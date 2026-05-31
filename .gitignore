@@ -1,0 +1,39 @@
+# ── Secrets / environment (NEVER commit) ──
+.env
+.env.*
+!.env.example
+*.token
+*.key
+*.pem
+secrets/
+credentials/
+config/local*
+# soul.md        # uncomment to keep the persona private — decide when it's added
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── LangGraph / LangSmith ──
+.langgraph_api/
+*.sqlite
+*.sqlite3
+checkpoints/
+
+# ── IDE / OS ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
