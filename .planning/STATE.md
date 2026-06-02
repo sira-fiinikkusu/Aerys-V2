@@ -9,10 +9,10 @@ See: .planning/PROJECT.md (updated 2026-06-01)
 
 ## Current Position
 
-Phase: 1 of 9 (Orchestration Skeleton)
-Plan: 0 of ~4 in current phase
-Status: Scoping complete (DRAFT) — roadmap pending cross-architecture review before any planning
-Last activity: 2026-06-01 — initial `.planning/` bootstrapped from the migration design doc; 9-phase build-first roadmap drafted
+Phase: 1 of 10 (Orchestration Skeleton)
+Plan: 0 of ~5 in current phase
+Status: Roadmap v2 complete (cross-reviewed, build-first endorsed-with-changes). Ready to plan Phase 1.
+Last activity: 2026-06-01 — cross-architecture review folded in; roadmap revised 9→10 phases (real-n8n smoke pulled early, structural seams moved up, compensation added)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -33,12 +33,14 @@ Progress: [░░░░░░░░░░] 0%
 
 ### Decisions
 
-Decisions are logged in PROJECT.md Key Decisions table. Recent:
+Logged in PROJECT.md Key Decisions. Recent:
 
 - Build the Brain ourselves (no wholesale framework adoption)
 - Three-runtime split: Brain (Python/LangGraph) / Hands (n8n) / Voice (TS, later)
-- **Build-first, migrate-last** phasing — under cross-architecture review
-- Public Brain repo + private Hands infra (the boundary is also the public/private seam)
+- **Build-first, migrate-last** — ✓ endorsed-with-changes by cross-review
+- **Integrate real n8n early (Phase 3)** — adopted from cross-review (don't build orchestration on a mock)
+- **Lay structural seams up front** (output gate, injected context, trace propagation, compensation) — adopted from cross-review
+- Public Brain repo + private Hands infra
 
 ### Pending Todos
 
@@ -46,8 +48,8 @@ None yet.
 
 ### Blockers/Concerns
 
-- **Roadmap is DRAFT** — must pass cross-architecture review before Phase 1 planning begins. The central question for review: is build-first/migrate-last the right phasing vs the original migrate-first (shadow-from-the-start) framing?
-- Open questions logged in PROJECT.md (soul.md public/private, transport HTTP vs gRPC, framework, memory interface).
+- **Cross-review status:** One independent review pass complete → build-first endorsed-with-changes, five changes folded into roadmap v2. A second independent pass is pending; a fresh full cross-review will run against this revised roadmap before Phase 1 execution.
+- Open questions in PROJECT.md: soul.md public/private; transport HTTP vs gRPC; framework; checkpointer durability on Jetson.
 
 ## Deferred Items
 
@@ -59,5 +61,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-06-01
-Stopped at: `.planning/` skeleton written (PROJECT / REQUIREMENTS / ROADMAP / STATE / config). Next: cross-architecture review of the phase breakdown, then `/gsd:plan-phase 1`.
+Stopped at: Roadmap v2 written + cross-review folded in (PROJECT / REQUIREMENTS / ROADMAP / STATE). Next: a fresh cross-review pass against the revised roadmap, then `/gsd:plan-phase 1`.
 Resume file: None

@@ -27,9 +27,9 @@ capability can grow without ever weakening the safety boundary.
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] Orchestration skeleton: a local LangGraph agent loop with a swappable model, persona injection, and tracing from the first commit
-- [ ] A typed Brain↔Hands capability contract with a local mock, so the boundary is testable before any real infrastructure exists
-- [ ] Capabilities layered one per phase: read-only research tool → identity → memory read → memory write → output routing
+- [ ] Orchestration skeleton: a local LangGraph agent loop with a swappable model, persona injection, a Brain-owned checkpointer, the output-emit seam, and tracing from the first commit
+- [ ] A typed Brain↔Hands capability contract (idempotency, rejection/compensation, trace propagation) with a local mock — then proven against real n8n early, before orchestration is stacked on it
+- [ ] Capabilities layered one per phase: research tool → identity → memory read → memory write → output routing, with the structural seams (output gate, injected context) laid up front
 - [ ] Cutover safety: shadow mode, then a single canary path in production, with rollback always available
 
 ### Out of Scope
@@ -50,7 +50,8 @@ capability can grow without ever weakening the safety boundary.
 ## Constraints
 
 - **Tech stack**: Python + LangGraph for the Brain; n8n (existing) for Hands; TypeScript later for Voice. Cross-runtime calls over an explicit typed contract — HTTP/JSON to start, gRPC evaluated only if latency demands it.
-- **Boundary**: NO shared business logic across runtimes. ONE canonical owner per concept. The Brain may *ask* Hands for a decision; it never caches or pre-resolves a Hands-owned policy (privacy, identity, memory).
+- **Boundary**: NO shared business logic across runtimes. ONE canonical owner per concept. The Brain may *ask* Hands for a decision; it never caches or pre-resolves a Hands-owned policy (privacy, identity, memory). The "no direct database" rule scopes to **Hands-owned memory** (the pgvector store) — the Brain keeps its OWN checkpointer for conversation/orchestration state, which is not a boundary violation.
+- **Structural seams**: invariants that are expensive to retrofit — the output-approval gate, injected caller-context, trace-context propagation, and failure/compensation — are laid at the skeleton/contract stage; later phases fill the policy behind them rather than inverting the architecture late.
 - **Security / Privacy**: caller identity is *injected*, never a model-settable parameter (policy-by-architecture). Every state-changing Hands call carries an idempotency key. Streaming stays Brain-internal until Hands approves the response envelope.
 - **Deployment**: runs on a Jetson Orin Nano (ARM). Reproducible, containerized deployment is a first-class concern, not an afterthought.
 - **Public repo**: no secrets, no private infrastructure detail, ever. This is portfolio-visible by design.
@@ -63,7 +64,9 @@ capability can grow without ever weakening the safety boundary.
 |----------|-----------|---------|
 | Build the Brain ourselves rather than adopt a framework wholesale | Every evaluated framework is "almost" — the agent's discriminators (persona, privacy semantics, cross-platform identity, tiered memory) aren't any framework's defaults; adoption means lock-in or a permanent fork tax | — Pending |
 | Three-runtime split (Brain / Hands / Voice) with strict boundaries | Keep n8n's deterministic governance strengths; move orchestration to code; isolate latency-critical streaming to the runtime built for it | — Pending |
-| Build-first, migrate-last phasing | Stand up the skeleton and layer capabilities incrementally (one per phase); bring shadow/canary cutover in once the Brain is feature-capable | — Pending (under cross-review) |
+| Build-first, migrate-last phasing | Stand up the skeleton and layer capabilities incrementally (one per phase); bring shadow/canary cutover in once the Brain is feature-capable | ✓ Endorsed-with-changes (cross-review 2026-06-01) |
+| Integrate real n8n early (Phase 3), not just a mock | Mocking the boundary away hides the exact n8n physics (cold starts, latency, partial failure) the rebuild exists to escape; prove the contract against real n8n before stacking orchestration | ✓ Adopted from cross-review |
+| Lay structural seams up front, fill policy later | Output gate, injected context, trace propagation, and compensation are invariants; retrofitting them inverts the architecture late and forces rewrites | ✓ Adopted from cross-review |
 | Public Brain repo + private Hands infra | The architectural boundary doubles as a clean public/private seam — contract + mock are public; the credential-bound implementation stays private | — Pending |
 
 ## Open Questions
@@ -72,6 +75,7 @@ capability can grow without ever weakening the safety boundary.
 - **Transport**: HTTP/JSON vs gRPC+Protobuf for Brain↔Hands — decide when a real latency number demands it, not before
 - **Brain framework**: LangGraph as the primary orchestration layer vs a thinner FastAPI/anyio core — leaning LangGraph
 - **Memory interface**: confirm the Brain only ever reaches memory through Hands endpoints (no direct Postgres access) at contract-design time
+- **Checkpointer durability**: where the Brain's own conversation/orchestration state lives on the Jetson — local SQLite + mounted volume (durable across container restarts) vs in-session only for the skeleton (decide in Phase 1)
 
 ---
-*Last updated: 2026-06-01 after initial scoping (DRAFT — phase breakdown pending cross-architecture review)*
+*Last updated: 2026-06-01 — roadmap v2 after cross-architecture review. Build-first endorsed-with-changes; see Key Decisions.*
