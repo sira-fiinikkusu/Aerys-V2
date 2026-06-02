@@ -27,10 +27,10 @@ capability can grow without ever weakening the safety boundary.
 
 <!-- Current scope. Building toward these. -->
 
-- [ ] Orchestration skeleton: a local LangGraph agent loop with a swappable model, persona injection, a Brain-owned checkpointer, the output-emit seam, and tracing from the first commit
-- [ ] A typed Brain↔Hands capability contract (idempotency, rejection/compensation, trace propagation) with a local mock — then proven against real n8n early, before orchestration is stacked on it
-- [ ] Capabilities layered one per phase: research tool → identity → memory read → memory write → output routing, with the structural seams (output gate, injected context) laid up front
-- [ ] Cutover safety: shadow mode, then a single canary path in production, with rollback always available
+- [ ] Orchestration skeleton: a local LangGraph loop with a swappable model, persona injection, a durable Brain-owned checkpointer, a stream-shaped output-emit seam, and tracing from the first commit
+- [ ] A typed, versioned Brain↔Hands contract (idempotency, rejection/compensation, trace propagation, golden fixtures) with a local mock — then proven against real n8n early on its semantics and concurrency, before orchestration is stacked on it
+- [ ] Capabilities layered one per phase: research → identity → memory read → output → memory write (idempotent, compensating), with structural seams laid up front and an eval harness growing alongside
+- [ ] Cutover safety: eval parity + rollback controls, then shadow mode, then a single canary path in production
 
 ### Out of Scope
 
@@ -66,7 +66,10 @@ capability can grow without ever weakening the safety boundary.
 | Three-runtime split (Brain / Hands / Voice) with strict boundaries | Keep n8n's deterministic governance strengths; move orchestration to code; isolate latency-critical streaming to the runtime built for it | — Pending |
 | Build-first, migrate-last phasing | Stand up the skeleton and layer capabilities incrementally (one per phase); bring shadow/canary cutover in once the Brain is feature-capable | ✓ Endorsed-with-changes (cross-review 2026-06-01) |
 | Integrate real n8n early (Phase 3), not just a mock | Mocking the boundary away hides the exact n8n physics (cold starts, latency, partial failure) the rebuild exists to escape; prove the contract against real n8n before stacking orchestration | ✓ Adopted from cross-review |
-| Lay structural seams up front, fill policy later | Output gate, injected context, trace propagation, and compensation are invariants; retrofitting them inverts the architecture late and forces rewrites | ✓ Adopted from cross-review |
+| Lay structural seams up front, fill policy later | Output gate (stream-shaped), injected context, trace propagation, and compensation are invariants; retrofitting them inverts the architecture late and forces rewrites | ✓ Adopted from cross-review |
+| Output before memory-write; durable compensation | Memory-write compensation must be conditioned on a real output status, with retryable (not synchronous) undo, to close the two-generals desync without trading it for the inverse | ✓ Adopted from 2nd review |
+| Eval parity before shadow; harness grows from the first tool | Rebuilding a working agent demands continuous parity measurement — not a first comparison at shadow, eight phases in | ✓ Adopted from 2nd review |
+| Concentrate production rigor at the state-changing & cutover phases | Full sagas/reconciliation/load-testing belong where stakes are real (memory-write, shadow, canary), not gold-plated across the skeleton — this is a solo build with the old agent still in production | ✓ Adopted from 2nd review |
 | Public Brain repo + private Hands infra | The architectural boundary doubles as a clean public/private seam — contract + mock are public; the credential-bound implementation stays private | — Pending |
 
 ## Open Questions
@@ -75,7 +78,7 @@ capability can grow without ever weakening the safety boundary.
 - **Transport**: HTTP/JSON vs gRPC+Protobuf for Brain↔Hands — decide when a real latency number demands it, not before
 - **Brain framework**: LangGraph as the primary orchestration layer vs a thinner FastAPI/anyio core — leaning LangGraph
 - **Memory interface**: confirm the Brain only ever reaches memory through Hands endpoints (no direct Postgres access) at contract-design time
-- **Checkpointer durability**: where the Brain's own conversation/orchestration state lives on the Jetson — local SQLite + mounted volume (durable across container restarts) vs in-session only for the skeleton (decide in Phase 1)
+- **Checkpointer durability** — now a Phase 2 deliverable (leaning local SQLite + mounted volume for restart-durability), with a declared Brain↔Hands reconciliation rule (leaning: Hands authoritative on conflict)
 
 ---
-*Last updated: 2026-06-01 — roadmap v2 after cross-architecture review. Build-first endorsed-with-changes; see Key Decisions.*
+*Last updated: 2026-06-01 — roadmap v3, polished after a second cross-architecture review (build-first endorsed across three independent passes). See Key Decisions.*
