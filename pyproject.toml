@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-aerys-v2 = "aerys_v2:main"
+aerys-v2 = "aerys_v2.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.23,<0.12.0"]
