@@ -1,0 +1,18 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets / local env — never into the build context
+.env
+.env.*
+
+# Repo internals not needed in the image
+.git/
+.planning/
