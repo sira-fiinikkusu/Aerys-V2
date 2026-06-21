@@ -11,8 +11,8 @@ See: .planning/PROJECT.md (updated 2026-06-01)
 
 Phase: 1 of 12 (Orchestration Skeleton)
 Plan: 0 of ~5 in current phase
-Status: Roadmap v3 complete and polished (build-first endorsed across three independent cross-architecture passes). Ready to plan Phase 1.
-Last activity: 2026-06-01 — second cross-review folded in; roadmap 10→12 phases (Phase 1 split, output reordered ahead of memory-write, eval-parity + cutover controls added, stream-seam / contract versioning / real-n8n semantics+concurrency / durable compensation)
+Status: Phase 1 PLANNED. v2 PLAN complete (01-PLAN.md) — three-brain reviewed (Gemini + Codex), verified vs langgraph 1.2.6, reference-grounded; all 01-REVIEW.md blockers folded. Ready to EXECUTE (build 01-01 scaffold). S2 channel provisional `configurable` (single-accessor) — validate with work-AI in PARALLEL; non-blocking (bounded swap, cheapest pre-Phase-5).
+Last activity: 2026-06-20 — drafted Phase 1 plan; Gemini + Codex reviews (Codex caught 3 real LangGraph-API blockers); verified vs langgraph 1.2.6 docs; cross-checked a reference implementation (confirmed most fixes, refuted Codex's configurable-blocker); gemini-cli auth fixed (api-key)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -61,6 +61,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-01
-Stopped at: Roadmap v3 written + second cross-review folded in (PROJECT / REQUIREMENTS / ROADMAP / STATE). Next: `/gsd:plan-phase 1`.
-Resume file: None
+Last session: 2026-06-20
+Stopped at: Phase 1 v2 PLAN complete + reviewed + reference-grounded. Next: EXECUTE — build 01-01 (scaffold) hand-written by Chris, Kael reviews. In parallel: Chris validates the S2 `configurable` channel with work-AI (brief on NAS) — non-blocking.
+Resume file: .planning/phases/01-orchestration-skeleton/01-PLAN.md (v2, ready to build)
