@@ -1,0 +1,23 @@
+[project]
+name = "aerys-v2"
+version = "0.1.0"
+description = "A personal AI companion and assistant, built on LangGraph."
+readme = "README.md"
+authors = [
+    { name = "sira-fiinikkusu", email = "181170082+sira-fiinikkusu@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "langchain-anthropic>=1.4.6",
+    "langgraph>=1.2.6",
+    "opentelemetry-exporter-otlp>=1.42.1",
+    "opentelemetry-sdk>=1.42.1",
+    "pydantic-settings>=2.14.2",
+]
+
+[project.scripts]
+aerys-v2 = "aerys_v2:main"
+
+[build-system]
+requires = ["uv_build>=0.11.23,<0.12.0"]
+build-backend = "uv_build"
