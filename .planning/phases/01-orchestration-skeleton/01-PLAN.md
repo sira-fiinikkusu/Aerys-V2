@@ -7,7 +7,7 @@
 ## Reference map (where each pattern comes from)
 - **Confirmed against a reference LangGraph implementation** (adopt the proven shape): `add_messages` reducer, `InMemorySaver`, `Identity` TypedDict + single accessor, empty-input guard, narrow-except-with-full-traceback + `BaseException` propagates, fail-fast config/prompt, swappable checkpointer seam, `build_model`/`build_graph` factories, caller-supplied thread_id, fake-model graph injection for offline tests.
 - **Current-docs only (the reference is silent — it's synchronous)**: the **streaming emit seam** via `graph.astream`. Net-new for Aerys, driven by the future Voice runtime.
-- **Provisional (pending external validation)**: S2 caller-context channel = `configurable` (reference-style). Bounded to swap later via the single-accessor rule; cheapest window pre-Phase-5.
+- **RESOLVED (external validation complete 2026-06-22)**: S2 caller-context channel = `configurable` + single accessor. A meets all 3 invariants but is **proven, not future-proof** — `context`/`Runtime` is LangGraph's stated long-term direction for typed per-run context (the `config_schema` *declaration* is deprecated, removal targeted v2.0). We never *declare* a `config_schema` (we read the `configurable` bag through one accessor), so we don't trip the deprecation; and `thread_id` rides `configurable` permanently, so `context` never fully replaces it. The single-accessor rule is the hedge: a later swap to `context_schema` stays bounded (~hours, cost scales per-tool, cheapest pre-Phase-5).
 
 ---
 
@@ -26,7 +26,7 @@
 
 **S1 — Stream-shaped emit seam (→ Phase 8). [CORRECTED]** Streaming is a GRAPH-level concern, not a node. Graph nodes are state-transition functions (the chat node returns `{"messages": [reply]}`). The public entry `async def ask(query, *, session_id, identity, ...) -> AsyncGenerator[OutEvent, None]` **wraps `graph.astream(..., stream_mode="messages")`** and translates LangGraph stream events into typed `OutEvent`s. A mock-approval pass-through wraps the OutEvent stream (Phase 8 fills real approval by consuming-before-yielding — no signature change).
 
-**S2 — Injected caller-context seam (→ Phases 5/6). [PROVISIONAL: `configurable`]** Identity passed per-call via `config["configurable"]["identity"]`; read ONLY through a single accessor `identity_from_config(config)` returning an `Identity` TypedDict, defaulting to `UNKNOWN_CALLER`. **HARD RULES:** never in checkpointed state; never a model-settable arg; **never read raw — always via the accessor** (this single-accessor discipline is what bounds a future swap to `context_schema`). Phase 1 has no tools yet, so identity is composed into the system message only.
+**S2 — Injected caller-context seam (→ Phases 5/6). [RESOLVED: `configurable` + single accessor, 2026-06-22]** This is the **authorization** identity — *who an action runs for*. Passed per-call via `config["configurable"]["identity"]`; read ONLY through a single accessor `identity_from_config(config)` returning an `Identity` TypedDict, defaulting to `UNKNOWN_CALLER`. **HARD RULES:** never in checkpointed state; never a model-settable arg; **never read raw — always via the accessor** (this single-accessor discipline is what bounds a future swap to `context_schema`). Phase 1 has no tools yet, so identity is composed into the system message only. **Pairs with attribution** (the Phase-6 "Speaker (verified)" turn format, below) — two deliberately separate channels for two jobs: authorization here vs *who said what* in the transcript.
 
 **S3 — Trace-propagation seam (→ Phases 3/4). [CORRECTED]** OTel + `W3CTraceContextPropagator` configured now — but registering it does NOT auto-propagate. Define a named `PropagationHelper` / injection point so Phase 4's HTTP client has a contract to fill. No claim of automatic cross-boundary propagation.
 
@@ -78,14 +78,14 @@ Built ONCE with the persona-injection point (01-03) and stream entry (01-04) stu
 
 ## Reference patterns deferred to later phases (noted, NOT built in Phase 1)
 - Per-thread serialization lock (concurrency) → Phase 2.
-- "Speaker (verified) / Message (untrusted, verbatim)" turn format (prompt-injection-hardened attribution) → Phase 6 (when real identity arrives).
+- "Speaker (verified) / Message (untrusted, verbatim)" turn format (prompt-injection-hardened attribution) → Phase 6 (when real identity arrives). **This is the attribution half of the two-identity split** (authorization = S2 `configurable`, never checkpointed; attribution = this sanitized speaker label written INTO the transcript). It's the piece that actually (a) stops a second caller in a shared thread — e.g. a multi-person guild channel — from inheriting the first caller's identity, and (b) lets the model tell speakers apart. Elevate it to a named Phase-6 deliverable, not a footnote (see ROADMAP Phase 6 note).
 - Dangling-tool crash healer → Phase 2 (recovery) / relevant once tools + durable checkpointer exist.
 
 ## Resolved / Provisional Decisions
 - **soul.md:** public template + gitignored real persona. (Confirmed 2026-06-20.)
 - **Framework:** LangGraph (ORCH-01 commits to it).
 - **Secrets:** `pydantic-settings`, fail-fast (01-01).
-- **S2 channel:** `configurable` + single accessor — **PROVISIONAL**, pending external validation. Bounded swap to `context_schema`; cheapest pre-Phase-5.
+- **S2 channel:** `configurable` + single accessor — **RESOLVED** (external validation complete 2026-06-22). Proven-not-future-proof; `thread_id` rides `configurable` permanently; bounded swap to `context_schema` later via the single-accessor hedge (cheapest pre-Phase-5). Amendments: `config_schema` *declaration* is deprecated (removal v2.0) but we don't declare one; tracing identity is a parallel `metadata` write decoupled from the accessor, so it adds nothing to an A→B swap.
 
 ## Three-Brain Review Log → see `01-REVIEW.md`
 Gemini (structural) + Codex (adversarial, caught 3 blockers) + current-docs verification (langgraph 1.2.6) + reference-implementation grounding (confirmed fixes; refuted Codex's S2 over-call). All folded into this v2.

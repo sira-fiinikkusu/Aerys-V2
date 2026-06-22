@@ -127,18 +127,21 @@ Plans:
 
 ### Phase 6: Identity via Hands
 **Goal**: The Brain resolves *who it is talking to* by asking Hands; the resolved identity flows in through the injected-context seam — never a model-settable parameter. Policy-by-architecture: control is structural, not promptable.
+**Note — the two-identity split (added 2026-06-22, external validation):** identity does two distinct jobs and Phase 6 must deliver BOTH as named work, not conflate them. (1) **Authorization** — *who an action runs for* — rides the injected-context seam (`configurable`, never checkpointed, not model-settable); that's criteria 1–3 below. (2) **Attribution** — *who said what* — a sanitized `Speaker (verified): …` label written into the transcript. Attribution is the half that actually prevents a second caller in a **shared thread** (e.g. a multi-person guild channel) from inheriting the first caller's identity, and lets the model tell speakers apart. It was previously a footnote (01-PLAN "deferred patterns"); elevated here to a deliverable.
 **Depends on**: Phase 5 (injected-context seam), Phase 3 (contract)
 **Requirements**: IDENT-01, IDENT-02, IDENT-03
 **Success Criteria** (what must be TRUE):
   1. The Brain personalizes by the identity Hands resolves for the caller
   2. Caller identity arrives via the injected seam and is not a model-settable parameter
   3. A red-team test confirms the model cannot target another identity even under direct social-engineering prompts
+  4. In a shared thread with two distinct speakers, attribution labels keep them apart and neither inherits the other's authorization identity
 **Plans**: TBD
 
 Plans:
 - [ ] 06-01: Identity-resolve capability wired through the contract
 - [ ] 06-02: Feed resolved identity into the injected-context seam
 - [ ] 06-03: Cross-identity red-team test
+- [ ] 06-04: Attribution turn-format (`Speaker (verified) / Message (untrusted, verbatim)`) + shared-thread multi-speaker test
 
 ### Phase 7: Memory Read via Hands
 **Goal**: The Brain retrieves relevant per-person memory through Hands. Hands owns the database and the vector store; the Brain only asks. No credentials cross the boundary.
