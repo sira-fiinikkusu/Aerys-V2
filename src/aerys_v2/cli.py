@@ -71,6 +71,31 @@ def main() -> None:
         print(format_summary_table(summary))
         sys.exit(0)
 
+    if "--discord" in sys.argv:  # run the 1c gateway spike (needs DISCORD_BOT_TOKEN in .env)
+        if settings.discord_bot_token is None:
+            print("--discord needs DISCORD_BOT_TOKEN in .env (dev bot token).")
+            sys.exit(1)
+        from aerys_v2.factory import build_graph, build_model, load_soul
+        from aerys_v2.service import ask
+        from aerys_v2.transports.discord_gateway import AerysDiscordClient
+
+        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+
+        def resolve(event):  # spike resolver: display-name passthrough (DB resolver later)
+            return {"user_id": f"discord:{event.platform_user_id}", "display_name": event.display_name}
+
+        channel_ids = frozenset(
+            int(c) for c in settings.discord_reply_channel_ids.split(",") if c.strip()
+        )
+        client = AerysDiscordClient(
+            ask_fn=lambda text, identity, thread: ask(graph, text, identity=identity, thread_id=thread),
+            resolve_fn=resolve,
+            allowed_guild_id=settings.discord_guild_id,
+            allowed_channel_ids=channel_ids,
+        )
+        client.run(settings.discord_bot_token.get_secret_value())
+        sys.exit(0)
+
     log.info(
         "aerys-v2 ready | model=%s soul=%s otlp=%s",
         settings.model,

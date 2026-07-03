@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
 
+    # None = Discord transport OFF (the spike only arms when a token is present).
+    # One gateway client covers guild AND DMs — the katerlol two-adapter IPC race
+    # (and its watchdog liturgy) structurally cannot exist here.
+    discord_bot_token: SecretStr | None = None
+    discord_guild_id: int | None = None          # only this guild is served (None = DMs only)
+    discord_reply_channel_ids: str = ""          # csv of guild channel ids to listen in ("" = all)
+
     # None = DB-backed services OFF. Tests and CI never need a live Postgres —
     # the services take an injected connection, and nothing connects unless this
     # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys — the same
