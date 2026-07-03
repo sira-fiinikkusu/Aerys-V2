@@ -12,6 +12,8 @@ dependencies = [
     "langgraph>=1.2.6",
     "opentelemetry-exporter-otlp>=1.42.1",
     "opentelemetry-sdk>=1.42.1",
+    "pgvector>=0.4.2",
+    "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
 ]
 

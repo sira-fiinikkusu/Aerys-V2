@@ -13,3 +13,9 @@ class Settings(BaseSettings):
     model: str = "claude-opus-4-8"
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
+
+    # None = DB-backed services OFF. Tests and CI never need a live Postgres —
+    # the services take an injected connection, and nothing connects unless this
+    # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys — the same
+    # NAS database the n8n workflows hit; V2 reads it directly, no webhook hop.
+    database_url: str | None = None
