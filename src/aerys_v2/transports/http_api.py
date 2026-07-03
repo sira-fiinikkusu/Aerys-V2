@@ -46,6 +46,41 @@ def build_app(ask_fn, api_token: str | None) -> FastAPI:
         # Unauthenticated on purpose: docker HEALTHCHECK + HA availability probes.
         return {"status": "ok"}
 
+    @app.post("/v1/chat/completions")
+    def openai_compat(body: dict, _: None = Depends(require_token)) -> dict:
+        """OpenAI-protocol shim — exists so HA's Extended OpenAI Conversation can
+        point at the Brain like any OpenAI server (same integration the current
+        voice pipeline uses, different base_url). We take the LAST user message as
+        the turn; HISTORY comes from our checkpointer, not from the request — HA
+        resends its own transcript, and two history owners is the contamination
+        bug again, so the request transcript is deliberately ignored."""
+        msgs = body.get("messages", [])
+        last_user = next(
+            (m.get("content", "") for m in reversed(msgs) if m.get("role") == "user"), ""
+        )
+        if isinstance(last_user, list):  # OpenAI content-parts form
+            last_user = " ".join(
+                p.get("text", "") for p in last_user if isinstance(p, dict)
+            )
+        if not last_user.strip():
+            raise HTTPException(status_code=400, detail="no user message")
+        reply = ask_fn(
+            last_user,
+            {"user_id": "http-caller", "display_name": "Chris (Voice)"},
+            "voice:beta",   # one shared voice thread for the beta pipeline (owner decision: voice rides the owner thread)
+        )
+        return {
+            "id": "aerys-v2",
+            "object": "chat.completion",
+            "model": body.get("model", "aerys-v2"),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": reply},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
     @app.post("/ask", response_model=AskReply)
     def ask_route(body: AskRequest, _: None = Depends(require_token)) -> AskReply:
         identity: Identity = {
