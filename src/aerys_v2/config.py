@@ -9,6 +9,10 @@ class Settings(BaseSettings):
 
     # a field with NO default = REQUIRED. missing -> ValidationError at startup.
     # SecretStr masks the value in logs/reprs (prints ****, not the key)
+    # "api" = metered ChatAnthropic (needs anthropic_api_key). "oauth" = the Claude
+    # Agent SDK on the Max subscription — zero API tokens for daily conversation.
+    # The api key stays REQUIRED either way: evals/CI/fallback run on it.
+    model_backend: str = "api"
     anthropic_api_key: SecretStr
     model: str = "claude-opus-4-8"
     soul_file_path: Path = Path("config/soul.md")

@@ -60,12 +60,18 @@ def load_soul(path: Path) -> str:
         return FALLBACK_SOUL
 
 
-def build_model(settings: Settings, *, timeout_s: float = 60.0) -> ChatAnthropic:
+def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel:
     """One place that knows how to turn Settings into a chat model.
 
     The request `timeout` is a safety rail (cross-review #13): a hung provider call
     must fail the turn, never hang the caller. max_tokens caps the spend per reply.
     """
+    if settings.model_backend == "oauth":
+        # Subscription-auth backend (the June credit-pool decision, landed) — the
+        # graph gets "a chat model" and can't tell which wallet it bills.
+        from aerys_v2.oauth_model import ClaudeOAuthChatModel
+
+        return ClaudeOAuthChatModel(model=settings.model)
     return ChatAnthropic(
         model=settings.model,
         api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
