@@ -46,6 +46,14 @@ def build_app(ask_fn, api_token: str | None) -> FastAPI:
         # Unauthenticated on purpose: docker HEALTHCHECK + HA availability probes.
         return {"status": "ok"}
 
+    @app.get("/v1/models")
+    def models(_: None = Depends(require_token)) -> dict:
+        # Extended OpenAI Conversation validates the connection with a models.list
+        # call before saving (observed live: three 404s = "unexpected error" in the
+        # HA UI). One stub entry satisfies it.
+        return {"object": "list", "data": [
+            {"id": "aerys-v2", "object": "model", "owned_by": "aerys"}]}
+
     @app.post("/v1/chat/completions")
     def openai_compat(body: dict, _: None = Depends(require_token)) -> dict:
         """OpenAI-protocol shim — exists so HA's Extended OpenAI Conversation can

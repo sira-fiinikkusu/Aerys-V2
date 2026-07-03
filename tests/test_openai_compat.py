@@ -47,3 +47,8 @@ def test_no_user_message_400():
     r = client().post("/v1/chat/completions", headers=AUTH, json={"messages": [
         {"role": "system", "content": "x"}]})
     assert r.status_code == 400
+
+
+def test_models_list_for_ha_validation():
+    r = client().get("/v1/models", headers=AUTH)
+    assert r.json()["data"][0]["id"] == "aerys-v2"
