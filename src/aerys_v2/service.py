@@ -63,4 +63,6 @@ def ask(
         raise TurnTimeout(f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)")
 
     reply = result["messages"][-1]
-    return reply.text() if callable(getattr(reply, "text", None)) else str(reply.content)
+    # .text is a property in current langchain-core (calling it is deprecated)
+    text_attr = getattr(reply, "text", None)
+    return text_attr if isinstance(text_attr, str) else str(reply.content)
