@@ -48,6 +48,7 @@ FETCH_LIMIT = 500
 IDENTITY_PIN_LABELS = (
     "basic.name",
     "name",
+    "basic.nickname",
     "basic.location",
     "relationship.partner",
     "relationship.family",
