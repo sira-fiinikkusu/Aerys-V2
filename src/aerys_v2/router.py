@@ -39,21 +39,39 @@ ROUTER_MODEL = "claude-haiku-4-5"
 FALLBACK_ACK = "On it."
 
 # Heuristic for the degraded path: words that make a message *plausibly* a device
-# command. Deliberately broad — the locked failure direction is toward action.
+# command OR a live-state question. Deliberately broad — the locked failure
+# direction is toward action. State words (charge, battery, temperature...)
+# matter as much as command words: a state question answered from chat is a
+# guess dressed as an answer (the Jolteon-charge live incident, 2026-07-02).
 _DEVICE_WORDS = (
     "turn on", "turn off", "switch on", "switch off", "toggle",
     "light", "lights", "lamp", "switch", "plug", "outlet", "fan",
     "dim", "brighten", "thermostat",
+    # live-state readings — questions about these need the action path's tools
+    "charge", "battery", "temperature", "how warm", "how cold",
+    "locked", "unlocked", "sensor",
 )
 
 _ROUTER_INSTRUCTIONS = """\
 You are the routing layer in front of Aerys's brain. Read the user's message and
 decide which path handles it:
 
-- "action": the message asks to control or check a smart-home device — turning
-  lights/switches on or off, toggling them, or asking whether a device is on.
-- "chat": everything else — conversation, questions, requests that don't touch
-  a physical device.
+- "action": the message needs to TOUCH or READ the smart home. That means
+  controlling a device (lights, switches, toggles) — AND any question whose
+  honest answer requires the CURRENT state of a device or sensor: battery or
+  charge level, temperature, on/off, open/closed, locked/unlocked, presence,
+  location. Phrasing does NOT matter: opinion or speculation wording is still
+  "action" when live state is needed to answer. "Do you think the car has
+  enough charge to get to Tampa?", "I wonder if the office light is still on",
+  "would Jolteon be able to make it there and back?" are ALL "action" — the
+  answer depends on a reading only the tools can take.
+- "chat": pure conversation — feelings, memories, opinions about the world,
+  general knowledge, planning that needs no device reading. "Do you think cats
+  love us?" is chat; "do you think the bedroom is too warm?" is action.
+
+If you are unsure whether live state is needed, choose "action" — that path can
+read as well as act, and a needless reading is harmless, while a chat answer to
+a state question is a guess.
 
 Reply with ONLY a JSON object — no prose, no code fences:
 {"route": "chat" or "action", "ack": "<acknowledgment>"}
@@ -61,6 +79,8 @@ Reply with ONLY a JSON object — no prose, no code fences:
 The ack is what Aerys says OUT LOUD immediately, before the action completes.
 Write it fresh for THIS message, in Aerys's voice, referencing what was actually
 asked (e.g. for "kill the office light": "[softly] Dousing the office light now").
+For read-style questions the ack is a natural check-in (e.g. for "does the car
+have enough charge for Tampa?": "[warmly] Let me check her charge").
 Short and speakable — one clause. Never a generic canned phrase. For "chat"
 routes the ack is ignored; an empty string is fine there."""
 

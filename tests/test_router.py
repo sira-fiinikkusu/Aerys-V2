@@ -13,6 +13,7 @@ from aerys_v2.router import (
     FALLBACK_ACK,
     RouteDecision,
     build_router,
+    fallback_decision,
     parse_route_reply,
     plausibly_commands_device,
 )
@@ -87,3 +88,62 @@ def test_device_heuristic_shapes():
     assert plausibly_commands_device("please TURN ON the porch light")
     assert plausibly_commands_device("toggle the fan")
     assert not plausibly_commands_device("how are you feeling today?")
+
+
+# ---- state questions route ACTION regardless of opinion phrasing --------------
+# Regression for the 2026-07-02 live miss: "Do you think Jolteon has enough
+# charge to get to Tampa and back?" routed chat (opinion-phrased), so the
+# tool-less chat path answered "no charge level on file" while the action path
+# had read 96% minutes earlier. Questions needing CURRENT device/sensor state
+# must be action, however they're phrased.
+
+def test_opinion_phrased_charge_question_heuristic_fails_toward_action():
+    # even the degraded-path heuristic must catch state words, not just commands
+    decision = fallback_decision(
+        "do you think Jolteon has enough charge to get to Tampa and back?"
+    )
+    assert decision.route == "action"
+
+
+def test_state_question_shapes_hit_heuristic():
+    assert plausibly_commands_device("I wonder if the car's battery is topped off")
+    assert plausibly_commands_device("would the house be too warm? check the temperature")
+    assert plausibly_commands_device("is the front door locked?")
+
+
+def test_genuine_opinion_chat_stays_chat():
+    assert fallback_decision("do you think cats love us?").route == "chat"
+    assert fallback_decision("I wonder if we'll ever visit Japan").route == "chat"
+
+
+def test_router_prompt_teaches_state_questions_are_action():
+    # prompt-level regression guard: the routing rule that fixed the Jolteon
+    # miss must stay in the instructions — opinion phrasing never makes a
+    # live-state question "chat", and uncertainty fails toward action.
+    from aerys_v2.router import _ROUTER_INSTRUCTIONS
+
+    text = _ROUTER_INSTRUCTIONS.lower()
+    assert "current state" in text
+    assert "charge" in text
+    assert "opinion or speculation wording is still" in text
+    assert 'unsure whether live state is needed, choose "action"' in text
+
+
+def test_action_overlay_permits_read_plus_reasoning():
+    # the action graph must be allowed to COMBINE a sensor read with general
+    # reasoning (EV range math) instead of stopping at the raw number
+    from aerys_v2.factory import ACTION_OVERLAY
+
+    lowered = ACTION_OVERLAY.lower()
+    assert "read-only questions" in lowered
+    assert "combine" in lowered
+
+
+def test_garbled_state_reply_fails_toward_action():
+    # unusable router JSON + state-shaped text -> heuristic sends it to action
+    decision = parse_route_reply(
+        "she probably has plenty!",
+        "do you think jolteon has enough charge to reach tampa?",
+    )
+    assert decision.route == "action"
+    assert decision.ack == FALLBACK_ACK
