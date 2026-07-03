@@ -5,16 +5,16 @@
 See: .planning/PROJECT.md (updated 2026-06-01)
 
 **Core value:** The Brain orchestrates; the Hands govern — capability grows without weakening the safety boundary.
-**Current focus:** Phase 1 — Orchestration Skeleton (EXECUTING — 01-02 in progress: ChatState + S2 accessor done; build_model next)
+**Current focus:** Phase 1 — Orchestration Skeleton (01-02 COMPLETE 2026-07-02; next: 01-03 per revised Wave-1 order in planning-repo `.planning/aerys-v2-dossier/CROSS-REVIEW.md`)
 
 ## Current Position
 
 Phase: 1 of 12 (Orchestration Skeleton)
-Plan: 01-02 in progress (01-01 done; 01-02 sub-steps 1-2 of ~5 done — state + S2 accessor)
+Plan: 01-02 COMPLETE (`113c03d`) — factory.py (build_model + START→chat→END graph, checkpointer INJECTED: InMemorySaver now / NAS Postgres Phase 2 per owner decision 7/2), service.py ask() seam with rails (recursion_limit fuse, wall-clock budget, empty-input gate), CLI --ask path, 8 new offline tests (17 green). BUILD RHYTHM CHANGED 7/2: Kael builds during the Fable window, Chris gates at phase boundaries + learns via docs/learning/ (see 2026-07-02-factory-service-ask.md). Dossier + cross-review live in the PRIVATE planning repo.
 Status: **01-01 (Scaffold + reproducible ARM build) COMPLETE** — hand-written by Chris, reviewed by Kael. uv project (Python 3.11 pinned), pinned deps + committed `uv.lock` (langgraph 1.2.6, langchain-anthropic, pydantic-settings, opentelemetry), multi-stage `linux/arm64` Dockerfile + non-root + HEALTHCHECK (native build verified), `Settings` (pydantic-settings) with fail-fast secrets gate, deployable entrypoint (`cli.py`: config-load → fail-fast → SIGTERM/SIGINT graceful shutdown via threading.Event → `--health` probe), Makefile, pytest skeleton (2 tests green), GitHub Actions CI **green**. **01-02 IN PROGRESS** — done + committed (`038924f`): ChatState (messages-only + G1 guard) + the S2 channel (`Identity` / `UNKNOWN_CALLER` / `identity_from_config` accessor + 7 tests, 9 green). Next sub-steps: `build_model` factory → graph + chat node + `InMemorySaver` → `ask()` entry. **S2 channel RESOLVED → Option A (`configurable` + single accessor)** — external validation complete 2026-06-22; A is proven-not-future-proof (`context`/`Runtime` is LangGraph's long-term direction, `config_schema` declaration deprecated/removal v2.0, but we don't declare one and `thread_id` rides `configurable` permanently). Single-accessor is the hedge for a bounded later swap.
 Last activity: 2026-06-27 — built 01-02 sub-steps 1-2 hands-on (ChatState + S2 accessor + 7 tests, green, `038924f`); review caught Copilot's accessor crash (`.get(k,{})` vs `or {}`), a broken test (SimpleNamespace + tuple-assert), and a silently-shadowed duplicate test — all caught because Chris asked "is it the RIGHT test, not just green?". Prior: 2026-06-21 — built 01-01 hands-on (Chris hand-writes = learning tier; Kael reviews + SSH-verifies on Leviathan). Review caught real bugs Copilot introduced (`"none"` vs `None`; module-level-vs-`main()` scope; `@v8` non-existent moving tag). Final commit `7219cd1`, CI green + warning-free.
 
-Progress: [███░░░░░░░] ~30% (01-01 done + 01-02 state/accessor done; build_model/graph/ask remain)
+Progress: [████░░░░░░] ~40% (01-01 done + 01-02 state/accessor done; build_model/graph/ask remain)
 
 ## Performance Metrics
 
