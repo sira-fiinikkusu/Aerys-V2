@@ -13,9 +13,19 @@ def main() -> None:
     health = (
         "--health" in sys.argv
     )  # check for health check flag before loading settings
+    wants_eval = "--eval" in sys.argv  # checked pre-Settings so we can instruct on failure
     try:
         settings = Settings()
     except ValidationError as e:
+        if wants_eval:
+            # --eval needs a REAL judge (an actual model call scoring each reply) —
+            # there is no offline mode here; the offline path is tests/test_evals.py
+            # with fake models. So a missing key gets instructions, not a stacktrace.
+            print(
+                "--eval requires a configured ANTHROPIC_API_KEY (the judge is a real "
+                "model call).\nAdd it to .env (see config.py Settings) and rerun."
+            )
+            sys.exit(1)
         log.error(f"Error validating settings: {e}")
         sys.exit(1)
 
@@ -37,6 +47,28 @@ def main() -> None:
             thread_id="cli",  # InMemorySaver → each CLI run is a fresh thread for now
         )
         print(reply)
+        sys.exit(0)
+
+    if wants_eval:  # run the eval harness against the local graph: aerys-v2 --eval
+        # n8n mapping: this is "manually execute the 06-01 Eval Suite workflow",
+        # except the dataset/target/judge are library code we can also unit-test.
+        from aerys_v2.evals.runner import (
+            Judge,
+            LocalGraphTarget,
+            format_summary_table,
+            load_cases,
+            run_eval,
+        )
+        from aerys_v2.factory import build_graph, build_model, load_soul
+
+        cases = load_cases()  # golden.json locally; example.json on a fresh clone/CI
+        log.info("eval: %d case(s) loaded, judging with model=%s", len(cases), settings.model)
+        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+        results, summary = run_eval(LocalGraphTarget(graph), cases, Judge.from_settings(settings))
+        for r in results:  # one line per case — the per-item view before the rollup
+            print(f"[{r['score']}] {r['id']} ({r['category']}, {r['latency_ms']:.0f}ms) — {r['reasoning']}")
+        print()
+        print(format_summary_table(summary))
         sys.exit(0)
 
     log.info(

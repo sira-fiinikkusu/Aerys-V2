@@ -37,3 +37,7 @@ checkpoints/
 *.swp
 .DS_Store
 Thumbs.db
+
+# ── Eval golden dataset (personal data — never commit) ──
+evals/cases/*
+!evals/cases/example.json

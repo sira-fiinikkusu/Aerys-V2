@@ -1,0 +1,9 @@
+[
+  {
+    "id": "tc-example-01",
+    "input": "Hey, what's a good way to spend a rainy Saturday?",
+    "persona_expectations": "Warm, personality-consistent suggestions in the assistant's characteristic voice. Offers 2-3 concrete ideas rather than a generic list, and invites follow-up without being pushy.",
+    "category": "normal_conversation",
+    "notes": "context: {\"person_id\": \"00000000-0000-0000-0000-000000000000\"} (synthetic sample case — schema matches golden.json; golden.json itself is gitignored because it contains personal data)"
+  }
+]
