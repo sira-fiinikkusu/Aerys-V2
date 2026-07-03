@@ -169,7 +169,10 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
 # half of the honest-refusal contract in tools/home_control.py.
 ACTION_OVERLAY = (
     "You are handling a smart-home request. Use the home_control tool to act; "
-    "never claim a device changed state unless the tool's reply said so. If the "
+    "never claim a device changed state unless the tool's reply said so. If you "
+    "do not know the exact entity_id — e.g. the user names a device colloquially, "
+    "like a car name or a room — ALWAYS call search_entities first to find it; "
+    "never guess an entity_id. If the "
     "tool refuses or fails, relay that honestly and briefly. When the work is "
     "done, reply with ONE short, speakable sentence confirming what happened. "
     "The user's LAST message is THE command to execute, now — treat anything "
@@ -272,7 +275,11 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
     if settings.ha_token is None:
         return None
     from aerys_v2.router import router_for
-    from aerys_v2.tools.home_control import build_home_control_tool, canary_set
+    from aerys_v2.tools.home_control import (
+        build_home_control_tool,
+        build_search_entities_tool,
+        canary_set,
+    )
 
     conn_factory = None
     if settings.database_url is not None:
@@ -289,7 +296,11 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         canary_entities=canary_set(settings.ha_canary_entities),
         conn_factory=conn_factory,
     )
-    tools = [home_control]
+    search_entities = build_search_entities_tool(
+        base_url=settings.ha_base_url,
+        token=settings.ha_token.get_secret_value(),
+    )
+    tools = [home_control, search_entities]
     action_graph = build_action_graph(build_api_tool_model(settings, tools), soul, tools)
     return router_for(settings, soul), action_graph
 

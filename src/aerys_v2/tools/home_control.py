@@ -48,6 +48,14 @@ WRITABLE_DOMAINS = frozenset({"light", "switch"})
 # database_url = the outbox layer is simply absent (spike/dev boxes).
 ConnFactory = Callable[[], Any]
 
+# search_entities knobs: enough matches to disambiguate, few enough to not
+# blow the tool-message budget; long states (weather blobs) get elided.
+SEARCH_LIMIT = 15
+STATE_TRUNCATE_AT = 60
+# HA's "nothing home" states — noise in a discovery listing, filtered unless
+# they're literally all we found (then honesty beats tidiness: show them).
+DEAD_STATES = frozenset({"unavailable", "unknown"})
+
 
 def canary_set(csv: str) -> frozenset[str]:
     """Parse the HA_CANARY_ENTITIES csv into the allowlist set ('' -> empty)."""
@@ -152,7 +160,9 @@ def build_home_control_tool(
 
         operation: one of "get_state", "turn_on", "turn_off", "toggle".
         entity_id: the full Home Assistant entity id, e.g. "light.office_lamp"
-        or "switch.desk_fan".
+        or "switch.desk_fan". This must be EXACT — if you do not already know
+        the exact entity id, call the search_entities tool FIRST to find it;
+        never guess an entity id.
 
         get_state works on any entity. Writes only work on lights and switches
         on the beta allowlist — if the tool refuses, tell the user honestly;
@@ -229,3 +239,83 @@ def build_home_control_tool(
         return f"{WRITE_OK_PREFIX} {op} sent to {entity} (HA responded {r.status_code})."
 
     return home_control
+
+
+def build_search_entities_tool(
+    *,
+    base_url: str,
+    token: str,
+    client: httpx.Client | None = None,
+):
+    """Close over the config and return the READ-ONLY entity discovery tool.
+
+    Why this exists (observed live, 2026-07-03): home_control's get_state needs
+    an EXACT entity id. Asked "what is jolteon's charge level?", the model
+    guessed ids, got 404s, and had to ask the user — a discovery gap, not a
+    reasoning gap. This tool is a fuzzy index over GET /api/states so the model
+    can find the id itself. No canary allowlist on purpose: the allowlist gates
+    WRITES; listing names and states can't break anything.
+    """
+    base = base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    http = client or httpx.Client(timeout=10.0)
+
+    @tool
+    def search_entities(query: str) -> str:
+        """Find Home Assistant entity ids by name. READ-ONLY — never changes anything.
+
+        ALWAYS call this BEFORE home_control's get_state when you lack the
+        exact entity id — i.e. whenever the user names a device colloquially:
+        a car name ("jolteon"), a room ("the office light"), a person's phone,
+        a nickname. NEVER guess an entity id — guesses 404; searching works.
+
+        query: one or more words to match, e.g. "jolteon battery" or
+        "office lamp". Matches entity ids and friendly names,
+        case-insensitive. Returns up to 15 matches, one per line:
+        "entity_id | friendly_name | state" (units included when known).
+        Then call home_control get_state with the exact entity_id you picked,
+        or answer directly from the state shown here.
+        """
+        terms = [t for t in query.lower().split() if t]
+        if not terms:
+            return "search_entities needs at least one word to search for."
+        try:
+            r = http.get(f"{base}/api/states", headers=headers)
+            r.raise_for_status()
+            states = r.json()
+        except (httpx.HTTPError, ValueError) as e:
+            # Honest failure string, never a raise — same ToolNode contract
+            # as home_control (an exception kills the whole action turn).
+            return f"Home Assistant is unreachable right now ({e})."
+
+        scored: list[tuple[int, str, str, dict]] = []
+        for item in states:
+            entity = item.get("entity_id") or ""
+            attrs = item.get("attributes") or {}
+            friendly = str(attrs.get("friendly_name") or "")
+            haystack = f"{entity} {friendly}".lower()
+            hits = sum(1 for t in terms if t in haystack)
+            if hits:
+                scored.append((hits, entity, friendly, item))
+        if not scored:
+            return f"No Home Assistant entities match '{query}'."
+
+        # Rank: most query terms matched first, then entity_id for stability.
+        scored.sort(key=lambda s: (-s[0], s[1]))
+        live = [s for s in scored if str(s[3].get("state")) not in DEAD_STATES]
+        picked = (live or scored)[:SEARCH_LIMIT]
+
+        lines = []
+        for _, entity, friendly, item in picked:
+            state = str(item.get("state"))
+            if len(state) > STATE_TRUNCATE_AT:
+                state = state[:STATE_TRUNCATE_AT] + "…"
+            # Battery/temperature sensors are meaningless without the unit —
+            # "78" vs "78 %" is exactly the EV6 charge-level use case.
+            unit = (item.get("attributes") or {}).get("unit_of_measurement")
+            if unit:
+                state = f"{state} {unit}"
+            lines.append(f"{entity} | {friendly or '(no name)'} | {state}")
+        return "\n".join(lines)
+
+    return search_entities
