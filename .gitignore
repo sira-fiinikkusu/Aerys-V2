@@ -41,3 +41,7 @@ Thumbs.db
 # ── Eval golden dataset (personal data — never commit) ──
 evals/cases/*
 !evals/cases/example.json
+
+# ── Replay harness captures (real payloads — never commit) ──
+evals/replay/*
+!evals/replay/example_payload.json

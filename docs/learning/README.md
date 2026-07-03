@@ -10,3 +10,4 @@ Numbered so they read as a sequence (now and later). Convention: next doc takes 
 6. 06-discord-gateway.md — one gateway client, pure gates, the watchdog dies
 7. 07-http-door-and-jetson-deploy.md — the /ask door + first deploy to her hardware
 8. 08-oauth-backend.md — her words on the Max pool; the API key retires to evals/fallback
+9. 09-replay-harness.md — 50 captured n8n executions replayed through ask(); throwaway-checkpointer isolation, replay:-namespaced threads

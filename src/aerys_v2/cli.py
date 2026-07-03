@@ -14,9 +14,19 @@ def main() -> None:
         "--health" in sys.argv
     )  # check for health check flag before loading settings
     wants_eval = "--eval" in sys.argv  # checked pre-Settings so we can instruct on failure
+    wants_replay = "--replay" in sys.argv  # same pre-check, same reason
     try:
         settings = Settings()
     except ValidationError as e:
+        if wants_replay:
+            # --replay drives the REAL model with captured traffic (the point is
+            # proving live payload shapes survive the ask() seam end-to-end) —
+            # the offline path is tests/test_replay.py with fake models.
+            print(
+                "--replay requires a configured ANTHROPIC_API_KEY (each payload is a "
+                "real model call).\nAdd it to .env (see config.py Settings) and rerun."
+            )
+            sys.exit(1)
         if wants_eval:
             # --eval needs a REAL judge (an actual model call scoring each reply) —
             # there is no offline mode here; the offline path is tests/test_evals.py
@@ -75,6 +85,30 @@ def main() -> None:
         print()
         print(format_summary_table(summary))
         sys.exit(0)
+
+    if wants_replay:  # replay captured n8n traffic through the graph: aerys-v2 --replay
+        # n8n mapping: feed the Core Agent the exact items its Execute Workflow
+        # Trigger / Voice Adapter actually received — but into the V2 brain, on a
+        # THROWAWAY InMemorySaver (never checkpointer_for: replaying redacted
+        # captures into NAS-durable threads would poison real history).
+        from aerys_v2.factory import build_model, load_soul
+        from aerys_v2.replay import (
+            build_replay_graph,
+            format_replay_summary,
+            load_payloads,
+            run_replay,
+        )
+
+        payloads = load_payloads()  # payloads.json locally; example on a fresh clone/CI
+        log.info("replay: %d payload(s) loaded, model=%s", len(payloads), settings.model)
+        graph = build_replay_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+        results, summary = run_replay(graph, payloads)
+        for r in results:  # one line per payload — the per-item view before the rollup
+            status = "ok" if r["ok"] else f"FAIL {r['error']}"
+            print(f"[{status}] {r['id']} ({r['channel']}, {r['latency_ms']:.0f}ms, reply={r['reply_len']} chars)")
+        print()
+        print(format_replay_summary(summary))
+        sys.exit(0 if summary["failed"] == 0 else 1)  # nonzero when any payload broke
 
     if "--serve" in sys.argv:  # run the HTTP door (deploy target: the Jetson container)
         if settings.api_token is None:
