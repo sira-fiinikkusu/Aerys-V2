@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     discord_guild_id: int | None = None          # only this guild is served (None = DMs only)
     discord_reply_channel_ids: str = ""          # csv of guild channel ids to listen in ("" = all)
 
+    # HTTP API (--serve). None = the /ask door stays locked shut; callers (HA voice
+    # pipeline, future satellites) present this as a Bearer token. LAN-only surface.
+    api_token: SecretStr | None = None
+    api_port: int = 8300
+
     # None = DB-backed services OFF. Tests and CI never need a live Postgres —
     # the services take an injected connection, and nothing connects unless this
     # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys — the same

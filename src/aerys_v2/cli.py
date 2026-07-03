@@ -76,6 +76,27 @@ def main() -> None:
         print(format_summary_table(summary))
         sys.exit(0)
 
+    if "--serve" in sys.argv:  # run the HTTP door (deploy target: the Jetson container)
+        if settings.api_token is None:
+            print("--serve needs API_TOKEN in .env (Bearer token for /ask).")
+            sys.exit(1)
+        import uvicorn
+
+        from aerys_v2.factory import build_graph, build_model, checkpointer_for, load_soul
+        from aerys_v2.service import ask
+        from aerys_v2.transports.http_api import build_app
+
+        with checkpointer_for(settings) as cp:
+            graph = build_graph(
+                build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp
+            )
+            app = build_app(
+                lambda text, identity, thread: ask(graph, text, identity=identity, thread_id=thread),
+                settings.api_token.get_secret_value(),
+            )
+            uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
+        sys.exit(0)
+
     if "--discord" in sys.argv:  # run the 1c gateway spike (needs DISCORD_BOT_TOKEN in .env)
         if settings.discord_bot_token is None:
             print("--discord needs DISCORD_BOT_TOKEN in .env (dev bot token).")
