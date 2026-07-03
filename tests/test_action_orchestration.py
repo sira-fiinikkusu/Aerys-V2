@@ -325,3 +325,103 @@ def test_parallel_start_propagates_contextvars_into_workers():
         router=recording_router, action_graph=RecordingActionGraph())
     wait_for_messages(graph, "voice:ctx", 2)
     assert seen == {"router": "trace-123", "action": "trace-123"}
+
+
+# ---- regression: 2026-07-03 voice garble incident --------------------------------
+# Live bug: STT turned "turn office light one off" into "Can you turn off office
+# light on?"; the router acked "off", then the action subgraph asked "on or off?"
+# over the one-way announce channel. These tests pin the contract that prevents it:
+# the subgraph gets ONLY the current turn, plus the already-spoken ack with an
+# explicit never-ask instruction.
+
+
+class RecordingActionGraph:
+    """Stub that captures BOTH the input messages and the config it was invoked with."""
+
+    def __init__(self, final: str = "done"):
+        self.final = final
+        self.inputs: list[list] = []
+        self.configs: list[dict] = []
+
+    def invoke(self, inp: dict, config: dict) -> dict:
+        self.inputs.append(list(inp["messages"]))
+        self.configs.append(config)
+        return {"messages": [AIMessage(content=self.final)]}
+
+
+def test_voice_action_passes_spoken_ack_to_subgraph():
+    graph = build_graph(fake_model("unused"), soul="s")
+    stub = RecordingActionGraph()
+    out = ask(graph, "turn off office light 1", identity=CHRIS, thread_id="voice:ack",
+              router=action_router, action_graph=stub)
+    assert out == "[warmly] Getting that light for you"
+    wait_for_messages(graph, "voice:ack", 2)
+    # the ack the caller already heard rides configurable into the subgraph
+    assert stub.configs[0]["configurable"]["spoken_ack"] == out
+    # and the checkpointer thread_id still flows (history write targets the thread)
+    assert stub.configs[0]["configurable"]["thread_id"] == "voice:ack"
+
+
+def test_action_subgraph_sees_only_current_command_despite_toggle_history():
+    # Thread full of on/off ping-pong — the exact history live on voice:beta when
+    # the incident fired. The subgraph must still receive ONLY the current turn.
+    graph = build_graph(fake_model("unused"), soul="s")
+    ping_pong = []
+    for i in range(3):
+        ping_pong += [
+            HumanMessage(content=f"turn on office light {i}"),
+            AIMessage(content="Office light is on."),
+            HumanMessage(content="Can you turn off office light on?"),
+            AIMessage(content="Quick check — did you mean on or off?"),
+        ]
+    graph.update_state(
+        {"configurable": {"thread_id": "voice:pingpong"}},
+        {"messages": ping_pong},
+        as_node="chat",
+    )
+    stub = RecordingActionGraph(final="Office light 1 is off.")
+    ask(graph, "turn off office light 1", identity=CHRIS, thread_id="voice:pingpong",
+        router=action_router, action_graph=stub)
+    wait_for_messages(graph, "voice:pingpong", len(ping_pong) + 2)
+    # exactly ONE message reached the subgraph: the current command, verbatim
+    assert len(stub.inputs[0]) == 1
+    assert stub.inputs[0][0].content == "turn off office light 1"
+
+
+class RecordingToolModel:
+    """Fake tool-model for build_action_graph that records the prompt it was given."""
+
+    def __init__(self, reply: str = "Office light one is off."):
+        self.reply = reply
+        self.prompts: list[list] = []
+
+    def invoke(self, messages: list) -> AIMessage:
+        self.prompts.append(list(messages))
+        return AIMessage(content=self.reply)
+
+
+def test_spoken_ack_flips_subgraph_prompt_to_never_ask():
+    model = RecordingToolModel()
+    graph = build_action_graph(model, soul="persona", tools=[home_tool()])
+    graph.invoke(
+        {"messages": [HumanMessage(content="Can you turn off office light on?")]},
+        {"configurable": {"identity": CHRIS, "spoken_ack": "Turning off the office light."}},
+    )
+    system = model.prompts[0][0].content
+    assert "Turning off the office light." in system
+    assert "NEVER ask a clarifying question" in system
+    # the garbled text arrives as the single human turn, untouched
+    assert model.prompts[0][1].content == "Can you turn off office light on?"
+
+
+def test_no_spoken_ack_means_no_voice_overlay():
+    # Non-voice sequential path never sets spoken_ack — the subgraph may still
+    # converse there (its reply returns to a caller who CAN answer).
+    model = RecordingToolModel()
+    graph = build_action_graph(model, soul="persona", tools=[home_tool()])
+    graph.invoke(
+        {"messages": [HumanMessage(content="turn off office light 1")]},
+        {"configurable": {"identity": CHRIS}},
+    )
+    system = model.prompts[0][0].content
+    assert "NEVER ask a clarifying question" not in system

@@ -114,3 +114,25 @@ Locks, covers, climate (those arrive with confirmation semantics, not just an
 allowlist), the outbox sweeper that reconciles stuck `'executing'` rows, flipping the
 `ha_write` lease to `'brain'` (retires the exception), streaming, and any second tool.
 One write capability, gated three ways, before the toolbox grows.
+
+## Field notes from the first live week (2026-07-03)
+
+**Per-satellite follow-up routing is a known limitation.** `HA_ANNOUNCE_ENTITY` is a
+single static target — the OpenAI shim never receives satellite identity from HA
+(Extended OpenAI Conversation's chat-completions payload carries no device/satellite
+field), so "announce where the request came from" cannot be implemented at this seam.
+For the single-satellite beta, point the env var at the satellite actually running the
+pipeline (bit us live: it pointed at the Voice PE while the beta pipeline lived on the
+ReSpeaker, so follow-ups spoke in the wrong room). The proper fix — satellite identity
+riding the request — belongs to the voice-runtime phase.
+
+**STT garble vs the one-way announce channel.** Live incident: "turn office light one
+off" transcribed as "Can you turn off office light on?" — the router acked "off", then
+the action subgraph (correctly reading an ambiguous sentence) ASKED "did you mean on or
+off?" over a channel the user cannot answer, contradicting the ack already spoken.
+Fix: the router's ack now rides `configurable.spoken_ack` into the action subgraph,
+whose prompt (VOICE_ACK_OVERLAY) says: never ask on this path; resolve garble toward
+the acknowledged reading; if truly unexecutable, state the problem in one sentence.
+Phoenix trace evidence also confirmed the subgraph's input really is just the current
+turn (no thread-history contamination) — the ambiguity came in through the STT text
+itself, not through leaked ping-pong history.

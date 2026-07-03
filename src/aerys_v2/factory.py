@@ -98,6 +98,16 @@ def speak_fn_for(settings: Settings) -> Callable[[str], None] | None:
     speak (silent-success rule); this only knows HOW. Raising on failure is
     fine: the caller logs and moves on, and the history write never depends
     on delivery.
+
+    KNOWN LIMITATION — per-satellite follow-up routing (2026-07-03): the
+    announce target is a single static entity from HA_ANNOUNCE_ENTITY. The
+    OpenAI shim never learns WHICH satellite a request came from — HA's
+    Extended OpenAI Conversation sends no satellite/device identity in the
+    chat-completions payload — so "announce where the request came from" is
+    not possible at this seam. Acceptable for the single-satellite beta
+    (point the env var at the satellite actually running the pipeline); the
+    proper fix (satellite identity riding the request) lands with the
+    voice-runtime phase.
     """
     if settings.ha_token is None or settings.ha_announce_entity is None:
         return None
@@ -161,7 +171,26 @@ ACTION_OVERLAY = (
     "You are handling a smart-home request. Use the home_control tool to act; "
     "never claim a device changed state unless the tool's reply said so. If the "
     "tool refuses or fails, relay that honestly and briefly. When the work is "
-    "done, reply with ONE short, speakable sentence confirming what happened."
+    "done, reply with ONE short, speakable sentence confirming what happened. "
+    "The user's LAST message is THE command to execute, now — treat anything "
+    "earlier as context, never as the instruction."
+)
+
+# Appended to the system prompt ONLY when service.py hands us the ack the router
+# already spoke (voice ack-then-act path). Root cause it guards (2026-07-03 live
+# incident): STT garbled 'turn office light one off' into 'Can you turn off
+# office light on?' — the router acked 'off', then this subgraph, seeing both
+# 'off' and 'on', ASKED 'did you mean on or off?'. The question was announced to
+# a one-way satellite the user can't answer, contradicting the ack already
+# spoken. Rule: on this path, resolve garble toward the ack; never ask.
+VOICE_ACK_OVERLAY = (
+    "This command arrived by VOICE and the user was ALREADY told, out loud: "
+    "{ack!r}. This channel is one-way — the user cannot hear or answer a "
+    "question from you, so NEVER ask a clarifying question. Speech-to-text "
+    "sometimes garbles a word (e.g. 'one' heard as 'on'); if the wording looks "
+    "slightly off or self-contradictory, execute the reading consistent with "
+    "that spoken acknowledgment. Only if the command is truly unexecutable or "
+    "unsafe, skip the tool and state the problem in one plain sentence."
 )
 
 
@@ -203,7 +232,18 @@ def build_action_graph(api_model_with_tools: object, soul: str, tools: list) -> 
         caller_line = (
             f"The current caller is {identity.get('display_name', 'Unknown Caller')}."
         )
-        system = SystemMessage(content=f"{soul}\n\n{ACTION_OVERLAY}\n{caller_line}")
+        # spoken_ack rides `configurable` (per-call, like identity): set only by
+        # the voice ack-then-act path in service.py. Its presence flips the
+        # subgraph from "may converse" to "execute-or-report, never ask" —
+        # because on that path the ack was already spoken and no reply channel
+        # exists for a question.
+        spoken_ack = (config.get("configurable") or {}).get("spoken_ack")
+        ack_block = (
+            f"\n\n{VOICE_ACK_OVERLAY.format(ack=spoken_ack)}" if spoken_ack else ""
+        )
+        system = SystemMessage(
+            content=f"{soul}\n\n{ACTION_OVERLAY}{ack_block}\n{caller_line}"
+        )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
 

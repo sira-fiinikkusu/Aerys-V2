@@ -265,12 +265,22 @@ def _voice_parallel_start(
         chat_cancelled = chat_future.cancel()
         ack_at = time.monotonic()  # the ack leaves for the speaker ~now
 
+        # The ack the caller just heard rides `configurable` into the subgraph
+        # (2026-07-03 incident): the action model must execute CONSISTENT with
+        # what was already spoken — and must never ask a clarifying question,
+        # because the announce channel is one-way. See VOICE_ACK_OVERLAY in
+        # factory.py for the prompt-side half of this contract.
+        action_config = {
+            **config,
+            "configurable": {**config["configurable"], "spoken_ack": decision.ack},
+        }
+
         def _complete_action() -> None:
             failed = False
             result_messages: list = []
             try:
                 result = action_graph.invoke(
-                    {"messages": [HumanMessage(content=text)]}, config
+                    {"messages": [HumanMessage(content=text)]}, action_config
                 )
                 result_messages = result["messages"]
                 final = _reply_text(result_messages[-1])
