@@ -37,15 +37,20 @@ def main() -> None:
         from aerys_v2.factory import build_graph, build_model, load_soul
         from aerys_v2.service import ask
 
+        from aerys_v2.factory import checkpointer_for
+
         text = sys.argv[sys.argv.index("--ask") + 1]
-        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
-        reply = ask(
-            graph,
-            text,
-            # CLI caller = the operator; real transports resolve identity properly (S2)
-            identity={"user_id": "cli-operator", "display_name": "Chris (CLI)"},
-            thread_id="cli",  # InMemorySaver → each CLI run is a fresh thread for now
-        )
+        with checkpointer_for(settings) as cp:  # Postgres when DATABASE_URL set → durable
+            graph = build_graph(
+                build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp
+            )
+            reply = ask(
+                graph,
+                text,
+                # CLI caller = the operator; real transports resolve identity properly (S2)
+                identity={"user_id": "cli-operator", "display_name": "Chris (CLI)"},
+                thread_id="cli",  # durable with DATABASE_URL: separate runs SHARE this thread
+            )
         print(reply)
         sys.exit(0)
 
@@ -77,9 +82,12 @@ def main() -> None:
             sys.exit(1)
         from aerys_v2.factory import build_graph, build_model, load_soul
         from aerys_v2.service import ask
+        from aerys_v2.factory import checkpointer_for
         from aerys_v2.transports.discord_gateway import AerysDiscordClient
 
-        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+        cp_ctx = checkpointer_for(settings)
+        cp = cp_ctx.__enter__()  # held for the life of the gateway process
+        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp)
 
         def resolve(event):  # spike resolver: display-name passthrough (DB resolver later)
             return {"user_id": f"discord:{event.platform_user_id}", "display_name": event.display_name}

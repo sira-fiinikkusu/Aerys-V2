@@ -18,6 +18,30 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.config import Settings
 from aerys_v2.state import ChatState, identity_from_config
+from contextlib import contextmanager
+
+
+@contextmanager
+def checkpointer_for(settings: Settings):
+    """Yield the right checkpointer for the environment (the durability seam).
+
+    database_url set -> PostgresSaver on the NAS: threads survive restarts (the
+    n8n_chat_histories job, done properly). None -> InMemorySaver: tests, CI, and
+    any box without the LAN. setup() is idempotent — it creates the checkpoint
+    tables on first run and no-ops after.
+
+    Benchmarked 2026-07-02 from the Jetson: ~1ms roundtrip to NAS Postgres —
+    single-digit ms per turn against a ~3.6s voice budget. The pluggable seam
+    stays anyway (cross-review #9).
+    """
+    if settings.database_url is None:
+        yield InMemorySaver()
+        return
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(settings.database_url) as saver:
+        saver.setup()
+        yield saver
 
 FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and honest."
 
