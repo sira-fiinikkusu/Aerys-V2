@@ -34,6 +34,11 @@ from langchain_core.tools import tool
 log = logging.getLogger(__name__)
 
 WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle"})
+
+# The ONLY string prefix a successful write returns — service.py's silent-success
+# rule keys on it (a fast turn whose every tool note starts with this = the device
+# visibly changed = skip the spoken follow-up). Change it here and nowhere else.
+WRITE_OK_PREFIX = "Done:"
 # v1 scope: only domains where a misfire is an annoyance, not a hazard.
 # (No locks, no covers, no climate — those arrive with confirmation semantics.)
 WRITABLE_DOMAINS = frozenset({"light", "switch"})
@@ -221,6 +226,6 @@ def build_home_control_tool(
         _outbox_close(
             outbox_id, "succeeded", receipt={"status_code": r.status_code, "changed": changed}
         )
-        return f"Done: {op} sent to {entity} (HA responded {r.status_code})."
+        return f"{WRITE_OK_PREFIX} {op} sent to {entity} (HA responded {r.status_code})."
 
     return home_control

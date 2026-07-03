@@ -90,6 +90,35 @@ def context_fn_for(settings: Settings) -> ContextFn | None:
     return context_fn
 
 
+def speak_fn_for(settings: Settings) -> Callable[[str], None] | None:
+    """The spoken-follow-up delivery seam: text -> the room, via HA announce.
+
+    None unless BOTH ha_token and ha_announce_entity are set — same arming
+    pattern as every optional transport. The service layer decides WHEN to
+    speak (silent-success rule); this only knows HOW. Raising on failure is
+    fine: the caller logs and moves on, and the history write never depends
+    on delivery.
+    """
+    if settings.ha_token is None or settings.ha_announce_entity is None:
+        return None
+    import httpx
+
+    base = settings.ha_base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
+    entity = settings.ha_announce_entity
+
+    def speak(text: str) -> None:
+        r = httpx.post(
+            f"{base}/api/services/assist_satellite/announce",
+            headers=headers,
+            json={"entity_id": entity, "message": text},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+
+    return speak
+
+
 def load_soul(path: Path) -> str:
     """Read the persona prompt from disk, with a safe fallback.
 

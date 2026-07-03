@@ -73,7 +73,17 @@ class _WarmClient:
             options=ClaudeAgentOptions(
                 model=self.model,
                 max_turns=1,
-                allowed_tools=[],       # chat backend only — no file/bash/tool access
+                # TOOLS-OFF TRAP (root-caused 2026-07-03, live voice trace): these are
+                # TWO different knobs. `allowed_tools` only controls AUTO-PERMISSION;
+                # the CLI still exposes every built-in tool (Bash, Skill, ...) to the
+                # model. `tools=[]` is what actually removes them. Without it, an
+                # action-shaped prompt ("kill the office light" — reaches this chat
+                # backend via the voice parallel-start's speculative generation) makes
+                # the model CALL a tool; with max_turns=1 the turn then dies as
+                # ResultMessage(subtype='error_max_turns', result=None) — on every
+                # retry, deterministically, because it's the prompt, not a race.
+                tools=[],               # chat backend only — no built-in tools exist
+                allowed_tools=[],       # and nothing would be auto-permitted anyway
                 permission_mode="default",
                 env={"ANTHROPIC_API_KEY": ""},
             )
@@ -99,7 +109,17 @@ class _WarmClient:
                         assistant_text.append(block.text)
             if isinstance(message, ResultMessage):
                 if getattr(message, "is_error", False):
-                    raise RuntimeError(f"oauth backend error: {message.result!r}")
+                    # result is None on error subtypes — surface the fields that
+                    # actually diagnose it (a bare "error: None" left us blind on
+                    # the 2026-07-03 voice trace; never again).
+                    raise RuntimeError(
+                        "oauth backend error: "
+                        f"subtype={getattr(message, 'subtype', None)!r} "
+                        f"result={message.result!r} "
+                        f"num_turns={getattr(message, 'num_turns', None)!r} "
+                        f"stop_reason={getattr(message, 'stop_reason', None)!r} "
+                        f"permission_denials={getattr(message, 'permission_denials', None)!r}"
+                    )
                 result_text = message.result
         return result_text or "".join(assistant_text) or ""
 

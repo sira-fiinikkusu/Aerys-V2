@@ -65,6 +65,18 @@ class Settings(BaseSettings):
     # the tool exists but is read-only, which is a valid canary stage zero.
     ha_canary_entities: str = ""
 
+    # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
+    # Owner rule (2026-07-03): if a device action completes within this many
+    # seconds of the ack going out, the spoken follow-up is SKIPPED — the light
+    # changing IS the feedback. Slow actions and FAILURES are always spoken.
+    # The follow-up lands in thread history either way (silent record).
+    voice_followup_skip_s: float = 6.0
+    # The assist satellite entity that speaks follow-ups (e.g.
+    # "assist_satellite.home_assistant_voice_..._assist_satellite").
+    # None = no spoken follow-ups (history-only) — same arming pattern as every
+    # other optional transport.
+    ha_announce_entity: str | None = None
+
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
     # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =
     # openai/text-embedding-3-small, 1536-dim). The model MUST match what the

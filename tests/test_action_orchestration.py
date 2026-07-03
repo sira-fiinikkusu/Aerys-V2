@@ -179,3 +179,149 @@ def test_voice_action_failure_lands_honestly_in_thread():
     assert out == "[warmly] Getting that light for you"  # ack still speaks
     msgs = wait_for_messages(graph, "voice:x", 2)
     assert "didn't complete" in msgs[-1].content  # honest failure, never silence
+
+
+# ---- spoken follow-up: the silent-success rule (owner, 2026-07-03) ---------------
+# If the device action succeeds fast, the light changing IS the feedback — skip the
+# spoken follow-up. Slow, failed, refused, or question-shaped actions always speak.
+# The thread history gets the outcome EITHER WAY (silent record).
+
+from langchain_core.messages import ToolMessage  # noqa: E402
+
+
+class ToolNoteActionGraph:
+    """Returns a tool trace shaped like the real subgraph: ToolMessages + final AI."""
+
+    def __init__(self, notes: list[str], final: str = "all set", delay_s: float = 0.0):
+        self.notes, self.final, self.delay_s = notes, final, delay_s
+
+    def invoke(self, inp: dict, config: dict) -> dict:
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        msgs = [ToolMessage(content=n, tool_call_id=f"c{i}") for i, n in enumerate(self.notes)]
+        return {"messages": [*inp["messages"], *msgs, AIMessage(content=self.final)]}
+
+
+def recording_speaker():
+    calls: list[str] = []
+    return calls, calls.append
+
+
+def test_voice_fast_clean_write_skips_spoken_followup():
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Done: turn_off sent to light.desk (HA responded 200)."], final="Light's off."
+    )
+    out = ask(graph, "turn off the desk light", identity=CHRIS, thread_id="voice:skip",
+              router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+    assert out == "[warmly] Getting that light for you"
+    msgs = wait_for_messages(graph, "voice:skip", 2)
+    assert any(m.content == "Light's off." for m in msgs)  # silent record still lands
+    assert calls == []  # the light changing IS the feedback — say nothing
+
+
+def test_voice_slow_action_speaks_followup():
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Done: turn_off sent to light.desk (HA responded 200)."],
+        final="Light's off.", delay_s=0.02,
+    )
+    ask(graph, "turn off the desk light", identity=CHRIS, thread_id="voice:slow",
+        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=0.0)
+    wait_for_messages(graph, "voice:slow", 2)
+    assert calls == ["Light's off."]  # slow = silence would read as a dropped command
+
+
+def test_voice_failed_action_always_speaks():
+    class ExplodingActionGraph:
+        def invoke(self, inp, config):
+            raise RuntimeError("HA melted")
+
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    ask(graph, "toggle the desk light", identity=CHRIS, thread_id="voice:fail",
+        router=action_router, action_graph=ExplodingActionGraph(),
+        speak_fn=speak, followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:fail", 2)
+    assert len(calls) == 1 and "didn't complete" in calls[0]  # failures NEVER silent
+
+
+def test_voice_refusal_speaks_followup():
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Refused: light.garage is not on the beta write allowlist."],
+        final="I can't touch that one yet.",
+    )
+    ask(graph, "turn off the garage light", identity=CHRIS, thread_id="voice:refuse",
+        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:refuse", 2)
+    # nothing visibly changed in the room — the honest refusal MUST be spoken
+    assert calls == ["I can't touch that one yet."]
+
+
+def test_voice_state_query_speaks_answer():
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ['{"entity_id": "light.desk", "state": "on", "friendly_name": "Desk"}'],
+        final="It's on.",
+    )
+    ask(graph, "is the desk light on?", identity=CHRIS, thread_id="voice:query",
+        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:query", 2)
+    assert calls == ["It's on."]  # a question's answer IS the follow-up
+
+
+def test_voice_no_tool_run_speaks_followup():
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    ask(graph, "turn on the desk light", identity=CHRIS, thread_id="voice:notool",
+        router=action_router, action_graph=StubActionGraph("nothing I could do"),
+        speak_fn=speak, followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:notool", 2)
+    assert calls == ["nothing I could do"]  # no device change = the sentence is all there is
+
+
+def test_speak_failure_never_blocks_history():
+    def broken_speaker(_text: str) -> None:
+        raise RuntimeError("satellite offline")
+
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(["Refused: not allowed."], final="couldn't do it")
+    ask(graph, "turn off the lamp", identity=CHRIS, thread_id="voice:deaf",
+        router=action_router, action_graph=stub, speak_fn=broken_speaker,
+        followup_skip_s=6.0)
+    msgs = wait_for_messages(graph, "voice:deaf", 2)
+    assert any(m.content == "couldn't do it" for m in msgs)  # durable record survives
+
+
+# ---- context propagation into parallel-start threads (Phoenix trace unity) ------
+
+def test_parallel_start_propagates_contextvars_into_workers():
+    """OTel context rides contextvars; the parallel-start worker threads must carry
+    a COPY of the caller's context or Phoenix gets orphaned root traces (the
+    router's ack generation was invisible in the turn trace, owner-observed
+    2026-07-03)."""
+    import contextvars
+
+    turn_var: contextvars.ContextVar = contextvars.ContextVar("turn_var", default=None)
+    turn_var.set("trace-123")
+    seen: dict = {}
+
+    def recording_router(text: str) -> RouteDecision:
+        seen["router"] = turn_var.get()
+        return RouteDecision(route="action", ack="on it")
+
+    class RecordingActionGraph(StubActionGraph):
+        def invoke(self, inp, config):
+            seen["action"] = turn_var.get()
+            return super().invoke(inp, config)
+
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    ask(graph, "toggle the desk light", identity=CHRIS, thread_id="voice:ctx",
+        router=recording_router, action_graph=RecordingActionGraph())
+    wait_for_messages(graph, "voice:ctx", 2)
+    assert seen == {"router": "trace-123", "action": "trace-123"}

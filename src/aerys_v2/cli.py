@@ -123,6 +123,7 @@ def main() -> None:
             checkpointer_for,
             context_fn_for,
             load_soul,
+            speak_fn_for,
         )
         from aerys_v2.service import ask
         from aerys_v2.transports.http_api import build_app
@@ -149,10 +150,17 @@ def main() -> None:
                 router, action_graph = stack
                 log.info("action stack armed | ha=%s canary=[%s]",
                          settings.ha_base_url, settings.ha_canary_entities)
+            # Spoken follow-up seam: None = history-only (no announce entity).
+            speak_fn = speak_fn_for(settings)
+            if speak_fn is not None:
+                log.info("spoken follow-ups armed | entity=%s skip<=%.1fs",
+                         settings.ha_announce_entity, settings.voice_followup_skip_s)
             app = build_app(
                 lambda text, identity, thread: ask(
                     graph, text, identity=identity, thread_id=thread,
                     router=router, action_graph=action_graph,
+                    speak_fn=speak_fn,
+                    followup_skip_s=settings.voice_followup_skip_s,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris

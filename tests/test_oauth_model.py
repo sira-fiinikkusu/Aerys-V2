@@ -56,3 +56,30 @@ def test_error_result_raises(monkeypatch):
     monkeypatch.setattr(model, "_query", fake_query)
     with pytest.raises(RuntimeError):
         model.invoke([HumanMessage(content="x")])
+
+
+def test_connect_disables_all_builtin_tools(monkeypatch):
+    """Regression guard for the 2026-07-03 voice bug: `allowed_tools=[]` is only
+    auto-permission — the CLI still exposes every built-in tool unless `tools=[]`
+    is set, and a tool attempt under max_turns=1 dies as error_max_turns."""
+    import claude_agent_sdk
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options=None):
+            captured["options"] = options
+
+        async def connect(self):
+            pass
+
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", FakeClient)
+    from aerys_v2.oauth_model import _WarmClient
+
+    w = _WarmClient("claude-sonnet-5")
+    client = w._run(w._connect())
+    assert isinstance(client, FakeClient)
+    opts = captured["options"]
+    assert opts.tools == []          # no built-in tools EXIST for the chat backend
+    assert opts.allowed_tools == []  # and none would be auto-permitted anyway
+    assert opts.max_turns == 1
