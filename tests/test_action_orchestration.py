@@ -414,6 +414,54 @@ def test_spoken_ack_flips_subgraph_prompt_to_never_ask():
     assert model.prompts[0][1].content == "Can you turn off office light on?"
 
 
+def test_action_graph_injects_profile_context_block():
+    # Live gap (2026-07-03): "enough charge to get to Tampa and back from home?"
+    # routed to the action path, which had NO profile block — the agent read the
+    # battery but didn't know where home is. context_fn output must ride the
+    # action system prompt.
+    model = RecordingToolModel()
+    seen = []
+
+    def fake_context(person_id, query_text):
+        seen.append((person_id, query_text))
+        return "• basic.location: Rotonda West, Florida"
+
+    graph = build_action_graph(model, soul="persona", tools=[home_tool()], context_fn=fake_context)
+    graph.invoke(
+        {"messages": [HumanMessage(content="enough charge to reach Tampa from home?")]},
+        {"configurable": {"identity": CHRIS}},
+    )
+    system = model.prompts[0][0].content
+    assert "[What you know about this person]" in system
+    assert "Rotonda West" in system
+    # called with the caller's id and the latest human text
+    assert seen[0] == (CHRIS["user_id"], "enough charge to reach Tampa from home?")
+
+
+def test_action_graph_context_fn_failure_never_kills_the_turn():
+    def broken_context(person_id, query_text):
+        raise RuntimeError("NAS is down")
+
+    model = RecordingToolModel(reply="done")
+    graph = build_action_graph(model, soul="persona", tools=[home_tool()], context_fn=broken_context)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="lights off")]},
+        {"configurable": {"identity": CHRIS}},
+    )
+    assert result["messages"][-1].content == "done"
+    assert "[What you know about this person]" not in model.prompts[0][0].content
+
+
+def test_action_graph_without_context_fn_prompt_unchanged():
+    model = RecordingToolModel(reply="done")
+    graph = build_action_graph(model, soul="persona", tools=[home_tool()])
+    graph.invoke(
+        {"messages": [HumanMessage(content="lights off")]},
+        {"configurable": {"identity": CHRIS}},
+    )
+    assert "[What you know about this person]" not in model.prompts[0][0].content
+
+
 # ---- regression: speculative chat must NEVER pollute the real thread -------------
 # Live bug (flagged 2026-07-03): on route=action, the speculative chat gen — running
 # via graph.invoke on the REAL thread — checkpointed replies like "Office light

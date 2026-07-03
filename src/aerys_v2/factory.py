@@ -55,7 +55,7 @@ FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and ho
 ContextFn = Callable[[str, str], str]
 
 
-def context_fn_for(settings: Settings) -> ContextFn | None:
+def context_fn_for(settings: Settings, *, profile_only: bool = False) -> ContextFn | None:
     """Wire the real memory-context seam from Settings — None when memories are off.
 
     n8n mapping: this replaces the Core Agent's per-message webhook calls to
@@ -72,7 +72,11 @@ def context_fn_for(settings: Settings) -> ContextFn | None:
 
     from aerys_v2.services.context import build_context, embedder_from_settings
 
-    embed = embedder_from_settings(settings)
+    # profile_only skips the embedding seam entirely: build_context with
+    # embed=None emits just the profile block (who the person IS). The action
+    # subgraph uses this — identity facts per tool-loop hop for one ~1ms LAN
+    # SELECT, no per-hop embeddings HTTP call.
+    embed = None if profile_only else embedder_from_settings(settings)
 
     def context_fn(person_id: str, query_text: str) -> str:
         # Fenced end-to-end: a NAS outage or DNS hiccup = empty context, never
@@ -217,7 +221,12 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
     ).bind_tools(tools)
 
 
-def build_action_graph(api_model_with_tools: object, soul: str, tools: list) -> object:
+def build_action_graph(
+    api_model_with_tools: object,
+    soul: str,
+    tools: list,
+    context_fn: ContextFn | None = None,
+) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
     n8n mapping: this is the AI Agent node with an ai_tool connection — the
@@ -248,8 +257,31 @@ def build_action_graph(api_model_with_tools: object, soul: str, tools: list) -> 
         ack_block = (
             f"\n\n{VOICE_ACK_OVERLAY.format(ack=spoken_ack)}" if spoken_ack else ""
         )
+        # Identity facts for the action path (2026-07-03 live gap): "does the
+        # car have enough charge to get to Tampa FROM HOME?" routed here, the
+        # tool read the battery fine, but this prompt had no profile block —
+        # so the agent didn't know where home IS and asked instead of doing
+        # the range math. context_fn here is the PROFILE-ONLY seam (identity
+        # claims, no embedding call) — same graceful contract as the chat node.
+        knowledge = ""
+        if context_fn is not None:
+            latest = next(
+                (m for m in reversed(state["messages"]) if getattr(m, "type", "") == "human"),
+                None,
+            )
+            query_text = ""
+            if latest is not None:
+                content = latest.content
+                query_text = content if isinstance(content, str) else str(content)
+            try:
+                block = context_fn(str(identity.get("user_id", "")), query_text)
+            except Exception:
+                log.warning("action context_fn raised; continuing without profile", exc_info=True)
+                block = ""
+            if block:
+                knowledge = f"\n\n[What you know about this person]\n{block}"
         system = SystemMessage(
-            content=f"{soul}\n\n{ACTION_OVERLAY}{ack_block}\n{caller_line}"
+            content=f"{soul}\n\n{ACTION_OVERLAY}{ack_block}\n{caller_line}{knowledge}"
         )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
@@ -305,7 +337,12 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         token=settings.ha_token.get_secret_value(),
     )
     tools = [home_control, search_entities]
-    action_graph = build_action_graph(build_api_tool_model(settings, tools), soul, tools)
+    action_graph = build_action_graph(
+        build_api_tool_model(settings, tools),
+        soul,
+        tools,
+        context_fn=context_fn_for(settings, profile_only=True),
+    )
     return router_for(settings, soul), action_graph
 
 
