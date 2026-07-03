@@ -14,3 +14,6 @@ Numbered so they read as a sequence (now and later). Convention: next doc takes 
 10. 10-memory-context.md — build_context wires profile + memories into every turn; the 7/3 caveat dissolves, claims follow facts
 11. 11-phoenix-tracing.md — wire_tracing() ships spans to Phoenix; the Executions tab without the self-destruct, degrade-safe
 12. 12-tools-block.md — Option C ratified: Haiku router with generated acks, voice parallel-start (~800ms ack), home_control behind the canary allowlist, outbox-inline writes + the beta lease-exception
+13. 13-extraction-shadow.md — the memory WRITE path in shadow: batch extraction ported node-for-node, staging table + raw-string watermarks, diff before the lease flips
+14. 14-media-tools.md — she can see: vision/documents/YouTube as honest read-only tools; signed-URL sanctity and the extensions-before-image ladder
+15. 15-tier-routing.md — the classify sandwich returns: fast/standard/deep as a hint on the router call, voice pinned to standard, the deep tier's atomic daily cap, boot assertions that refuse the wrong database

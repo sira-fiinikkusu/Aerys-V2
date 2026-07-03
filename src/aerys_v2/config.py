@@ -1,6 +1,12 @@
+import logging
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
+
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+log = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -32,8 +38,10 @@ class Settings(BaseSettings):
 
     # None = DB-backed services OFF. Tests and CI never need a live Postgres —
     # the services take an injected connection, and nothing connects unless this
-    # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys — the same
-    # NAS database the n8n workflows hit; V2 reads it directly, no webhook hop.
+    # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys_v2 — the
+    # brain's OWN database on the NAS (checkpoints, outbox, model-usage cap).
+    # MUST target `aerys_v2`, never prod `aerys` — run_boot_assertions() below
+    # refuses to start otherwise (the two-database footgun, made unbootable).
     database_url: str | None = None
 
     # ---- MEMORY-RETRIEVAL block (long-term context) --------------------------
@@ -86,3 +94,136 @@ class Settings(BaseSettings):
     # None api_key = the memory half of context stays empty (profile still works).
     embeddings_api_key: SecretStr | None = None
     embeddings_base_url: str = "https://openrouter.ai/api/v1"
+
+    # ---- EXTRACTION WORKER (shadow mode) --------------------------------------
+    # The n8n batch extraction (IfqY4BrhBGeQrcTC) re-run as a V2 worker that reads
+    # prod conversations READ-ONLY and writes ONLY to aerys_v2 staging tables
+    # (migration 002) — output gets diffed against prod before any lease flip.
+    # Reuses embeddings_api_key (it's an OpenRouter key) for the extraction LLM.
+    extraction_model: str = "anthropic/claude-haiku-4.5"  # v1's extractor, via OpenRouter
+    extraction_interval_minutes: int = 60   # loop-mode cadence (v1 cron: hourly)
+    extraction_lookback_hours: int = 2      # first-run window when no watermark exists
+    extraction_batch_limit: int = 200       # rows per source per pass (v1 LIMIT 200)
+
+    # ---- TIER ROUTING (the V1 classify sandwich, folded into the router) ------
+    # n8n mapping: V1's three tier sub-workflows (Sonnet/Opus/Gemini agents) and
+    # the modelsConfig dict in Load Config. Tiers are named by ROLE, not vendor
+    # (the haiku→gemini rename left a dead name in Parse Classification's
+    # validation array — role names survive model swaps). tier applies to CHAT
+    # routes on TEXT threads; voice stays pinned to standard (ChannelPolicy,
+    # locked: the ~3.6s voice budget can't absorb opus latency, and fast-tier
+    # identity wobbles are exactly what got Haiku demoted in V1).
+    tier_fast_model: str = "claude-haiku-4-5"       # greetings, trivia — pennies
+    tier_standard_model: str = "claude-sonnet-5"    # the daily driver (api backend
+    #   only — on the oauth backend, standard IS `model` above: the subscription
+    #   client is single-model, so this knob applies when chat bills the API key)
+    tier_deep_model: str = "claude-opus-4-8"        # research/analysis — rationed
+    # Deep turns per UTC day, enforced atomically in v2_model_usage (migration
+    # 003) when database_url is set — V1's aerys_model_usage 10/day opus cap,
+    # minus its check-then-increment race. Cap hit -> silently costs nothing:
+    # the turn downgrades to standard and the downgrade is logged.
+    deep_daily_cap: int = 10
+
+
+# =============================================================================
+# Boot assertions — the env-scare prevention.
+#
+# Two real incidents drive these checks:
+#   1. The watchdog .env bug (2026-05-05): a relative AERYS_ENV_PATH resolved
+#      against / under systemd — the service booted "fine" with missing config.
+#   2. The two-database footgun: NAS Postgres hosts BOTH `aerys` (prod, n8n's,
+#      sacred) and `aerys_v2` (this brain's own). DATABASE_URL pointed at prod
+#      would checkpoint V2 threads INTO the production database; conversely,
+#      MEMORIES_DATABASE_URL pointed at aerys_v2 reads memories from an empty
+#      staging DB and silently retrieves nothing.
+# n8n mapping: V1 had no equivalent — a misconfigured workflow just ran wrong
+# until someone noticed. Refusing to boot is the upgrade.
+# =============================================================================
+
+# The one database this brain may write to. MEMORIES_DATABASE_URL must point at
+# prod `aerys` (read-only retrieval) — the names must never swap.
+V2_DATABASE_NAME = "aerys_v2"
+
+# .env line shape (what python-dotenv itself accepts): optional `export`, a
+# KEY, `=`. Comments and blanks never match.
+_ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+class BootConfigError(RuntimeError):
+    """Fatal misconfiguration found at startup — refuse to serve, say why."""
+
+
+def database_name(url: str) -> str:
+    """The database a postgres URL targets ('' when the URL has no path)."""
+    return urlsplit(url).path.lstrip("/")
+
+
+def duplicate_env_keys(env_file: Path) -> list[str]:
+    """Keys assigned more than once in a dotenv file (last one silently wins).
+
+    Deploy-side equivalent, for boxes where the running process can't see the
+    file:  awk -F= '/^[A-Za-z_]/{print $1}' .env | sort | uniq -d
+    """
+    seen: dict[str, int] = {}
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        m = _ENV_LINE.match(line)
+        if m:
+            key = m.group(1)
+            seen[key] = seen.get(key, 0) + 1
+    return sorted(k for k, n in seen.items() if n > 1)
+
+
+def run_boot_assertions(settings: Settings, env_file: Path | None = None) -> None:
+    """Startup config sanity — called by --serve/--discord BEFORE anything binds.
+
+    Raises BootConfigError on fatal misconfig (wrong database = refuse to
+    start); logs loudly on suspicious-but-survivable config (backwards memory
+    URL, duplicate .env keys). The direction is deliberate: a write surface
+    aimed at the wrong database must never boot, while a read surface aimed
+    somewhere odd degrades to empty context — visible, not destructive.
+    """
+    # 1. FATAL: the brain's own DB (checkpointer, outbox, model-usage cap)
+    #    must be aerys_v2 — anything else risks writing into prod `aerys` or
+    #    n8n's engine database.
+    if settings.database_url is not None:
+        name = database_name(settings.database_url)
+        if name != V2_DATABASE_NAME:
+            raise BootConfigError(
+                f"DATABASE_URL targets database {name!r} — the V2 brain writes "
+                f"(checkpoints, outbox, model-usage) belong in '{V2_DATABASE_NAME}'. "
+                "If you meant the prod memories connection, that is "
+                "MEMORIES_DATABASE_URL. Refusing to start."
+            )
+
+    # 2. LOUD WARNING: the memories connection pointed at aerys_v2 is the same
+    #    mistake mirrored — retrieval reads an empty staging DB and every turn
+    #    quietly knows nothing. Survivable (read-only), so warn, don't die.
+    if settings.memories_database_url is not None:
+        name = database_name(settings.memories_database_url)
+        if name == V2_DATABASE_NAME:
+            log.warning(
+                "MEMORIES_DATABASE_URL targets '%s' — that is the brain's OWN "
+                "database, not prod 'aerys'. Memory retrieval will find nothing. "
+                "The two URLs look swapped.",
+                V2_DATABASE_NAME,
+            )
+
+    # 3. LOUD WARNING: duplicate keys in the env file — dotenv keeps the LAST
+    #    assignment, so an old line lower in the file silently overrides the
+    #    one you just edited (the exact shape of the 2026-05-05 watchdog scare).
+    if env_file is None:
+        configured = Settings.model_config.get("env_file")
+        env_file = Path(configured) if configured else None
+    if env_file is not None and env_file.exists():
+        dupes = duplicate_env_keys(env_file)
+        if dupes:
+            log.warning(
+                "env file %s assigns these keys more than once (LAST one wins): "
+                "%s — delete the stale lines.",
+                env_file,
+                ", ".join(dupes),
+            )

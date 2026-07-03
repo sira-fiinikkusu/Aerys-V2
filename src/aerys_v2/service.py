@@ -17,6 +17,12 @@ an action subgraph. Both None = chat-only, byte-for-byte the old behavior. Both 
   ack IMMEDIATELY (speakable now, ~3.6s budget intact) while a background
   thread finishes the action and appends the real result to the SAME thread —
   so the next turn's history shows what actually happened, not just the ack.
+
+TIER ROUTING rides the same router verdict: chat routes on TEXT threads carry a
+fast/standard/deep tier into the graph (model picked per turn in the chat node);
+voice threads stay pinned to standard (ChannelPolicy, locked), and the deep tier
+is rationed by the deep_allowed gate — cap reached means the turn quietly runs
+standard and the downgrade is logged, never an error to the caller.
 """
 
 import concurrent.futures
@@ -31,7 +37,7 @@ from typing import Callable
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from aerys_v2.router import RouteDecision
+from aerys_v2.router import DEFAULT_TIER, RouteDecision, normalize_tier
 from aerys_v2.state import Identity
 
 log = logging.getLogger(__name__)
@@ -109,6 +115,7 @@ def ask(
     action_graph: object | None = None,
     speak_fn: Callable[[str], None] | None = None,
     followup_skip_s: float = 6.0,
+    deep_allowed: Callable[[], bool] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -121,6 +128,10 @@ def ask(
     - speak_fn + followup_skip_s: the voice spoken-follow-up seam — speak_fn
       delivers text to the room (HA announce in prod, a fake in tests); the
       silent-success rule in _voice_parallel_start decides WHEN it fires.
+    - deep_allowed: the deep-tier cap gate (factory.deep_gate_for) — consulted
+      ONLY when a text-thread chat turn actually classified deep, so voice
+      turns and downgrades never burn a v2_model_usage credit. None = cap
+      unenforced (dev boxes); the gate saying False downgrades to standard.
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
@@ -136,6 +147,11 @@ def ask(
             return _chat_turn(graph, text, config, rails, started)
 
         if str(thread_id).startswith("voice"):
+            # ChannelPolicy (locked): voice is PINNED to the standard tier —
+            # the ~3.6s budget can't absorb deep latency, and fast-tier
+            # identity wobbles are what got Haiku demoted in V1. The pin is
+            # structural: this path never writes a tier into config, so the
+            # chat node's DEFAULT_TIER (= standard) always applies.
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, followup_skip_s,
@@ -147,7 +163,24 @@ def ask(
         if decision.route == "action":
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
+            log.info("route decision | thread=%s route=action", thread_id)
             return _action_turn(action_graph, graph, text, config, add_human=True)
+
+        # Chat route on a TEXT thread: the router's tier picks the model. This
+        # is where the deep cap bites — the gate is an atomic spend against
+        # v2_model_usage, so it runs ONLY once we know this turn is deep.
+        tier = normalize_tier(decision.tier)
+        if tier == "deep" and deep_allowed is not None and not deep_allowed():
+            # Cap held: degrade to standard, and say so in the logs (the V1
+            # opus cap degraded SILENTLY — a documented regret, not a feature).
+            log.info(
+                "deep tier cap reached — downgrading to standard | thread=%s", thread_id
+            )
+            tier = DEFAULT_TIER
+        # The router log IS the persistence for the tier decision until the
+        # v2_turns writer lands — same fields the turns row will carry.
+        log.info("route decision | thread=%s route=chat tier=%s", thread_id, tier)
+        config["configurable"]["tier"] = tier
         return _chat_turn(graph, text, config, rails, started)
 
 

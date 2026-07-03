@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.config import Settings
+from aerys_v2.router import DEFAULT_TIER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config
 from contextlib import contextmanager
 
@@ -168,6 +169,82 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
     )
 
 
+def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str, BaseChatModel]:
+    """The per-tier model map for the chat node — V1's modelsConfig, typed.
+
+    n8n mapping: Load Config's `modelsConfig` dict plus the three Execute
+    Sonnet/Opus/Gemini sub-workflows, collapsed to one dict lookup (the
+    sub-workflow split only ever existed because of the n8n task-runner hang).
+
+    Backend rule (the June credit-pool decision, extended): the oauth/SDK
+    client is SINGLE-MODEL — it serves whatever the subscription serves — so
+    only the STANDARD tier may ride it. fast and deep are always metered
+    ChatAnthropic: fast is haiku (pennies), deep is opus (rationed by
+    deep_gate_for below). standard = build_model(settings), so it keeps
+    honoring model_backend exactly as before tiers existed.
+    """
+
+    def api_model(name: str) -> BaseChatModel:
+        return ChatAnthropic(
+            model=name,
+            api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
+            max_tokens=4096,
+            timeout=timeout_s,
+            max_retries=2,
+        )
+
+    return {
+        "fast": api_model(settings.tier_fast_model),
+        "standard": (
+            build_model(settings, timeout_s=timeout_s)
+            if settings.model_backend == "oauth"
+            else api_model(settings.tier_standard_model)
+        ),
+        "deep": api_model(settings.tier_deep_model),
+    }
+
+
+def deep_gate_for(settings: Settings) -> Callable[[], bool] | None:
+    """The deep-tier daily cap: () -> True (spend a deep turn) or False (capped).
+
+    n8n mapping: the Core Agent's Opus cap against aerys_model_usage — except
+    V1 did check-then-increment (two queries, racy); this is the dossier's one
+    atomic statement: INSERT ... ON CONFLICT DO UPDATE ... WHERE count < cap
+    RETURNING. No row back = the cap held = the caller downgrades to standard.
+
+    None when database_url is unset: the cap is UNENFORCED (dev boxes, tests) —
+    logged at arm time so a metered box missing its DB is visible, not silent.
+    Failure direction on DB trouble: False (deep is a luxury; a broken counter
+    must fail toward the cheap tier, never toward uncounted opus spend).
+    """
+    if settings.database_url is None:
+        log.info("deep tier cap UNENFORCED — no DATABASE_URL, v2_model_usage unavailable")
+        return None
+    import psycopg
+
+    def allow_deep() -> bool:
+        try:
+            # Fresh short connection per check — same per-call choice (and the
+            # same "pool is a drop-in later" note) as context_fn_for above.
+            with psycopg.connect(settings.database_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO v2_model_usage (day, tier, call_count) "
+                        "VALUES (CURRENT_DATE, 'deep', 1) "
+                        "ON CONFLICT (day, tier) DO UPDATE "
+                        "SET call_count = v2_model_usage.call_count + 1, updated_at = now() "
+                        "WHERE v2_model_usage.call_count < %s "
+                        "RETURNING call_count",
+                        (settings.deep_daily_cap,),
+                    )
+                    return cur.fetchone() is not None
+        except Exception:
+            log.warning("deep-cap check failed — failing toward standard", exc_info=True)
+            return False
+
+    return allow_deep
+
+
 # Overlay for the action subgraph's system prompt: the chat persona plus tool
 # discipline. The "never claim success" line is load-bearing — it's the prompt-side
 # half of the honest-refusal contract in tools/home_control.py.
@@ -185,6 +262,24 @@ ACTION_OVERLAY = (
     "done, reply with ONE short, speakable sentence confirming what happened. "
     "The user's LAST message is THE command to execute, now — treat anything "
     "earlier as context, never as the instruction."
+)
+
+# Media half of the action overlay — appended when the media tools are armed.
+# The trigger patterns are concrete on purpose (the V1 lesson: "specificity
+# beats generality in tool descriptions" applies to prompts telling the model
+# WHEN to reach for tools, too). Tool names here MUST match the @tool function
+# names in tools/media.py — the V1 toolWorkflow name-mismatch bug, kept dead.
+MEDIA_OVERLAY = (
+    "You also handle media. You have ZERO ability to see images or read files "
+    "directly — when the message contains an attachment or CDN URL "
+    "(https://cdn.discordapp.com/attachments/... or media.discordapp.net), or "
+    "asks you to look at, read, describe, or summarize an image, photo, "
+    "screenshot, PDF, document, or video, call the matching tool IMMEDIATELY: "
+    "analyze_image for pictures, read_document for .pdf/.docx/.txt files, "
+    "youtube_summary for youtube.com/youtu.be links. Pass URLs EXACTLY as they "
+    "appeared — every query parameter intact (Discord CDN URLs are signed; "
+    "trimming them breaks the link). Never describe media you did not run "
+    "through a tool."
 )
 
 # Appended to the system prompt ONLY when service.py hands us the ack the router
@@ -226,6 +321,7 @@ def build_action_graph(
     soul: str,
     tools: list,
     context_fn: ContextFn | None = None,
+    overlay: str = ACTION_OVERLAY,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -281,7 +377,7 @@ def build_action_graph(
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
         system = SystemMessage(
-            content=f"{soul}\n\n{ACTION_OVERLAY}{ack_block}\n{caller_line}{knowledge}"
+            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}"
         )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
@@ -300,48 +396,100 @@ def build_action_graph(
     return graph.compile()
 
 
+def action_tools_for(settings: Settings) -> list:
+    """Every tool the action subgraph gets, assembled from what Settings arms.
+
+    Two independently-armed halves, same pattern as every optional transport:
+    - HOME (ha_token set): home_control + search_entities — the write half,
+      canary-gated and outbox-audited.
+    - MEDIA (embeddings_api_key set): analyze_image + read_document +
+      youtube_summary — the read half, replacing V1's Tool: Image node and the
+      06-05 extractor sub-workflows (HE7zmxKeWoxjvM9L / yuHzxHqqWz93xwYj /
+      tJwLt494G1VugToU). The OpenRouter credential is the embedder's, reused —
+      exactly like n8n credential gvgPllzFhLSds5Qv serving both jobs.
+
+    Empty list = nothing armed = the caller keeps ask() chat-only.
+    """
+    tools: list = []
+
+    if settings.ha_token is not None:
+        from aerys_v2.tools.home_control import (
+            build_home_control_tool,
+            build_search_entities_tool,
+            canary_set,
+        )
+
+        conn_factory = None
+        if settings.database_url is not None:
+            import psycopg
+
+            # Fresh short connection per outbox touch — same per-call choice (and
+            # the same "pool is a drop-in later" note) as context_fn_for above.
+            def conn_factory():
+                return psycopg.connect(settings.database_url)
+
+        tools.append(
+            build_home_control_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+                canary_entities=canary_set(settings.ha_canary_entities),
+                conn_factory=conn_factory,
+            )
+        )
+        tools.append(
+            build_search_entities_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+            )
+        )
+
+    if settings.embeddings_api_key is not None:
+        from aerys_v2.tools.media import build_media_tools
+
+        tools.extend(
+            build_media_tools(
+                api_key=settings.embeddings_api_key.get_secret_value(),
+                base_url=settings.embeddings_base_url,
+            )
+        )
+
+    return tools
+
+
+def action_overlay_for(settings: Settings) -> str:
+    """Compose the action-subgraph system overlay from the armed tool halves.
+
+    The prompt must only mention tools that EXIST this boot — telling the model
+    to "use the home_control tool" on a box without ha_token is asking for the
+    V1 hallucinated-tool-call failure with extra steps.
+    """
+    parts = []
+    if settings.ha_token is not None:
+        parts.append(ACTION_OVERLAY)
+    if settings.embeddings_api_key is not None:
+        parts.append(MEDIA_OVERLAY)
+    return "\n\n".join(parts)
+
+
 def action_stack_for(settings: Settings, soul: str) -> tuple | None:
     """Wire the whole TOOLS block from Settings: (router, action_graph), or None.
 
-    Arms only when ha_token is set (anthropic_api_key is structurally required
-    by Settings, so the API half is always available). None = ask() runs
-    chat-only, exactly as before the TOOLS block existed — backward compatible
-    by construction.
+    Arms when ANY tool half exists — ha_token (home) and/or embeddings_api_key
+    (media); the API model half is structurally required by Settings. None =
+    ask() runs chat-only, exactly as before the TOOLS block existed — backward
+    compatible by construction.
     """
-    if settings.ha_token is None:
+    tools = action_tools_for(settings)
+    if not tools:
         return None
     from aerys_v2.router import router_for
-    from aerys_v2.tools.home_control import (
-        build_home_control_tool,
-        build_search_entities_tool,
-        canary_set,
-    )
 
-    conn_factory = None
-    if settings.database_url is not None:
-        import psycopg
-
-        # Fresh short connection per outbox touch — same per-call choice (and
-        # the same "pool is a drop-in later" note) as context_fn_for above.
-        def conn_factory():
-            return psycopg.connect(settings.database_url)
-
-    home_control = build_home_control_tool(
-        base_url=settings.ha_base_url,
-        token=settings.ha_token.get_secret_value(),
-        canary_entities=canary_set(settings.ha_canary_entities),
-        conn_factory=conn_factory,
-    )
-    search_entities = build_search_entities_tool(
-        base_url=settings.ha_base_url,
-        token=settings.ha_token.get_secret_value(),
-    )
-    tools = [home_control, search_entities]
     action_graph = build_action_graph(
         build_api_tool_model(settings, tools),
         soul,
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
+        overlay=action_overlay_for(settings),
     )
     return router_for(settings, soul), action_graph
 
@@ -351,6 +499,7 @@ def build_graph(
     soul: str,
     checkpointer: BaseCheckpointSaver | None = None,
     context_fn: ContextFn | None = None,
+    tier_models: dict[str, BaseChatModel] | None = None,
 ) -> object:
     """START → chat → END, checkpointed.
 
@@ -361,6 +510,13 @@ def build_graph(
     context_fn is the same idea for long-term memory: None = the chat node knows
     nothing beyond the thread; set = each turn asks it (person_id, latest user text)
     and injects whatever comes back into the system prompt.
+
+    tier_models is the model-as-a-per-call-parameter seam (Chip's tiering
+    pattern via the dossier): the router's tier rides `configurable` — per
+    call, never checkpointed, same channel as identity — and the chat node
+    picks the model for THIS turn from the map. None (or a tier missing from
+    the map) = `model`, so every pre-tier caller behaves byte-for-byte as
+    before. One graph, one node; the V1 three-sub-workflow split stays dead.
     """
 
     def chat(state: ChatState, config: RunnableConfig) -> dict:
@@ -424,9 +580,14 @@ def build_graph(
         system = SystemMessage(
             content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{voice_style}"
         )
+        # Tier -> model, resolved per turn (normalize_tier at the node too, not
+        # just ask() — Chip's belt-and-braces: whatever garbage reaches config,
+        # the node answers with a REAL model and the trace shows which).
+        tier = normalize_tier(((config or {}).get("configurable") or {}).get("tier", DEFAULT_TIER))
+        turn_model = (tier_models or {}).get(tier, model)
         # n8n mapping: this is the AI Agent node's invoke — prompt + history in, one
         # AIMessage out. add_messages in ChatState appends it to the thread history.
-        reply = model.invoke([system, *state["messages"]])
+        reply = turn_model.invoke([system, *state["messages"]])
         return {"messages": [reply]}
 
     graph = StateGraph(ChatState)
