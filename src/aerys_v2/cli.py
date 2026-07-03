@@ -23,6 +23,22 @@ def main() -> None:
         print("ok")  # confirm that we loaded successfully, which means we're healthy
         sys.exit(0)  # exit with success
 
+    if "--ask" in sys.argv:  # one-shot turn: aerys-v2 --ask "hello" — the first REAL call path
+        from aerys_v2.factory import build_graph, build_model, load_soul
+        from aerys_v2.service import ask
+
+        text = sys.argv[sys.argv.index("--ask") + 1]
+        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+        reply = ask(
+            graph,
+            text,
+            # CLI caller = the operator; real transports resolve identity properly (S2)
+            identity={"user_id": "cli-operator", "display_name": "Chris (CLI)"},
+            thread_id="cli",  # InMemorySaver → each CLI run is a fresh thread for now
+        )
+        print(reply)
+        sys.exit(0)
+
     log.info(
         "aerys-v2 ready | model=%s soul=%s otlp=%s",
         settings.model,
