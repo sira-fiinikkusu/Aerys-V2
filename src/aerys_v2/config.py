@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     # anonymous "http-caller" bucket that matches nothing in the database.
     owner_person_id: str | None = None
 
+    # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
+    # Chat turns stay on whatever model_backend says (oauth = free daily driver);
+    # TOOL turns always run on the metered API backend — the SDK backend is
+    # chat-only. None ha_token = the home_control tool (and the whole action
+    # path: router + subgraph) simply doesn't exist — same arming pattern as
+    # discord_bot_token. n8n mapping: this is the 07-01 "HA Action" workflow's
+    # credential check, done at construction time instead of per-execution.
+    ha_base_url: str = "http://192.168.1.155:8123"   # HA Green on the LAN
+    ha_token: SecretStr | None = None
+    # csv of entity_ids the Brain may WRITE to during beta (reads unrestricted).
+    # e.g. "light.office_lamp,switch.desk_fan". Empty = every write refused —
+    # the tool exists but is read-only, which is a valid canary stage zero.
+    ha_canary_entities: str = ""
+
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
     # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =
     # openai/text-embedding-3-small, 1536-dim). The model MUST match what the

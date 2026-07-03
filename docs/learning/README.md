@@ -13,3 +13,4 @@ Numbered so they read as a sequence (now and later). Convention: next doc takes 
 9. 09-replay-harness.md — 50 captured n8n executions replayed through ask(); throwaway-checkpointer isolation, replay:-namespaced threads
 10. 10-memory-context.md — build_context wires profile + memories into every turn; the 7/3 caveat dissolves, claims follow facts
 11. 11-phoenix-tracing.md — wire_tracing() ships spans to Phoenix; the Executions tab without the self-destruct, degrade-safe
+12. 12-tools-block.md — Option C ratified: Haiku router with generated acks, voice parallel-start (~800ms ack), home_control behind the canary allowlist, outbox-inline writes + the beta lease-exception

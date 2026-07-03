@@ -83,6 +83,12 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
             )
         if not last_user.strip():
             raise HTTPException(status_code=400, detail="no user message")
+        # TOOLS block: the "voice" thread prefix is what arms ack-then-act inside
+        # ask() (service.py parallel-start). For a device command, `reply` here is
+        # the router's generated acknowledgment — HA speaks it immediately — and
+        # the action finishes in the background, its real outcome appended to this
+        # same thread. The transport contract stays one-request-one-string; the
+        # asynchrony lives entirely behind the ask() seam.
         reply = ask_fn(
             last_user,
             {"user_id": http_user_id, "display_name": "Chris (Voice)"},
@@ -106,6 +112,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
             "user_id": http_user_id,
             "display_name": body.display_name,
         }
+        # Same seam as the OpenAI shim: callers that name a "voice*" thread_id
+        # get ack-then-act for device commands; every other thread gets the
+        # sequential router (reply = the actual action outcome). No new fields —
+        # the thread_id the caller already sends is the behavior switch.
         reply = ask_fn(body.text, identity, body.thread_id)
         return AskReply(reply=reply, thread_id=body.thread_id)
 

@@ -117,6 +117,7 @@ def main() -> None:
         import uvicorn
 
         from aerys_v2.factory import (
+            action_stack_for,
             build_graph,
             build_model,
             checkpointer_for,
@@ -129,17 +130,30 @@ def main() -> None:
         # [01-05 PHOENIX] one line, degrade-safe: no-op unless OTLP_ENDPOINT set; any failure logs and serves anyway
         from aerys_v2.tracing import wire_tracing; wire_tracing(settings)
 
+        soul = load_soul(settings.soul_file_path)  # shared: chat graph, action graph, router acks
         with checkpointer_for(settings) as cp:
             graph = build_graph(
                 build_model(settings),
-                soul=load_soul(settings.soul_file_path),
+                soul=soul,
                 checkpointer=cp,
                 # long-term memory context: ON only when MEMORIES_DATABASE_URL is
                 # set (read-only prod aerys DB); None keeps the graph memory-free
                 context_fn=context_fn_for(settings),
             )
+            # TOOLS block (Option C): arms only when HA_TOKEN is set (the api key
+            # the router/tool model needs is structurally required by Settings).
+            # None = ask() runs chat-only, exactly as before tools existed.
+            router = action_graph = None
+            stack = action_stack_for(settings, soul)
+            if stack is not None:
+                router, action_graph = stack
+                log.info("action stack armed | ha=%s canary=[%s]",
+                         settings.ha_base_url, settings.ha_canary_entities)
             app = build_app(
-                lambda text, identity, thread: ask(graph, text, identity=identity, thread_id=thread),
+                lambda text, identity, thread: ask(
+                    graph, text, identity=identity, thread_id=thread,
+                    router=router, action_graph=action_graph,
+                ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
                 # retrieves HIS memories (identity user_id = owner persons.id)

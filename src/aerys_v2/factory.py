@@ -125,6 +125,106 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
     )
 
 
+# Overlay for the action subgraph's system prompt: the chat persona plus tool
+# discipline. The "never claim success" line is load-bearing — it's the prompt-side
+# half of the honest-refusal contract in tools/home_control.py.
+ACTION_OVERLAY = (
+    "You are handling a smart-home request. Use the home_control tool to act; "
+    "never claim a device changed state unless the tool's reply said so. If the "
+    "tool refuses or fails, relay that honestly and briefly. When the work is "
+    "done, reply with ONE short, speakable sentence confirming what happened."
+)
+
+
+def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
+    """The tool-turn model: ALWAYS metered API, tools bound (Option C, ratified).
+
+    Deliberately NOT build_model(): the oauth/SDK backend is chat-only — it can't
+    drive a LangChain tool loop — so action turns bill the API key regardless of
+    model_backend. Voice device commands are short turns; the spend is pennies.
+    """
+    return ChatAnthropic(
+        model=settings.model,
+        api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
+        max_tokens=1024,   # action confirmations are one sentence, not essays
+        timeout=timeout_s,
+        max_retries=2,
+    ).bind_tools(tools)
+
+
+def build_action_graph(api_model_with_tools: object, soul: str, tools: list) -> object:
+    """START → act ⇄ tools → END: the tool subgraph for device commands.
+
+    n8n mapping: this is the AI Agent node with an ai_tool connection — the
+    model proposes tool_calls, ToolNode (LangGraph prebuilt) executes them and
+    feeds ToolMessages back, and the loop repeats until the model answers in
+    plain text. The recursion_limit rail from ask() applies here too: each
+    act/tools hop is a super-step, so a confused model hits the wall instead of
+    incinerating budget (the dormant turn_limit in Rails, now live).
+
+    No checkpointer on purpose — an action turn is a one-shot; the durable
+    record is (a) the outbox row the tool wrote and (b) the final AIMessage
+    that service.py appends to the MAIN thread's checkpointer.
+    """
+    from langgraph.prebuilt import ToolNode
+
+    def act(state: ChatState, config: RunnableConfig) -> dict:
+        # Same identity rule as the chat node: from per-call config, never state.
+        identity = identity_from_config(config)
+        caller_line = (
+            f"The current caller is {identity.get('display_name', 'Unknown Caller')}."
+        )
+        system = SystemMessage(content=f"{soul}\n\n{ACTION_OVERLAY}\n{caller_line}")
+        reply = api_model_with_tools.invoke([system, *state["messages"]])
+        return {"messages": [reply]}
+
+    def after_act(state: ChatState) -> str:
+        # tool_calls present -> execute them; plain text -> the turn is done.
+        last = state["messages"][-1]
+        return "tools" if getattr(last, "tool_calls", None) else END
+
+    graph = StateGraph(ChatState)
+    graph.add_node("act", act)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_edge(START, "act")
+    graph.add_conditional_edges("act", after_act, {"tools": "tools", END: END})
+    graph.add_edge("tools", "act")
+    return graph.compile()
+
+
+def action_stack_for(settings: Settings, soul: str) -> tuple | None:
+    """Wire the whole TOOLS block from Settings: (router, action_graph), or None.
+
+    Arms only when ha_token is set (anthropic_api_key is structurally required
+    by Settings, so the API half is always available). None = ask() runs
+    chat-only, exactly as before the TOOLS block existed — backward compatible
+    by construction.
+    """
+    if settings.ha_token is None:
+        return None
+    from aerys_v2.router import router_for
+    from aerys_v2.tools.home_control import build_home_control_tool, canary_set
+
+    conn_factory = None
+    if settings.database_url is not None:
+        import psycopg
+
+        # Fresh short connection per outbox touch — same per-call choice (and
+        # the same "pool is a drop-in later" note) as context_fn_for above.
+        def conn_factory():
+            return psycopg.connect(settings.database_url)
+
+    home_control = build_home_control_tool(
+        base_url=settings.ha_base_url,
+        token=settings.ha_token.get_secret_value(),
+        canary_entities=canary_set(settings.ha_canary_entities),
+        conn_factory=conn_factory,
+    )
+    tools = [home_control]
+    action_graph = build_action_graph(build_api_tool_model(settings, tools), soul, tools)
+    return router_for(settings, soul), action_graph
+
+
 def build_graph(
     model: BaseChatModel,
     soul: str,
