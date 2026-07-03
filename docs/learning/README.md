@@ -8,3 +8,4 @@ Numbered so they read as a sequence (now and later). Convention: next doc takes 
 4. 04-channel-pure-functions.md — Output Router + Detect Media Type + vision tool as pure functions with golden-tested quirks
 5. 05-read-services.md — identity/profile/memory READ path as injected-connection modules; the UNION-ALL sentinels and CTE wrappers die
 6. 06-discord-gateway.md — one gateway client, pure gates, the watchdog dies
+7. 07-http-door-and-jetson-deploy.md — the /ask door + first deploy to her hardware
