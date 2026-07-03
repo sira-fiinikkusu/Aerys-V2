@@ -29,6 +29,12 @@ PERSON = "6e6bcbed-03ef-4d17-95d2-89c467414335"  # a real UUID — passes the gu
 FAKE_EMBED = lambda text: [0.5, 0.5]  # noqa: E731 — "text in, vector out", offline
 
 
+def stamp(days_ago: int) -> str:
+    """The '(YYYY-MM-DD, Nd ago)' suffix format_memory_context appends per line."""
+    created = NOW - timedelta(days=days_ago)
+    return f"({created.date().isoformat()}, {days_ago}d ago)"
+
+
 # --- fakes (same duck-typed psycopg trick as test_services.py) ----------------
 
 
@@ -102,7 +108,7 @@ def test_context_assembles_profile_then_memories():
     # profile lines first (who they ARE), memories second (what happened lately)
     assert block == (
         "• Preferred name: Chris"
-        "\n\nRelevant memories:\n* black coffee [discord] (3d ago)"
+        f"\n\nRelevant memories:\n* black coffee [discord] {stamp(3)}"
     )
 
 
@@ -125,7 +131,7 @@ def test_context_profile_only_when_no_memory_rows():
 def test_context_memories_only_when_profile_cold_start():
     conn = FakeConn([[], [memory_row("no colon memory", source=None, days_ago=0)]])
     assert build_context(PERSON, "hi", conn, embed=FAKE_EMBED) == (
-        "Relevant memories:\n* no colon memory (0d ago)"
+        f"Relevant memories:\n* no colon memory {stamp(0)}"
     )
 
 
@@ -157,11 +163,16 @@ def test_context_without_embed_seam_still_serves_profile():
     assert len(conn.calls) == 1  # only the profile SELECT ran
 
 
-def test_context_survives_a_query_exploding():
+def test_context_survives_a_query_exploding(caplog):
     # Profile SELECT raises; memories still emit — halves are fenced separately.
     conn = ExplodingConn([[memory_row("likes: espresso", days_ago=0)]])
     assert build_context(PERSON, "hi", conn, embed=FAKE_EMBED) == (
-        "Relevant memories:\n* espresso [discord] (0d ago)"
+        f"Relevant memories:\n* espresso [discord] {stamp(0)}"
+    )
+    # Degrade-graceful is NOT degrade-silent: the swallowed failure must log.
+    assert any(
+        "profile context failed" in r.message and r.levelname == "WARNING"
+        for r in caplog.records
     )
 
 

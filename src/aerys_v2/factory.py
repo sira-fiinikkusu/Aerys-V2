@@ -6,6 +6,7 @@ built ONCE at startup into objects the rest of the app calls. The graph is the w
 canvas; each node function is a Code node that receives state instead of $json.
 """
 
+import logging
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +21,8 @@ from langgraph.graph import END, START, StateGraph
 from aerys_v2.config import Settings
 from aerys_v2.state import ChatState, identity_from_config
 from contextlib import contextmanager
+
+log = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -80,6 +83,8 @@ def context_fn_for(settings: Settings) -> ContextFn | None:
                 conn.read_only = True
                 return build_context(person_id, query_text, conn, embed=embed)
         except Exception:
+            # graceful but never silent — a dead NAS/DNS must show in the logs.
+            log.warning("memory-context connect failed for person %s", person_id, exc_info=True)
             return ""
 
     return context_fn
@@ -176,7 +181,10 @@ def build_graph(
             try:
                 block = context_fn(str(identity.get("user_id", "")), query_text)
             except Exception:
-                block = ""  # the seam promises graceful, but memory NEVER kills a turn
+                # the seam promises graceful, but memory NEVER kills a turn —
+                # and a swallowed failure must still be visible in the logs.
+                log.warning("context_fn raised; continuing without memory context", exc_info=True)
+                block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
 

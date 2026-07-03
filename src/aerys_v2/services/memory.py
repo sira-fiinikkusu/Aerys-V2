@@ -16,10 +16,18 @@ that were never embedded sorted to the TOP of retrieval. `AND m.embedding IS NOT
 NULL` excludes them (an unembedded memory can't be similarity-scored anyway).
 
 Scoring (in SQL, reference implementation in `combined_score()` below):
-  score = cosine_similarity * 0.7 + recency * 0.3
+  score = cosine_similarity * (0.7 + 0.3 * recency)      -- recency is a BOOST, not a term
   cosine_similarity = 1 - (embedding <=> query_vec)      -- pgvector cosine distance
   recency = clamp(1 - age_seconds / 30 days, 0, 1)       -- linear decay to 0 at 30d
 No similarity threshold: ALL of a person's live memories are scored, top 20 kept.
+
+V1 scoring bug FIXED in the port (observed live 2026-07-03): the additive form
+`sim*0.7 + recency*0.3` let ANY fresh memory (+0.3) outrank every memory older
+than 30 days regardless of relevance — "who am I married to?" retrieved this
+week's smart-home chatter while the April wedding memories sat at rank #21+,
+below the LIMIT. Multiplicative recency keeps the freshness preference but makes
+similarity the gate: an irrelevant memory can't ride recency to the top, and an
+old-but-on-point memory (sim*0.7 floor) beats fresh noise.
 """
 
 import json
@@ -29,7 +37,9 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 
 # The scoring constants — named here, interpolated into the SQL below so the
-# query and the reference math can never drift apart.
+# query and the reference math can never drift apart. SIM_WEIGHT is the floor
+# multiplier for a fully-aged memory; a fresh one is boosted up to
+# SIM_WEIGHT + RECENCY_WEIGHT (= 1.0, pure similarity).
 SIM_WEIGHT = 0.7
 RECENCY_WEIGHT = 0.3
 RECENCY_WINDOW_S = 2_592_000  # 30 days — recency decays linearly to 0 over this
@@ -44,10 +54,10 @@ Embedder = Callable[[str], Sequence[float]]
 MEMORY_SQL = f"""\
 SELECT
   m.id, m.person_id, m.content, m.source_platform, m.privacy_level, m.created_at,
-  (1 - (m.embedding <=> %(embedding)s::vector)) * {SIM_WEIGHT}
-  + LEAST(1.0, GREATEST(0.0,
+  (1 - (m.embedding <=> %(embedding)s::vector))
+  * ({SIM_WEIGHT} + {RECENCY_WEIGHT} * LEAST(1.0, GREATEST(0.0,
       1 - EXTRACT(EPOCH FROM (NOW() - m.created_at)) / {RECENCY_WINDOW_S}.0
-    )) * {RECENCY_WEIGHT} AS combined_score
+    ))) AS combined_score
 FROM memories m
 WHERE m.person_id = %(person_id)s::uuid
   AND m.deleted_at IS NULL
@@ -75,7 +85,7 @@ def combined_score(cosine_similarity: float, age_seconds: float) -> float:
     behavior are provable offline (and eyeball-checkable against live rows).
     """
     recency = min(1.0, max(0.0, 1 - age_seconds / RECENCY_WINDOW_S))
-    return cosine_similarity * SIM_WEIGHT + recency * RECENCY_WEIGHT
+    return cosine_similarity * (SIM_WEIGHT + RECENCY_WEIGHT * recency)
 
 
 def embedding_to_pgvector(embedding: Sequence[float]) -> str:
@@ -140,8 +150,12 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
       3. cap at CONTEXT_CAP (5) lines
       4. per line: display = text after the FIRST ':' (rest rejoined, so values
          containing colons — URLs, timestamps — survive), else full content;
-         then '[source_platform]' if present, then '(Nd ago)'
+         then '[source_platform]' if present, then '(YYYY-MM-DD, Nd ago)'
     Returns '' for zero rows (caller injects nothing into the prompt).
+
+    Date added vs the n8n Format node (which emitted only '(Nd ago)'): "when
+    did X happen?" questions need the calendar date, and the model can't
+    recover it from a bare day-count without knowing today's date.
 
     Cosmetic fix vs n8n: the JS template `* ${display} ${src} ${age}` left an
     interior double space when src was missing; we join parts with single spaces.
@@ -170,7 +184,8 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
         parts = [f"* {display}"]
         if row.get("source_platform"):
             parts.append(f"[{row['source_platform']}]")
-        parts.append(f"({_age_days(row['created_at'], now)}d ago)")
+        created = row["created_at"]
+        parts.append(f"({created.date().isoformat()}, {_age_days(created, now)}d ago)")
         lines.append(" ".join(parts))
 
         if len(lines) >= CONTEXT_CAP:

@@ -14,6 +14,7 @@ still emits, and the worst case is an empty string the chat node simply skips.
 """
 
 import json
+import logging
 import urllib.request
 import uuid
 from typing import Any
@@ -25,6 +26,8 @@ from aerys_v2.services.memory import (
     retrieve_memories,
 )
 from aerys_v2.services.profile import get_profile
+
+log = logging.getLogger(__name__)
 
 
 def _is_uuid(value: str) -> bool:
@@ -74,7 +77,9 @@ def build_context(
         if profile["lines"]:
             parts.append("\n".join(profile["lines"]))
     except Exception:
-        pass  # graceful: no profile, not a dead turn
+        # graceful: no profile, not a dead turn — but degrade-graceful must not
+        # mean degrade-SILENT: an invisible fence hid a broken pipeline once.
+        log.warning("profile context failed for person %s", person_id, exc_info=True)
 
     try:
         # No embed seam = no way to score memories against the query; the
@@ -92,7 +97,9 @@ def build_context(
             if memory_block:
                 parts.append(f"Relevant memories:\n{memory_block}")
     except Exception:
-        pass  # graceful: no memories, not a dead turn
+        # graceful: no memories, not a dead turn — logged for the same reason
+        # as the profile fence (embed HTTP failures land here too).
+        log.warning("memory context failed for person %s", person_id, exc_info=True)
 
     return "\n\n".join(parts)
 

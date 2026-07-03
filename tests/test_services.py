@@ -237,21 +237,32 @@ def test_embedding_serialization_matches_n8n_join():
 # --- memory: scoring math ---------------------------------------------------
 
 
-def test_score_is_similarity_weighted_plus_recency():
-    # Fresh memory (age 0): recency 1.0 → score = sim*0.7 + 0.3
+def test_score_is_similarity_scaled_by_recency_boost():
+    # Fresh memory (age 0): recency 1.0 → score = sim * (0.7 + 0.3) = sim
     assert combined_score(1.0, 0) == pytest.approx(1.0)
-    assert combined_score(0.5, 0) == pytest.approx(0.65)
-    # Exactly 30 days old: recency decayed to 0 → pure similarity term.
+    assert combined_score(0.5, 0) == pytest.approx(0.5)
+    # Exactly 30 days old: recency decayed to 0 → sim * 0.7 floor.
     assert combined_score(0.5, RECENCY_WINDOW_S) == pytest.approx(0.35)
-    # Half the window: recency 0.5 → 0.5*0.7 + 0.5*0.3
-    assert combined_score(0.5, RECENCY_WINDOW_S / 2) == pytest.approx(0.5)
+    # Half the window: recency 0.5 → 0.5 * (0.7 + 0.15)
+    assert combined_score(0.5, RECENCY_WINDOW_S / 2) == pytest.approx(0.425)
 
 
 def test_score_recency_clamps_both_ends():
-    # Older than 30 days: clamped to 0, never negative.
-    assert combined_score(0.0, RECENCY_WINDOW_S * 10) == pytest.approx(0.0)
-    # Future timestamp (clock skew): clamped to 1, never above.
-    assert combined_score(0.0, -999_999) == pytest.approx(0.3)
+    # Older than 30 days: recency clamped to 0 → the 0.7 floor, never lower.
+    assert combined_score(1.0, RECENCY_WINDOW_S * 10) == pytest.approx(0.7)
+    # Future timestamp (clock skew): recency clamped to 1, never above sim.
+    assert combined_score(1.0, -999_999) == pytest.approx(1.0)
+
+
+def test_score_relevance_gates_recency():
+    # THE 2026-07-03 regression: "who am I married to?" must rank an aged
+    # on-point memory (sim 0.44, >30d old) above fresh small talk (sim 0.25).
+    # The old additive form gave the fresh row +0.3 flat and buried the answer.
+    aged_relevant = combined_score(0.44, RECENCY_WINDOW_S * 3)
+    fresh_noise = combined_score(0.25, 0)
+    assert aged_relevant > fresh_noise
+    # And recency still breaks ties between equally relevant memories.
+    assert combined_score(0.5, 0) > combined_score(0.5, RECENCY_WINDOW_S)
 
 
 # --- memory: context formatting ----------------------------------------------
@@ -263,19 +274,19 @@ def test_format_empty_rows_is_empty_string():
 
 def test_format_line_shape_with_source_and_age():
     rows = [dict(zip("id person_id content source_platform privacy_level created_at combined_score".split(), memory_row("likes: black coffee", days_ago=3)))]
-    assert format_memory_context(rows, now=NOW) == "* black coffee [discord] (3d ago)"
+    assert format_memory_context(rows, now=NOW) == "* black coffee [discord] (2026-06-29, 3d ago)"
 
 
 def test_format_without_source_has_single_spaces():
     # Cosmetic fix vs n8n: no interior double-space when source is missing.
     rows = [{"content": "plain memory", "source_platform": None, "created_at": NOW - timedelta(days=2)}]
-    assert format_memory_context(rows, now=NOW) == "* plain memory (2d ago)"
+    assert format_memory_context(rows, now=NOW) == "* plain memory (2026-06-30, 2d ago)"
 
 
 def test_format_strips_only_first_colon():
     # Values containing colons (URLs, times) must survive the key-prefix strip.
     rows = [{"content": "homepage: https://kael.dev:8080/x", "source_platform": None, "created_at": NOW}]
-    assert format_memory_context(rows, now=NOW) == "* https://kael.dev:8080/x (0d ago)"
+    assert format_memory_context(rows, now=NOW) == "* https://kael.dev:8080/x (2026-07-02, 0d ago)"
 
 
 def test_format_dedup_by_key_prefix_first_wins():
@@ -287,7 +298,7 @@ def test_format_dedup_by_key_prefix_first_wins():
         {"content": "No Colon Here", "source_platform": None, "created_at": NOW},
     ]
     out = format_memory_context(rows, now=NOW)
-    assert out == "* espresso (0d ago)\n* no colon here (0d ago)"
+    assert out == "* espresso (2026-07-02, 0d ago)\n* no colon here (2026-07-02, 0d ago)"
 
 
 def test_format_caps_at_five_after_dedup():
@@ -304,10 +315,10 @@ def test_format_skips_null_content_rows():
         {"content": None, "source_platform": None, "created_at": None},
         {"content": "real: memory", "source_platform": None, "created_at": NOW},
     ]
-    assert format_memory_context(rows, now=NOW) == "* memory (0d ago)"
+    assert format_memory_context(rows, now=NOW) == "* memory (2026-07-02, 0d ago)"
 
 
 def test_format_age_rounds_half_up_like_js():
     # 2.5 days → JS Math.round gives 3 (half rounds UP, not banker's).
     rows = [{"content": "x", "source_platform": None, "created_at": NOW - timedelta(days=2.5)}]
-    assert format_memory_context(rows, now=NOW) == "* x (3d ago)"
+    assert format_memory_context(rows, now=NOW) == "* x (2026-06-30, 3d ago)"
