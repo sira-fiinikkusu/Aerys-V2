@@ -20,7 +20,13 @@ from aerys_v2.services.memory import (
     format_memory_context,
     retrieve_memories,
 )
-from aerys_v2.services.profile import format_profile_context, get_profile
+from aerys_v2.services.profile import (
+    FETCH_LIMIT,
+    PROFILE_LIMIT,
+    format_profile_context,
+    get_profile,
+    select_claims,
+)
 
 NOW = datetime(2026, 7, 2, 12, 0, 0, tzinfo=timezone.utc)
 PERSON = "6e6bcbed-03ef-4d17-95d2-89c467414335"
@@ -101,7 +107,10 @@ def test_get_profile_param_shape_and_quirks_killed():
     assert "UNION" not in sql  # zero-row sentinel killed
     # The privacy semantics that must survive verbatim:
     assert "('P2', 'P3')" in sql
-    assert "LIMIT 15" in sql
+    # The 15-claim cap moved to Python (select_claims) so identity pins can
+    # beat it — SQL now only bounds the fetch.
+    assert "LIMIT 15" not in sql
+    assert f"LIMIT {FETCH_LIMIT}" in sql
 
 
 def test_profile_cold_start_on_zero_rows():
@@ -158,6 +167,80 @@ def test_profile_lines_use_bullet_u2022():
     )["profile"]
     assert profile["lines"] == ["• Loves n8n"]
     assert profile["display_name"] is None  # no name claim present
+
+
+# --- profile: identity pinning (select_claims) --------------------------------
+
+
+def claims_of(rows):
+    return [dict(zip(PROFILE_COLS, r)) for r in rows]
+
+
+def ephemera(n, confidence=1.0):
+    """n high-confidence non-identity claims — the crowd that ate the cap in prod."""
+    return [claim_row(f"decision.thing_{i}", f"ephemera {i}", confidence=confidence) for i in range(n)]
+
+
+def test_pinned_identity_claims_beat_high_confidence_ephemera():
+    # Prod failure mode: 20 claims at 1.0 confidence rank ahead of location
+    # (unlocked here — no manual-lock crutch) and partner at 0.93.
+    rows = ephemera(20) + [
+        claim_row("basic.location", "basic.location: Rotonda West, Florida", confidence=0.93),
+        claim_row("relationship.partner", "In a relationship with Megan", confidence=0.93),
+    ]
+    selected = select_claims(claims_of(rows))
+    labels = [c["key_label"] for c in selected]
+    assert "basic.location" in labels
+    assert "relationship.partner" in labels
+    assert len(selected) == PROFILE_LIMIT
+
+
+def test_pinning_survives_into_formatted_lines_via_get_profile():
+    rows = ephemera(30) + [
+        claim_row("basic.name", "Preferred name: Chris", confidence=0.5),
+        claim_row("basic.location", "basic.location: Rotonda West, Florida", confidence=0.5),
+    ]
+    conn = FakeConn([rows])
+    profile = get_profile(conn, PERSON)["profile"]
+    assert any("Rotonda West" in line for line in profile["lines"])
+    # display_name comes from the pinned name claim even though pure confidence
+    # ranking would have dropped it.
+    assert profile["display_name"] == "Chris"
+    assert len(profile["lines"]) == PROFILE_LIMIT
+
+
+def test_block_stays_bounded_even_with_many_pins():
+    # Pathological: more pinned identity claims than the cap allows. Block must
+    # stay hard-bounded; higher-ranked pins win.
+    rows = [
+        claim_row(label, f"claim {i}", confidence=1.0 - i * 0.01)
+        for i in range(20)
+        for label in ["basic.location"]
+    ] + ephemera(10)
+    selected = select_claims(claims_of(rows))
+    assert len(selected) == PROFILE_LIMIT
+    assert all(c["key_label"] == "basic.location" for c in selected)
+
+
+def test_absent_identity_claims_degrade_gracefully():
+    # No identity claims at all → plain top-N by query order, same as before.
+    rows = ephemera(20)
+    selected = select_claims(claims_of(rows))
+    assert [c["claim_text"] for c in selected] == [f"ephemera {i}" for i in range(PROFILE_LIMIT)]
+
+
+def test_select_claims_under_cap_is_identity_passthrough():
+    rows = claims_of(ephemera(3))
+    assert select_claims(rows) == rows
+
+
+def test_select_claims_preserves_query_order():
+    # Pinning changes WHICH claims survive, never the survivors' relative order
+    # (locked-first, confidence DESC — the order the query returned).
+    rows = ephemera(16) + [claim_row("user.vehicle", "White Kia EV6", confidence=0.9)]
+    selected = select_claims(claims_of(rows))
+    assert selected[-1]["key_label"] == "user.vehicle"
+    assert [c["claim_text"] for c in selected[:-1]] == [f"ephemera {i}" for i in range(14)]
 
 
 # --- memory: retrieval ------------------------------------------------------

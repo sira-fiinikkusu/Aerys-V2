@@ -20,11 +20,40 @@ Semantics preserved verbatim from the live query:
     private context.
   - locked claims outrank everything, then confidence DESC with NULLs last.
   - hard cap 15 claims.
+
+Selection change (2026-07-03, owner ruling): the cap is now applied in Python,
+not SQL, so identity-class claims can be PINNED into the block ahead of the
+confidence ranking. With ~70+ claims at confidence >= 0.99 in prod, pure
+confidence ordering let high-confidence ephemera (decision.*, work.*, event.*)
+crowd out who-the-person-IS facts — the partner claim (0.930) ranked ~9th in
+relationships and missed the cap entirely; home location survived only because
+it happened to be manually locked. Identity facts must always ride the profile
+block; remaining slots fill by the original locked-then-confidence order.
 """
 
 from typing import Any
 
 PROFILE_LIMIT = 15
+
+# How many rows we pull before Python-side selection. Bounds the fetch (a
+# person accumulates hundreds of claims) while leaving room for pins that
+# rank far below the confidence cut.
+FETCH_LIMIT = 500
+
+# Identity-class key_labels pinned into the block ahead of the confidence cap.
+# Derived from the owner's actual prod claims (2026-07-03): these are the exact
+# labels the extractor writes for name / home location / partner / family /
+# marital status / daily-driver vehicle. Absent labels simply don't pin —
+# graceful no-op, nothing invented.
+IDENTITY_PIN_LABELS = (
+    "basic.name",
+    "name",
+    "basic.location",
+    "relationship.partner",
+    "relationship.family",
+    "relationship.marital_status",
+    "user.vehicle",
+)
 
 # Categories emit in this fixed order; anything else follows in first-seen order.
 CATEGORY_ORDER = ("basic", "interests", "relationship", "emotional", "other")
@@ -33,6 +62,8 @@ CATEGORY_ORDER = ("basic", "interests", "relationship", "emotional", "other")
 NAME_KEYS = ("basic.name", "name")
 
 # The inner logic of the n8n query, minus the params-CTE and the NULL sentinel.
+# NOTE: the 15-claim cap moved to select_claims() so identity pins can beat it;
+# the SQL LIMIT here only bounds the fetch.
 PROFILE_SQL = f"""\
 SELECT cc.core_id, cc.key_label, cc.claim_text, cc.status, cc.locked,
        cc.confidence, cc.sensitivity, cc.visibility
@@ -45,7 +76,7 @@ WHERE cc.speaker_id = %(pid)s::uuid
     OR (cc.visibility = 'dm' AND %(pctx)s = 'private'))
 ORDER BY CASE WHEN cc.locked THEN 0 ELSE 1 END,
          cc.confidence DESC NULLS LAST
-LIMIT {PROFILE_LIMIT}
+LIMIT {FETCH_LIMIT}
 """
 
 # Column order of PROFILE_SQL — rows come back as tuples, this names them.
@@ -71,7 +102,37 @@ def get_profile(conn: Any, person_id: str, privacy_context: str = "public") -> d
         PROFILE_SQL, {"pid": person_id, "pctx": privacy_context}
     ).fetchall()
     claims = [dict(zip(_COLUMNS, row)) for row in rows]
-    return format_profile_context(claims)
+    return format_profile_context(select_claims(claims))
+
+
+def select_claims(claims: list[dict]) -> list[dict]:
+    """Cap claims at PROFILE_LIMIT with identity-class claims pinned first.
+
+    Input arrives in query order (locked first, then confidence DESC NULLS
+    LAST) and that relative order is preserved in the output — pinning changes
+    WHICH claims survive the cap, never how the survivors are ordered.
+
+    Two passes over the ranked list:
+      1. pin every claim whose key_label is identity-class (IDENTITY_PIN_LABELS)
+      2. fill the remaining slots with the best non-pinned claims, in order
+
+    The block stays hard-bounded at PROFILE_LIMIT even if the pin list ever
+    outgrows it (higher-ranked pins win — locked identity beats unlocked).
+    Missing identity claims just don't pin; nothing is invented.
+    """
+    if len(claims) <= PROFILE_LIMIT:
+        return claims
+
+    pinned_idx = [
+        i for i, c in enumerate(claims) if c["key_label"] in IDENTITY_PIN_LABELS
+    ][:PROFILE_LIMIT]
+    taken = set(pinned_idx)
+    for i in range(len(claims)):
+        if len(taken) >= PROFILE_LIMIT:
+            break
+        if i not in taken:
+            taken.add(i)
+    return [claims[i] for i in sorted(taken)]
 
 
 def format_profile_context(claims: list[dict]) -> dict:
