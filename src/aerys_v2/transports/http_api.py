@@ -28,9 +28,20 @@ class AskReply(BaseModel):
     thread_id: str
 
 
-def build_app(ask_fn, api_token: str | None) -> FastAPI:
-    """App factory — ask_fn injected like every other transport (testable with fakes)."""
+def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None) -> FastAPI:
+    """App factory — ask_fn injected like every other transport (testable with fakes).
+
+    owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
+    token already proves it's the owner's own infrastructure calling (HA voice
+    pipeline, curl from the LAN), so identity.user_id becomes the owner's
+    persons.id — the key the memory-context seam retrieves by. That's how
+    voice-Chris gets HIS memories instead of an anonymous "http-caller" bucket.
+    display_name stays whatever the caller said (channel flavor, not identity).
+    """
     app = FastAPI(title="aerys-v2 brain", docs_url=None, redoc_url=None)
+    # n8n mapping: this is the Identity Resolver's job for HTTP — except HTTP has
+    # exactly one possible person, so "resolution" is a constant.
+    http_user_id = owner_person_id or "http-caller"
 
     def require_token(request: Request) -> None:
         # Locked shut unless a token is configured — an unset token means 503 for
@@ -74,7 +85,7 @@ def build_app(ask_fn, api_token: str | None) -> FastAPI:
             raise HTTPException(status_code=400, detail="no user message")
         reply = ask_fn(
             last_user,
-            {"user_id": "http-caller", "display_name": "Chris (Voice)"},
+            {"user_id": http_user_id, "display_name": "Chris (Voice)"},
             "voice:beta",   # one shared voice thread for the beta pipeline (owner decision: voice rides the owner thread)
         )
         return {
@@ -92,7 +103,7 @@ def build_app(ask_fn, api_token: str | None) -> FastAPI:
     @app.post("/ask", response_model=AskReply)
     def ask_route(body: AskRequest, _: None = Depends(require_token)) -> AskReply:
         identity: Identity = {
-            "user_id": "http-caller",
+            "user_id": http_user_id,
             "display_name": body.display_name,
         }
         reply = ask_fn(body.text, identity, body.thread_id)

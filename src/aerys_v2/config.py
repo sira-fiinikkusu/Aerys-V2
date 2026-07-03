@@ -35,3 +35,28 @@ class Settings(BaseSettings):
     # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys — the same
     # NAS database the n8n workflows hit; V2 reads it directly, no webhook hop.
     database_url: str | None = None
+
+    # ---- MEMORY-RETRIEVAL block (long-term context) --------------------------
+    # None = memory context OFF. Points at the PROD aerys database — the same
+    # memories/core_claim tables the live n8n pipeline writes. V2 treats this
+    # connection as READ-ONLY (retrieval only): while both brains coexist, the
+    # n8n batch-extraction workflow stays the sole writer. Kept separate from
+    # database_url on purpose — the checkpointer may live in its own DB, and
+    # "durable threads" vs "prod memories" are different blast radii.
+    memories_database_url: str | None = None
+
+    # The owner's persons.id (UUID string). HTTP callers can't prove who they
+    # are beyond the Bearer token, so when this is set, voice + /ask identities
+    # resolve to the owner — voice-Chris retrieves HIS memories instead of an
+    # anonymous "http-caller" bucket that matches nothing in the database.
+    owner_person_id: str | None = None
+
+    # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
+    # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =
+    # openai/text-embedding-3-small, 1536-dim). The model MUST match what the
+    # write pipeline stored in memories.embedding, or cosine distance compares
+    # apples to bananas. base_url is a setting so a different OpenAI-compat host
+    # (or a local embedding server) is a .env change, not a code change.
+    # None api_key = the memory half of context stays empty (profile still works).
+    embeddings_api_key: SecretStr | None = None
+    embeddings_base_url: str = "https://openrouter.ai/api/v1"

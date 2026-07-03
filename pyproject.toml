@@ -14,6 +14,7 @@ dependencies = [
     "langchain-anthropic>=1.4.6",
     "langgraph>=1.2.6",
     "langgraph-checkpoint-postgres>=2.0",
+    "openinference-instrumentation-langchain>=0.1.67",
     "opentelemetry-exporter-otlp>=1.42.1",
     "opentelemetry-sdk>=1.42.1",
     "pgvector>=0.4.2",

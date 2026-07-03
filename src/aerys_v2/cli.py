@@ -116,17 +116,34 @@ def main() -> None:
             sys.exit(1)
         import uvicorn
 
-        from aerys_v2.factory import build_graph, build_model, checkpointer_for, load_soul
+        from aerys_v2.factory import (
+            build_graph,
+            build_model,
+            checkpointer_for,
+            context_fn_for,
+            load_soul,
+        )
         from aerys_v2.service import ask
         from aerys_v2.transports.http_api import build_app
 
+        # [01-05 PHOENIX] one line, degrade-safe: no-op unless OTLP_ENDPOINT set; any failure logs and serves anyway
+        from aerys_v2.tracing import wire_tracing; wire_tracing(settings)
+
         with checkpointer_for(settings) as cp:
             graph = build_graph(
-                build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp
+                build_model(settings),
+                soul=load_soul(settings.soul_file_path),
+                checkpointer=cp,
+                # long-term memory context: ON only when MEMORIES_DATABASE_URL is
+                # set (read-only prod aerys DB); None keeps the graph memory-free
+                context_fn=context_fn_for(settings),
             )
             app = build_app(
                 lambda text, identity, thread: ask(graph, text, identity=identity, thread_id=thread),
                 settings.api_token.get_secret_value(),
+                # authed HTTP callers ARE the owner when configured — voice-Chris
+                # retrieves HIS memories (identity user_id = owner persons.id)
+                owner_person_id=settings.owner_person_id,
             )
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)

@@ -7,6 +7,7 @@ canvas; each node function is a Code node that receives state instead of $json.
 """
 
 from pathlib import Path
+from typing import Callable
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -44,6 +45,44 @@ def checkpointer_for(settings: Settings):
         yield saver
 
 FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and honest."
+
+# The memory-context seam: (person_id, latest_user_text) -> prompt block ('' = nothing
+# known). Injectable like the checkpointer — tests pass a lambda, --serve passes the
+# real DB-backed builder from context_fn_for(), and None means the feature is OFF.
+ContextFn = Callable[[str, str], str]
+
+
+def context_fn_for(settings: Settings) -> ContextFn | None:
+    """Wire the real memory-context seam from Settings — None when memories are off.
+
+    n8n mapping: this replaces the Core Agent's per-message webhook calls to
+    04-02 Memory Retrieval + 04-03 Profile API. A psycopg connection is opened
+    PER CALL against the prod aerys database and marked read-only at the session
+    level — the DB itself will refuse a write even if a future bug tries one
+    (belt and braces on top of the SELECT-only services). One connection per
+    turn is fine at personal-assistant volume (~1ms LAN roundtrip to the NAS);
+    a pool is a drop-in swap behind this same seam if that ever changes.
+    """
+    if settings.memories_database_url is None:
+        return None
+    import psycopg
+
+    from aerys_v2.services.context import build_context, embedder_from_settings
+
+    embed = embedder_from_settings(settings)
+
+    def context_fn(person_id: str, query_text: str) -> str:
+        # Fenced end-to-end: a NAS outage or DNS hiccup = empty context, never
+        # a dead turn. build_context is graceful inside; this catch covers the
+        # connect itself.
+        try:
+            with psycopg.connect(settings.memories_database_url) as conn:
+                conn.read_only = True
+                return build_context(person_id, query_text, conn, embed=embed)
+        except Exception:
+            return ""
+
+    return context_fn
 
 
 def load_soul(path: Path) -> str:
@@ -85,12 +124,17 @@ def build_graph(
     model: BaseChatModel,
     soul: str,
     checkpointer: BaseCheckpointSaver | None = None,
+    context_fn: ContextFn | None = None,
 ) -> object:
     """START → chat → END, checkpointed.
 
     The checkpointer is INJECTED (pluggable — cross-review #9): InMemorySaver for tests
     and the CLI today, PostgresSaver on the NAS when Phase 2 wires durability. The graph
     shape doesn't change when the storage does — that's the point of the seam.
+
+    context_fn is the same idea for long-term memory: None = the chat node knows
+    nothing beyond the thread; set = each turn asks it (person_id, latest user text)
+    and injects whatever comes back into the system prompt.
     """
 
     def chat(state: ChatState, config: RunnableConfig) -> dict:
@@ -108,6 +152,34 @@ def build_graph(
             "Your conversation memory is durable: this thread persists across "
             "restarts and sessions. You may confidently say you'll remember."
         )
+        if context_fn is not None:
+            # Claims follow facts: this sentence exists ONLY when retrieval is
+            # actually wired, so she never promises a recall she doesn't have.
+            capability += (
+                " You also know long-term facts about the caller — they persist "
+                "across ALL conversations and channels, not just this thread."
+            )
+
+        # Long-term context: retrieval is scored against the CURRENT message, so
+        # find the latest human turn (n8n mapping: the query the Core Agent sent
+        # to Memory Retrieval was always the incoming message text).
+        knowledge = ""
+        if context_fn is not None:
+            latest = next(
+                (m for m in reversed(state["messages"]) if getattr(m, "type", "") == "human"),
+                None,
+            )
+            query_text = ""
+            if latest is not None:
+                content = latest.content
+                query_text = content if isinstance(content, str) else str(content)
+            try:
+                block = context_fn(str(identity.get("user_id", "")), query_text)
+            except Exception:
+                block = ""  # the seam promises graceful, but memory NEVER kills a turn
+            if block:
+                knowledge = f"\n\n[What you know about this person]\n{block}"
+
         thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         voice_style = ""
         if str(thread).startswith("voice"):
@@ -120,7 +192,9 @@ def build_graph(
                 "feeling; the speech engine performs them, listeners never hear "
                 "the bracket text."
             )
-        system = SystemMessage(content=f"{soul}\n\n{capability}\n{caller_line}{voice_style}")
+        system = SystemMessage(
+            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{voice_style}"
+        )
         # n8n mapping: this is the AI Agent node's invoke — prompt + history in, one
         # AIMessage out. add_messages in ChatState appends it to the thread history.
         reply = model.invoke([system, *state["messages"]])
