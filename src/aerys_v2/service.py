@@ -25,6 +25,7 @@ import contextvars
 import logging
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Callable
 
@@ -231,37 +232,90 @@ def _voice_parallel_start(
     generation is seconds of the daily driver. Both start NOW; the router's
     verdict decides which one the caller ever hears about.
 
+    SPECULATIVE ISOLATION (2026-07-03 history-pollution fix): graph.invoke
+    checkpoints unconditionally, so the speculative chat gen must NEVER run on
+    the real thread — when the router said action and the cancel lost the race
+    (it almost always does once the model call starts), the speculative reply
+    ("Office light one's on.") was persisted as durable history claiming a
+    device change that never happened, and the next turn's model read it as
+    fact. The speculative gen now runs on a THROWAWAY thread (real history
+    seeded in, unique suffix). route=chat is the only moment its text becomes
+    real: the turn is copied into the real thread then. route=action discards
+    it entirely — only the human turn + the real action outcome land.
+
     Every submitted callable is wrapped in _in_ctx so the worker threads carry
     the turn's contextvars — OTel context above all: router, speculative chat
     gen, and the background action subgraph all parent under the SAME Phoenix
     trace instead of scattering into orphaned roots.
     """
+    real_configurable = config["configurable"]
+    spec_thread = f"{real_configurable['thread_id']}::spec::{uuid.uuid4().hex}"
+    # keeps the "voice" prefix, so the chat node's voice styling still applies
+    spec_config = {
+        **config,
+        "configurable": {**real_configurable, "thread_id": spec_thread},
+    }
+
+    def _speculative_chat() -> dict:
+        # Seed the throwaway with the real thread's history so the speculative
+        # generation sees exactly what a real chat turn would have seen.
+        history = (
+            graph.get_state({"configurable": real_configurable})
+            .values.get("messages", [])
+        )
+        if history:
+            graph.update_state(
+                {"configurable": spec_config["configurable"]},
+                {"messages": history},
+                as_node="chat",
+            )
+        return graph.invoke({"messages": [HumanMessage(content=text)]}, spec_config)
+
+    def _discard_speculative() -> None:
+        # Best-effort cleanup: the throwaway is garbage either way; a failed
+        # delete costs orphan checkpointer rows, never correctness — nothing
+        # ever reads a ::spec:: thread again.
+        checkpointer = getattr(graph, "checkpointer", None)
+        if checkpointer is None:
+            return
+        try:
+            checkpointer.delete_thread(spec_thread)
+        except Exception:
+            log.debug("speculative thread cleanup failed (harmless)", exc_info=True)
+
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
     try:
         route_future = pool.submit(_in_ctx(router, text))
-        chat_future = pool.submit(
-            _in_ctx(graph.invoke, {"messages": [HumanMessage(content=text)]}, config)
-        )
+        chat_future = pool.submit(_in_ctx(_speculative_chat))
         decision = route_future.result()
 
         if decision.route != "action":
             # Chat wins: the generation is already in flight — the router's
-            # latency hid entirely inside the chat call's shadow. Discard it.
-            result = chat_future.result()
+            # latency hid entirely inside the chat call's shadow. It ran on the
+            # throwaway thread, so the turn must be copied into the REAL thread
+            # here or the conversation never durably happened.
+            try:
+                result = chat_future.result()
+                reply_message = result["messages"][-1]
+                graph.update_state(
+                    {"configurable": real_configurable},
+                    {"messages": [HumanMessage(content=text), reply_message]},
+                    as_node="chat",
+                )
+            finally:
+                _discard_speculative()
             elapsed = time.monotonic() - started
             if elapsed > rails.wall_clock_s:
                 raise TurnTimeout(
                     f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
                 )
-            return _reply_text(result["messages"][-1])
+            return _reply_text(reply_message)
 
         # Action: the ack goes out NOW; the tool loop finishes in the background.
         # Best-effort cancel of the speculative chat call — if it already
         # started (fake models finish instantly; real ones usually haven't
-        # begun streaming), its reply simply lands in the thread and the action
-        # result lands after it, superseding it. Slightly chatty history beats
-        # blocking the ack, and the checkpointer race is avoided by waiting for
-        # the chat future before writing (below).
+        # begun streaming), it burns tokens into the throwaway thread and gets
+        # deleted below. Its text can never reach the real thread on this path.
         chat_cancelled = chat_future.cancel()
         ack_at = time.monotonic()  # the ack leaves for the speaker ~now
 
@@ -304,24 +358,24 @@ def _voice_parallel_start(
                     # delivery is best-effort; the durable record below is not
                     log.warning("spoken follow-up delivery failed", exc_info=True)
 
+            # History write happens EITHER WAY (silent record) — the next turn's
+            # model must see what actually happened, spoken aloud or not. The
+            # speculative gen wrote ONLY to the throwaway thread, so the human
+            # turn is never in the real thread yet and there is no checkpoint
+            # interleave to wait out — the durable record lands immediately.
+            graph.update_state(
+                {"configurable": real_configurable},
+                {"messages": [HumanMessage(content=text), AIMessage(content=final)]},
+                as_node="chat",
+            )
             if not chat_cancelled:
-                # The speculative chat invoke owns the checkpoint until it
-                # finishes — wait so our update_state can't interleave with it.
+                # Let the speculative run finish before deleting its thread —
+                # deleting under a live invoke would just let it respawn rows.
                 try:
                     chat_future.result()
                 except Exception:
                     pass
-            # History write happens EITHER WAY (silent record) — the next turn's
-            # model must see what actually happened, spoken aloud or not.
-            messages: list = [AIMessage(content=final)]
-            if chat_cancelled:
-                # chat never ran -> the human turn isn't in the thread yet
-                messages.insert(0, HumanMessage(content=text))
-            graph.update_state(
-                {"configurable": config["configurable"]},
-                {"messages": messages},
-                as_node="chat",
-            )
+            _discard_speculative()
 
         threading.Thread(target=_in_ctx(_complete_action), daemon=True).start()
         return decision.ack

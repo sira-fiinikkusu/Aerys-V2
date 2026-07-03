@@ -414,6 +414,93 @@ def test_spoken_ack_flips_subgraph_prompt_to_never_ask():
     assert model.prompts[0][1].content == "Can you turn off office light on?"
 
 
+# ---- regression: speculative chat must NEVER pollute the real thread -------------
+# Live bug (flagged 2026-07-03): on route=action, the speculative chat gen — running
+# via graph.invoke on the REAL thread — checkpointed replies like "Office light
+# one's on." claiming device changes it never made; the next turn's model read that
+# false history. The speculative gen now runs on a throwaway thread: route=action
+# discards it entirely; route=chat copies the turn into the real thread.
+
+
+def slow_action_router(_text: str) -> RouteDecision:
+    # Slow verdict on purpose: the instant fake chat gen FINISHES first, so
+    # chat_future.cancel() is guaranteed to fail — the exact live-race shape
+    # that used to leak the speculative reply into the thread.
+    time.sleep(0.05)
+    return RouteDecision(route="action", ack="[warmly] Getting that light for you")
+
+
+def all_thread_ids(graph) -> set:
+    return {c.config["configurable"]["thread_id"] for c in graph.checkpointer.list(None)}
+
+
+def test_voice_action_route_never_persists_speculative_chat_text():
+    graph = build_graph(fake_model("Office light one's on."), soul="s")
+    stub = StubActionGraph("Done: office light 1 is off.")
+    out = ask(graph, "turn office light 1 off", identity=CHRIS, thread_id="voice:clean",
+              router=slow_action_router, action_graph=stub)
+    assert out == "[warmly] Getting that light for you"
+    msgs = wait_for_messages(graph, "voice:clean", 2)
+    contents = [m.content for m in msgs]
+    # the false claim NEVER lands — only the human turn and the real outcome
+    assert "Office light one's on." not in contents
+    assert contents == ["turn office light 1 off", "Done: office light 1 is off."]
+    # ...and the throwaway thread is cleaned up shortly after (background)
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        tids = all_thread_ids(graph)
+        if tids == {"voice:clean"}:
+            break
+        time.sleep(0.02)
+    assert tids == {"voice:clean"}
+
+
+def test_voice_chat_route_persists_reply_and_leaves_no_speculative_thread():
+    graph = build_graph(fake_model("spoken chat reply"), soul="s")
+    out = ask(graph, "tell me something nice", identity=CHRIS, thread_id="voice:persist",
+              router=chat_router, action_graph=StubActionGraph())
+    assert out == "spoken chat reply"
+    # route=chat: the turn IS copied into the real thread (durable conversation)
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:persist"}}).values["messages"]
+    assert [m.content for m in msgs] == ["tell me something nice", "spoken chat reply"]
+    # cleanup is synchronous on the chat path — no ::spec:: thread survives
+    assert all_thread_ids(graph) == {"voice:persist"}
+
+
+class RecordingChatModel:
+    """Fake chat model recording the exact messages each invoke received."""
+
+    def __init__(self, reply: str = "ok"):
+        self.reply = reply
+        self.prompts: list[list] = []
+
+    def invoke(self, messages: list) -> AIMessage:
+        self.prompts.append(list(messages))
+        return AIMessage(content=self.reply)
+
+
+def test_voice_speculative_chat_sees_real_thread_history():
+    # isolation must not cost context: the throwaway thread is SEEDED with the
+    # real history, so the speculative gen answers with full conversation memory.
+    model = RecordingChatModel("and that's the story")
+    graph = build_graph(model, soul="s")
+    graph.update_state(
+        {"configurable": {"thread_id": "voice:hist"}},
+        {"messages": [HumanMessage(content="remember the lighthouse"),
+                      AIMessage(content="I remember.")]},
+        as_node="chat",
+    )
+    out = ask(graph, "tell me more", identity=CHRIS, thread_id="voice:hist",
+              router=chat_router, action_graph=StubActionGraph())
+    assert out == "and that's the story"
+    prompt = model.prompts[0]  # [system, *history, human]
+    assert [m.content for m in prompt[1:]] == [
+        "remember the lighthouse", "I remember.", "tell me more"]
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:hist"}}).values["messages"]
+    assert [m.content for m in msgs] == [
+        "remember the lighthouse", "I remember.", "tell me more", "and that's the story"]
+
+
 def test_no_spoken_ack_means_no_voice_overlay():
     # Non-voice sequential path never sets spoken_ack — the subgraph may still
     # converse there (its reply returns to a caller who CAN answer).

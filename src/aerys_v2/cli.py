@@ -179,6 +179,12 @@ def main() -> None:
         from aerys_v2.factory import checkpointer_for
         from aerys_v2.transports.discord_gateway import AerysDiscordClient
 
+        # [01-05 PHOENIX] same degrade-safe arming as --serve: the soak
+        # container's turns must trace too (gap found 2026-07-03 — only
+        # --serve called wire_tracing, so aerys-soak turns never reached
+        # Phoenix). No-op unless OTLP_ENDPOINT is set; failures log and run on.
+        from aerys_v2.tracing import wire_tracing; wire_tracing(settings)
+
         cp_ctx = checkpointer_for(settings)
         cp = cp_ctx.__enter__()  # held for the life of the gateway process
         graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp)
