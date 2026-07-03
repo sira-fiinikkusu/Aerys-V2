@@ -94,6 +94,20 @@ _MEDIA_MARKERS = (
     "this video", "this pdf", "this document", "this attachment",
 )
 
+# Web-lookup shapes for the degraded path: current-events / "search for" / weather
+# asks need the action path's search_web tool — a chat answer to "what's the
+# weather this weekend?" is a guess from stale training data (the same
+# hallucinated-answer failure as chat-answering an image). Explicit lookup verbs
+# and time-sensitive nouns only, to keep timeless general-knowledge chat OUT
+# (same over-trigger-toward-action bias as the device/media heuristics, but
+# tuned not to swallow "do you think cats love us?"-shaped opinions).
+_SEARCH_MARKERS = (
+    "search for", "search the web", "look up", "look it up", "google ",
+    "find out", "what's the latest", "whats the latest", "latest news",
+    "in the news", "current price", "stock price", "exchange rate",
+    "weather", "forecast", "who won", "score of", "right now online",
+)
+
 _ROUTER_INSTRUCTIONS = """\
 You are the routing layer in front of Aerys's brain. Read the user's message and
 decide which path handles it:
@@ -114,15 +128,23 @@ decide which path handles it:
   look at / read / describe / summarize an image, photo, screenshot, PDF,
   document, or video — you have ZERO eyes without the media tools, and only
   the action path carries them.
+  LIVE WEB LOOKUP is "action" too: current events, breaking news, today's
+  weather or forecast, sports scores, prices, stock quotes, exchange rates —
+  or any "search for / look up / google / find out / what's the latest"
+  request, or any fact that could have changed after your training cutoff.
+  You cannot know today's world without a web search, and only the action path
+  carries the search tool. "What's the weather this weekend?", "search for the
+  latest on the merger", "look up who won last night" are ALL "action".
 - "chat": pure conversation — feelings, memories, opinions about the world,
-  general knowledge, planning that needs no device reading and no attachment.
-  "Do you think cats love us?" is chat; "do you think the bedroom is too warm?"
-  is action.
+  timeless general knowledge, planning that needs no device reading, no
+  attachment, and no live lookup. "Do you think cats love us?" is chat; "do you
+  think the bedroom is too warm?" is action.
 
 If you are unsure whether live state is needed, choose "action" — that path can
 read as well as act, and a needless reading is harmless, while a chat answer to
-a state question is a guess. The same bias applies to media: unsure whether an
-attachment needs the tools, choose "action".
+a state question is a guess. The same bias applies to media and to web lookups:
+unsure whether an attachment needs the tools or whether an answer needs current
+information, choose "action".
 
 Also grade how much thinking the reply deserves, as "tier":
 - "fast": greetings, one-word acknowledgments, small talk, trivial system
@@ -183,13 +205,30 @@ def plausibly_references_media(text: str) -> bool:
     return any(marker in lowered for marker in _MEDIA_MARKERS)
 
 
+def plausibly_wants_web_search(text: str) -> bool:
+    """Degraded-path heuristic: does this text want a live web lookup?
+
+    Same over-trigger bias as the device/media heuristics, but deliberately
+    tighter — a needless search costs one Tavily call, while a chat answer to a
+    current-events question is stale training data dressed as fact. Explicit
+    lookup verbs and time-sensitive nouns keep timeless opinion/knowledge chat
+    ("do you think cats love us?") on the chat path.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SEARCH_MARKERS)
+
+
 def fallback_decision(text: str) -> RouteDecision:
     """What we do when the router's answer is unusable: heuristic, biased to action.
 
     Tier is always DEFAULT_TIER here — the degraded path must never spend the
     rationed deep tier on a guess (fail cheap, same direction as the cap).
     """
-    if plausibly_commands_device(text) or plausibly_references_media(text):
+    if (
+        plausibly_commands_device(text)
+        or plausibly_references_media(text)
+        or plausibly_wants_web_search(text)
+    ):
         return RouteDecision(route="action", ack=FALLBACK_ACK)
     return RouteDecision(route="chat", ack="")
 

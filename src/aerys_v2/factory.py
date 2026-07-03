@@ -282,6 +282,26 @@ MEDIA_OVERLAY = (
     "through a tool."
 )
 
+# Web-search half of the action overlay — appended when tavily_api_key is armed.
+# Concrete triggers again (the V1 "specificity beats generality" lesson): naming
+# the exact shapes — current events, news, weather, prices, "search for", "look
+# up", anything past the knowledge cutoff — is what makes the model reach for the
+# tool instead of answering from stale memory. The tool name here MUST match the
+# @tool function name in tools/web_search.py — `search_web` — or the model calls
+# a tool that isn't registered (the V1 toolWorkflow name-mismatch bug, kept dead).
+SEARCH_OVERLAY = (
+    "You can also search the live web with the search_web tool. Call search_web "
+    "IMMEDIATELY whenever the honest answer depends on something you cannot know "
+    "from training alone: current events, breaking news, today's weather or "
+    "forecasts, sports scores, prices, stock quotes, exchange rates — or whenever "
+    "the user says 'search for', 'look up', 'google', 'find out', or 'what's the "
+    "latest'. Anything that could have changed after your knowledge cutoff needs a "
+    "search, not a guess. NEVER fabricate search results or answer a current-events "
+    "question from memory: run search_web, then ground your answer strictly in what "
+    "it returns and mention what you found. If the search fails or returns nothing, "
+    "say so plainly — do not invent an answer."
+)
+
 # Appended to the system prompt ONLY when service.py hands us the ack the router
 # already spoke (voice ack-then-act path). Root cause it guards (2026-07-03 live
 # incident): STT garbled 'turn office light one off' into 'Can you turn off
@@ -453,6 +473,13 @@ def action_tools_for(settings: Settings) -> list:
             )
         )
 
+    if settings.tavily_api_key is not None:
+        from aerys_v2.tools.web_search import build_web_search_tool
+
+        tools.append(
+            build_web_search_tool(api_key=settings.tavily_api_key.get_secret_value())
+        )
+
     return tools
 
 
@@ -468,6 +495,8 @@ def action_overlay_for(settings: Settings) -> str:
         parts.append(ACTION_OVERLAY)
     if settings.embeddings_api_key is not None:
         parts.append(MEDIA_OVERLAY)
+    if settings.tavily_api_key is not None:
+        parts.append(SEARCH_OVERLAY)
     return "\n\n".join(parts)
 
 

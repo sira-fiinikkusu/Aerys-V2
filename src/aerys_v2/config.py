@@ -95,6 +95,15 @@ class Settings(BaseSettings):
     embeddings_api_key: SecretStr | None = None
     embeddings_base_url: str = "https://openrouter.ai/api/v1"
 
+    # Web search seam — mirrors V1's `tavilyTool` community node (credentials
+    # iZxeoPSLwObXXEGN / PRAECj0Em1imOqmW) that hung off the research sub-agent.
+    # None = the search_web tool (and, if it is the only armed half, the whole
+    # action path: router + subgraph) simply doesn't exist — same arming pattern
+    # as ha_token and embeddings_api_key. When set, the action agent can look up
+    # current events / news / weather / prices instead of guessing from stale
+    # training knowledge.
+    tavily_api_key: SecretStr | None = None
+
     # ---- EXTRACTION WORKER (shadow mode) --------------------------------------
     # The n8n batch extraction (IfqY4BrhBGeQrcTC) re-run as a V2 worker that reads
     # prod conversations READ-ONLY and writes ONLY to aerys_v2 staging tables

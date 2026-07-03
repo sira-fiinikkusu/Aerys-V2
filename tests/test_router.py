@@ -116,6 +116,41 @@ def test_genuine_opinion_chat_stays_chat():
     assert fallback_decision("I wonder if we'll ever visit Japan").route == "chat"
 
 
+# ---- web-lookup questions route ACTION on the degraded path --------------------
+# The search_web tool lives on the action path; a chat answer to "what's the
+# weather this weekend?" is stale training data dressed as fact — same
+# hallucinated-answer failure the media/state guards prevent.
+
+def test_web_lookup_shapes_hit_heuristic():
+    from aerys_v2.router import plausibly_wants_web_search
+
+    assert plausibly_wants_web_search("search for the latest on the merger")
+    assert plausibly_wants_web_search("what's the weather this weekend?")
+    assert plausibly_wants_web_search("look up who won last night")
+    assert plausibly_wants_web_search("what's the current price of bitcoin")
+    # timeless opinion/knowledge stays OUT of the search heuristic
+    assert not plausibly_wants_web_search("do you think cats love us?")
+
+
+def test_web_lookup_fails_toward_action():
+    assert fallback_decision("search for tornado warnings near me").route == "action"
+    assert fallback_decision("what's the weather this weekend?").route == "action"
+    assert fallback_decision("what's the latest news on the election").route == "action"
+
+
+def test_router_prompt_teaches_web_lookup_is_action():
+    # prompt-level regression guard: the search-routing rule must stay in the
+    # instructions verbatim enough to keep firing, and the tool name must match
+    # tools/web_search.py's @tool (the V1 name-mismatch bug).
+    from aerys_v2.router import _ROUTER_INSTRUCTIONS
+
+    text = _ROUTER_INSTRUCTIONS.lower()
+    assert "live web lookup" in text
+    assert "current events" in text
+    assert "search for" in text
+    assert "training cutoff" in text
+
+
 def test_router_prompt_teaches_state_questions_are_action():
     # prompt-level regression guard: the routing rule that fixed the Jolteon
     # miss must stay in the instructions — opinion phrasing never makes a

@@ -362,3 +362,59 @@ def test_overlay_only_mentions_armed_tools():
         settings_with(ha_token="ha-token", embeddings_api_key="or-key")
     )
     assert "home_control" in both and "analyze_image" in both
+
+
+# ---- web-search tool registered into the action stack -----------------------------
+
+def test_search_half_arms_from_tavily_key_alone():
+    tools = action_tools_for(settings_with(tavily_api_key="tvly-key"))
+    assert tool_names(tools) == {"search_web"}
+
+
+def test_search_absent_when_tavily_key_is_none():
+    # the default Settings (no tavily key) must NOT carry search_web — the whole
+    # arming pattern is "no key, no tool"
+    assert "search_web" not in tool_names(action_tools_for(settings_with()))
+    assert "search_web" not in tool_names(
+        action_tools_for(settings_with(ha_token="ha-token", embeddings_api_key="or-key"))
+    )
+
+
+def test_all_three_halves_arm_together():
+    tools = action_tools_for(
+        settings_with(
+            ha_token="ha-token", embeddings_api_key="or-key", tavily_api_key="tvly-key"
+        )
+    )
+    assert tool_names(tools) == {
+        "home_control", "search_entities",
+        "analyze_image", "read_document", "youtube_summary",
+        "search_web",
+    }
+
+
+def test_action_stack_arms_with_search_only():
+    # the tavily key alone is enough for the action path to exist — current-events
+    # questions route to tools even on a box with no HA and no media
+    stack = action_stack_for(settings_with(tavily_api_key="tvly-key"), soul="s")
+    assert stack is not None
+    router, action_graph = stack
+    assert callable(router) and hasattr(action_graph, "invoke")
+
+
+def test_search_overlay_names_search_web_and_only_when_armed():
+    from aerys_v2.factory import SEARCH_OVERLAY
+
+    # the overlay names the real @tool function (V1 name-mismatch guard) and the
+    # concrete triggers (specificity beats generality)
+    lowered = SEARCH_OVERLAY.lower()
+    assert "search_web" in lowered
+    assert "current events" in lowered
+    assert "search for" in lowered
+    assert "never fabricate" in lowered
+
+    # armed -> the search clause appears; unarmed -> it must not
+    search_only = action_overlay_for(settings_with(tavily_api_key="tvly-key"))
+    assert "search_web" in search_only and "home_control" not in search_only
+    home_only = action_overlay_for(settings_with(ha_token="ha-token"))
+    assert "search_web" not in home_only
