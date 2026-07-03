@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # The api key stays REQUIRED either way: evals/CI/fallback run on it.
     model_backend: str = "api"
     anthropic_api_key: SecretStr
-    model: str = "claude-opus-4-8"
+    model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
 

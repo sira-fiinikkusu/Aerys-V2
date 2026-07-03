@@ -6,7 +6,7 @@ from aerys_v2.config import Settings
 def test_settings_loads_with_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     settings = Settings(_env_file=None)
-    assert settings.model == "claude-opus-4-8"
+    assert settings.model == "claude-sonnet-5"
     assert settings.otlp_endpoint is None
 
 

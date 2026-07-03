@@ -130,7 +130,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
     gets navigated on purpose, not by accident (see CROSS-REVIEW).
     """
 
-    model: str = "claude-opus-4-8"
+    model: str = "claude-sonnet-5"
 
     _warm: Any = None  # lazily created _WarmClient (pydantic private-ish)
 
