@@ -22,8 +22,8 @@ def test_factory_default_stays_api():
     assert not isinstance(m, ClaudeOAuthChatModel)
 
 
-def test_flatten_splits_system_and_labels_speakers():
-    system, prompt = _flatten(
+def test_flatten_system_leads_and_speakers_labeled():
+    prompt = _flatten(
         [
             SystemMessage(content="be aerys"),
             HumanMessage(content="hi"),
@@ -31,14 +31,14 @@ def test_flatten_splits_system_and_labels_speakers():
             HumanMessage(content="what number?"),
         ]
     )
-    assert system == "be aerys"
-    assert prompt == "User: hi\nAerys: hey\nUser: what number?\nAerys:"
+    assert prompt.startswith("[System instructions]\nbe aerys\n\n")
+    assert prompt.endswith("User: hi\nAerys: hey\nUser: what number?\nAerys:")
 
 
 def test_generate_uses_result_message(monkeypatch):
     model = ClaudeOAuthChatModel()
 
-    async def fake_query(system, prompt):
+    def fake_query(prompt):
         assert "User: ping" in prompt
         return "pong"
 
@@ -50,7 +50,7 @@ def test_generate_uses_result_message(monkeypatch):
 def test_error_result_raises(monkeypatch):
     model = ClaudeOAuthChatModel()
 
-    async def fake_query(system, prompt):
+    def fake_query(prompt):
         raise RuntimeError("oauth backend error: 'refused'")
 
     monkeypatch.setattr(model, "_query", fake_query)
