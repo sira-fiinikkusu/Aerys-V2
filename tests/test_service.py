@@ -70,3 +70,24 @@ def test_load_soul_reads_file(tmp_path):
     p = tmp_path / "soul.md"
     p.write_text("I am the soul.")
     assert load_soul(p) == "I am the soul."
+
+
+class RecordingModel(GenericFakeChatModel):
+    """Fake that records the system prompt each turn (for prompt-shape tests)."""
+
+    seen: list = []
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        type(self).seen.append(str(messages[0].content))
+        return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+def test_voice_threads_get_emotion_tag_instruction():
+    RecordingModel.seen = []
+    m = RecordingModel(messages=iter([AIMessage(content="a"), AIMessage(content="b")]))
+    graph = build_graph(m, soul="s")
+    ask(graph, "hi", identity=CHRIS, thread_id="voice:beta")
+    ask(graph, "hi", identity=CHRIS, thread_id="t1")
+    assert "[warmly]" in RecordingModel.seen[0]        # voice thread gets tags
+    assert "[warmly]" not in RecordingModel.seen[1]    # text thread stays clean
+    assert all("memory is durable" in s for s in RecordingModel.seen)  # capability line everywhere

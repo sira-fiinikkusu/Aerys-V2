@@ -101,7 +101,26 @@ def build_graph(
         caller_line = (
             f"The current caller is {identity.get('display_name', 'Unknown Caller')}."
         )
-        system = SystemMessage(content=f"{soul}\n\n{caller_line}")
+        # Capability overlay, anti-UNDERclaim direction: the soul was written for a
+        # brain that couldn't see its own memory. This one can — telling her stops
+        # replies like "that won't survive this session" (heard live, voice, 7/3).
+        capability = (
+            "Your conversation memory is durable: this thread persists across "
+            "restarts and sessions. You may confidently say you'll remember."
+        )
+        thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
+        voice_style = ""
+        if str(thread).startswith("voice"):
+            # Mini-ChannelPolicy: voice replies carry their own ElevenLabs v3
+            # emotion tags (the n8n polisher's job, done prompt-side for free).
+            voice_style = (
+                "\n\nThis is a VOICE conversation. Keep replies concise and "
+                "speakable. Weave in ElevenLabs v3 emotion tags — [warmly], "
+                "[softly], [playfully], [thoughtfully] — where they fit the "
+                "feeling; the speech engine performs them, listeners never hear "
+                "the bracket text."
+            )
+        system = SystemMessage(content=f"{soul}\n\n{capability}\n{caller_line}{voice_style}")
         # n8n mapping: this is the AI Agent node's invoke — prompt + history in, one
         # AIMessage out. add_messages in ChatState appends it to the thread history.
         reply = model.invoke([system, *state["messages"]])
