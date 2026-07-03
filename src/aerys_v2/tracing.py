@@ -28,6 +28,7 @@ def _install(endpoint: str) -> None:
     kills the whole process at module import time.
     """
     from openinference.instrumentation.langchain import LangChainInstrumentor
+    from opentelemetry import trace as trace_api
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
@@ -43,6 +44,13 @@ def _install(endpoint: str) -> None:
     # so graph steps, model calls, and (later, 01-03+) tool calls all emit spans —
     # no per-node wiring, which is exactly what ask()-as-the-single-seam buys us.
     LangChainInstrumentor().instrument(tracer_provider=provider)
+    # ALSO register the provider globally: service.py opens one "ask" span per
+    # turn from the global tracer, and every LangChain root run parents under
+    # the current runtime context. Without this line the ask-span is
+    # non-recording and each parallel-start thread (router ack gen, speculative
+    # chat, action subgraph) minted its own ORPHAN trace — the exact
+    # invisible-router-span symptom observed in Phoenix on 2026-07-03.
+    trace_api.set_tracer_provider(provider)
 
 
 def wire_tracing(settings) -> bool:
