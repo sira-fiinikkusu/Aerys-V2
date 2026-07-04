@@ -140,7 +140,10 @@ def speak_fn_for(settings: Settings) -> Callable[[str, str], None] | None:
         r = httpx.post(
             f"{base}/api/services/assist_satellite/announce",
             headers=headers,
-            json={"entity_id": entity_id, "message": text},
+            # preannounce=False suppresses HA's default chime before an announcement —
+            # the async spoken follow-up should just speak, not chime-then-speak
+            # (owner ask 2026-07-04: the pre-follow-up chime is annoying).
+            json={"entity_id": entity_id, "message": text, "preannounce": False},
             timeout=15.0,
         )
         r.raise_for_status()
