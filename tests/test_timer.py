@@ -3,9 +3,10 @@
 What these prove: natural-duration parsing (words → seconds), START/CANCEL drive
 HA's NATIVE assist-timer intent (HassStartTimer/HassCancelTimer) at
 /api/intent/handle carrying the ORIGINATING device_id (read from injected config,
-never guessed), a successful start/cancel leads with WRITE_OK_PREFIX so
-service.py's silent-success rule skips the redundant spoken follow-up (the LED
-wheel is the feedback), every failure path returns an HONEST string and NEVER
+never guessed), a successful CANCEL leads with WRITE_OK_PREFIX so service.py's
+silent-success rule skips a spoken follow-up, while a successful START speaks the
+duration back (the LED ring is VPE-only — a spoken confirm is the only fleet-wide
+feedback), every failure path returns an HONEST string and NEVER
 raises (a raise inside a ToolNode kills the whole action turn), and the no-device
 text/DM path degrades gracefully — a configured fallback helper or an honest
 "I can't set a device timer from here", never a silent pretend-success.
@@ -142,8 +143,8 @@ def test_describe_duration_reads_naturally():
 def test_start_targets_native_intent_on_device_and_omits_zero_slots():
     ha = FakeHA()
     out = make_tool(ha).invoke({"action": "start", "duration": "5 minutes"}, cfg("dev-pe"))
-    assert out.startswith(WRITE_OK_PREFIX)              # silent-success signal
-    assert "5 minutes" in out and "on your device" in out
+    assert not out.startswith(WRITE_OK_PREFIX)          # B: START speaks (no silent-success)
+    assert "5 minutes" in out                            # duration spoken back, catchable by ear
     [(method, path, body)] = ha.requests
     assert (method, path) == ("POST", "/api/intent/handle")
     # native assist timer, carrying the originating device_id, minutes-only slot
@@ -333,6 +334,8 @@ def test_action_graph_wires_device_id_from_config_into_timer_intent():
     assert body == {
         "name": "HassStartTimer", "data": {"minutes": 10}, "device_id": "dev-office-pe"
     }
-    # and the ToolMessage carried the silent-success signal into the transcript
+    # and the ToolMessage speaks the duration back (B: no silent-success on START —
+    # the LED ring is VPE-only, so the spoken confirm is the only fleet-wide feedback)
     tool_note = next(m.content for m in result["messages"] if getattr(m, "type", "") == "tool")
-    assert tool_note.startswith(WRITE_OK_PREFIX)
+    assert not tool_note.startswith(WRITE_OK_PREFIX)
+    assert "10 minutes" in tool_note

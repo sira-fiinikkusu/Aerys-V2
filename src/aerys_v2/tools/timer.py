@@ -32,10 +32,12 @@ Contracts every tool here obeys (same as tools/home_control.py, tools/web_search
    action turn (the V1 failed-webhook-kills-execution outage mode). HA
    unreachable, an error IntentResponse, an unparseable duration — all come back
    as honest strings.
-2. SILENT-SUCCESS ALIGNMENT — a successful native start/cancel returns a string
-   that leads with WRITE_OK_PREFIX ("Done:"), the same signal home_control uses,
-   so service.py's silent-success rule skips the redundant spoken follow-up: the
-   LED wheel spinning IS the feedback, exactly like the light changing is.
+2. FEEDBACK BY DEVICE — a successful CANCEL returns a string leading with
+   WRITE_OK_PREFIX ("Done:"), the same signal home_control uses, so service.py's
+   silent-success rule skips a redundant spoken follow-up. A successful START does
+   NOT: the LED ring is VPE-only, so on every other satellite a silent success is
+   zero feedback — START confirms the duration OUT LOUD (which also lets a
+   mis-heard number be caught by ear), the only fleet-wide feedback channel.
 3. GRACEFUL DEGRADE — on the text/DM path there is no originating satellite
    (device_id absent). The tool can't show a ring there and says so honestly; if
    an ha_timer_fallback_entity is configured it starts that generic (non-visual)
@@ -287,8 +289,12 @@ def build_timer_tool(
                     named = f" '{label}'" if label else ""
                     return f"I couldn't start the{named} timer — Home Assistant said: {err}"
                 named = f" '{label}'" if label else ""
-                # WRITE_OK_PREFIX => silent-success: the LED wheel is the feedback.
-                return f"{WRITE_OK_PREFIX} started a {desc}{named} timer on your device."
+                # NO WRITE_OK_PREFIX on START: a timer has no universal visual — the
+                # LED ring is VPE-only, so on every other satellite a silent success
+                # is zero feedback. START confirms OUT LOUD, duration included, so a
+                # mis-heard "15" vs "50" is catchable by ear. (Cancel stays silent on
+                # success — nothing ambiguous to hear-check there.)
+                return f"Timer set for {desc}{named} — starting now."
 
             # No originating device (text/DM/CLI): best-effort, and honest.
             if fallback_entity:
