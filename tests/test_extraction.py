@@ -7,18 +7,24 @@ verbatim (the ms-vs-µs precision bug), prod gets SELECTs only while every write
 lands in aerys_v2 staging, and an empty window is a true no-op.
 """
 
+import io
 import json
 from datetime import datetime, timedelta, timezone
 
+import aerys_v2.workers.extraction as extraction_mod
 from aerys_v2.workers.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     LEASE_KIND,
     N8N_EXTRACTION_WORKFLOW_ID,
     SOURCE_COLUMNS,
     LiveWriteRefused,
+    _safe_watermark,
+    _trim_tie_boundary,
     _value_text_from_content,
+    acquire_write_mutex,
     batch_date,
     ensure_lease_holder,
+    n8n_workflow_active,
     parse_observations,
     run_extraction,
     run_live_extraction,
@@ -31,11 +37,16 @@ CHRIS = "6e6bcbed-03ef-4d17-95d2-89c467414335"
 MEGAN = "11111111-2222-3333-4444-555555555555"
 
 
-def row(person_id, content, *, at=T0, raw=None, speaker="Unknown",
+def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
         platform="discord", privacy="private", thread="v1:n8n_chat_histories"):
-    """A source row in SOURCE_COLUMNS order — both queries return this shape."""
+    """A source row in SOURCE_COLUMNS order — both queries return this shape.
+
+    id defaults to "1" (fine when a test only ever has one row, or doesn't
+    care about row identity) — pass DISTINCT ids for tests that need to track
+    which specific rows landed in a parse-failed group (_safe_watermark keys
+    off row ids)."""
     values = {
-        "id": "1",
+        "id": id,
         "person_id": person_id,
         "content": content,
         "source_platform": platform,
@@ -206,6 +217,140 @@ def test_llm_returning_empty_array_stages_nothing():
     assert summary["inserted_total"] == 0
 
 
+# --- watermark safety: parse failures must never be skipped past -------------
+
+
+def test_parse_failure_on_the_very_first_row_freezes_the_watermark():
+    """A truncated LLM reply (parse_observations -> None, not []) for the
+    EARLIEST group in the window: there is nothing safe to advance past, so
+    the watermark must freeze at the pre-pass value, not jump to whatever
+    else was in the batch — otherwise this message is gone forever (next
+    pass's `created_at > watermark` would exclude it)."""
+    existing_wm = "2026-07-03 11:00:00+00"
+    raw_chris = "2026-07-03 12:00:00.000001+00"
+    prod = FakeConn([("FROM n8n_chat_histories", [
+        row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raw_chris),
+    ])])
+    staging = FakeConn([("last_processed_at", [(existing_wm,)])])
+    summary = run_extraction(prod, staging, FakeLlm(["not json at all -- truncated"]), fake_embedder)
+
+    assert not any("v2_memories_staging" in s for s, _ in staging.calls)  # nothing staged
+    saves = [(s, p) for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s]
+    assert len(saves) == 1
+    assert saves[0][1] == {"source": "prod_chat", "raw": existing_wm}  # frozen, not advanced
+    assert summary["sources"]["prod_chat"]["parse_failures"] == 1
+
+
+def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
+    """A truncated reply for ONE person's group must not sink the whole batch:
+    a DIFFERENT person's group in the same window still parses and stages
+    normally, and the watermark advances up to (but not past) the failure."""
+    raw_a = "2026-07-03 12:00:00.000001+00"
+    raw_b = "2026-07-03 12:00:02.000002+00"
+    raw_c = "2026-07-03 12:00:05.000003+00"  # this person's group fails to parse
+    PERSON_C = "99999999-8888-7777-6666-555555555555"
+    prod = FakeConn([("FROM n8n_chat_histories", [
+        row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raw_a),
+        row(MEGAN, "I collect SNES games", id="b", at=T0 + timedelta(seconds=2), raw=raw_b),
+        row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
+    ])])
+    staging = FakeConn()
+    llm = FakeLlm([OBS, OBS, "not json at all -- truncated"])
+    summary = run_extraction(prod, staging, llm, fake_embedder)
+
+    # both successful groups still staged — one failure doesn't block the rest
+    inserts = [s for s, _ in staging.calls if "v2_memories_staging" in s]
+    assert len(inserts) == 2
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == raw_b  # advances past both successes, stops before the failure
+    assert summary["sources"]["prod_chat"]["parse_failures"] == 1
+
+
+def test_parse_failure_never_reaches_staging_but_success_in_same_source_still_lands():
+    """v2_turns source specifically: a garbled reply must not stage a blank/
+    garbage row, and must not silently look identical to a "no memories" pass."""
+    staging = FakeConn([("FROM v2_turns", [
+        row(CHRIS, "static on the line", id="only", platform="voice",
+            privacy="private", thread="voice:beta", raw="2026-07-03 09:00:00.5+00"),
+    ])])
+    prod = FakeConn()
+    summary = run_extraction(prod, staging, FakeLlm(["<<garbled, not json>>"]), fake_embedder)
+
+    assert not any("v2_memories_staging" in s for s, _ in staging.calls)
+    assert summary["sources"]["v2_turns"]["parse_failures"] == 1
+    assert summary["sources"]["v2_turns"]["observations"] == 0
+
+
+# --- watermark safety: LIMIT-boundary ties must never be split ---------------
+
+
+def test_limit_boundary_tie_is_trimmed_not_split():
+    """batch_limit=2 -> the worker overfetches 3 (limit+1). All 3 come back
+    (the overfetch is "full", so more rows might exist beyond it) and the
+    LAST TWO share one microsecond-identical created_at — a real hazard,
+    since now() is transaction-time. Splitting the tie (processing one,
+    remembering a watermark that excludes its identical-timestamp sibling)
+    would strand that sibling forever. The whole tied pair must be trimmed
+    off THIS pass and left for the next one, together."""
+    tie_raw = "2026-07-03 12:00:05.000000+00"
+    tie_at = T0 + timedelta(seconds=5)
+    prod = FakeConn([("FROM n8n_chat_histories", [
+        row(CHRIS, "first", id="1", at=T0, raw="2026-07-03 12:00:00.000000+00"),
+        row(MEGAN, "tied-a", id="2", at=tie_at, raw=tie_raw),
+        row(CHRIS, "tied-b", id="3", at=tie_at, raw=tie_raw),
+    ])])
+    staging = FakeConn()
+    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+
+    # only the untied first row was processed this pass
+    assert summary["sources"]["prod_chat"]["rows"] == 1
+    inserts = [s for s, _ in staging.calls if "v2_memories_staging" in s]
+    assert len(inserts) == 1
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == "2026-07-03 12:00:00.000000+00"  # NOT the tied timestamp
+    assert save["raw"] != tie_raw
+
+    # the overfetch actually asked for limit+1, proving the SQL round-trip:
+    fetch_params = next(p for s, p in prod.calls if "FROM n8n_chat_histories" in s)
+    assert fetch_params["limit"] == 3
+
+
+def test_limit_boundary_no_tie_processes_the_full_overfetch_headroom():
+    """If the batch does NOT fill the +1 overfetch, there's nothing beyond
+    it and no tie risk — every row must be processed, none held back."""
+    prod = FakeConn([("FROM n8n_chat_histories", [
+        row(CHRIS, "only one row", id="1", at=T0, raw="2026-07-03 12:00:00.000000+00"),
+    ])])
+    staging = FakeConn()
+    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+    assert summary["sources"]["prod_chat"]["rows"] == 1
+    assert summary["inserted_total"] == 1
+
+
+def test_trim_tie_boundary_unit():
+    rows = [{"id": "1", "created_at": 1}, {"id": "2", "created_at": 2}, {"id": "3", "created_at": 2}]
+    assert _trim_tie_boundary(rows, limit=2) == [{"id": "1", "created_at": 1}]
+    # under the overfetch (didn't fill limit+1): nothing trimmed
+    assert _trim_tie_boundary(rows, limit=5) == rows
+    # pathological: every row ties -> nothing safe to trim to, return as-is
+    all_tied = [{"id": "1", "created_at": 1}, {"id": "2", "created_at": 1}]
+    assert _trim_tie_boundary(all_tied, limit=1) == all_tied
+
+
+def test_safe_watermark_unit():
+    rows = [
+        {"id": "a", "created_at": 1, "created_at_raw": "a-raw"},
+        {"id": "b", "created_at": 2, "created_at_raw": "b-raw"},
+        {"id": "c", "created_at": 3, "created_at_raw": "c-raw"},
+    ]
+    # no failures: newest wins, exactly as before
+    assert _safe_watermark(rows, set(), after="after-raw") == "c-raw"
+    # failure mid-list: freeze at the newest row strictly older than it
+    assert _safe_watermark(rows, {"b"}, after="after-raw") == "a-raw"
+    # failure on the very first row: nothing older -> the pre-pass value
+    assert _safe_watermark(rows, {"a"}, after="after-raw") == "after-raw"
+
+
 # --- v2_turns source ---------------------------------------------------------
 
 
@@ -233,9 +378,18 @@ def test_parse_observations_strips_code_fences():
     assert parse_observations(fenced)[0]["key_label"] == "basic.location"
 
 
-def test_parse_observations_tolerates_garbage():
-    assert parse_observations("Sure! Here you go: oops no json") == []
-    assert parse_observations('{"not": "an array"}') == []
+def test_parse_observations_distinguishes_failure_from_genuine_empty():
+    # Genuine "nothing worth remembering": the documented `[]` reply.
+    assert parse_observations("[]") == []
+    # Unparseable (e.g. max_tokens=1200 truncation mid-object on a busy
+    # transcript) and a non-array top-level value are BOTH a parse FAILURE —
+    # None, never [] — so the caller can tell "no memories" apart from
+    # "couldn't tell" and hold the watermark back for the latter.
+    assert parse_observations("Sure! Here you go: oops no json") is None
+    assert parse_observations('{"not": "an array"}') is None
+    assert parse_observations('[{"key_label": "basic.location", "value_te') is None  # truncated mid-object
+    assert parse_observations("null") is None
+    assert parse_observations('"just a string"') is None
 
 
 def test_batch_date_renders_owner_timezone():
@@ -246,12 +400,18 @@ def test_batch_date_renders_owner_timezone():
 # --- live-mode triage (prod `memories`) ---------------------------------------
 
 
-def lease_conn(holder=None, **extra_routes):
-    """A FakeConn pre-wired with a v2_writer_lease answer. holder=None means
-    "no row yet" (ensure_lease_holder seeds + defaults to 'n8n')."""
-    routes = [("FROM v2_writer_lease", [(holder,)] if holder else [])]
-    routes.extend(extra_routes.get("routes", ()))
-    return FakeConn(routes)
+def lease_conn(holder=None, *, mutex_acquired=True, routes=()):
+    """A FakeConn pre-wired with a v2_writer_lease answer AND an
+    advisory-mutex answer. holder=None means "no row yet" (ensure_lease_holder
+    seeds + defaults to 'n8n'). mutex_acquired controls the THIRD gate
+    (acquire_write_mutex / pg_try_advisory_xact_lock) — set False to simulate
+    a second 'brain' process already holding the write mutex."""
+    all_routes = [
+        ("FROM v2_writer_lease", [(holder,)] if holder else []),
+        ("pg_try_advisory_xact_lock", [(mutex_acquired,)]),
+    ]
+    all_routes.extend(routes)
+    return FakeConn(all_routes)
 
 
 def test_values_similar_exact_and_fuzzy_and_different():
@@ -319,6 +479,105 @@ def test_triage_replaces_when_value_changed():
     )
 
 
+# --- triage_memory: refuse to corrupt, never touch the DB when unusable ------
+
+
+def test_triage_skips_blank_value_text_never_reaches_replace():
+    # Cross-review bug: a blank value_text scored 0.0 similarity against ANY
+    # existing value, forcing REPLACE — soft-deleting the real memory and
+    # inserting a blank "key_label: " row in its place.
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="",
+        content="basic.location: ", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "skipped"
+    assert conn.calls == []  # refused before even the dedup SELECT — zero writes, zero reads
+
+
+def test_triage_skips_whitespace_only_value_text():
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="   ",
+        content="basic.location:    ", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "skipped"
+    assert conn.calls == []
+
+
+def test_triage_skips_null_key_label_unusable_for_dedup():
+    # Cross-review bug: `key_label = NULL` is never true in SQL, so the dedup
+    # SELECT always misses -> every observation without a key_label fell to
+    # INSERT -> unbounded duplicate rows.
+    conn = FakeConn([("FROM memories", [])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label=None, value_text="some fact with no label",
+        content=": some fact with no label", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "skipped"
+    assert conn.calls == []
+
+
+def test_triage_skips_blank_key_label():
+    conn = FakeConn([("FROM memories", [])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="   ", value_text="some fact",
+        content="   : some fact", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "skipped"
+    assert conn.calls == []
+
+
+# --- triage_memory: privacy_level tightens on UPDATE, never loosens ---------
+
+
+def test_triage_update_writes_privacy_level_param_for_sql_side_tightening():
+    """The UPDATE now carries privacy_level through, with a CASE that only
+    ever tightens (public -> private) — a re-statement flagged private must
+    not leave the existing row silently public in retrieval. The CASE logic
+    itself lives in SQL (no real DB here to execute it against), so what's
+    provable offline is the SHAPE: the column is in the SET list and the
+    incoming privacy_level rides the params, every single time."""
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
+        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="private",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "update"
+    sql, params = next((s, p) for s, p in conn.calls if s.lstrip().upper().startswith("UPDATE"))
+    assert "privacy_level" in sql
+    assert "CASE" in sql.upper()  # tightening logic, not a blind overwrite
+    assert params["privacy_level"] == "private"
+
+
+def test_triage_update_case_only_tightens_toward_private_in_sql_text():
+    # The CASE must resolve to 'private' when the incoming value is 'private',
+    # and otherwise fall back to the EXISTING row's privacy_level column
+    # (never blindly assign the incoming 'public') — asserted on the SQL text
+    # itself since there's no real Postgres here to execute the CASE against.
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
+        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    sql, params = next((s, p) for s, p in conn.calls if s.lstrip().upper().startswith("UPDATE"))
+    assert "THEN 'private'" in sql
+    assert "ELSE privacy_level" in sql  # falls back to the EXISTING column, not the incoming value
+    assert params["privacy_level"] == "public"
+
+
 # --- live-mode hard gates ------------------------------------------------------
 
 
@@ -369,6 +628,29 @@ def test_ensure_lease_holder_returns_brain_without_seeding_twice():
     assert ensure_lease_holder(staging) == "brain"
 
 
+def test_acquire_write_mutex_true_and_false():
+    assert acquire_write_mutex(lease_conn(holder="brain", mutex_acquired=True)) is True
+    assert acquire_write_mutex(lease_conn(holder="brain", mutex_acquired=False)) is False
+
+
+def test_live_refuses_when_write_mutex_already_held():
+    """The lease ROW says 'brain' is authorized (gate #2 passes) but a SECOND
+    brain process (the loop container, say, racing a manual --once --live)
+    already holds the actual write mutex — this pass must refuse rather than
+    race it. This is the gate ensure_lease_holder alone can't provide."""
+    prod, prod_write = FakeConn(), FakeConn()
+    staging = lease_conn(holder="brain", mutex_acquired=False)
+    try:
+        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: False)
+        assert False, "expected LiveWriteRefused"
+    except LiveWriteRefused as e:
+        assert LEASE_KIND in str(e)
+    # refused BEFORE any read/write, same posture as the other two gates.
+    assert prod.calls == []
+    assert prod_write.calls == []
+    assert not any("v2_extraction_watermark" in s for s, _ in staging.calls)
+
+
 def test_live_proceeds_and_triages_when_lease_held_by_brain_and_n8n_inactive():
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
     staging = lease_conn(holder="brain")
@@ -410,3 +692,94 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
     inserts = [p for s, p in prod_write.calls if s.lstrip().upper().startswith("INSERT")]
     embeddings = {p["embedding"] for p in inserts}
     assert embeddings == {"[1.0]", "[2.0]"}  # two distinct fresh vectors, not a shared/cached one
+
+
+def test_live_extraction_skips_unusable_observations_and_counts_them():
+    """A group whose reply contains one observation with NO key_label and one
+    with a BLANK value_text: both are unusable for dedup/triage and must land
+    ZERO writes in prod `memories` — but they still show up in the summary's
+    skipped tally, not silently vanish as if nothing was extracted at all."""
+    bad_obs = json.dumps([
+        {"key_label": None, "value_text": "no label at all", "context": None,
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+        {"key_label": "basic.location", "value_text": "", "context": None,
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+    ])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "mumble mumble")])])
+    staging = lease_conn(holder="brain")
+    prod_write = FakeConn([("FROM memories", [])])
+    summary = run_live_extraction(prod, staging, prod_write, FakeLlm([bad_obs]), fake_embedder, lambda: False)
+
+    assert summary["inserted_total"] == 0
+    assert summary["updated_total"] == 0
+    assert summary["replaced_total"] == 0
+    assert summary["skipped_total"] == 2
+    assert summary["sources"]["prod_chat"]["skipped"] == 2
+    assert not any(
+        s.lstrip().upper().startswith(("INSERT", "UPDATE")) for s, _ in prod_write.calls
+    )
+
+
+# --- n8n_workflow_active: fail CLOSED on an ambiguous 200, not just HTTP errors --
+
+
+class _FakeHTTPResponse(io.BytesIO):
+    """Same minimal fake-urlopen-response shape as test_alerts.py's FakeResponse."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_n8n_urlopen(monkeypatch, body: dict):
+    def fake_urlopen(req, timeout=None):
+        return _FakeHTTPResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(extraction_mod.urllib.request, "urlopen", fake_urlopen)
+
+
+def test_n8n_active_true_when_active_is_true(monkeypatch):
+    _patch_n8n_urlopen(monkeypatch, {"active": True})
+    assert n8n_workflow_active("key")() is True
+
+
+def test_n8n_active_false_when_active_is_false(monkeypatch):
+    _patch_n8n_urlopen(monkeypatch, {"active": False})
+    assert n8n_workflow_active("key")() is False
+
+
+def test_n8n_active_fails_closed_on_missing_active_key(monkeypatch):
+    # API change / envelope / stale edge-cache: 200 OK but no top-level 'active'.
+    # bool(None) used to silently coerce to False ("not active" -> proceed).
+    _patch_n8n_urlopen(monkeypatch, {"id": "IfqY4BrhBGeQrcTC", "name": "batch extraction"})
+    try:
+        n8n_workflow_active("key")()
+        assert False, "expected LiveWriteRefused on an ambiguous 200 shape"
+    except LiveWriteRefused:
+        pass
+
+
+def test_n8n_active_fails_closed_on_non_bool_active(monkeypatch):
+    _patch_n8n_urlopen(monkeypatch, {"active": "yes"})  # truthy string, not a real bool
+    try:
+        n8n_workflow_active("key")()
+        assert False, "expected LiveWriteRefused"
+    except LiveWriteRefused:
+        pass
+
+
+def test_n8n_active_still_fails_closed_on_http_error(monkeypatch):
+    # The asymmetry this fix must PRESERVE: an outright network/HTTP failure
+    # already refuses (propagates) rather than defaulting to "inactive" —
+    # this fix only closes the malformed-200 gap, not change this path.
+    def raising_urlopen(req, timeout=None):
+        raise OSError("network down")
+
+    monkeypatch.setattr(extraction_mod.urllib.request, "urlopen", raising_urlopen)
+    try:
+        n8n_workflow_active("key")()
+        assert False, "expected the OSError to propagate, not be swallowed into False"
+    except OSError:
+        pass
