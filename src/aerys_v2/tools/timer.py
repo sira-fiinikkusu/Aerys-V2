@@ -74,6 +74,14 @@ _PHRASE_FIXUPS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bhalf\s+a\s+minute\b"), "30 seconds"),
     (re.compile(r"\bquarter\s+of\s+an\s+hour\b"), "15 minutes"),
     (re.compile(r"\bquarter\s+hour\b"), "15 minutes"),
+    # DIGIT-form '…and a half|quarter' tails. Without these the grammar below
+    # matches only the leading '<n> hour(s)/minute(s)' fragment and silently
+    # DROPS the fractional tail — '1 hour and a half' would score 3600, a
+    # confidently-wrong timer. Normalize the tail to an explicit sub-unit so the
+    # whole phrase is accounted for (\1 keeps the author's quantity).
+    (re.compile(r"\b(\d+)\s+hours?\s+and\s+a\s+half\b"), r"\1 hours 30 minutes"),
+    (re.compile(r"\b(\d+)\s+hours?\s+and\s+a\s+quarter\b"), r"\1 hours 15 minutes"),
+    (re.compile(r"\b(\d+)\s+minutes?\s+and\s+a\s+half\b"), r"\1 minutes 30 seconds"),
 ]
 
 # One quantity (digits/decimal, or "a"/"an" = 1) glued to a unit. Findall-summed,
@@ -82,7 +90,11 @@ _PHRASE_FIXUPS: list[tuple[re.Pattern, str]] = [
 # glued forms like "1h30m" (unit letter followed by a digit) still match, while a
 # bare unit letter inside a longer word ("5 monkeys" → the 'm') stays rejected.
 _QTY_UNIT = re.compile(
-    r"(?P<qty>\d+(?:\.\d+)?|an?)\s*"
+    # The article branch is boundary-anchored (\ban?) so 'a'/'an' only matches a
+    # standalone word — without \b the 'an' inside 'human minutes' would glue to
+    # the unit and score a bogus 60s. The numeric branch stays unanchored so
+    # glued forms like '1h30m' still match.
+    r"(?P<qty>\d+(?:\.\d+)?|\ban?)\s*"
     r"(?P<unit>hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)(?![a-z])"
 )
 
@@ -146,7 +158,7 @@ def describe_duration(total: int) -> str:
     return " ".join(parts) if parts else "0 second"
 
 
-def _intent_error_message(resp: dict) -> str | None:
+def _intent_error_message(resp: object) -> str | None:
     """None if the IntentResponse succeeded; an honest message if it's an error.
 
     /api/intent/handle returns the bare IntentResponse.as_dict(): a top-level
@@ -154,6 +166,12 @@ def _intent_error_message(resp: dict) -> str | None:
     speech.plain.speech, and (on errors) a code at data.code. HA catches
     IntentHandleError/MatchFailedError and returns them as an error response with
     HTTP 200, so a non-2xx never fires for those — we read the envelope."""
+    if not isinstance(resp, dict):
+        # A 200 whose body isn't a JSON object (a bare list, or literal null)
+        # can't be a valid IntentResponse. Return an honest failure string rather
+        # than let resp.get(...) raise AttributeError out of the tool — contract
+        # #1: NEVER raise inside a ToolNode (it would kill the whole action turn).
+        return "Home Assistant returned an unexpected response."
     if resp.get("response_type") != "error":
         return None
     speech = (((resp.get("speech") or {}).get("plain") or {}).get("speech") or "").strip()

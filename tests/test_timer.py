@@ -102,10 +102,26 @@ ERROR_RESP = {
         ("10", 600),          # bare number = minutes (the common shorthand)
         ("2 hours", 7200),
         ("45 s", 45),
+        # DIGIT-form fractional tails must be summed, not silently truncated to
+        # the leading whole unit (regression: '1 hour and a half' was 3600).
+        ("1 hour and a half", 5400),
+        ("2 hours and a half", 9000),
+        ("1 hour and a quarter", 4500),
+        ("5 minutes and a half", 330),
     ],
 )
 def test_parse_duration_recognizes_natural_forms(text, expected):
     assert parse_duration(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["human minutes", "roman hours", "german seconds"],
+)
+def test_parse_duration_ignores_article_glued_inside_a_word(text):
+    # 'an'/'a' must be a standalone word to count as qty=1 — the 'an' buried in
+    # 'human' must NOT glue to a following unit and fabricate a 60s timer.
+    assert parse_duration(text) is None
 
 
 @pytest.mark.parametrize("text", ["", "   ", "banana", "soon", "0 minutes", "0"])
@@ -264,6 +280,19 @@ def test_tool_never_raises_on_transport_error():
     out = tool.invoke({"action": "start", "duration": "5 minutes"}, cfg("dev-pe"))
     assert "unreachable" in out
     assert not out.startswith(WRITE_OK_PREFIX)
+
+
+@pytest.mark.parametrize("bad_body", [[], None])
+def test_start_non_dict_intent_body_is_honest_not_exception(bad_body):
+    # HA returning a 200 whose body is a bare list or literal null must NOT raise
+    # AttributeError out of the tool (resp.get on a list/None) — contract #1:
+    # never raise inside a ToolNode. It degrades to an honest failure string.
+    ha = FakeHA()
+    ha.intent_response = bad_body  # set directly: '' / [] / None are falsy, bypass ctor default
+    out = make_tool(ha).invoke({"action": "start", "duration": "5 minutes"}, cfg("dev-pe"))
+    assert isinstance(out, str)
+    assert not out.startswith(WRITE_OK_PREFIX)
+    assert "couldn't start" in out
 
 
 def test_missing_config_degrades_like_no_device():
