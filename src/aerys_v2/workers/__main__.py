@@ -149,7 +149,17 @@ def _mine_gaps_once(settings: Settings, allowlist) -> dict:
     `with` commits on clean exit, rolls back if the pass blew up mid-batch."""
     import psycopg
 
-    with psycopg.connect(settings.database_url) as conn:
+    # Loop-mode self-defense (cross-review). The miner is OFFLINE, so a wedged NAS
+    # Postgres can never crash a live turn — but in loop mode it would hang the
+    # BlockingScheduler's single job thread. Bound the connect, and cap any single
+    # statement, so a stuck connect/query surfaces as a caught error and the next
+    # interval retries instead of the pass blocking forever. run_gap_mining holds ONE
+    # transaction across the batch, so the SET is a per-STATEMENT ceiling (each SELECT/
+    # INSERT/watermark write), not a whole-pass one — enough to unstick a hung DB.
+    # The SET also guarantees a transaction is open before the per-turn SAVEPOINTs,
+    # reinforcing the non-autocommit invariant run_gap_mining now asserts.
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
+        conn.execute("SET statement_timeout = '120s'")
         summary = run_gap_mining(
             conn,
             allowlist=allowlist,

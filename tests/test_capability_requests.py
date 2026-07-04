@@ -292,6 +292,26 @@ def test_malformed_structured_fields_coerce_to_empty():
     assert _error_signals(turn(tool_calls=["not-a-dict"], degraded=[""])) == []
 
 
+def test_nonlist_structured_field_warns_but_stays_safe(caplog):
+    """A structured column that decoded to a non-list (str/dict — a jsonb decoding
+    regression) must still coerce to [] (never crash, never fabricate a gap) AND emit
+    a WARNING, so the silent structural-error under-report becomes visible. None stays
+    quiet (expected pre-writer / JSON null)."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger=cap.__name__):
+        # tool_calls is a bare string (decoded wrong); degraded=None coerces to [] in
+        # the fixture — so exactly one column trips the warning.
+        assert _error_signals(turn(tool_calls="not-json", degraded=None)) == []
+    ours = [r for r in caplog.records if r.name == cap.__name__]
+    assert any("decoding regression" in r.getMessage() for r in ours)
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=cap.__name__):
+        assert _error_signals(turn(tool_calls=None, degraded=None)) == []
+    assert [r for r in caplog.records if r.name == cap.__name__] == []   # None never warns
+
+
 def test_error_then_complaint_ordering_in_one_turn():
     """A turn can carry both an un-forgeable error AND a complaint; both surface,
     error first, each with its own machine-set label — the error is never
@@ -321,6 +341,16 @@ def test_parity_gate_refuses_when_no_armed_rows():
 def test_parity_gate_refuses_on_empty_turns_table():
     with pytest.raises(GapMiningRefused, match="no recent rows"):
         run_gap_mining(GapConn(parity=(0, 0)), allowlist={CHRIS})
+
+
+def test_autocommit_connection_refuses_before_any_write():
+    """The per-turn SAVEPOINT isolation requires a single outer transaction; under
+    autocommit one poison row would abort the batch. Refuse loudly, write nothing."""
+    conn = GapConn(turns=[turn_tuple(degraded=["ha_unreachable"])])
+    conn.autocommit = True
+    with pytest.raises(GapMiningRefused, match="autocommit"):
+        run_gap_mining(conn, allowlist={CHRIS})
+    assert conn.examples == set()   # refused before touching anything
 
 
 def test_owner_filter_scopes_the_fetch():

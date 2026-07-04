@@ -129,7 +129,23 @@ def _as_list(value: object) -> list:
     lists. A malformed/legacy value (None, a dict, a prose string that slipped in)
     degrades to [] — the SAFE direction: under-report a gap, never crash the pass
     or fabricate one. Same doctrine as turns.py's tool classification."""
-    return value if isinstance(value, list) else []
+    if isinstance(value, list):
+        return value
+    if value is not None:
+        # A non-None value that ISN'T a list means the structured column did not
+        # decode to a JSONB array (a decoding regression: a non-default jsonb loader,
+        # a connection-config change, or a legacy prose value that slipped in). We
+        # still fail safe to [] — never crash, never fabricate a gap — but WARN,
+        # because otherwise the whole structural 'error' path silently zeroes out and
+        # only complaints would ever fire, invisibly. None is expected (pre-writer /
+        # JSON null) and stays quiet. (cross-review — make the silent under-report loud.)
+        log.warning(
+            "gap mining: expected a JSONB list for a structured turn column but got "
+            "%s — coercing to [] (structural 'error' signals for this turn are "
+            "skipped; possible jsonb decoding regression)",
+            type(value).__name__,
+        )
+    return []
 
 
 def _bounded_excerpt(text: object, *, limit: int = EXCERPT_LIMIT) -> str:
@@ -424,6 +440,21 @@ def run_gap_mining(
     Owner-scope is a hard gate (cross-review H2 + the design's None-defeatable
     caveat): an empty allowlist means no owner is configured, and mining then would
     either match everyone or no one — refuse rather than guess."""
+    # The per-turn crash isolation below (each turn's writes roll back to a SAVEPOINT
+    # via `with conn.transaction()`) is load-bearing and holds ONLY on a non-autocommit
+    # connection: psycopg3 nests a SAVEPOINT when a transaction is already open, but
+    # under autocommit each `with conn.transaction()` becomes a top-level transaction,
+    # so a single poison row would abort the batch AND the watermark save and re-stall
+    # the same row every pass. The invariant was validated with offline fakes only
+    # (house rules forbid a live DB in tests), so make it explicit here: refuse loudly
+    # rather than mine under a posture the isolation was never proven against.
+    # (cross-review — the flagged "assert not conn.autocommit at pass start".)
+    if getattr(conn, "autocommit", False):
+        raise GapMiningRefused(
+            "connection is in autocommit mode — the miner's per-turn SAVEPOINT "
+            "isolation requires a single outer transaction; refusing to mine."
+        )
+
     allow = sorted({str(p) for p in allowlist if str(p).strip()})
     if not allow:
         raise GapMiningRefused(

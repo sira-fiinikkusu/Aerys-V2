@@ -52,7 +52,27 @@ CREATE TABLE IF NOT EXISTS v2_capability_requests (
     approved_by     TEXT,                           -- owner person_id
     approved_at     TIMESTAMPTZ,
     approval_channel TEXT,
-    resolved_at     TIMESTAMPTZ
+    resolved_at     TIMESTAMPTZ,
+    -- Belt-and-braces provenance invariant (cross-review). The whole security thesis
+    -- is "provenance is machine-set and UN-FORGEABLE at the DATA layer" — yet the
+    -- per-column CHECKs above only validate each column in isolation. Bind the tier and
+    -- signal_kind to their class at the storage layer so a divergent row (e.g. a forged
+    -- 'complaint' smuggled onto the lax 'standard' gate) is REJECTED by Postgres, not
+    -- merely by Python convention (GapSignal.required_tier + the hardcoded detectors).
+    -- This matches EXACTLY the two legitimate write paths the miner emits — error =>
+    -- standard from {degraded,tool_error}; complaint => stringent from reply_phrase
+    -- (capability_requests.py REQUIRED_TIER_BY_ORIGIN + _error_signals/_complaint_signals)
+    -- — and holds for the row's whole lifetime (Phase B mutates only status/diagnosis/
+    -- approval columns, never class/tier/kind). Same doctrine as the read_only connection
+    -- and the signal_kind CHECK: convention AND mechanism, not either alone.
+    CONSTRAINT v2_caprequests_provenance_ck CHECK (
+        (origin_class = 'error'
+             AND required_tier = 'standard'
+             AND signal_kind IN ('degraded','tool_error'))
+     OR (origin_class = 'complaint'
+             AND required_tier = 'stringent'
+             AND signal_kind = 'reply_phrase')
+    )
 );
 
 -- --------------------------------------------- v2_capability_request_examples
@@ -62,6 +82,12 @@ CREATE TABLE IF NOT EXISTS v2_capability_requests (
 -- the parent's how_often is COUNT(*) over this child so recurrence spans distinct
 -- turns, never a blind increment. The PK's leading `fingerprint` column also
 -- serves the count-by-fingerprint subquery, so no extra index is needed here.
+-- APPEND-ONLY / UNBOUNDED by construction (cross-review): a persistently-failing
+-- subsystem adds one child row every turn it fails, forever, and how_often is a
+-- COUNT(*) over this child on every upsert. Volumes are tiny for Postgres near-term,
+-- but this is the one place worth a future retention policy — Phase-B task: cap the
+-- examples kept per fingerprint (keep the most recent N used for recurrence) or age
+-- rows out beyond the recurrence window, and consider materializing how_often on write.
 CREATE TABLE IF NOT EXISTS v2_capability_request_examples (
     fingerprint     TEXT NOT NULL,
     turn_id         BIGINT NOT NULL,                -- v2_turns.id that carried the signal
