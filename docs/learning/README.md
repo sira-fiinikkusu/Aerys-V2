@@ -18,3 +18,4 @@ Numbered so they read as a sequence (now and later). Convention: next doc takes 
 14. 14-media-tools.md — she can see: vision/documents/YouTube as honest read-only tools; signed-URL sanctity and the extensions-before-image ladder
 15. 15-tier-routing.md — the classify sandwich returns: fast/standard/deep as a hint on the router call, voice pinned to standard, the deep tier's atomic daily cap, boot assertions that refuse the wrong database
 16. 16-turns-writer.md — the v2_turns writer lands: one row per ask() turn on every path, structured tool_calls/degraded the self-iteration loop can mine, written after-response + fail-open so an audit row never degrades a live turn
+17. 17-self-iteration-loop.md — the capability-request miner (Phase A): friction in v2_turns becomes structured gap requests, provenance machine-set so trust can't be forged (error vs complaint), the /gaps read path, the parity gate that refuses to run until the writer landed
