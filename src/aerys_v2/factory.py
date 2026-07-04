@@ -386,6 +386,30 @@ MEDIA_OVERLAY = (
     "through a tool."
 )
 
+# Timer half of the action overlay — appended when ha_token is armed (the timer
+# rides the same HA door as home_control). Concrete triggers again (the V1
+# "specificity beats generality" lesson): naming the exact phrasings — "set a
+# timer", "N minute timer", "cancel the timer" — is what makes the model reach
+# for THIS tool instead of trying home_control or answering "I can't do that".
+# The tool name here MUST match the @tool function name in tools/timer.py —
+# `timer` — or the model calls a tool that isn't registered (the V1 toolWorkflow
+# name-mismatch bug, kept dead). The "targets the device automatically" line is
+# load-bearing: it stops the model asking WHICH device (a one-way voice channel
+# can't answer) — the tool reads the originating device_id from config itself.
+TIMER_OVERLAY = (
+    "You can set and cancel real countdown TIMERS on the user's voice device with "
+    "the timer tool. Call timer IMMEDIATELY whenever the user says 'set a timer', "
+    "'start a timer', 'set a timer for N minutes/hours', 'timer for N minutes', or "
+    "'cancel/stop the/my timer'. Pass action='start' with the duration in plain "
+    "words (e.g. '5 minutes', '90 seconds', '1 hour 30 minutes'), or action='cancel' "
+    "to stop it. The timer shows the ring on the satellite and rings there when "
+    "done — just like asking the speaker directly. The tool targets whichever device "
+    "the user is speaking on AUTOMATICALLY: NEVER ask which device and NEVER pass a "
+    "device or entity id. If the tool reports it can't set a device timer (a text "
+    "chat with no voice device), relay that honestly — never claim a timer is "
+    "visibly running when the tool said it isn't."
+)
+
 # Web-search half of the action overlay — appended when tavily_api_key is armed.
 # Concrete triggers again (the V1 "specificity beats generality" lesson): naming
 # the exact shapes — current events, news, weather, prices, "search for", "look
@@ -570,6 +594,18 @@ def action_tools_for(settings: Settings) -> list:
                 token=settings.ha_token.get_secret_value(),
             )
         )
+        # The timer tool rides the same HA door (base_url + token) as home_control
+        # — no canary/outbox: a timer is HA-durable countdown state HA already owns,
+        # not a device write. fallback_entity powers the no-device (text/DM) degrade.
+        from aerys_v2.tools.timer import build_timer_tool
+
+        tools.append(
+            build_timer_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+                fallback_entity=settings.ha_timer_fallback_entity,
+            )
+        )
 
     if settings.embeddings_api_key is not None:
         from aerys_v2.tools.media import build_media_tools
@@ -601,6 +637,7 @@ def action_overlay_for(settings: Settings) -> str:
     parts = []
     if settings.ha_token is not None:
         parts.append(ACTION_OVERLAY)
+        parts.append(TIMER_OVERLAY)
     if settings.embeddings_api_key is not None:
         parts.append(MEDIA_OVERLAY)
     if settings.tavily_api_key is not None:
