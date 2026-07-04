@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "aiogram>=3.13",
     "apscheduler>=3.11.3",
     "claude-agent-sdk>=0.2.110",
     "discord-py>=2.4",
