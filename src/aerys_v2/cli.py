@@ -238,8 +238,20 @@ def main() -> None:
         if stack is not None:
             router, action_graph = stack
 
-        def resolve(event):  # spike resolver: display-name passthrough (DB resolver later)
-            return {"user_id": f"discord:{event.platform_user_id}", "display_name": event.display_name}
+        # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
+        # aerys DB wired, a known platform account resolves to its real person_id
+        # (its OWN memories); a stranger or any second user resolves COLD and can
+        # never inherit the owner. Without a DB (bare spike) everyone is cold. Both
+        # paths set room-scoped privacy_context (dm=private, guild=public).
+        if settings.memories_database_url is not None:
+            from aerys_v2.transports.resolver import db_resolver
+
+            resolve = db_resolver(settings.memories_database_url)
+        else:
+            from aerys_v2.transports.resolver import identity_from_lookup
+
+            def resolve(event):  # no DB: everyone cold, still room-scoped
+                return identity_from_lookup(None, event)
 
         channel_ids = frozenset(
             int(c) for c in settings.discord_reply_channel_ids.split(",") if c.strip()

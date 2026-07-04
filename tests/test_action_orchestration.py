@@ -422,7 +422,7 @@ def test_action_graph_injects_profile_context_block():
     model = RecordingToolModel()
     seen = []
 
-    def fake_context(person_id, query_text):
+    def fake_context(person_id, query_text, privacy_context="private"):
         seen.append((person_id, query_text))
         return "• basic.location: Rotonda West, Florida"
 
@@ -439,7 +439,7 @@ def test_action_graph_injects_profile_context_block():
 
 
 def test_action_graph_context_fn_failure_never_kills_the_turn():
-    def broken_context(person_id, query_text):
+    def broken_context(person_id, query_text, privacy_context="private"):
         raise RuntimeError("NAS is down")
 
     model = RecordingToolModel(reply="done")

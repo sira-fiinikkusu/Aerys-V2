@@ -199,7 +199,7 @@ def recording_graph(context_fn, *replies):
 
 
 def test_context_block_lands_under_header_in_system_prompt():
-    graph = recording_graph(lambda pid, text: "• Preferred name: Chris", "ok")
+    graph = recording_graph(lambda pid, text, pctx="private": "• Preferred name: Chris", "ok")
     ask(graph, "hi", identity=CHRIS, thread_id="t1")
     assert f"{HEADER}\n• Preferred name: Chris" in RecordingModel.seen[0]
 
@@ -207,7 +207,7 @@ def test_context_block_lands_under_header_in_system_prompt():
 def test_context_fn_receives_person_id_and_latest_user_text():
     calls = []
 
-    def spy(person_id, query_text):
+    def spy(person_id, query_text, privacy_context="private"):
         calls.append((person_id, query_text))
         return ""
 
@@ -218,8 +218,28 @@ def test_context_fn_receives_person_id_and_latest_user_text():
     assert calls == [(PERSON, "first message"), (PERSON, "second message")]
 
 
+def test_privacy_context_flows_from_identity_to_context_fn():
+    # A public-room identity must reach context_fn as 'public' so the profile
+    # visibility gates hide dm-only claims in shared rooms; an identity with no
+    # privacy_context (the owner's own CLI/voice channels) defaults to 'private'.
+    seen = []
+
+    def spy(person_id, query_text, privacy_context="private"):
+        seen.append(privacy_context)
+        return ""
+
+    graph = recording_graph(spy, "a", "b")
+    ask(
+        graph, "hi",
+        identity={"user_id": PERSON, "privacy_context": "public"},
+        thread_id="t1",
+    )
+    ask(graph, "hi", identity=CHRIS, thread_id="t2")  # CHRIS carries no privacy_context
+    assert seen == ["public", "private"]
+
+
 def test_empty_context_means_no_header():
-    graph = recording_graph(lambda pid, text: "", "ok")
+    graph = recording_graph(lambda pid, text, pctx="private": "", "ok")
     ask(graph, "hi", identity=CHRIS, thread_id="t1")
     assert HEADER not in RecordingModel.seen[0]
 
@@ -234,14 +254,14 @@ def test_no_context_fn_means_no_header_and_no_recall_claim():
 
 
 def test_wired_context_fn_extends_capability_claim():
-    graph = recording_graph(lambda pid, text: "", "ok")
+    graph = recording_graph(lambda pid, text, pctx="private": "", "ok")
     ask(graph, "hi", identity=CHRIS, thread_id="t1")
     # even with nothing retrieved THIS turn, the capability is real → claimed
     assert "ALL conversations" in RecordingModel.seen[0]
 
 
 def test_raising_context_fn_never_kills_the_turn():
-    def bomb(person_id, query_text):
+    def bomb(person_id, query_text, privacy_context="private"):
         raise RuntimeError("NAS unplugged")
 
     graph = recording_graph(bomb, "still alive")

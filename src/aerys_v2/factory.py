@@ -50,10 +50,12 @@ def checkpointer_for(settings: Settings):
 
 FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and honest."
 
-# The memory-context seam: (person_id, latest_user_text) -> prompt block ('' = nothing
-# known). Injectable like the checkpointer — tests pass a lambda, --serve passes the
-# real DB-backed builder from context_fn_for(), and None means the feature is OFF.
-ContextFn = Callable[[str, str], str]
+# The memory-context seam: (person_id, latest_user_text, privacy_context) -> prompt
+# block ('' = nothing known). privacy_context is optional (defaults 'private') so
+# every existing 2-arg caller and injected test lambda keeps working. Injectable
+# like the checkpointer — tests pass a lambda, --serve passes the real DB-backed
+# builder from context_fn_for(), and None means the feature is OFF.
+ContextFn = Callable[..., str]
 
 
 def context_fn_for(settings: Settings, *, profile_only: bool = False) -> ContextFn | None:
@@ -79,14 +81,21 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
     # SELECT, no per-hop embeddings HTTP call.
     embed = None if profile_only else embedder_from_settings(settings)
 
-    def context_fn(person_id: str, query_text: str) -> str:
+    def context_fn(
+        person_id: str, query_text: str, privacy_context: str = "private"
+    ) -> str:
         # Fenced end-to-end: a NAS outage or DNS hiccup = empty context, never
         # a dead turn. build_context is graceful inside; this catch covers the
-        # connect itself.
+        # connect itself. privacy_context ('private' DM / 'public' room) rides
+        # through to the profile visibility gates; defaults 'private' for the
+        # owner's own single-user channels (CLI, voice/HTTP).
         try:
             with psycopg.connect(settings.memories_database_url) as conn:
                 conn.read_only = True
-                return build_context(person_id, query_text, conn, embed=embed)
+                return build_context(
+                    person_id, query_text, conn,
+                    embed=embed, privacy_context=privacy_context,
+                )
         except Exception:
             # graceful but never silent — a dead NAS/DNS must show in the logs.
             log.warning("memory-context connect failed for person %s", person_id, exc_info=True)
@@ -390,7 +399,11 @@ def build_action_graph(
                 content = latest.content
                 query_text = content if isinstance(content, str) else str(content)
             try:
-                block = context_fn(str(identity.get("user_id", "")), query_text)
+                block = context_fn(
+                    str(identity.get("user_id", "")),
+                    query_text,
+                    identity.get("privacy_context", "private"),
+                )
             except Exception:
                 log.warning("action context_fn raised; continuing without profile", exc_info=True)
                 block = ""
@@ -585,7 +598,11 @@ def build_graph(
                 content = latest.content
                 query_text = content if isinstance(content, str) else str(content)
             try:
-                block = context_fn(str(identity.get("user_id", "")), query_text)
+                block = context_fn(
+                    str(identity.get("user_id", "")),
+                    query_text,
+                    identity.get("privacy_context", "private"),
+                )
             except Exception:
                 # the seam promises graceful, but memory NEVER kills a turn —
                 # and a swallowed failure must still be visible in the logs.

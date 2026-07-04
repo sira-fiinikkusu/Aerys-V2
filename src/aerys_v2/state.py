@@ -19,6 +19,11 @@ class Identity(TypedDict, total=False):
     user_id: str
     display_name: str
     email: str
+    # Room-scoped privacy, set by the transport resolver: 'private' for a 1:1 DM,
+    # 'public' for a group/guild. Threaded into build_context so the profile
+    # service's visibility gates keep dm-only claims out of shared rooms. Absent =
+    # 'private' (the owner's own single-user channels — CLI, voice/HTTP).
+    privacy_context: str
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}
