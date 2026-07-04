@@ -159,6 +159,55 @@ def resolve_announce_entity(
     return satellite_map.get(device_id, default_entity) if device_id else default_entity
 
 
+def followup_router_for(settings: Settings) -> Callable[[str, str | None], None] | None:
+    """Route a spoken follow-up to the right delivery for the ORIGINATING device.
+
+    A mapped satellite (device_id in HA_SATELLITE_MAP) gets an assist_satellite
+    announce — the speaker plays it locally, exactly as before. Any OTHER device
+    (the headless Myo phone satellite, or an unmapped/None device_id) has NO
+    announce-able entity: HA would otherwise play a phone turn's follow-up on a
+    physical home speaker the remote owner can't hear. Those fire an `aerys_followup`
+    HA event carrying the outcome text; the Myo app subscribes and speaks it itself
+    (a TTS-stage pipeline run -> playback), the only path back to a phone.
+
+    None when ha_token is unset (dev/CI) — same arming pattern as speak_fn_for;
+    ask() then falls back to its legacy speak_fn/satellite_for path. Fires are
+    best-effort: the caller wraps in try/except and the durable history write
+    never depends on delivery.
+    """
+    if settings.ha_token is None:
+        return None
+    import httpx
+
+    base = settings.ha_base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
+    satellite_map = satellite_map_from(settings.ha_satellite_map)
+
+    def route(text: str, device_id: str | None) -> None:
+        if device_id and device_id in satellite_map:
+            # Mapped satellite -> announce locally. preannounce=False: no chime
+            # before the follow-up (owner ask 2026-07-04), matching speak_fn_for.
+            r = httpx.post(
+                f"{base}/api/services/assist_satellite/announce",
+                headers=headers,
+                json={"entity_id": satellite_map[device_id], "message": text,
+                      "preannounce": False},
+                timeout=15.0,
+            )
+        else:
+            # Phone / unmapped -> fire the event the Myo app listens for. No entity
+            # reaches a headless phone satellite; the app turns this into speech.
+            r = httpx.post(
+                f"{base}/api/events/aerys_followup",
+                headers=headers,
+                json={"text": text},
+                timeout=15.0,
+            )
+        r.raise_for_status()
+
+    return route
+
+
 def load_soul(path: Path) -> str:
     """Read the persona prompt from disk, with a safe fallback.
 

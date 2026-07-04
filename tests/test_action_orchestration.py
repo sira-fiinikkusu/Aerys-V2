@@ -15,9 +15,11 @@ import httpx
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
+from aerys_v2.config import Settings
 from aerys_v2.factory import (
     build_action_graph,
     build_graph,
+    followup_router_for,
     resolve_announce_entity,
     satellite_map_from,
 )
@@ -316,6 +318,51 @@ def test_speak_failure_never_blocks_history():
         satellite_for=fixed_satellite, followup_skip_s=6.0)
     msgs = wait_for_messages(graph, "voice:deaf", 2)
     assert any(m.content == "couldn't do it" for m in msgs)  # durable record survives
+
+
+def recording_router():
+    calls: list[tuple[str, str | None]] = []
+
+    def route(text: str, device_id: str | None) -> None:
+        calls.append((text, device_id))
+
+    return calls, route
+
+
+def test_voice_followup_router_owns_delivery_and_carries_device_id():
+    # A wired followup_router OWNS delivery (per-device routing) and bypasses
+    # speak_fn; the originating device_id rides through so the router can send a
+    # mapped satellite an announce and the headless phone an aerys_followup event.
+    router_calls, followup_router = recording_router()
+    speak_calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Refused: light.garage is not on the beta write allowlist."],
+        final="I can't touch that one yet.",
+    )
+    who = {**CHRIS, "device_id": "phone-xyz"}
+    ask(graph, "turn off the garage light", identity=who, thread_id="voice:router",
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_router=followup_router,
+        followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:router", 2)
+    assert router_calls == [("I can't touch that one yet.", "phone-xyz")]
+    assert speak_calls == []  # speak_fn bypassed entirely when the router is present
+
+
+def test_voice_followup_router_failure_never_blocks_history():
+    # A router raising (HA event post failed) is swallowed like speak_fn failures —
+    # the durable history write still lands.
+    def broken_router(_text: str, _device_id: str | None) -> None:
+        raise RuntimeError("HA event post failed")
+
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(["Refused: nope."], final="couldn't do it")
+    ask(graph, "turn off the lamp", identity=CHRIS, thread_id="voice:routerfail",
+        router=action_router, action_graph=stub, followup_router=broken_router,
+        followup_skip_s=6.0)
+    msgs = wait_for_messages(graph, "voice:routerfail", 2)
+    assert any(m.content == "couldn't do it" for m in msgs)
 
 
 # ---- context propagation into parallel-start threads (Phoenix trace unity) ------
@@ -699,6 +746,48 @@ def test_resolve_announce_entity_unmapped_device_falls_back_to_default():
     smap = {"dev-respeaker": "assist_satellite.living_room"}
     # An unknown device_id (e.g. the phone, not in the map) speaks from the default.
     assert resolve_announce_entity("dev-unknown", smap, "assist_satellite.default") == "assist_satellite.default"
+
+
+# followup_router_for owns per-device follow-up delivery: a mapped satellite gets
+# an announce, the headless phone (unmapped/None) gets the aerys_followup event.
+
+
+def test_followup_router_for_none_without_ha_token():
+    assert followup_router_for(Settings(_env_file=None, anthropic_api_key="sk-test")) is None
+
+
+def test_followup_router_for_routes_mapped_to_announce_and_phone_to_event(monkeypatch):
+    posts: list[tuple[str, dict]] = []
+
+    class FakeResp:
+        def raise_for_status(self) -> None:
+            pass
+
+    def fake_post(url, **kw):
+        posts.append((url, kw.get("json")))
+        return FakeResp()
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    s = Settings(
+        _env_file=None, anthropic_api_key="sk-test", ha_token="tok",
+        ha_base_url="http://ha.test",
+        ha_satellite_map="dev-sat=assist_satellite.living",
+        ha_announce_entity="assist_satellite.default",
+    )
+    route = followup_router_for(s)
+    assert route is not None
+    route("light's off", "dev-sat")        # mapped -> announce on its speaker
+    route("it's 85 degrees", "phone-xyz")  # unmapped phone -> event
+    route("no device here", None)          # None device_id -> event too
+
+    assert posts[0][0].endswith("/api/services/assist_satellite/announce")
+    assert posts[0][1]["entity_id"] == "assist_satellite.living"
+    assert posts[0][1]["message"] == "light's off"
+    assert posts[0][1]["preannounce"] is False
+    assert posts[1][0].endswith("/api/events/aerys_followup")
+    assert posts[1][1] == {"text": "it's 85 degrees"}
+    assert posts[2][0].endswith("/api/events/aerys_followup")
+    assert posts[2][1] == {"text": "no device here"}
 
 
 def test_resolve_announce_entity_none_device_falls_back_to_default():

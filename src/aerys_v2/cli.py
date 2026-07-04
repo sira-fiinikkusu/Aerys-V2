@@ -132,6 +132,7 @@ def main() -> None:
             checkpointer_for,
             context_fn_for,
             deep_gate_for,
+            followup_router_for,
             gaps_reader_for,
             load_soul,
             resolve_announce_entity,
@@ -192,6 +193,10 @@ def main() -> None:
             # when speak_fn is armed — the two halves always travel together.
             satellite_map = satellite_map_from(settings.ha_satellite_map)
             speak_fn = speak_fn_for(settings)
+            # Per-device follow-up routing: mapped satellite -> announce, headless
+            # phone -> aerys_followup event (the Myo app speaks it). Owns delivery
+            # over speak_fn/satellite_for when armed (ha_token set).
+            followup_router = followup_router_for(settings)
             satellite_for = (
                 (lambda device_id: resolve_announce_entity(
                     device_id, satellite_map, settings.ha_announce_entity))
@@ -206,6 +211,7 @@ def main() -> None:
                     graph, text, identity=identity, thread_id=thread,
                     router=router, action_graph=action_graph,
                     speak_fn=speak_fn, satellite_for=satellite_for,
+                    followup_router=followup_router,
                     followup_skip_s=settings.voice_followup_skip_s,
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,

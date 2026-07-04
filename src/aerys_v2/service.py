@@ -229,6 +229,7 @@ def ask(
     action_graph: object | None = None,
     speak_fn: Callable[[str, str], None] | None = None,
     satellite_for: Callable[[str | None], str] | None = None,
+    followup_router: Callable[[str, str | None], None] | None = None,
     followup_skip_s: float = 6.0,
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
@@ -251,6 +252,11 @@ def ask(
       satellite_for = no follow-up target resolves, so speak_fn never fires
       (the pre-satellite-routing default: history-only unless the caller wires
       both halves, exactly as cli.py --serve does).
+    - followup_router: when wired (factory.followup_router_for), it OWNS follow-up
+      delivery per originating device — a mapped satellite gets an announce, the
+      headless Myo phone (unmapped/None device_id) gets an `aerys_followup` HA
+      event it turns into speech. Takes precedence over speak_fn/satellite_for;
+      None falls back to the legacy announce path above (tests, dev boxes).
     - deep_allowed: the deep-tier cap gate (factory.deep_gate_for) — consulted
       ONLY when a text-thread chat turn actually classified deep, so voice
       turns and downgrades never burn a v2_model_usage credit. None = cap
@@ -301,6 +307,7 @@ def ask(
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
+                followup_router=followup_router,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -491,6 +498,29 @@ def _needs_spoken_followup(result_messages: list, elapsed_s: float, skip_s: floa
     return not all(note.startswith(WRITE_OK_PREFIX) for note in tool_notes)
 
 
+def _deliver_followup(
+    text: str,
+    device_id: str | None,
+    followup_router: Callable[[str, str | None], None] | None,
+    speak_fn: Callable[[str, str], None] | None,
+    satellite_for: Callable[[str | None], str] | None,
+) -> None:
+    """Best-effort spoken follow-up, one place, fail-open. Prefers followup_router
+    (per-device: mapped satellite -> announce, phone -> aerys_followup event); else
+    the legacy speak_fn(text, resolved_entity) path (tests, dev). A delivery failure
+    is logged and swallowed — the durable history write never depends on it."""
+    try:
+        if followup_router is not None:
+            followup_router(text, device_id)
+            return
+        if speak_fn is not None and satellite_for is not None:
+            entity_id = satellite_for(device_id)
+            if entity_id is not None:
+                speak_fn(text, entity_id)
+    except Exception:
+        log.warning("spoken follow-up delivery failed", exc_info=True)
+
+
 def _voice_parallel_start(
     graph: object,
     text: str,
@@ -503,6 +533,7 @@ def _voice_parallel_start(
     satellite_for: Callable[[str | None], str] | None,
     followup_skip_s: float,
     record_turn: Callable[[dict], None] | None = None,
+    followup_router: Callable[[str, str | None], None] | None = None,
 ) -> str:
     """Voice hot path: race the router against the chat generation.
 
@@ -653,19 +684,16 @@ def _voice_parallel_start(
             # speculative chat future — the room shouldn't wait on a
             # generation nobody asked for.
             elapsed = time.monotonic() - ack_at
-            # Resolve WHERE the follow-up speaks from the originating satellite's
-            # device_id (rides the per-call identity). No satellite_for wired (or
-            # no target resolves) = no announce, exactly as before this seam existed.
+            # Resolve WHERE the follow-up goes from the originating satellite's
+            # device_id (rides the per-call identity). followup_router (when wired)
+            # owns per-device routing — mapped satellite -> announce, the headless
+            # phone -> the aerys_followup event; None falls back to the legacy
+            # speak_fn/satellite_for announce (tests, dev boxes).
             device_id = real_configurable.get("identity", {}).get("device_id")
-            entity_id = satellite_for(device_id) if satellite_for is not None else None
-            if speak_fn is not None and entity_id is not None and (
-                failed or _needs_spoken_followup(result_messages, elapsed, followup_skip_s)
-            ):
-                try:
-                    speak_fn(final, entity_id)
-                except Exception:
-                    # delivery is best-effort; the durable record below is not
-                    log.warning("spoken follow-up delivery failed", exc_info=True)
+            if failed or _needs_spoken_followup(result_messages, elapsed, followup_skip_s):
+                _deliver_followup(
+                    final, device_id, followup_router, speak_fn, satellite_for
+                )
 
             # History write happens EITHER WAY (silent record) — the next turn's
             # model must see what actually happened, spoken aloud or not. The
