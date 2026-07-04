@@ -137,6 +137,7 @@ def main() -> None:
             satellite_map_from,
             speak_fn_for,
             tier_models_for,
+            turn_recorder_for,
         )
         from aerys_v2.service import ask
         from aerys_v2.transports.http_api import build_app
@@ -153,6 +154,9 @@ def main() -> None:
             # AUTH: who may reach the action/tools stack (house control). Owner +
             # any house_control_person_ids; None = unenforced (dev). See ask().
             action_allow = action_allowlist_for(settings)
+            # v2_turns audit writer (migration 001): one row per ask() turn to
+            # aerys_v2, off the hot path + fail-open. None when DATABASE_URL unset.
+            record_turn = turn_recorder_for(settings)
             log.info("tiers armed | fast=%s standard=%s deep=%s cap=%d/day",
                      settings.tier_fast_model,
                      settings.model if settings.model_backend == "oauth" else settings.tier_standard_model,
@@ -201,6 +205,7 @@ def main() -> None:
                     followup_skip_s=settings.voice_followup_skip_s,
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,
+                    record_turn=record_turn,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
@@ -230,6 +235,7 @@ def main() -> None:
             deep_gate_for,
             load_soul,
             tier_models_for,
+            turn_recorder_for,
         )
         from aerys_v2.service import ask
         from aerys_v2.transports.discord_gateway import AerysDiscordClient
@@ -251,6 +257,9 @@ def main() -> None:
             tier_models=tier_models_for(settings),
         )
         deep_gate = deep_gate_for(settings)
+        # v2_turns audit writer (migration 001) — the soak container's turns must
+        # be audited too, not just --serve. None when DATABASE_URL is unset.
+        record_turn = turn_recorder_for(settings)
         router = action_graph = None
         stack = action_stack_for(settings, soul)
         if stack is not None:
@@ -283,6 +292,7 @@ def main() -> None:
                 # member / DM'er not in the allowlist gets chat-only (enforced in
                 # ask()). Owner is always in; add others via house_control_person_ids.
                 action_allowlist=action_allowlist_for(settings),
+                record_turn=record_turn,
             ),
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,

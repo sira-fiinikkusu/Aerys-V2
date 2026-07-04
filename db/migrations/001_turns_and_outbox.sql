@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS v2_turns (
     -- routing decision (reproducibility for evals/incidents):
     classifier_intent TEXT,
     tier            TEXT,
-    tier_override_source TEXT,                       -- null | 'owner_phrase' | 'fallback_retry'
+    tier_override_source TEXT,                       -- null | 'deep_cap' | 'owner_phrase' | 'fallback_retry'
     guard_verdict   TEXT,
     -- content provenance (polish may never overwrite the only copy):
     input_text      TEXT        NOT NULL,

@@ -39,8 +39,122 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.router import DEFAULT_TIER, RouteDecision, normalize_tier
 from aerys_v2.state import Identity
+from aerys_v2.turns import build_turn_row, current_trace_id
 
 log = logging.getLogger(__name__)
+
+
+# ── v2_turns audit seam (migration 001; recorder wired by factory.turn_recorder_for) ──
+# One row per completed ask() turn, on EVERY completion path — chat, action, voice
+# chat, voice background action, and the timeout/error exits. Two hard rules:
+#   OFF THE HOT PATH — the row is BUILT synchronously here (so trace_id, tool_calls,
+#     and latency are captured with the data in hand and inside the turn's OTel span)
+#     but WRITTEN on a daemon thread, so the reply returns to the transport without
+#     ever waiting on the NAS insert.
+#   FAIL-OPEN — building or writing the row can never disturb the turn; both are
+#     wrapped so a DB/serialization failure logs and is dropped (the outbox /
+#     extraction graceful contract). record_turn=None (dev/CI, no DATABASE_URL)
+#     short-circuits the whole thing.
+# Cap concurrent audit writer threads. At personal-assistant volume this is never
+# neared; it exists as a fuse for a SLOW/DOWN NAS (cross-review hotpath H/M): without
+# it, one thread + one fresh DB connection per turn grow without bound while inserts
+# hang, marching toward RLIMIT_NPROC / Postgres max_connections until the hot path's
+# own DB access on the shared aerys_v2 instance starts failing. Over the cap we DROP
+# the audit write (fail-open) rather than pile up — an audit log may lose a row under
+# a NAS outage; the live turn may not.
+_MAX_INFLIGHT_AUDIT = 32
+_audit_inflight = threading.BoundedSemaphore(_MAX_INFLIGHT_AUDIT)
+
+
+def _safe_record(record_turn: Callable[[dict], None], row: dict) -> None:
+    try:
+        record_turn(row)
+    except Exception:  # pragma: no cover - recorder is already fail-open
+        log.warning("v2_turns record failed — turn not audited", exc_info=True)
+
+
+def _fire_turn_record(
+    record_turn: Callable[[dict], None] | None,
+    config: dict,
+    text: str,
+    latency_ms: int | None,
+    **fields: object,
+) -> None:
+    """Build the audit row now (trace/tool/latency captured in-context), write it
+    off the hot path. thread_id + identity are read from the per-call config — the
+    same S2 channel the graph uses — so the row can never disagree with the turn."""
+    if record_turn is None:
+        return
+    try:
+        configurable = (config or {}).get("configurable") or {}
+        row = build_turn_row(
+            thread_id=str(configurable.get("thread_id", "")),
+            identity=configurable.get("identity") or {},
+            input_text=text,
+            latency_ms=latency_ms,
+            trace_id=current_trace_id(),
+            **fields,  # type: ignore[arg-type]
+        )
+    except Exception:
+        log.warning("v2_turns row build failed — turn not audited", exc_info=True)
+        return
+
+    # Bounded fire-and-forget. The .start() itself was the ONE audit-path line outside
+    # a try/except (cross-review hotpath H): under thread exhaustion Thread.start()
+    # raises RuntimeError and, unguarded, that unwinds into the live turn and crashes
+    # the reply — the exact opposite of the writer's fail-open contract. Acquire a
+    # slot first (drop the write if the fuse is blown), and guard the spawn so a failed
+    # start can NEVER reach the caller.
+    if not _audit_inflight.acquire(blocking=False):
+        log.warning(
+            "v2_turns audit DROPPED — %d writes already in flight (NAS slow/down?)",
+            _MAX_INFLIGHT_AUDIT,
+        )
+        return
+
+    def _run() -> None:
+        try:
+            _safe_record(record_turn, row)
+        finally:
+            _audit_inflight.release()
+
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except RuntimeError:  # can't start new thread — fail open, never crash the turn
+        _audit_inflight.release()
+        log.warning("v2_turns audit thread could not start — turn not audited", exc_info=True)
+
+
+def _record_turn_failure(
+    record_turn: Callable[[dict], None] | None,
+    config: dict,
+    text: str,
+    started: float | None,
+    exc: BaseException,
+    *,
+    classifier_intent: str | None = None,
+    tier: str | None = None,
+    tier_override_source: str | None = None,
+    base_degraded: list[str] | None = None,
+) -> None:
+    """One v2_turns row for a turn whose invoke RAISED, fired before the caller
+    re-raises. Degraded marker is 'recursion_limit' for a rail trip, else
+    'turn_failed'; the exception text rides `error`. This is what makes the docstring
+    promise — a row on the error exits, not just the timeout exit — literally true
+    (cross-review correctness H)."""
+    marker = (
+        "recursion_limit" if type(exc).__name__ == "GraphRecursionError" else "turn_failed"
+    )
+    latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
+    _fire_turn_record(
+        record_turn, config, text, latency_ms,
+        classifier_intent=classifier_intent,
+        tier=tier,
+        tier_override_source=tier_override_source,
+        extra_degraded=[*(base_degraded or []), marker],
+        error=str(exc) or type(exc).__name__,
+    )
+
 
 # Degrade-safe tracer (same rule as tracing.py: a passenger, never the driver).
 # Without a root span at the ask() seam, the parallel-start's worker threads each
@@ -118,6 +232,7 @@ def ask(
     followup_skip_s: float = 6.0,
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
+    record_turn: Callable[[dict], None] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -148,6 +263,10 @@ def ask(
       guild member and the owner's house. The owner is always in the set; more can
       be added by config (e.g. Megan) with no code change (factory.action_allowlist_for).
       None = unenforced (dev boxes), same posture as deep_allowed.
+    - record_turn: the v2_turns audit seam (factory.turn_recorder_for). Called
+      once per completed turn on EVERY path with the fully-built row, off the hot
+      path and fail-open (see _fire_turn_record). None = no auditing (dev/CI, no
+      DATABASE_URL), byte-for-byte the old behavior.
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
@@ -167,7 +286,11 @@ def ask(
 
     with _turn_span(str(thread_id), text):
         if router is None or action_graph is None:
-            return _chat_turn(graph, text, config, rails, started)
+            # Chat-only path: either the TOOLS block isn't armed, or the caller was
+            # forced off it by the allowlist gate above. No router ran, so
+            # classifier_intent/tier stay NULL — the row records what actually
+            # happened, not a tier decision that was never made.
+            return _chat_turn(graph, text, config, rails, started, record_turn=record_turn)
 
         if str(thread_id).startswith("voice"):
             # ChannelPolicy (locked): voice is PINNED to the standard tier —
@@ -177,7 +300,7 @@ def ask(
             # chat node's DEFAULT_TIER (= standard) always applies.
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
-                speak_fn, satellite_for, followup_skip_s,
+                speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -187,12 +310,17 @@ def ask(
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
             log.info("route decision | thread=%s route=action", thread_id)
-            return _action_turn(action_graph, graph, text, config, add_human=True)
+            return _action_turn(
+                action_graph, graph, text, config, add_human=True,
+                record_turn=record_turn, started=started,
+            )
 
         # Chat route on a TEXT thread: the router's tier picks the model. This
         # is where the deep cap bites — the gate is an atomic spend against
         # v2_model_usage, so it runs ONLY once we know this turn is deep.
         tier = normalize_tier(decision.tier)
+        override_source: str | None = None
+        downgrade_marker: list[str] | None = None
         if tier == "deep" and deep_allowed is not None and not deep_allowed():
             # Cap held: degrade to standard, and say so in the logs (the V1
             # opus cap degraded SILENTLY — a documented regret, not a feature).
@@ -200,28 +328,97 @@ def ask(
                 "deep tier cap reached — downgrading to standard | thread=%s", thread_id
             )
             tier = DEFAULT_TIER
-        # The router log IS the persistence for the tier decision until the
-        # v2_turns writer lands — same fields the turns row will carry.
+            # The turn row now carries this too: the served tier (standard), WHY it
+            # differs from the classifier's pick (tier_override_source), and a
+            # degraded marker so the capability loop can see a capped deep request.
+            override_source = "deep_cap"
+            downgrade_marker = ["deep_cap_downgraded"]
         log.info("route decision | thread=%s route=chat tier=%s", thread_id, tier)
         config["configurable"]["tier"] = tier
-        return _chat_turn(graph, text, config, rails, started)
+        return _chat_turn(
+            graph, text, config, rails, started, record_turn=record_turn,
+            classifier_intent="chat", tier=tier,
+            tier_override_source=override_source, extra_degraded=downgrade_marker,
+        )
 
 
-def _chat_turn(graph: object, text: str, config: dict, rails: Rails, started: float) -> str:
-    """The original chat path: invoke, budget-check, extract."""
-    result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+def _chat_turn(
+    graph: object,
+    text: str,
+    config: dict,
+    rails: Rails,
+    started: float,
+    *,
+    record_turn: Callable[[dict], None] | None = None,
+    classifier_intent: str | None = None,
+    tier: str | None = None,
+    tier_override_source: str | None = None,
+    extra_degraded: list[str] | None = None,
+) -> str:
+    """The original chat path: invoke, budget-check, extract — now also audited.
+
+    The v2_turns row is fired on BOTH exits: the normal return AND the timeout
+    raise (the reply exists either way — a turn that ran past budget is exactly
+    the kind of thing forensics need to see). raw_reply == emitted_reply here:
+    the chat path has no separate polish step (V1's Gemini polisher is now
+    prompt-side emotion tags), so what the model said IS what the channel emits.
+    """
+    try:
+        result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+    except Exception as e:
+        # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
+        # for forensics and the capability loop — record it BEFORE re-raising so the
+        # 'row on EVERY completion path incl. error' contract actually holds
+        # (cross-review correctness H). Then propagate unchanged: the caller still sees
+        # the failure exactly as before.
+        _record_turn_failure(
+            record_turn, config, text, started, e,
+            classifier_intent=classifier_intent,
+            tier=tier,
+            tier_override_source=tier_override_source,
+            base_degraded=extra_degraded,
+        )
+        raise
+    reply = _reply_text(result["messages"][-1])
 
     elapsed = time.monotonic() - started
-    if elapsed > rails.wall_clock_s:
+    timed_out = elapsed > rails.wall_clock_s
+    timeout_msg = (
+        f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)" if timed_out else None
+    )
+    degraded = list(extra_degraded or [])
+    if timed_out:
+        degraded.append("wall_clock_exceeded")
+
+    _fire_turn_record(
+        record_turn, config, text, int(elapsed * 1000),
+        classifier_intent=classifier_intent,
+        tier=tier,
+        tier_override_source=tier_override_source,
+        raw_reply=reply,
+        emitted_reply=reply,
+        messages=result["messages"],
+        extra_degraded=degraded or None,
+        error=timeout_msg,
+    )
+
+    if timed_out:
         # The reply exists but arrived past budget — surface it loudly rather than
         # silently normalizing a degraded experience (voice cares at ~4s, not 90).
-        raise TurnTimeout(f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)")
+        raise TurnTimeout(timeout_msg)
 
-    return _reply_text(result["messages"][-1])
+    return reply
 
 
 def _action_turn(
-    action_graph: object, graph: object, text: str, config: dict, *, add_human: bool
+    action_graph: object,
+    graph: object,
+    text: str,
+    config: dict,
+    *,
+    add_human: bool,
+    record_turn: Callable[[dict], None] | None = None,
+    started: float | None = None,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -230,14 +427,37 @@ def _action_turn(
     the chat model sees "I turned the office light on" as its own prior message
     instead of a hole where an action happened. as_node="chat" attributes the
     write to the node that normally speaks.
+
+    The audit row carries the ACTION subgraph's OWN message list (result_messages)
+    — the AIMessage tool_calls + ToolMessages — so tool_calls/degraded are mined
+    from the real tool loop, not the two-line human/ai summary written to history.
     """
-    result = action_graph.invoke({"messages": [HumanMessage(content=text)]}, config)
-    final = _reply_text(result["messages"][-1])
+    try:
+        result = action_graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+    except Exception as e:
+        # Rail trip / tool-loop blowup on the sequential action path: record the
+        # failed turn (classifier_intent='action') before re-raising, same as the
+        # chat path (cross-review correctness H).
+        _record_turn_failure(
+            record_turn, config, text, started, e, classifier_intent="action"
+        )
+        raise
+    result_messages = result["messages"]
+    final = _reply_text(result_messages[-1])
     messages: list = [AIMessage(content=final)]
     if add_human:
         messages.insert(0, HumanMessage(content=text))
     graph.update_state(
         {"configurable": config["configurable"]}, {"messages": messages}, as_node="chat"
+    )
+
+    latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
+    _fire_turn_record(
+        record_turn, config, text, latency_ms,
+        classifier_intent="action",
+        raw_reply=final,
+        emitted_reply=final,
+        messages=result_messages,
     )
     return final
 
@@ -282,6 +502,7 @@ def _voice_parallel_start(
     speak_fn: Callable[[str, str], None] | None,
     satellite_for: Callable[[str | None], str] | None,
     followup_skip_s: float,
+    record_turn: Callable[[dict], None] | None = None,
 ) -> str:
     """Voice hot path: race the router against the chat generation.
 
@@ -359,14 +580,40 @@ def _voice_parallel_start(
                     {"messages": [HumanMessage(content=text), reply_message]},
                     as_node="chat",
                 )
+            except Exception as e:
+                # Speculative voice-chat generation raised: record the failed voice
+                # turn (pinned standard) before re-raising, so the error exit audits
+                # like the others (cross-review correctness H).
+                _record_turn_failure(
+                    record_turn, config, text, started, e,
+                    classifier_intent="chat", tier=DEFAULT_TIER,
+                )
+                raise
             finally:
                 _discard_speculative()
             elapsed = time.monotonic() - started
-            if elapsed > rails.wall_clock_s:
-                raise TurnTimeout(
-                    f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
-                )
-            return _reply_text(reply_message)
+            timed_out = elapsed > rails.wall_clock_s
+            timeout_msg = (
+                f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
+                if timed_out else None
+            )
+            reply = _reply_text(reply_message)
+            # Voice is pinned to standard (ChannelPolicy) — record that, not the
+            # router's ignored tier hint. config carries the REAL thread_id, so
+            # the row is a 'voice' turn even though generation ran on the throwaway.
+            _fire_turn_record(
+                record_turn, config, text, int(elapsed * 1000),
+                classifier_intent="chat",
+                tier=DEFAULT_TIER,
+                raw_reply=reply,
+                emitted_reply=reply,
+                messages=[reply_message],
+                extra_degraded=["wall_clock_exceeded"] if timed_out else None,
+                error=timeout_msg,
+            )
+            if timed_out:
+                raise TurnTimeout(timeout_msg)
+            return reply
 
         # Action: the ack goes out NOW; the tool loop finishes in the background.
         # Best-effort cancel of the speculative chat call — if it already
@@ -438,6 +685,23 @@ def _voice_parallel_start(
                 except Exception:
                     pass
             _discard_speculative()
+
+            # Audit the voice action turn — from INSIDE this already-background
+            # thread, so it's off the hot path by construction (the caller got the
+            # ack long ago). emitted_reply is the ACK the caller actually heard;
+            # raw_reply is the action's real outcome (the provenance split the
+            # schema exists for). tool_calls/degraded come from result_messages;
+            # a raised background action is an honest error + 'action_failed' marker.
+            _fire_turn_record(
+                record_turn, config, text,
+                int((time.monotonic() - started) * 1000),
+                classifier_intent="action",
+                raw_reply=final,
+                emitted_reply=decision.ack,
+                messages=result_messages,
+                extra_degraded=["action_failed"] if failed else None,
+                error=final if failed else None,
+            )
 
         threading.Thread(target=_in_ctx(_complete_action), daemon=True).start()
         return decision.ack

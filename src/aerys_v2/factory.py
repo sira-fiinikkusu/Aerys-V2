@@ -302,6 +302,53 @@ def deep_gate_for(settings: Settings) -> Callable[[], bool] | None:
     return allow_deep
 
 
+def turn_recorder_for(settings: Settings) -> Callable[[dict], None] | None:
+    """The v2_turns audit-writer seam: persist one row per completed ask() turn.
+
+    n8n mapping: the record every workflow execution left in the Executions tab —
+    who was resolved, which tier fired, raw vs emitted output, tool health — done
+    durably in the brain's OWN aerys_v2 database (checkpointer/outbox/model-usage
+    live there too; run_boot_assertions already refused to boot if DATABASE_URL
+    aims anywhere but aerys_v2, so this can never scribble into prod `aerys`).
+
+    None when database_url is unset (dev/CI boxes): ask() then simply doesn't
+    audit — same arming pattern as deep_gate_for / speak_fn_for. Fresh short
+    connection per turn (same per-call choice and "pool is a drop-in later" note
+    as context_fn_for); a personal-assistant volume never strains it.
+
+    FAIL-OPEN (the load-bearing contract): any DB trouble — NAS down, DNS hiccup,
+    a bad row — is logged and swallowed. The audit insert must never crash a turn,
+    mirroring the outbox (_outbox_open) and extraction graceful stance. service.py
+    already calls this OFF the hot path in a daemon thread, so a slow NAS costs a
+    lingering background thread, never a byte of the user's latency.
+    """
+    if settings.database_url is None:
+        log.info("v2_turns audit UNRECORDED — no DATABASE_URL configured")
+        return None
+    import psycopg
+
+    from aerys_v2.turns import INSERT_TURN_SQL
+
+    def record(row: dict) -> None:
+        try:
+            # Bounded blocking (cross-review hotpath H): connect_timeout caps a DOWN
+            # NAS's TCP-SYN wait (default ~127s at kernel tcp_syn_retries) and
+            # statement_timeout caps a SLOW/hung NAS's INSERT, so an audit connection
+            # can never hold an aerys_v2 slot open long enough to accumulate against
+            # Postgres max_connections and starve the hot path's own DB access.
+            with psycopg.connect(
+                settings.database_url,
+                connect_timeout=5,
+                options="-c statement_timeout=5000",
+            ) as conn:
+                conn.execute(INSERT_TURN_SQL, row)
+        except Exception:
+            # graceful but never silent — an unaudited turn must show in the logs.
+            log.warning("v2_turns insert failed — turn not audited", exc_info=True)
+
+    return record
+
+
 # Overlay for the action subgraph's system prompt: the chat persona plus tool
 # discipline. The "never claim success" line is load-bearing — it's the prompt-side
 # half of the honest-refusal contract in tools/home_control.py.
