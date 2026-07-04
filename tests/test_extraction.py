@@ -12,10 +12,18 @@ from datetime import datetime, timedelta, timezone
 
 from aerys_v2.workers.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
+    LEASE_KIND,
+    N8N_EXTRACTION_WORKFLOW_ID,
     SOURCE_COLUMNS,
+    LiveWriteRefused,
+    _value_text_from_content,
     batch_date,
+    ensure_lease_holder,
     parse_observations,
     run_extraction,
+    run_live_extraction,
+    triage_memory,
+    values_similar,
 )
 
 T0 = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
@@ -233,3 +241,172 @@ def test_parse_observations_tolerates_garbage():
 def test_batch_date_renders_owner_timezone():
     # 2026-07-03 01:00 UTC is still July 2 in Florida (EDT, UTC-4)
     assert batch_date(datetime(2026, 7, 3, 1, 0, tzinfo=timezone.utc)) == "Jul 2"
+
+
+# --- live-mode triage (prod `memories`) ---------------------------------------
+
+
+def lease_conn(holder=None, **extra_routes):
+    """A FakeConn pre-wired with a v2_writer_lease answer. holder=None means
+    "no row yet" (ensure_lease_holder seeds + defaults to 'n8n')."""
+    routes = [("FROM v2_writer_lease", [(holder,)] if holder else [])]
+    routes.extend(extra_routes.get("routes", ()))
+    return FakeConn(routes)
+
+
+def test_values_similar_exact_and_fuzzy_and_different():
+    assert values_similar("Lives in Rotonda West, Florida", "Lives in Rotonda West, Florida")
+    assert values_similar("Lives in Rotonda West, Florida", "lives in rotonda west, florida")  # case
+    assert values_similar("Interested in a Dodge Ram truck", "Interested in a Dodge Ram")  # restated
+    assert not values_similar("Lives in Rotonda West, Florida", "Lives in Austin, Texas")  # genuinely new
+
+
+def test_value_text_from_content_strips_label_context_and_date():
+    content = "basic.location: Lives in Rotonda West, Florida -- came up casually (Jul 2)"
+    assert _value_text_from_content(content) == "Lives in Rotonda West, Florida"
+    # no context, no date
+    assert _value_text_from_content("basic.location: Lives in Rotonda West, Florida") == \
+        "Lives in Rotonda West, Florida"
+
+
+def test_triage_inserts_when_no_existing_row():
+    conn = FakeConn([("FROM memories", [])])  # dedup check finds nothing live
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West",
+        content="basic.location: Lives in Rotonda West", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "insert"
+    inserts = [s for s, _ in conn.calls if s.lstrip().upper().startswith("INSERT")]
+    assert len(inserts) == 1
+    assert not any(s.lstrip().upper().startswith("UPDATE") for s, _ in conn.calls)
+
+
+def test_triage_updates_when_value_restated():
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
+        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "update"
+    updates = [(s, p) for s, p in conn.calls if s.lstrip().upper().startswith("UPDATE")]
+    assert len(updates) == 1
+    assert updates[0][1]["id"] == "existing-id"
+    assert updates[0][1]["embedding"] == "[0.4,0.5,0.6]"  # fresh embedding rides the UPDATE
+    assert not any(s.lstrip().upper().startswith("INSERT") for s, _ in conn.calls)
+
+
+def test_triage_replaces_when_value_changed():
+    conn = FakeConn([("FROM memories", [("old-id", "basic.location: Lives in Rotonda West")])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Austin, Texas",
+        content="basic.location: Lives in Austin, Texas", context=None, event_date=None,
+        embedding="[0.7,0.8,0.9]", source_platform="discord", privacy_level="public",
+        created_at="2026-07-03 12:00:00+00",
+    )
+    assert action == "replace"
+    # atomic soft-delete + insert: ONE statement, the CTE, referencing old_id and
+    # inserting the new row — never a bare UPDATE/DELETE plus a separate INSERT.
+    replace_calls = [(s, p) for s, p in conn.calls if "soft_del" in s]
+    assert len(replace_calls) == 1
+    assert replace_calls[0][1]["old_id"] == "old-id"
+    assert replace_calls[0][1]["content"] == "basic.location: Lives in Austin, Texas"
+    assert not any(
+        s.lstrip().upper().startswith("UPDATE") and "soft_del" not in s for s, _ in conn.calls
+    )
+
+
+# --- live-mode hard gates ------------------------------------------------------
+
+
+def test_live_refuses_when_n8n_workflow_active():
+    prod, staging, prod_write = FakeConn(), lease_conn(holder="brain"), FakeConn()
+    try:
+        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: True)
+        assert False, "expected LiveWriteRefused"
+    except LiveWriteRefused as e:
+        assert N8N_EXTRACTION_WORKFLOW_ID in str(e)
+    # refused BEFORE any read/write — no watermark or prod query touched.
+    assert prod.calls == []
+    assert not any("v2_extraction_watermark" in s for s, _ in staging.calls)
+    assert prod_write.calls == []
+
+
+def test_live_refuses_when_lease_held_by_n8n():
+    prod, staging, prod_write = FakeConn(), lease_conn(holder="n8n"), FakeConn()
+    try:
+        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: False)
+        assert False, "expected LiveWriteRefused"
+    except LiveWriteRefused as e:
+        assert LEASE_KIND in str(e)
+    assert prod.calls == []
+    assert prod_write.calls == []
+
+
+def test_live_refuses_and_seeds_lease_row_when_absent():
+    """No memory_extraction row yet (migration 001 seeded only 4 kinds) —
+    ensure_lease_holder seeds it as 'n8n' (the pre-flip default) and live mode
+    refuses exactly as if n8n already held it explicitly."""
+    staging = lease_conn(holder=None)
+    try:
+        run_live_extraction(FakeConn(), staging, FakeConn(), FakeLlm([]), fake_embedder, lambda: False)
+        assert False, "expected LiveWriteRefused"
+    except LiveWriteRefused as e:
+        assert "n8n" in str(e)
+    seed_calls = [
+        (s, p) for s, p in staging.calls
+        if "v2_writer_lease" in s and s.lstrip().upper().startswith("INSERT")
+    ]
+    assert seed_calls, "the lease row was seeded on first touch"
+    assert seed_calls[0][1] == {"kind": LEASE_KIND}
+
+
+def test_ensure_lease_holder_returns_brain_without_seeding_twice():
+    staging = lease_conn(holder="brain")
+    assert ensure_lease_holder(staging) == "brain"
+
+
+def test_live_proceeds_and_triages_when_lease_held_by_brain_and_n8n_inactive():
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
+    staging = lease_conn(holder="brain")
+    prod_write = FakeConn([("FROM memories", [])])  # nothing existing -> insert
+    summary = run_live_extraction(
+        prod, staging, prod_write, FakeLlm([OBS]), fake_embedder, lambda: False,
+    )
+    assert summary["inserted_total"] == 1
+    assert summary["updated_total"] == 0
+    assert summary["replaced_total"] == 0
+    inserts = [s for s, _ in prod_write.calls if s.lstrip().upper().startswith("INSERT")]
+    assert inserts, "the triaged write landed on prod_write_conn, not staging_conn"
+    assert not any("v2_memories_staging" in s for s, _ in staging.calls)  # never shadow-staged
+    # watermark still advances, same table/mechanism as shadow mode
+    assert any("v2_extraction_watermark" in s and "INSERT" in s for s, _ in staging.calls)
+
+
+def test_live_computes_fresh_embedding_per_write_not_cached():
+    """Two observations from one LLM reply -> two DIFFERENT embedder calls,
+    each embedding riding its own write — never one embedding reused."""
+    calls = {"n": 0}
+
+    def counting_embedder(text):
+        calls["n"] += 1
+        return [float(calls["n"])]
+
+    two_obs = json.dumps([
+        {"key_label": "basic.location", "value_text": "Lives in Rotonda West", "context": None,
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+        {"key_label": "interest.game", "value_text": "Collects SNES games", "context": None,
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+    ])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West and collect SNES")])])
+    staging = lease_conn(holder="brain")
+    prod_write = FakeConn([("FROM memories", [])])
+    run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder, lambda: False)
+
+    assert calls["n"] == 2  # one fresh embed call per observation, not one for the batch
+    inserts = [p for s, p in prod_write.calls if s.lstrip().upper().startswith("INSERT")]
+    embeddings = {p["embedding"] for p in inserts}
+    assert embeddings == {"[1.0]", "[2.0]"}  # two distinct fresh vectors, not a shared/cached one
