@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     # e.g. "light.office_lamp,switch.desk_fan". Empty = every write refused —
     # the tool exists but is read-only, which is a valid canary stage zero.
     ha_canary_entities: str = ""
+    # Optional generic `timer.*` helper entity for the timer tool's NO-DEVICE
+    # fallback (text/DM/CLI turns carry no originating satellite, so there is no
+    # native LED-wheel timer to start). None = no fallback: the tool honestly says
+    # it can't set a device timer from a text channel instead of pretending. When
+    # set (e.g. "timer.aerys_fallback"), it starts that non-visual helper as a
+    # best-effort background timer and is honest it won't ring on a speaker. Arms
+    # nothing on its own — the timer tool itself is gated on ha_token like the
+    # rest of the home half.
+    ha_timer_fallback_entity: str | None = None
 
     # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
     # Owner rule (2026-07-03): if a device action completes within this many

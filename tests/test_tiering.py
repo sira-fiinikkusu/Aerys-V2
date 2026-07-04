@@ -325,7 +325,8 @@ def test_media_half_arms_from_embeddings_key_alone():
 
 def test_home_half_arms_from_ha_token_alone():
     tools = action_tools_for(settings_with(ha_token="ha-token"))
-    assert tool_names(tools) == {"home_control", "search_entities"}
+    # the timer tool rides the same HA door as home_control/search_entities
+    assert tool_names(tools) == {"home_control", "search_entities", "timer"}
 
 
 def test_both_halves_arm_together():
@@ -333,7 +334,7 @@ def test_both_halves_arm_together():
         settings_with(ha_token="ha-token", embeddings_api_key="or-key")
     )
     assert tool_names(tools) == {
-        "home_control", "search_entities",
+        "home_control", "search_entities", "timer",
         "analyze_image", "read_document", "youtube_summary",
     }
 
@@ -356,8 +357,10 @@ def test_overlay_only_mentions_armed_tools():
     # the prompt must never tell the model to use a tool that doesn't exist
     media_only = action_overlay_for(settings_with(embeddings_api_key="or-key"))
     assert "analyze_image" in media_only and "home_control" not in media_only
+    assert "timer tool" not in media_only  # timer rides the HA half, not media
     home_only = action_overlay_for(settings_with(ha_token="ha-token"))
     assert "home_control" in home_only and "analyze_image" not in home_only
+    assert "timer tool" in home_only  # armed with ha_token alongside home_control
     both = action_overlay_for(
         settings_with(ha_token="ha-token", embeddings_api_key="or-key")
     )
@@ -387,7 +390,7 @@ def test_all_three_halves_arm_together():
         )
     )
     assert tool_names(tools) == {
-        "home_control", "search_entities",
+        "home_control", "search_entities", "timer",
         "analyze_image", "read_document", "youtube_summary",
         "search_web",
     }
