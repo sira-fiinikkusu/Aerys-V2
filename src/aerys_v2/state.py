@@ -24,6 +24,11 @@ class Identity(TypedDict, total=False):
     # service's visibility gates keep dm-only claims out of shared rooms. Absent =
     # 'private' (the owner's own single-user channels — CLI, voice/HTTP).
     privacy_context: str
+    # HA ConversationInput.device_id — the originating satellite. Set by the HA
+    # aerys_conversation component (via /ask); lets the spoken follow-up answer on
+    # the SAME device the voice turn came from. Absent = fall back to the single
+    # configured announce entity (today's single-satellite behavior).
+    device_id: str
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}

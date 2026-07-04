@@ -133,6 +133,8 @@ def main() -> None:
             context_fn_for,
             deep_gate_for,
             load_soul,
+            resolve_announce_entity,
+            satellite_map_from,
             speak_fn_for,
             tier_models_for,
         )
@@ -177,15 +179,25 @@ def main() -> None:
                          settings.ha_canary_entities,
                          "on" if settings.embeddings_api_key else "off")
             # Spoken follow-up seam: None = history-only (no announce entity).
+            # satellite_for resolves the originating device_id -> announce entity
+            # (HA_SATELLITE_MAP, falling back to ha_announce_entity). Wired only
+            # when speak_fn is armed — the two halves always travel together.
+            satellite_map = satellite_map_from(settings.ha_satellite_map)
             speak_fn = speak_fn_for(settings)
+            satellite_for = (
+                (lambda device_id: resolve_announce_entity(
+                    device_id, satellite_map, settings.ha_announce_entity))
+                if speak_fn is not None else None
+            )
             if speak_fn is not None:
-                log.info("spoken follow-ups armed | entity=%s skip<=%.1fs",
-                         settings.ha_announce_entity, settings.voice_followup_skip_s)
+                log.info("spoken follow-ups armed | default_entity=%s satellites=%d skip<=%.1fs",
+                         settings.ha_announce_entity, len(satellite_map),
+                         settings.voice_followup_skip_s)
             app = build_app(
                 lambda text, identity, thread: ask(
                     graph, text, identity=identity, thread_id=thread,
                     router=router, action_graph=action_graph,
-                    speak_fn=speak_fn,
+                    speak_fn=speak_fn, satellite_for=satellite_for,
                     followup_skip_s=settings.voice_followup_skip_s,
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,

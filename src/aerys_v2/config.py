@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     # None = no spoken follow-ups (history-only) — same arming pattern as every
     # other optional transport.
     ha_announce_entity: str | None = None
+    # csv of "device_id=entity_id" pairs mapping a ConversationInput.device_id to
+    # the assist_satellite entity that should speak follow-ups FOR that device.
+    # Empty or an unmapped device_id falls back to ha_announce_entity (today's
+    # single-satellite behavior) — never a silent drop. Same CSV convention as
+    # ha_canary_entities.
+    ha_satellite_map: str = ""
 
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
     # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =

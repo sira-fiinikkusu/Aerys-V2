@@ -113,7 +113,8 @@ def ask(
     rails: Rails = Rails(),
     router: Callable[[str], RouteDecision] | None = None,
     action_graph: object | None = None,
-    speak_fn: Callable[[str], None] | None = None,
+    speak_fn: Callable[[str, str], None] | None = None,
+    satellite_for: Callable[[str | None], str] | None = None,
     followup_skip_s: float = 6.0,
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
@@ -126,9 +127,15 @@ def ask(
       super-step counts, so a runaway tool loop trips it long before infinity.
     - router + action_graph arm the TOOLS block (see module docstring); either
       missing = the pre-TOOLS chat-only path, unchanged.
-    - speak_fn + followup_skip_s: the voice spoken-follow-up seam — speak_fn
-      delivers text to the room (HA announce in prod, a fake in tests); the
-      silent-success rule in _voice_parallel_start decides WHEN it fires.
+    - speak_fn + satellite_for + followup_skip_s: the voice spoken-follow-up
+      seam — speak_fn delivers (text, entity_id) to the room (HA announce in
+      prod, a fake in tests); satellite_for resolves the originating device_id
+      to the announce entity_id (factory.resolve_announce_entity), so the
+      follow-up answers on the SAME satellite the turn came from; the
+      silent-success rule in _voice_parallel_start decides WHEN it fires. None
+      satellite_for = no follow-up target resolves, so speak_fn never fires
+      (the pre-satellite-routing default: history-only unless the caller wires
+      both halves, exactly as cli.py --serve does).
     - deep_allowed: the deep-tier cap gate (factory.deep_gate_for) — consulted
       ONLY when a text-thread chat turn actually classified deep, so voice
       turns and downgrades never burn a v2_model_usage credit. None = cap
@@ -170,7 +177,7 @@ def ask(
             # chat node's DEFAULT_TIER (= standard) always applies.
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
-                speak_fn, followup_skip_s,
+                speak_fn, satellite_for, followup_skip_s,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -272,7 +279,8 @@ def _voice_parallel_start(
     started: float,
     router: Callable[[str], RouteDecision],
     action_graph: object,
-    speak_fn: Callable[[str], None] | None,
+    speak_fn: Callable[[str, str], None] | None,
+    satellite_for: Callable[[str | None], str] | None,
     followup_skip_s: float,
 ) -> str:
     """Voice hot path: race the router against the chat generation.
@@ -398,11 +406,16 @@ def _voice_parallel_start(
             # speculative chat future — the room shouldn't wait on a
             # generation nobody asked for.
             elapsed = time.monotonic() - ack_at
-            if speak_fn is not None and (
+            # Resolve WHERE the follow-up speaks from the originating satellite's
+            # device_id (rides the per-call identity). No satellite_for wired (or
+            # no target resolves) = no announce, exactly as before this seam existed.
+            device_id = real_configurable.get("identity", {}).get("device_id")
+            entity_id = satellite_for(device_id) if satellite_for is not None else None
+            if speak_fn is not None and entity_id is not None and (
                 failed or _needs_spoken_followup(result_messages, elapsed, followup_skip_s)
             ):
                 try:
-                    speak_fn(final)
+                    speak_fn(final, entity_id)
                 except Exception:
                     # delivery is best-effort; the durable record below is not
                     log.warning("spoken follow-up delivery failed", exc_info=True)

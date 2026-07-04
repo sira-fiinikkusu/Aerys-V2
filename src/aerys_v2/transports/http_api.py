@@ -23,6 +23,10 @@ class AskRequest(BaseModel):
     # curl defaults to a shared scratch thread. (Checkpointer keys, not sessions.)
     thread_id: str = "http:default"
     display_name: str = "Chris (HTTP)"
+    # HA's aerys_conversation component passes the originating satellite's
+    # ConversationInput.device_id here so the spoken follow-up answers on the SAME
+    # device. Every other caller (curl, tests) omits it -> single-satellite default.
+    device_id: str | None = None
 
 
 class AskReply(BaseModel):
@@ -131,6 +135,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
             # Owner's own authed channel → private context (see openai_compat note).
             "privacy_context": "private",
         }
+        # Only carry device_id when the caller sent one — keeps the identity dict
+        # byte-for-byte as before for every non-satellite caller (curl, tests).
+        if body.device_id:
+            identity["device_id"] = body.device_id
         # Same seam as the OpenAI shim: callers that name a "voice*" thread_id
         # get ack-then-act for device commands; every other thread gets the
         # sequential router (reply = the actual action outcome). No new fields —

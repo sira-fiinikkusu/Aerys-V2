@@ -104,24 +104,30 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
     return context_fn
 
 
-def speak_fn_for(settings: Settings) -> Callable[[str], None] | None:
-    """The spoken-follow-up delivery seam: text -> the room, via HA announce.
+def satellite_map_from(csv: str) -> dict[str, str]:
+    """Parse HA_SATELLITE_MAP ('device_id=entity_id,...') into a dict ('' -> {})."""
+    pairs = (p.strip() for p in csv.split(",") if p.strip())
+    return dict(p.split("=", 1) for p in pairs)
+
+
+def speak_fn_for(settings: Settings) -> Callable[[str, str], None] | None:
+    """The spoken-follow-up delivery seam: (text, entity_id) -> the room, via HA
+    announce.
 
     None unless BOTH ha_token and ha_announce_entity are set — same arming
     pattern as every optional transport. The service layer decides WHEN to
-    speak (silent-success rule); this only knows HOW. Raising on failure is
-    fine: the caller logs and moves on, and the history write never depends
-    on delivery.
+    speak (silent-success rule) and WHERE (the entity_id is now resolved PER
+    CALL by the caller via resolve_announce_entity below, not baked in at
+    construction); this only knows HOW. Raising on failure is fine: the caller
+    logs and moves on, and the history write never depends on delivery.
 
-    KNOWN LIMITATION — per-satellite follow-up routing (2026-07-03): the
-    announce target is a single static entity from HA_ANNOUNCE_ENTITY. The
-    OpenAI shim never learns WHICH satellite a request came from — HA's
-    Extended OpenAI Conversation sends no satellite/device identity in the
-    chat-completions payload — so "announce where the request came from" is
-    not possible at this seam. Acceptable for the single-satellite beta
-    (point the env var at the satellite actually running the pipeline); the
-    proper fix (satellite identity riding the request) lands with the
-    voice-runtime phase.
+    ha_announce_entity is still required to ARM the feature at all — it's now
+    the fallback default target (resolve_announce_entity), not the sole target.
+    This is the fix for the former KNOWN LIMITATION: the OpenAI shim never
+    learned WHICH satellite a request came from, so follow-ups always announced
+    to one hardcoded entity. The aerys_conversation HA component now rides the
+    device_id on the /ask request, and service.py resolves it to the right
+    satellite per turn.
     """
     if settings.ha_token is None or settings.ha_announce_entity is None:
         return None
@@ -129,18 +135,25 @@ def speak_fn_for(settings: Settings) -> Callable[[str], None] | None:
 
     base = settings.ha_base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
-    entity = settings.ha_announce_entity
 
-    def speak(text: str) -> None:
+    def speak(text: str, entity_id: str) -> None:
         r = httpx.post(
             f"{base}/api/services/assist_satellite/announce",
             headers=headers,
-            json={"entity_id": entity, "message": text},
+            json={"entity_id": entity_id, "message": text},
             timeout=15.0,
         )
         r.raise_for_status()
 
     return speak
+
+
+def resolve_announce_entity(
+    device_id: str | None, satellite_map: dict[str, str], default_entity: str
+) -> str:
+    """device_id -> its mapped satellite, or the configured default. None/
+    unmapped device_id degrades to today's single-satellite behavior."""
+    return satellite_map.get(device_id, default_entity) if device_id else default_entity
 
 
 def load_soul(path: Path) -> str:

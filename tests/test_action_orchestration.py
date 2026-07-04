@@ -15,7 +15,12 @@ import httpx
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
-from aerys_v2.factory import build_action_graph, build_graph
+from aerys_v2.factory import (
+    build_action_graph,
+    build_graph,
+    resolve_announce_entity,
+    satellite_map_from,
+)
 from aerys_v2.router import RouteDecision
 from aerys_v2.service import ask
 from aerys_v2.tools.home_control import build_home_control_tool, canary_set
@@ -204,7 +209,18 @@ class ToolNoteActionGraph:
 
 def recording_speaker():
     calls: list[str] = []
-    return calls, calls.append
+
+    def speak(text: str, entity_id: str) -> None:
+        calls.append(text)
+
+    return calls, speak
+
+
+def fixed_satellite(_device_id):
+    # A satellite_for that always resolves to one entity — the follow-up target
+    # for these single-device orchestration tests. Its presence is what arms the
+    # announce (no satellite_for => no target resolves => speak_fn never fires).
+    return "assist_satellite.test"
 
 
 def test_voice_fast_clean_write_skips_spoken_followup():
@@ -214,7 +230,8 @@ def test_voice_fast_clean_write_skips_spoken_followup():
         ["Done: turn_off sent to light.desk (HA responded 200)."], final="Light's off."
     )
     out = ask(graph, "turn off the desk light", identity=CHRIS, thread_id="voice:skip",
-              router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+              router=action_router, action_graph=stub, speak_fn=speak,
+              satellite_for=fixed_satellite, followup_skip_s=6.0)
     assert out == "[warmly] Getting that light for you"
     msgs = wait_for_messages(graph, "voice:skip", 2)
     assert any(m.content == "Light's off." for m in msgs)  # silent record still lands
@@ -229,7 +246,8 @@ def test_voice_slow_action_speaks_followup():
         final="Light's off.", delay_s=0.02,
     )
     ask(graph, "turn off the desk light", identity=CHRIS, thread_id="voice:slow",
-        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=0.0)
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_skip_s=0.0)
     wait_for_messages(graph, "voice:slow", 2)
     assert calls == ["Light's off."]  # slow = silence would read as a dropped command
 
@@ -243,7 +261,7 @@ def test_voice_failed_action_always_speaks():
     graph = build_graph(fake_model("speculative chat"), soul="s")
     ask(graph, "toggle the desk light", identity=CHRIS, thread_id="voice:fail",
         router=action_router, action_graph=ExplodingActionGraph(),
-        speak_fn=speak, followup_skip_s=6.0)
+        speak_fn=speak, satellite_for=fixed_satellite, followup_skip_s=6.0)
     wait_for_messages(graph, "voice:fail", 2)
     assert len(calls) == 1 and "didn't complete" in calls[0]  # failures NEVER silent
 
@@ -256,7 +274,8 @@ def test_voice_refusal_speaks_followup():
         final="I can't touch that one yet.",
     )
     ask(graph, "turn off the garage light", identity=CHRIS, thread_id="voice:refuse",
-        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_skip_s=6.0)
     wait_for_messages(graph, "voice:refuse", 2)
     # nothing visibly changed in the room — the honest refusal MUST be spoken
     assert calls == ["I can't touch that one yet."]
@@ -270,7 +289,8 @@ def test_voice_state_query_speaks_answer():
         final="It's on.",
     )
     ask(graph, "is the desk light on?", identity=CHRIS, thread_id="voice:query",
-        router=action_router, action_graph=stub, speak_fn=speak, followup_skip_s=6.0)
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_skip_s=6.0)
     wait_for_messages(graph, "voice:query", 2)
     assert calls == ["It's on."]  # a question's answer IS the follow-up
 
@@ -280,20 +300,20 @@ def test_voice_no_tool_run_speaks_followup():
     graph = build_graph(fake_model("speculative chat"), soul="s")
     ask(graph, "turn on the desk light", identity=CHRIS, thread_id="voice:notool",
         router=action_router, action_graph=StubActionGraph("nothing I could do"),
-        speak_fn=speak, followup_skip_s=6.0)
+        speak_fn=speak, satellite_for=fixed_satellite, followup_skip_s=6.0)
     wait_for_messages(graph, "voice:notool", 2)
     assert calls == ["nothing I could do"]  # no device change = the sentence is all there is
 
 
 def test_speak_failure_never_blocks_history():
-    def broken_speaker(_text: str) -> None:
+    def broken_speaker(_text: str, _entity_id: str) -> None:
         raise RuntimeError("satellite offline")
 
     graph = build_graph(fake_model("speculative chat"), soul="s")
     stub = ToolNoteActionGraph(["Refused: not allowed."], final="couldn't do it")
     ask(graph, "turn off the lamp", identity=CHRIS, thread_id="voice:deaf",
         router=action_router, action_graph=stub, speak_fn=broken_speaker,
-        followup_skip_s=6.0)
+        satellite_for=fixed_satellite, followup_skip_s=6.0)
     msgs = wait_for_messages(graph, "voice:deaf", 2)
     assert any(m.content == "couldn't do it" for m in msgs)  # durable record survives
 
@@ -637,3 +657,81 @@ def test_safe_display_name_strips_prompt_injection():
     assert _safe_display_name("a\r\nb\tc") == "abc"
     assert _safe_display_name("") == "Unknown Caller"
     assert _safe_display_name("x" * 200) == "x" * 64  # length-capped
+
+
+# ---- satellite-routing for voice follow-ups (pure functions) --------------------
+# The follow-up must answer on the SAME satellite the turn came from. Two pure
+# helpers do the work: satellite_map_from parses HA_SATELLITE_MAP, and
+# resolve_announce_entity keys a device_id to its satellite (or the default).
+# Same pure-function style as canary_set / _needs_spoken_followup.
+
+
+def test_satellite_map_from_empty_csv_is_empty_dict():
+    # No mapping configured — every device_id degrades to the default entity.
+    assert satellite_map_from("") == {}
+    assert satellite_map_from("   ") == {}
+
+
+def test_satellite_map_from_parses_multiple_pairs():
+    csv = (
+        "4f23e5d4672b5a56da3566d3522ccae7=assist_satellite.aerys_satellite_assist_satellite,"
+        "46100e87ff18621ce195fccf903ef049=assist_satellite.home_assistant_voice_0925b6_assist_satellite"
+    )
+    assert satellite_map_from(csv) == {
+        "4f23e5d4672b5a56da3566d3522ccae7": "assist_satellite.aerys_satellite_assist_satellite",
+        "46100e87ff18621ce195fccf903ef049": "assist_satellite.home_assistant_voice_0925b6_assist_satellite",
+    }
+
+
+def test_satellite_map_from_tolerates_whitespace_and_single_pair():
+    # Whitespace around pairs is stripped; a lone pair parses fine.
+    assert satellite_map_from(" dev1 = light.a ") == {"dev1 ": " light.a"}  # only pair-level strip
+    assert satellite_map_from("dev1=ent1") == {"dev1": "ent1"}
+
+
+def test_resolve_announce_entity_mapped_device_wins():
+    smap = {"dev-respeaker": "assist_satellite.living_room", "dev-pe": "assist_satellite.office"}
+    assert resolve_announce_entity("dev-pe", smap, "assist_satellite.default") == "assist_satellite.office"
+    assert resolve_announce_entity("dev-respeaker", smap, "assist_satellite.default") == "assist_satellite.living_room"
+
+
+def test_resolve_announce_entity_unmapped_device_falls_back_to_default():
+    smap = {"dev-respeaker": "assist_satellite.living_room"}
+    # An unknown device_id (e.g. the phone, not in the map) speaks from the default.
+    assert resolve_announce_entity("dev-unknown", smap, "assist_satellite.default") == "assist_satellite.default"
+
+
+def test_resolve_announce_entity_none_device_falls_back_to_default():
+    smap = {"dev-respeaker": "assist_satellite.living_room"}
+    # No device_id at all (curl, non-satellite caller) = today's single-satellite behavior.
+    assert resolve_announce_entity(None, smap, "assist_satellite.default") == "assist_satellite.default"
+    # And an empty map always degrades to the default, mapped or not.
+    assert resolve_announce_entity("dev-respeaker", {}, "assist_satellite.default") == "assist_satellite.default"
+
+
+def test_voice_followup_announces_on_originating_satellite():
+    # End-to-end: the turn's identity carries device_id; the follow-up resolves it
+    # to that device's satellite and speaks THERE — the whole point of the feature.
+    from aerys_v2.factory import resolve_announce_entity as _resolve
+
+    smap = {"dev-office-pe": "assist_satellite.office"}
+    spoken: list[tuple[str, str]] = []
+
+    def speak(text: str, entity_id: str) -> None:
+        spoken.append((text, entity_id))
+
+    def satellite_for(device_id):
+        return _resolve(device_id, smap, "assist_satellite.default")
+
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Refused: light.garage is not on the beta write allowlist."],
+        final="I can't touch that one yet.",
+    )
+    identity = {**CHRIS, "device_id": "dev-office-pe"}
+    ask(graph, "turn off the garage light", identity=identity, thread_id="voice:sat",
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=satellite_for, followup_skip_s=6.0)
+    wait_for_messages(graph, "voice:sat", 2)
+    # spoke the refusal, and did so on the ORIGINATING device's satellite
+    assert spoken == [("I can't touch that one yet.", "assist_satellite.office")]
