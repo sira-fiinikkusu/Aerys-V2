@@ -125,6 +125,7 @@ def main() -> None:
         import uvicorn
 
         from aerys_v2.factory import (
+            action_allowlist_for,
             action_stack_for,
             build_graph,
             build_model,
@@ -147,6 +148,9 @@ def main() -> None:
             # (v2_model_usage; None = unenforced on DB-less boxes, logged).
             tier_models = tier_models_for(settings)
             deep_gate = deep_gate_for(settings)
+            # AUTH: who may reach the action/tools stack (house control). Owner +
+            # any house_control_person_ids; None = unenforced (dev). See ask().
+            action_allow = action_allowlist_for(settings)
             log.info("tiers armed | fast=%s standard=%s deep=%s cap=%d/day",
                      settings.tier_fast_model,
                      settings.model if settings.model_backend == "oauth" else settings.tier_standard_model,
@@ -184,6 +188,7 @@ def main() -> None:
                     speak_fn=speak_fn,
                     followup_skip_s=settings.voice_followup_skip_s,
                     deep_allowed=deep_gate,
+                    action_allowlist=action_allow,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
@@ -205,6 +210,7 @@ def main() -> None:
             log.error(str(e))
             sys.exit(1)
         from aerys_v2.factory import (
+            action_allowlist_for,
             action_stack_for,
             build_graph,
             build_model,
@@ -261,6 +267,10 @@ def main() -> None:
                 graph, text, identity=identity, thread_id=thread,
                 router=router, action_graph=action_graph,
                 deep_allowed=deep_gate,
+                # AUTH GATE: house control + tools are allowlist-only. A guild
+                # member / DM'er not in the allowlist gets chat-only (enforced in
+                # ask()). Owner is always in; add others via house_control_person_ids.
+                action_allowlist=action_allowlist_for(settings),
             ),
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,

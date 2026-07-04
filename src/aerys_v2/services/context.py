@@ -50,7 +50,7 @@ def build_context(
     conn: Any,
     *,
     embed: Embedder | None = None,
-    privacy_context: str = "private",
+    privacy_context: str = "public",
 ) -> str:
     """Everything the brain knows about this person, as one prompt-ready block.
 
@@ -59,10 +59,11 @@ def build_context(
     builder spliced them. Returns '' when there is nothing to say; the caller
     injects nothing rather than an empty header.
 
-    privacy_context defaults to 'private' because today's only wired caller is
-    the owner's own channel (voice / HTTP behind the Bearer token). A future
-    guild transport passes 'public' and the P-level/visibility gates in the
-    services do the filtering — the assembly logic here doesn't change.
+    privacy_context defaults to 'public' — the FAIL-CLOSED, least-disclosure value
+    (it hides dm-only claims and private memories). The owner's own private channels
+    (voice / HTTP / CLI) opt IN to 'private' explicitly at the transport; anything
+    that forgets to pass a value reveals LESS, never more. The P-level/visibility
+    gates in the services do the filtering — the assembly logic here doesn't change.
     """
     if conn is None or not _is_uuid(person_id):
         return ""

@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     api_token: SecretStr | None = None
     api_port: int = 8300
 
+    @field_validator("api_token", mode="after")
+    @classmethod
+    def _blank_api_token_is_none(cls, v: SecretStr | None) -> SecretStr | None:
+        # An empty/whitespace API_TOKEN in .env parses to SecretStr('') — NOT None.
+        # Coerce blank to None so the --serve gate + require_token refuse to start
+        # (fail-closed); otherwise the Bearer credential becomes the literal
+        # "Bearer " (empty token) — trivially guessable, and this repo is public.
+        if v is not None and not v.get_secret_value().strip():
+            return None
+        return v
+
     # None = DB-backed services OFF. Tests and CI never need a live Postgres —
     # the services take an injected connection, and nothing connects unless this
     # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys_v2 — the
@@ -58,6 +69,13 @@ class Settings(BaseSettings):
     # resolve to the owner — voice-Chris retrieves HIS memories instead of an
     # anonymous "http-caller" bucket that matches nothing in the database.
     owner_person_id: str | None = None
+
+    # Additional person_ids (CSV) granted ACTION/house-control access beyond the
+    # owner. The owner is ALWAYS included implicitly (factory.action_allowlist_for).
+    # Extending access = add a person_id here, no code change — this is where
+    # Megan's person_id lands once her identity is solutioned (identical house
+    # access to Chris). Empty = owner only.
+    house_control_person_ids: str = ""
 
     # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
     # Chat turns stay on whatever model_backend says (oauth = free daily driver);
@@ -243,4 +261,34 @@ def run_boot_assertions(settings: Settings, env_file: Path | None = None) -> Non
                 "%s — delete the stale lines.",
                 env_file,
                 ", ".join(dupes),
+            )
+
+    # 4. FATAL: owner_person_id, when set, must be a real UUID — it defines "who
+    #    is the owner" for the HTTP passthrough AND seeds the action allowlist. A
+    #    malformed value silently strips the owner of BOTH memories and house
+    #    control (a non-UUID never matches a real person_id), so fail fast.
+    import uuid
+
+    if settings.owner_person_id is not None:
+        try:
+            uuid.UUID(settings.owner_person_id)
+        except (ValueError, AttributeError, TypeError):
+            raise BootConfigError(
+                f"OWNER_PERSON_ID {settings.owner_person_id!r} is not a valid UUID "
+                "— it defines the owner (HTTP identity + house-control allowlist). "
+                "Refusing to start."
+            )
+
+    # 5. WARNING: a house_control_person_ids entry that isn't a UUID can never
+    #    match a real person_id, so it grants nobody access — surface the typo.
+    for pid in (
+        p.strip() for p in settings.house_control_person_ids.split(",") if p.strip()
+    ):
+        try:
+            uuid.UUID(pid)
+        except (ValueError, AttributeError, TypeError):
+            log.warning(
+                "HOUSE_CONTROL_PERSON_IDS entry %r is not a UUID — it will never "
+                "match a person and grants no access.",
+                pid,
             )

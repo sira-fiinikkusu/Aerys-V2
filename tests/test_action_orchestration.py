@@ -560,3 +560,69 @@ def test_no_spoken_ack_means_no_voice_overlay():
     )
     system = model.prompts[0][0].content
     assert "NEVER ask a clarifying question" not in system
+
+
+# ---- ask() ACTION AUTHORIZATION — the owner/allowlist gate (CRITICAL) -----------
+# Cross-review (2026-07-04) found the action stack had NO owner check: any caller
+# who reached ask() could actuate the house / read presence. These lock the gate:
+# only person_ids in the allowlist reach the tools; everyone else gets chat-only.
+
+STRANGER = {"user_id": "stranger:404", "display_name": "Nosy Guildmate"}
+MEGAN = {"user_id": "person-megan", "display_name": "Megan"}
+
+
+def test_action_gate_blocks_non_allowlisted_caller():
+    # A caller outside the allowlist NEVER reaches the action stack — even when the
+    # router would route action and the transport armed it. The house is untouched.
+    graph = build_graph(fake_model("chat-only for strangers"), soul="s")
+    stub = StubActionGraph("light is on")
+    out = ask(graph, "turn on the office light", identity=STRANGER, thread_id="t1",
+              router=action_router, action_graph=stub,
+              action_allowlist=frozenset({CHRIS["user_id"]}))
+    assert out == "chat-only for strangers"
+    assert stub.calls == []  # the action graph was never invoked
+
+
+def test_action_gate_allows_owner():
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("light is on")
+    out = ask(graph, "turn on the light", identity=CHRIS, thread_id="t1",
+              router=action_router, action_graph=stub,
+              action_allowlist=frozenset({CHRIS["user_id"]}))
+    assert out == "light is on"
+    assert stub.calls == ["turn on the light"]
+
+
+def test_action_gate_allows_second_allowlisted_person():
+    # Adding Megan's person_id to the allowlist grants IDENTICAL house access —
+    # the config-only extension path (house_control_person_ids), proven.
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("light is on")
+    allow = frozenset({CHRIS["user_id"], MEGAN["user_id"]})
+    out = ask(graph, "turn on the light", identity=MEGAN, thread_id="t1",
+              router=action_router, action_graph=stub, action_allowlist=allow)
+    assert out == "light is on"
+    assert stub.calls == ["turn on the light"]
+
+
+def test_action_gate_unenforced_when_no_allowlist():
+    # None = dev/unenforced (no owner configured), matching deep_allowed's posture:
+    # tools work for anyone. The gate is opt-in via config, not on by default.
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("light is on")
+    out = ask(graph, "turn on the light", identity=STRANGER, thread_id="t1",
+              router=action_router, action_graph=stub, action_allowlist=None)
+    assert out == "light is on"
+    assert stub.calls == ["turn on the light"]
+
+
+def test_action_gate_blocks_stranger_on_voice_thread_too():
+    # The gate fires BEFORE the voice parallel-start branch — a non-owner on a
+    # voice thread still gets chat-only, never a speculative action.
+    graph = build_graph(fake_model("chat-only"), soul="s")
+    stub = StubActionGraph("done")
+    out = ask(graph, "turn on the light", identity=STRANGER, thread_id="voice:x",
+              router=action_router, action_graph=stub,
+              action_allowlist=frozenset({CHRIS["user_id"]}))
+    assert out == "chat-only"
+    assert stub.calls == []

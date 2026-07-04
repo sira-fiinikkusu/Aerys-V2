@@ -112,13 +112,23 @@ def test_context_assembles_profile_then_memories():
     )
 
 
-def test_context_defaults_to_private_privacy():
-    # Today's only wired caller is the owner's own channel — private context:
-    # profile sees dm-visibility claims, memories see both privacy levels.
+def test_context_defaults_to_public_privacy():
+    # Fail-closed: with no explicit privacy_context, build_context discloses the
+    # LEAST — public-only profile visibility, public-only memories. A transport
+    # that forgets to tag the room can never leak dm-only claims this way.
     conn = FakeConn([[], []])
     build_context(PERSON, "hi", conn, embed=FAKE_EMBED)
-    assert conn.calls[0][1]["pctx"] == "private"  # profile query
-    assert conn.calls[1][1]["levels"] == ["public", "private"]  # memory query
+    assert conn.calls[0][1]["pctx"] == "public"  # profile query
+    assert conn.calls[1][1]["levels"] == ["public"]  # memory query
+
+
+def test_context_private_when_explicitly_requested():
+    # The owner's own channels opt IN to private → dm-visibility claims + both
+    # privacy levels surface. Private is a deliberate request, never a default.
+    conn = FakeConn([[], []])
+    build_context(PERSON, "hi", conn, embed=FAKE_EMBED, privacy_context="private")
+    assert conn.calls[0][1]["pctx"] == "private"
+    assert conn.calls[1][1]["levels"] == ["public", "private"]
 
 
 def test_context_profile_only_when_no_memory_rows():
@@ -219,23 +229,20 @@ def test_context_fn_receives_person_id_and_latest_user_text():
 
 
 def test_privacy_context_flows_from_identity_to_context_fn():
-    # A public-room identity must reach context_fn as 'public' so the profile
-    # visibility gates hide dm-only claims in shared rooms; an identity with no
-    # privacy_context (the owner's own CLI/voice channels) defaults to 'private'.
+    # privacy_context rides identity → context_fn. Explicit values flow through
+    # unchanged; a MISSING value defaults to 'public' (fail-closed / least
+    # disclosure) so a transport that forgets to tag the room reveals less.
     seen = []
 
-    def spy(person_id, query_text, privacy_context="private"):
+    def spy(person_id, query_text, privacy_context="public"):
         seen.append(privacy_context)
         return ""
 
-    graph = recording_graph(spy, "a", "b")
-    ask(
-        graph, "hi",
-        identity={"user_id": PERSON, "privacy_context": "public"},
-        thread_id="t1",
-    )
-    ask(graph, "hi", identity=CHRIS, thread_id="t2")  # CHRIS carries no privacy_context
-    assert seen == ["public", "private"]
+    graph = recording_graph(spy, "a", "b", "c")
+    ask(graph, "hi", identity={"user_id": PERSON, "privacy_context": "public"}, thread_id="t1")
+    ask(graph, "hi", identity={"user_id": PERSON, "privacy_context": "private"}, thread_id="t2")
+    ask(graph, "hi", identity=CHRIS, thread_id="t3")  # CHRIS carries no privacy_context
+    assert seen == ["public", "private", "public"]
 
 
 def test_empty_context_means_no_header():
@@ -291,8 +298,11 @@ AUTH = {"Authorization": "Bearer sekrit"}
 def test_ask_route_resolves_to_owner_person_id():
     client, identities = spy_app(OWNER)
     client.post("/ask", json={"text": "hi", "display_name": "Chris (HTTP)"}, headers=AUTH)
-    # user_id = owner persons.id (the memory retrieval key); display_name untouched
-    assert identities == [{"user_id": OWNER, "display_name": "Chris (HTTP)"}]
+    # user_id = owner persons.id (the memory retrieval key); display_name untouched;
+    # the owner's own authed channel pins privacy_context='private' explicitly.
+    assert identities == [
+        {"user_id": OWNER, "display_name": "Chris (HTTP)", "privacy_context": "private"}
+    ]
 
 
 def test_voice_route_resolves_to_owner_person_id():
@@ -302,7 +312,9 @@ def test_voice_route_resolves_to_owner_person_id():
         json={"messages": [{"role": "user", "content": "hi"}]},
         headers=AUTH,
     )
-    assert identities == [{"user_id": OWNER, "display_name": "Chris (Voice)"}]
+    assert identities == [
+        {"user_id": OWNER, "display_name": "Chris (Voice)", "privacy_context": "private"}
+    ]
 
 
 def test_no_owner_configured_keeps_anonymous_http_caller():
@@ -314,3 +326,32 @@ def test_no_owner_configured_keeps_anonymous_http_caller():
         headers=AUTH,
     )
     assert [i["user_id"] for i in identities] == ["http-caller", "http-caller"]
+
+
+# ---- empty/whitespace token must be LOCKED SHUT, not fail-open (CRITICAL) -------
+
+
+def test_empty_api_token_is_locked_shut_not_open():
+    # The cross-review bug: an empty token made "Bearer " a valid credential.
+    # An empty api_token must 503 every authed route, never authenticate.
+    client = TestClient(build_app(lambda t, i, th: "ok", "", OWNER))
+    assert client.post(
+        "/ask", json={"text": "hi"}, headers={"Authorization": "Bearer "}
+    ).status_code == 503
+    assert client.post(
+        "/ask", json={"text": "hi"}, headers={"Authorization": "Bearer sekrit"}
+    ).status_code == 503
+    assert client.get("/health").status_code == 200  # probes stay open
+
+
+def test_whitespace_api_token_is_locked_shut():
+    client = TestClient(build_app(lambda t, i, th: "ok", "   ", OWNER))
+    assert client.post(
+        "/ask", json={"text": "hi"}, headers={"Authorization": "Bearer    "}
+    ).status_code == 503
+
+
+def test_openapi_schema_not_served():
+    # openapi_url=None: the schema must not leak endpoint shapes to unauthed probers.
+    client = TestClient(build_app(lambda t, i, th: "ok", "sekrit", OWNER))
+    assert client.get("/openapi.json").status_code == 404

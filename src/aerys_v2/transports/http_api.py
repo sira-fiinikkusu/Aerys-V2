@@ -9,6 +9,8 @@ Auth: a single Bearer token from Settings (api_token). The voice satellite webho
 taught the pattern — the header check happens before ANYTHING else runs.
 """
 
+import hmac
+
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -38,18 +40,26 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
     voice-Chris gets HIS memories instead of an anonymous "http-caller" bucket.
     display_name stays whatever the caller said (channel flavor, not identity).
     """
-    app = FastAPI(title="aerys-v2 brain", docs_url=None, redoc_url=None)
+    # openapi_url=None too: docs_url/redoc_url only hide the HTML pages; the raw
+    # /openapi.json schema is a separate default and would otherwise leak the exact
+    # endpoint/field shapes to any unauthenticated prober on the tunnel.
+    app = FastAPI(
+        title="aerys-v2 brain", docs_url=None, redoc_url=None, openapi_url=None
+    )
     # n8n mapping: this is the Identity Resolver's job for HTTP — except HTTP has
     # exactly one possible person, so "resolution" is a constant.
     http_user_id = owner_person_id or "http-caller"
 
     def require_token(request: Request) -> None:
-        # Locked shut unless a token is configured — an unset token means 503 for
-        # everything except /health, never an open door.
-        if api_token is None:
+        # Locked shut unless a REAL token is configured — None OR empty/whitespace
+        # means 503 for everything except /health, never an open door. (An empty
+        # API_TOKEN in .env parses to "" not None; without this check the credential
+        # becomes the literal string "Bearer " — trivially guessable, public repo.)
+        if not api_token or not api_token.strip():
             raise HTTPException(status_code=503, detail="api_token not configured")
         auth = request.headers.get("authorization", "")
-        if auth != f"Bearer {api_token}":
+        # Constant-time compare — no timing side channel on the token (CWE-208).
+        if not hmac.compare_digest(auth, f"Bearer {api_token}"):
             raise HTTPException(status_code=401, detail="bad token")
 
     @app.get("/health")
@@ -91,7 +101,14 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
         # asynchrony lives entirely behind the ask() seam.
         reply = ask_fn(
             last_user,
-            {"user_id": http_user_id, "display_name": "Chris (Voice)"},
+            # Voice/HTTP is the owner's own private channel — pin privacy_context
+            # so his dm/private memories surface (the consumption default is now
+            # 'public'/fail-closed, so private channels must opt in explicitly).
+            {
+                "user_id": http_user_id,
+                "display_name": "Chris (Voice)",
+                "privacy_context": "private",
+            },
             "voice:beta",   # one shared voice thread for the beta pipeline (owner decision: voice rides the owner thread)
         )
         return {
@@ -111,6 +128,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
         identity: Identity = {
             "user_id": http_user_id,
             "display_name": body.display_name,
+            # Owner's own authed channel → private context (see openai_compat note).
+            "privacy_context": "private",
         }
         # Same seam as the OpenAI shim: callers that name a "voice*" thread_id
         # get ack-then-act for device commands; every other thread gets the

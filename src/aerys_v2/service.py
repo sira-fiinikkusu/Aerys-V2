@@ -116,6 +116,7 @@ def ask(
     speak_fn: Callable[[str], None] | None = None,
     followup_skip_s: float = 6.0,
     deep_allowed: Callable[[], bool] | None = None,
+    action_allowlist: frozenset[str] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -132,9 +133,24 @@ def ask(
       ONLY when a text-thread chat turn actually classified deep, so voice
       turns and downgrades never burn a v2_model_usage credit. None = cap
       unenforced (dev boxes); the gate saying False downgrades to standard.
+    - action_allowlist: the AUTH gate for the TOOLS block. The action stack (house
+      control + every tool) is restricted to an allowlist of person_ids: a caller
+      NOT in it is forced onto the chat-only path here, regardless of what the
+      transport armed. The memory boundary makes a stranger's identity COLD (no
+      memories) but does NOTHING to the tools — so this is the one thing between a
+      guild member and the owner's house. The owner is always in the set; more can
+      be added by config (e.g. Megan) with no code change (factory.action_allowlist_for).
+      None = unenforced (dev boxes), same posture as deep_allowed.
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
+
+    # Gate the action stack BEFORE anything else can arm it. A caller outside the
+    # allowlist never reaches home_control / search_entities / get_state — closing
+    # both the unauthorized-actuation and the presence-disclosure (reads) risks.
+    if action_allowlist is not None and identity.get("user_id") not in action_allowlist:
+        router = None
+        action_graph = None
 
     started = time.monotonic()
     config = {

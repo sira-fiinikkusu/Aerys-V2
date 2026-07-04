@@ -82,13 +82,13 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
     embed = None if profile_only else embedder_from_settings(settings)
 
     def context_fn(
-        person_id: str, query_text: str, privacy_context: str = "private"
+        person_id: str, query_text: str, privacy_context: str = "public"
     ) -> str:
         # Fenced end-to-end: a NAS outage or DNS hiccup = empty context, never
         # a dead turn. build_context is graceful inside; this catch covers the
         # connect itself. privacy_context ('private' DM / 'public' room) rides
-        # through to the profile visibility gates; defaults 'private' for the
-        # owner's own single-user channels (CLI, voice/HTTP).
+        # through to the profile visibility gates; defaults 'public' (fail-closed
+        # / least disclosure) — the owner's private channels opt in explicitly.
         try:
             with psycopg.connect(settings.memories_database_url) as conn:
                 conn.read_only = True
@@ -211,6 +211,22 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
         ),
         "deep": api_model(settings.tier_deep_model),
     }
+
+
+def action_allowlist_for(settings: Settings) -> frozenset[str] | None:
+    """Who may reach the ACTION stack (house control + every tool) — the auth gate
+    ask() enforces. The owner is ALWAYS in the set; settings.house_control_person_ids
+    (CSV) adds more (Megan's person_id lands there once her identity is solutioned —
+    identical house access to Chris). None when no owner is configured (dev boxes):
+    the gate in ask() then stays UNENFORCED, same posture as deep_gate_for. Widening
+    access is a config edit, never a code change.
+    """
+    if settings.owner_person_id is None:
+        return None
+    extra = {
+        p.strip() for p in settings.house_control_person_ids.split(",") if p.strip()
+    }
+    return frozenset({settings.owner_person_id, *extra})
 
 
 def deep_gate_for(settings: Settings) -> Callable[[], bool] | None:
@@ -402,7 +418,7 @@ def build_action_graph(
                 block = context_fn(
                     str(identity.get("user_id", "")),
                     query_text,
-                    identity.get("privacy_context", "private"),
+                    identity.get("privacy_context", "public"),
                 )
             except Exception:
                 log.warning("action context_fn raised; continuing without profile", exc_info=True)
@@ -601,7 +617,7 @@ def build_graph(
                 block = context_fn(
                     str(identity.get("user_id", "")),
                     query_text,
-                    identity.get("privacy_context", "private"),
+                    identity.get("privacy_context", "public"),
                 )
             except Exception:
                 # the seam promises graceful, but memory NEVER kills a turn —
