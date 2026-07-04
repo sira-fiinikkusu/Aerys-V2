@@ -349,6 +349,44 @@ def turn_recorder_for(settings: Settings) -> Callable[[dict], None] | None:
     return record
 
 
+def gaps_reader_for(settings: Settings) -> Callable[[], str] | None:
+    """The /gaps read seam for the HTTP door: return the formatted mined-gaps
+    string on demand, so a Discord /gaps slash command (or any authed HTTP caller)
+    surfaces the owner READ path without shelling into the container.
+
+    None when database_url is unset (dev/CI): the door then omits /gaps — same
+    arming pattern as turn_recorder_for. Fresh short READ-ONLY connection per call
+    (personal-assistant volume never strains it; boot assertions already proved the
+    url points at aerys_v2, so this can't read prod `aerys`). FAIL-OPEN: any DB
+    trouble is logged and returned as an honest one-line string, never raised — a
+    down NAS must turn a read into a shrug, not a 500. The connection refuses writes
+    too (belt-and-braces, matching _gaps_read_main)."""
+    if settings.database_url is None:
+        return None
+    import psycopg
+
+    from aerys_v2.workers.capability_requests import format_gaps, read_gaps
+
+    def read() -> str:
+        try:
+            with psycopg.connect(
+                settings.database_url,
+                connect_timeout=5,
+                options="-c statement_timeout=5000",
+            ) as conn:
+                conn.read_only = True
+                rows = read_gaps(conn)
+            return format_gaps(rows)
+        except Exception:
+            log.warning("/gaps read failed — surfacing an honest shrug", exc_info=True)
+            return (
+                "Couldn't read the capability-gaps table right now "
+                "(database hiccup) — try again in a moment."
+            )
+
+    return read
+
+
 # Overlay for the action subgraph's system prompt: the chat persona plus tool
 # discipline. The "never claim success" line is load-bearing — it's the prompt-side
 # half of the honest-refusal contract in tools/home_control.py.

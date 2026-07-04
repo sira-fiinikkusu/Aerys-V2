@@ -132,6 +132,7 @@ def main() -> None:
             checkpointer_for,
             context_fn_for,
             deep_gate_for,
+            gaps_reader_for,
             load_soul,
             resolve_announce_entity,
             satellite_map_from,
@@ -157,6 +158,9 @@ def main() -> None:
             # v2_turns audit writer (migration 001): one row per ask() turn to
             # aerys_v2, off the hot path + fail-open. None when DATABASE_URL unset.
             record_turn = turn_recorder_for(settings)
+            # /gaps READ seam for the HTTP door (self-iteration Phase A) — same
+            # arming as record_turn; None DB-less. Fail-open, read-only.
+            gaps_fn = gaps_reader_for(settings)
             log.info("tiers armed | fast=%s standard=%s deep=%s cap=%d/day",
                      settings.tier_fast_model,
                      settings.model if settings.model_backend == "oauth" else settings.tier_standard_model,
@@ -211,6 +215,7 @@ def main() -> None:
                 # authed HTTP callers ARE the owner when configured — voice-Chris
                 # retrieves HIS memories (identity user_id = owner persons.id)
                 owner_person_id=settings.owner_person_id,
+                gaps_fn=gaps_fn,
             )
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)

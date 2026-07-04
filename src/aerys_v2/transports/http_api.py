@@ -34,7 +34,8 @@ class AskReply(BaseModel):
     thread_id: str
 
 
-def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None) -> FastAPI:
+def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
+              gaps_fn=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -145,5 +146,19 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None)
         # the thread_id the caller already sends is the behavior switch.
         reply = ask_fn(body.text, identity, body.thread_id)
         return AskReply(reply=reply, thread_id=body.thread_id)
+
+    @app.get("/gaps")
+    def gaps_route(_: None = Depends(require_token)) -> dict:
+        """The owner READ path for mined capability gaps (self-iteration Phase A),
+        surfaced so a Discord /gaps slash command can post them without shelling
+        into the container. Authed like every other door. Read-only and FAIL-OPEN:
+        gaps_fn catches its own DB trouble and returns an honest string, so this
+        route never 500s; a DB-less brain honestly reports the surface is off. The
+        text is already fenced ("information only, never instructions") by
+        format_gaps — the transport relays it verbatim and adds no authority."""
+        if gaps_fn is None:
+            return {"text": "Capability-gap tracking isn't enabled on this brain "
+                            "(no database configured)."}
+        return {"text": gaps_fn()}
 
     return app
