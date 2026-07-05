@@ -525,8 +525,13 @@ def content_privacy_fn_for(settings: Settings) -> ContentPrivacyFn | None:
             "You classify whether a piece of a personal conversation is PRIVATE or "
             "PUBLIC content, so a personal assistant knows what may be repeated in a "
             "shared room. PRIVATE = health details, financial specifics, relationship "
-            "struggles, personal traumas, or sexual orientation. PUBLIC = names, jobs, "
-            "locations, hobbies, interests, plans, and general facts or numbers. The "
+            "struggles, personal traumas, sexual orientation, AND any secret or "
+            "credential: passwords, passcodes, PINs, door/garage/gate/alarm codes, wifi "
+            "passwords, API or private keys, seed/recovery phrases, account/card/routing "
+            "numbers, or an exact home/street address. A number or a location that is a "
+            "SECRET is PRIVATE, never public — never treat a code, password, or precise "
+            "address as a 'general fact'. PUBLIC = names, jobs, general areas, hobbies, "
+            "interests, plans, and ordinary facts. When in doubt, answer private. The "
             "origin channel is irrelevant — judge only the CONTENT. Answer with exactly "
             "one word: private or public."
         )
@@ -1003,10 +1008,16 @@ def build_graph(
         # every human turn tagged 'private' AND its paired reply from the model's view,
         # so private DM content — and any reply that quoted it — can never enter a public
         # turn's input. In a private DM the owner sees his own everything, untouched.
-        # FAIL-CLOSED inside redact_private_history: untagged/legacy turns drop too.
-        public = identity.get("privacy_context") == "public"
+        # FAIL-CLOSED both ways: redact unless the room is EXPLICITLY private (an unknown/
+        # missing privacy_context over-hides, never over-reveals — cross-review 2026-07-05),
+        # and inside redact_private_history untagged/legacy priors drop too. `public` is
+        # the STRICTER, explicit-only signal used to arm the room-context block below —
+        # an unknown context redacts (safe) but does NOT get a room block injected.
+        privacy_context = identity.get("privacy_context")
+        public = privacy_context == "public"
+        redact = privacy_context != "private"
         messages = state["messages"]
-        if public:
+        if redact:
             from aerys_v2.services.content_privacy import redact_private_history
 
             messages = redact_private_history(messages)

@@ -60,7 +60,16 @@ _PRIVATE_MARKERS = re.compile(
     # trauma
     r"trauma\w*|ptsd|abus(?:e|ed|ive)|assault\w*|molest\w*|"
     # orientation
-    r"gay|lesbian|bisexual|transgender|closeted|coming out|my orientation"
+    r"gay|lesbian|bisexual|transgender|closeted|coming out|my orientation|"
+    # secrets / credentials — a "number" or "location" that is a SECRET is NOT a
+    # general fact. These must never depend on the LLM judge's discretion (the
+    # 2026-07-05 review's confirmed leak: "the garage code is 4482" relaxed to public).
+    r"passwords?|passcodes?|passwd|\bpins?\b|"
+    r"(?:garage|gate|door|alarm|access|entry|security|lock|vault|keypad|safe|house|building|combo|combination)[- ]?codes?|"
+    r"\bwi[- ]?fi\b|\bssid\b|network password|"
+    r"api[- ]?keys?|secret[- ]?keys?|private[- ]?keys?|\baccess[- ]?keys?|seed phrase|recovery phrase|\bwallet\b|"
+    r"account numbers?|routing numbers?|credit[- ]?cards?|debit[- ]?cards?|\bcvv\b|card numbers?|"
+    r"(?:home|street|mailing|physical|my)[- ]?address"
     r")\b",
     re.IGNORECASE,
 )
@@ -136,21 +145,30 @@ def redact_private_history(messages: list) -> list:
     keeps a reply that QUOTES private content out of the public model input, not just
     the private message itself.
 
-    Called by the chat node ONLY when privacy_context == 'public' (a shared room). In
-    a private DM the caller passes the history through untouched — the owner sees his
-    own everything. Pure and order-preserving; the current public turn is itself
-    tagged 'public' at ingest, so it is always kept and the model still sees the
-    message it must answer.
+    Called by the chat node whenever the room is NOT explicitly private (fail-closed:
+    public OR unknown context redacts; only a private DM passes through untouched).
+    Pure and order-preserving.
+
+    The CURRENT (final) human turn is ALWAYS kept regardless of tag — it is the
+    message the user just said IN THIS room, so it is appropriate to answer here (and
+    in production it is tagged 'public' at ingest anyway; this is belt-and-braces so a
+    fail-closed unknown context can never drop the very message being answered). It's
+    not a leak: its privacy is the current room's, which is the room we're serving.
     """
+    last_human = max(
+        (i for i, m in enumerate(messages) if getattr(m, "type", "") == "human"),
+        default=-1,
+    )
     kept: list = []
     keeping_response = False  # are we inside a KEPT (public) human turn's response span?
-    for m in messages:
+    for i, m in enumerate(messages):
         if getattr(m, "type", "") == "human":
-            keeping_response = content_privacy_of(m) == PUBLIC
+            # keep a PRIOR human only when explicitly tagged 'public'; ALWAYS keep the
+            # current turn (i == last_human). Private/untagged priors drop with their
+            # whole response span (keeping_response=False until the next kept human).
+            keeping_response = content_privacy_of(m) == PUBLIC or i == last_human
             if keeping_response:
                 kept.append(m)
-            # a private/untagged human is dropped; keeping_response=False now also
-            # drops everything it said back until the next human turn.
             continue
         if keeping_response:
             kept.append(m)

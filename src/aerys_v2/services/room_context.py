@@ -13,8 +13,11 @@ audit spine instead of a per-execution Discord fetch, and keyed on channel_id.
 Safety: EVERY row this returns happened IN the queried public channel, so it is
 public-by-origin — there is no path for a DM/private turn (different channel_id) to
 appear here. The chat node injects this block ONLY on public turns; DMs never get it.
-Everything downstream is degrade-safe: a DB hiccup yields an empty block, never a
-dead turn (mirrors services/context.py's graceful contract).
+Belt-and-braces (cross-review 2026-07-05): the query ALSO whitelists the channel enum
+to the genuinely-public surfaces ('guild','telegram_group'), so even if a caller ever
+passed a private/DM channel by mistake, no private-origin row could surface. Everything
+downstream is degrade-safe: a DB hiccup yields an empty block, never a dead turn
+(mirrors services/context.py's graceful contract).
 """
 
 from __future__ import annotations
@@ -23,10 +26,17 @@ from __future__ import annotations
 # discord-snowflake / telegram-chat-id numeric collision — takes the most recent N,
 # and the caller re-orders to chronological for rendering. person_id rides along only
 # so the formatter can fall back to a short handle when a row predates display_name.
+# The `channel IN (...)` whitelist is a privacy backstop: this block is a PUBLIC-room
+# feature, so it must NEVER return a row from a DM/voice/cli/http channel even if the
+# channel_id somehow matched — public origin is enforced structurally, not just by the
+# caller passing the right channel.
+_PUBLIC_CHANNELS = ("guild", "telegram_group")
+
 ROOM_TURNS_SQL = """\
 SELECT display_name, person_id, input_text, emitted_reply, created_at
 FROM v2_turns
 WHERE channel_id = %(channel_id)s AND channel = %(channel)s
+  AND channel IN ('guild', 'telegram_group')
   AND input_text IS NOT NULL AND input_text <> ''
 ORDER BY created_at DESC
 LIMIT %(limit)s

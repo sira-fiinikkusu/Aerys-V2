@@ -605,8 +605,10 @@ def test_voice_speculative_chat_sees_real_thread_history():
                       AIMessage(content="I remember.")]},
         as_node="chat",
     )
-    out = ask(graph, "tell me more", identity=CHRIS, thread_id="voice:hist",
-              router=chat_router, action_graph=StubActionGraph())
+    # voice is pinned private in production (http_api) — so the privacy gate never
+    # redacts it and the speculative gen keeps its full seeded history.
+    out = ask(graph, "tell me more", identity={**CHRIS, "privacy_context": "private"},
+              thread_id="voice:hist", router=chat_router, action_graph=StubActionGraph())
     assert out == "and that's the story"
     prompt = model.prompts[0]  # [system, *history, human]
     assert [m.content for m in prompt[1:]] == [

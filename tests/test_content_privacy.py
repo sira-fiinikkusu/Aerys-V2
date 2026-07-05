@@ -117,9 +117,38 @@ def test_gate_drops_private_human_and_its_reply_keeps_public():
 
 
 def test_gate_is_fail_closed_on_untagged_history():
-    # legacy/untagged turns (pre-feature) are treated as private in a public view
-    history = [_tagged("old message", None), AIMessage(content="old reply")]
-    assert redact_private_history(history) == []
+    # a legacy/untagged PRIOR turn (pre-feature) is treated as private in a public
+    # view and dropped with its reply; the CURRENT turn is always kept.
+    history = [
+        _tagged("old message", None), AIMessage(content="old reply"),
+        _tagged("what's up now", "public"),
+    ]
+    assert [m.content for m in redact_private_history(history)] == ["what's up now"]
+
+
+def test_gate_always_keeps_the_current_turn_even_if_untagged():
+    # robustness for the fail-closed predicate: the final human turn is the message
+    # being answered (said in THIS room), so it survives even untagged — otherwise a
+    # tagging hiccup would drop the very thing the user just asked. Not a leak: its
+    # privacy is the current room's.
+    history = [
+        _tagged("private thing", "private"), AIMessage(content="noted"),
+        _tagged("current question", None),
+    ]
+    assert [m.content for m in redact_private_history(history)] == ["current question"]
+
+
+def test_gate_hides_secret_bearing_dm_turn_from_public():
+    # the 2026-07-05 review's confirmed-leak scenario: a secret said in a DM must not
+    # surface in a public room. The keyword backstop tags it private regardless of the
+    # LLM judge, so redaction drops it.
+    for secret in ("the garage code is 4482", "wifi password is guest1234",
+                   "my home address is 12 Rotonda Blvd", "the pin is 9931"):
+        assert keyword_verdict(secret) == "private", secret
+        history = [_tagged(secret, "private"), AIMessage(content="got it"),
+                   _tagged("hey everyone", "public")]
+        kept = [m.content for m in redact_private_history(history)]
+        assert secret not in kept and "got it" not in kept
 
 
 def test_gate_keeps_only_explicitly_public():
