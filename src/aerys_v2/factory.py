@@ -7,8 +7,10 @@ canvas; each node function is a Code node that receives state instead of $json.
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -755,6 +757,35 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
     return router_for(settings, soul), action_graph
 
 
+EASTERN = ZoneInfo("America/New_York")  # Chris's timezone — the clock she reasons in
+
+
+def _channel_phrase(thread: str, room: str = "") -> str:
+    """Human phrase for WHERE the caller is, from the checkpointer thread key
+    (+ the room label when the transport supplies one). Feeds the system prompt so
+    she can answer "where are we talking," and the public-room cases carry a privacy
+    nudge. Unknown keys degrade to a neutral phrase."""
+    if thread.startswith("voice"):
+        return "a live voice conversation"
+    if thread.startswith("discord:dm"):
+        return "a private Discord DM"
+    if thread.startswith("discord:guild"):
+        return (
+            f"the #{room} channel on public Discord, where other people may be reading"
+            if room
+            else "a public Discord channel where other people may be reading"
+        )
+    if thread.startswith("telegram:group"):
+        return (
+            f"the '{room}' Telegram group, where other people may be reading"
+            if room
+            else "a Telegram group where other people may be reading"
+        )
+    if thread.startswith("telegram"):
+        return "a private Telegram chat"
+    return "a direct message"
+
+
 def build_graph(
     model: BaseChatModel,
     soul: str,
@@ -842,8 +873,24 @@ def build_graph(
                 "feeling; the speech engine performs them, listeners never hear "
                 "the bracket text."
             )
+        # Where + when — the text path had no clock (she couldn't say what day it
+        # was) and no sense of which surface she's on. Both derived per turn: the
+        # wall clock in Chris's timezone, and the channel from the thread key (the
+        # same seam the voice branch uses above) plus the room label the resolver
+        # carried on identity. The public-room phrasing also nudges her privacy
+        # posture behaviorally ("others may be reading").
+        now = datetime.now(EASTERN)
+        # Portable format — no %-d/%-I (glibc-only; the repo already avoids them,
+        # see extraction.py's "# no %-d" note). Strip the hour's leading zero by hand.
+        hour12 = now.strftime("%I").lstrip("0") or "12"
+        when = f"{now:%A, %B} {now.day}, {now.year} at {hour12}:{now:%M} {now:%p}"
+        where_when = (
+            f"\n\nRight now it is {when} Eastern time, "
+            f"and you are speaking with them in "
+            f"{_channel_phrase(str(thread), identity.get('channel_name', ''))}."
+        )
         system = SystemMessage(
-            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{voice_style}"
+            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{voice_style}"
         )
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
         # just ask() — Chip's belt-and-braces: whatever garbage reaches config,

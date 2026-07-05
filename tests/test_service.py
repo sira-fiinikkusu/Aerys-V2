@@ -10,7 +10,7 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
-from aerys_v2.factory import FALLBACK_SOUL, build_graph, load_soul
+from aerys_v2.factory import FALLBACK_SOUL, _channel_phrase, build_graph, load_soul
 from aerys_v2.service import ask
 from aerys_v2.state import UNKNOWN_CALLER
 
@@ -91,3 +91,36 @@ def test_voice_threads_get_emotion_tag_instruction():
     assert "[warmly]" in RecordingModel.seen[0]        # voice thread gets tags
     assert "[warmly]" not in RecordingModel.seen[1]    # text thread stays clean
     assert all("memory is durable" in s for s in RecordingModel.seen)  # capability line everywhere
+
+
+# --- #2: "where + when" injection ------------------------------------------
+
+def test_channel_phrase_surfaces():
+    assert _channel_phrase("voice:beta") == "a live voice conversation"
+    assert _channel_phrase("discord:dm:123") == "a private Discord DM"
+    assert "public Discord" in _channel_phrase("discord:guild:555")
+    # a supplied room name is used verbatim in the public-channel phrase
+    assert "#general" in _channel_phrase("discord:guild:555", "general")
+    assert "reading" in _channel_phrase("discord:guild:555", "general")  # privacy nudge
+    assert _channel_phrase("telegram:dm:9") == "a private Telegram chat"
+    assert "'fam'" in _channel_phrase("telegram:group:9", "fam")
+    assert _channel_phrase("weird:thing") == "a direct message"  # unknown degrades
+
+
+def test_system_prompt_carries_clock_and_where():
+    RecordingModel.seen = []
+    m = RecordingModel(messages=iter([AIMessage(content="a"), AIMessage(content="b")]))
+    graph = build_graph(m, soul="s")
+    # public guild turn, with the resolver-supplied room label on identity
+    ask(
+        graph,
+        "hi",
+        identity={"user_id": "person-1", "display_name": "Chris", "channel_name": "general"},
+        thread_id="discord:guild:555",
+    )
+    # private DM turn
+    ask(graph, "hi", identity=CHRIS, thread_id="discord:dm:person-1")
+    assert "Eastern time" in RecordingModel.seen[0]                 # she has a clock now
+    assert "#general channel on public Discord" in RecordingModel.seen[0]  # names the room
+    assert "a private Discord DM" in RecordingModel.seen[1]         # DM says private
+    assert "public Discord" not in RecordingModel.seen[1]           # DM never says public

@@ -13,12 +13,15 @@ Design split for testability:
     not in CI (the spike's reconnect soak happens on real hardware).
 """
 
+import logging
 from dataclasses import dataclass
 
 import discord
 
 from aerys_v2.channels.splitter import split_message
 from aerys_v2.state import Identity
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,7 @@ class NormalizedEvent:
     channel_id: str
     thread_id: str           # checkpointer key — see thread_key()
     text: str
+    channel_name: str = ""   # human room label for guild channels ("" for DMs) — feeds the "where" line
 
 
 def thread_key(channel_kind: str, platform_user_id: str, channel_id: str) -> str:
@@ -81,12 +85,28 @@ def normalize(message: object, *, self_id: int) -> NormalizedEvent:
     Strips the leading bot-mention from guild text the way the guild adapter's
     Normalize node did, so the model sees "what's the weather" not "<@123> what's
     the weather".
+
+    Attachments ride out-of-band on message.attachments, never in .content. The
+    media router keys off the CDN URL appearing IN THE TEXT (analyze_image /
+    read_document), so each signed URL is appended — full querystring intact (the
+    ?ex=&is=&hm= signature is load-bearing; stripping it 403s the fetch). This
+    also gives an image-only message (empty caption) non-empty text — the URL —
+    so it no longer trips ask()'s empty-text guard. Mirrors v1's Core Agent
+    handing the bare CDN URL string to the media tool.
     """
     is_dm = message.guild is None
     text = message.content or ""
     mention_tokens = (f"<@{self_id}>", f"<@!{self_id}>")
     for tok in mention_tokens:
         text = text.replace(tok, "")
+    text = text.strip()
+    urls = [
+        a.url
+        for a in (getattr(message, "attachments", None) or [])
+        if getattr(a, "url", "")
+    ]
+    if urls:
+        text = "\n".join(filter(None, [text, *urls]))
     return NormalizedEvent(
         platform="discord",
         platform_user_id=str(message.author.id),
@@ -97,7 +117,8 @@ def normalize(message: object, *, self_id: int) -> NormalizedEvent:
         thread_id=thread_key(
             "dm" if is_dm else "guild", str(message.author.id), str(message.channel.id)
         ),
-        text=text.strip(),
+        text=text,
+        channel_name="" if is_dm else (getattr(message.channel, "name", "") or ""),
     )
 
 
@@ -142,12 +163,27 @@ class AerysDiscordClient(discord.Client):
         ):
             return
         event = normalize(message, self_id=self.user.id)
+        # A bare @mention / sticker-only / embed-only message normalizes to empty
+        # text, which ask() rejects. The most common summon IS a naked @mention, so
+        # answer with a nudge rather than throwing into silence.
+        if not event.text.strip():
+            await message.channel.send("I'm here — what do you need?")
+            return
         identity: Identity = self._resolve(event)
-        async with message.channel.typing():
-            # ask() is sync (fine for a one-user spike); the soak test will tell
-            # us whether it needs a thread executor before this leaves spike-hood.
-            reply = await self.loop.run_in_executor(
-                None, lambda: self._ask(event.text, identity, event.thread_id)
+        try:
+            async with message.channel.typing():
+                # ask() is sync (fine for a one-user spike); the soak test will tell
+                # us whether it needs a thread executor before this leaves spike-hood.
+                reply = await self.loop.run_in_executor(
+                    None, lambda: self._ask(event.text, identity, event.thread_id)
+                )
+        except Exception:
+            # Never leave a summon on read: any failure inside the turn (model,
+            # memory, tool) becomes a short apology, not a typing-then-nothing.
+            log.exception("ask() failed for thread %s", event.thread_id)
+            await message.channel.send(
+                "Sorry — something broke on my end handling that. Try me again in a moment?"
             )
+            return
         for chunk in split_message(reply, 2000):
             await message.channel.send(chunk)

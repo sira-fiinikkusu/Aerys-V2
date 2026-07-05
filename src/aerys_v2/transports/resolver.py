@@ -56,16 +56,19 @@ def identity_from_lookup(row: dict | None, event: Any) -> Identity:
     platform showed. privacy_context always rides along, derived from the room.
     """
     privacy = _privacy_for(event.channel_kind)
+    room = getattr(event, "channel_name", "") or ""  # "" for DMs / events without the field
     if row is None:
         return {
             "user_id": f"{event.platform}:{event.platform_user_id}",
             "display_name": event.display_name,
             "privacy_context": privacy,
+            "channel_name": room,
         }
     return {
         "user_id": row["person_id"],
         "display_name": row.get("display_name") or event.display_name,
         "privacy_context": privacy,
+        "channel_name": room,
     }
 
 

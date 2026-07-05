@@ -29,6 +29,11 @@ class Identity(TypedDict, total=False):
     # the SAME device the voice turn came from. Absent = fall back to the single
     # configured announce entity (today's single-satellite behavior).
     device_id: str
+    # Human room label for shared channels (e.g. Discord "#general", a Telegram
+    # group title). Set by the transport resolver from the event; display-only,
+    # feeds the "where you're talking" line so she can name the public channel
+    # she's in. Absent/"" for DMs and single-user channels.
+    channel_name: str
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}

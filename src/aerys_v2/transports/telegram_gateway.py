@@ -21,6 +21,7 @@ once a third transport needs the same contract.
 """
 
 import asyncio
+import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
@@ -28,6 +29,8 @@ from aiogram.types import Message
 from aerys_v2.channels.splitter import split_message
 from aerys_v2.state import Identity
 from aerys_v2.transports.discord_gateway import NormalizedEvent
+
+log = logging.getLogger(__name__)
 
 # Telegram's hard per-message limit — NOT Discord's 2000 (see splitter.py's
 # TELEGRAM_LIMIT; duplicated here as a plain constant so this transport doesn't
@@ -163,14 +166,28 @@ class AerysTelegramClient:
         ):
             return
         event = normalize(message, bot_username=self._bot_username or "")
+        # Bare @mention / sticker-only messages normalize to empty text, which ask()
+        # rejects — answer with a nudge instead of throwing into silence (parity with
+        # discord_gateway).
+        if not event.text.strip():
+            await message.answer("I'm here — what do you need?")
+            return
         identity: Identity = self._resolve(event)
         # ask() is sync (same seam and same caveat as discord_gateway: fine for
         # a one-user spike, the soak test will tell us whether it needs more);
         # run_in_executor keeps a slow LLM turn from blocking aiogram's loop.
         loop = asyncio.get_running_loop()
-        reply = await loop.run_in_executor(
-            None, lambda: self._ask(event.text, identity, event.thread_id)
-        )
+        try:
+            reply = await loop.run_in_executor(
+                None, lambda: self._ask(event.text, identity, event.thread_id)
+            )
+        except Exception:
+            # Any failure inside the turn becomes a short apology, never dead air.
+            log.exception("ask() failed for thread %s", event.thread_id)
+            await message.answer(
+                "Sorry — something broke on my end handling that. Try me again in a moment?"
+            )
+            return
         # Telegram's hard limit is 4096 chars — NOT Discord's 2000.
         for chunk in split_message(reply, TELEGRAM_MESSAGE_LIMIT):
             await message.answer(chunk)
