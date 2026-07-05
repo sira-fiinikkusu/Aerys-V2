@@ -66,13 +66,18 @@ def test_telegram_runner_wires_client(monkeypatch):
     # calls context_fn_for(settings) and threads its result into build_graph — the
     # SAME memory wiring --serve has (text chats must recall memory too, not only voice).
     monkeypatch.setattr(factory, "context_fn_for", lambda s: "CTXFN")
+    # Cross-surface continuity seams (track/memory-continuity) — wired like --discord.
+    monkeypatch.setattr(factory, "room_context_fn_for", lambda s: "ROOMFN")
+    monkeypatch.setattr(factory, "content_privacy_fn_for", lambda s: "CPFN")
 
     graph_calls = {}
 
-    def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models):
+    def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
+                         room_context_fn):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
+            room_context_fn=room_context_fn,
         )
         return "GRAPH"
 
@@ -125,6 +130,7 @@ def test_telegram_runner_wires_client(monkeypatch):
         "checkpointer": "CP",
         "context_fn": "CTXFN",
         "tier_models": None,
+        "room_context_fn": "ROOMFN",
     }
 
     # ask() seam: invoking the injected ask_fn routes a Telegram turn through the
@@ -144,6 +150,7 @@ def test_telegram_runner_wires_client(monkeypatch):
     assert kw["deep_allowed"] == "DEEPGATE"
     assert kw["action_allowlist"] == "ALLOW"
     assert kw["record_turn"] == "RECORDER"
+    assert kw["content_privacy_classifier"] == "CPFN"  # cross-surface privacy judge wired
 
 
 def _event(channel_kind: str, channel_id: str) -> NormalizedEvent:

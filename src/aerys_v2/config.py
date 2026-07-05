@@ -71,6 +71,13 @@ class Settings(BaseSettings):
     # "durable threads" vs "prod memories" are different blast radii.
     memories_database_url: str | None = None
 
+    # Channel-recent room context (cross-surface continuity, multi-person half):
+    # how many recent turns of a PUBLIC channel to splice into the system prompt so
+    # she holds the shared room on top of the caller's person-keyed thread. Read from
+    # v2_turns (database_url); None database_url = the feature is off. Only public
+    # turns ever query it — DMs never do.
+    room_context_limit: int = 50
+
     # The owner's persons.id (UUID string). HTTP callers can't prove who they
     # are beyond the Bearer token, so when this is set, voice + /ask identities
     # resolve to the owner — voice-Chris retrieves HIS memories instead of an
