@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # session covers DMs AND groups; n8n mapping is workflow 02-02 Telegram Adapter
     # (K1jR1tpKZTOiid8N), the webhook that fed the retiring Core Agent.
     telegram_bot_token: SecretStr | None = None
-    telegram_chat_ids: str = ""                   # csv of group chat ids to listen in ("" = DMs only, groups by mention)
+    telegram_chat_ids: str = ""                   # csv of group chat ids to serve ("" = DMs only; a group is fail-closed until its chat id is listed — mirrors discord_guild_id)
 
     # HTTP API (--serve). None = the /ask door stays locked shut; callers (HA voice
     # pipeline, future satellites) present this as a Bearer token. LAN-only surface.

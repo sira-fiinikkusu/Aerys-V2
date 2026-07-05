@@ -197,5 +197,5 @@ def test_telegram_runner_resolver_is_cold_and_room_scoped(monkeypatch):
     assert dm["privacy_context"] == "private"       # 1:1 DM
     assert grp["privacy_context"] == "public"        # shared room
     assert dm["user_id"] == "telegram:123"           # COLD handle, never the owner's UUID
-    # empty TELEGRAM_CHAT_IDS -> no group allowlist (DMs in, groups by mention only)
+    # empty TELEGRAM_CHAT_IDS -> no group allowlist (DMs in; groups fail closed until a chat id is added)
     assert made[0].allowed_chat_ids == frozenset()
