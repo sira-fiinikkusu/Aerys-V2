@@ -40,6 +40,25 @@ from .extraction import n8n_workflow_active, openrouter_chat, run_extraction, ru
 log = logging.getLogger("aerys_v2.workers")
 
 
+def _add_interval_job(scheduler, func, *, minutes: int):
+    """Add ``func`` to ``scheduler`` on a fixed interval — scheduled, never paused.
+
+    APScheduler v3 treats an EXPLICIT ``next_run_time=None`` as "add this job
+    PAUSED" (BaseScheduler.add_job docstring: "pass ``None`` to add the job as
+    paused"). A paused interval job never fires: empirically the worker ran ONE
+    startup pass and then sat idle for 22h, silently killing both memory
+    extraction and the gaps-miner cadence. The fix is to OMIT the kwarg entirely
+    so the interval trigger computes the first fire at now+interval. Each caller
+    still does one manual pass right before ``scheduler.start()`` for the
+    immediate T0 run — so the net cadence is: immediate pass + every-interval
+    passes, with no double-run at T0.
+
+    Kept as a tiny seam so a unit test can prove the job lands SCHEDULED
+    (next_run_time is not None) rather than paused.
+    """
+    return scheduler.add_job(func, "interval", minutes=minutes)
+
+
 def _run_once(settings: Settings, *, live: bool = False) -> dict:
     """One pass: shadow staging by default, or prod triage when --live."""
     import psycopg
@@ -128,11 +147,10 @@ def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:
     from apscheduler.schedulers.blocking import BlockingScheduler
 
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(
+    _add_interval_job(
+        scheduler,
         lambda: _run_once(settings, live=args.live),
-        "interval",
         minutes=settings.extraction_interval_minutes,
-        next_run_time=None,
     )
     log.info("extraction loop armed (%s): every %s min",
               "live" if args.live else "shadow", settings.extraction_interval_minutes)
@@ -218,10 +236,7 @@ def _gaps_mine_main(settings: Settings, args: argparse.Namespace) -> int:
             log.warning("gaps mining pass skipped: %s", e)
 
     scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(
-        _safe_pass, "interval",
-        minutes=settings.extraction_interval_minutes, next_run_time=None,
-    )
+    _add_interval_job(scheduler, _safe_pass, minutes=settings.extraction_interval_minutes)
     log.info("gaps miner loop armed: every %s min", settings.extraction_interval_minutes)
     _safe_pass()  # fire immediately, then settle into the interval
     scheduler.start()  # blocks until SIGINT/SIGTERM
