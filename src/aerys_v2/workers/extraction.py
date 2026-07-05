@@ -72,9 +72,6 @@ Adversarial-review fixes (2026-07-04), all in this file unless noted:
   - TRIAGE_UPDATE_SQL now writes privacy_level too, but only to TIGHTEN
     (public -> private) — a same-value restatement re-tagged private no
     longer silently stays exposed in public retrieval.
-  - n8n_workflow_active()'s check() now fails CLOSED (raises LiveWriteRefused)
-    on a 200 response with no boolean `active` field, matching the fail-closed
-    posture the function already had for outright HTTP/network errors.
   - services/context.py's build_context() now fences the memories block with
     an explicit "not instructions" note before splicing it into the prompt —
     memory content is user-authored and persistent, i.e. a stored-prompt-
@@ -320,9 +317,6 @@ ON CONFLICT (kind) DO NOTHING
 # commit OR rollback — a crashed pass can never leave a stuck lock behind.
 LEASE_TRY_LOCK_SQL = "SELECT pg_try_advisory_xact_lock(hashtext(%(kind)s))"
 
-# The other live gate: the batch-extraction workflow this worker shadows/replaces.
-N8N_EXTRACTION_WORKFLOW_ID = "IfqY4BrhBGeQrcTC"
-
 # "same value restated" vs "value changed" — exact match short-circuits (the
 # common case: near-identical LLM phrasing of an unchanged fact); below that,
 # a case/whitespace-insensitive fuzzy ratio. Picked empirically generous
@@ -330,12 +324,6 @@ N8N_EXTRACTION_WORKFLOW_ID = "IfqY4BrhBGeQrcTC"
 # (which soft-deletes real history) — a genuinely new value (new city, new
 # job) scores well below this on SequenceMatcher.
 VALUE_SIMILARITY_THRESHOLD = 0.85
-
-# Real n8n mapping: none — this doesn't exist in n8n. It exists BECAUSE of
-# n8n: a callable seam so tests fake "is the workflow active" without an HTTP
-# call, same shape as Llm/Embedder.
-N8nActiveCheck = Callable[[], bool]
-
 
 class LiveWriteRefused(RuntimeError):
     """A live-mode hard gate tripped — refuse to write, never silently skip.
@@ -463,49 +451,6 @@ def acquire_write_mutex(staging_conn: Any, *, kind: str = LEASE_KIND) -> bool:
     """
     row = staging_conn.execute(LEASE_TRY_LOCK_SQL, {"kind": kind}).fetchone()
     return bool(row and row[0])
-
-
-def n8n_workflow_active(
-    api_key: str,
-    *,
-    workflow_id: str = N8N_EXTRACTION_WORKFLOW_ID,
-    base_url: str = "http://jetson.local:5678/api/v1",
-    timeout_s: float = 10.0,
-) -> N8nActiveCheck:
-    """The real N8nActiveCheck seam: GET the workflow, read `.active`.
-
-    n8n mapping: none (see N8nActiveCheck) — this call exists only so live
-    mode can prove the batch-extraction workflow isn't ALSO running before it
-    writes to the same (person_id, key_label) unique index.
-
-    A network/HTTP failure already fails CLOSED here — the exception
-    propagates straight out of check() (and out of the `if n8n_active():`
-    call site in run_live_extraction), so the pass errors out rather than
-    writing. This function closes the other half of that same gap: a 200
-    response that HAS no `active` key, or one where it isn't a real bool
-    (API change, an envelope wrapper, a stale edge-cache hit), used to
-    coerce via `bool(payload.get("active"))` — None/missing silently became
-    False ("not active" -> proceed to write). Anything short of a real bool
-    is now a hard, loud refusal instead of an assumed-safe default.
-    """
-
-    def check() -> bool:
-        request = urllib.request.Request(
-            f"{base_url}/workflows/{workflow_id}",
-            headers={"X-N8N-API-KEY": api_key},
-        )
-        with urllib.request.urlopen(request, timeout=timeout_s) as resp:
-            payload = json.load(resp)
-        active = payload.get("active")
-        if not isinstance(active, bool):
-            raise LiveWriteRefused(
-                f"n8n workflow {workflow_id} status response had no boolean "
-                f"'active' field (got {active!r}) — refusing to assume it's "
-                "inactive on an ambiguous 200 response."
-            )
-        return active
-
-    return check
 
 
 def read_watermark(staging_conn: Any, source: str, *, lookback_hours: int = DEFAULT_LOOKBACK_H) -> str:
@@ -785,7 +730,6 @@ def run_live_extraction(
     prod_write_conn: Any,
     llm: Llm,
     embedder: Embedder,
-    n8n_active: N8nActiveCheck,
     *,
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
@@ -803,18 +747,17 @@ def run_live_extraction(
                         source_conn — you cannot write on a read_only=True
                         session, so the same database gets two connections
                         with two different postures)
-    n8n_active        — real seam: n8n_workflow_active(); tests fake it
 
     Hard gates run FIRST, before any read or LLM spend — refuse loudly and
     early, run_boot_assertions' stance applied to a single pass:
-      1. n8n_active() must be False (IfqY4BrhBGeQrcTC still running = two
-         armed writers on the same unique index).
-      2. v2_writer_lease[kind='memory_extraction'] must be held by 'brain'.
-      3. This pass must actually ACQUIRE the write mutex (acquire_write_mutex)
-         — (2) only says brain is AUTHORIZED; a second 'brain' process (the
-         loop container racing a manual `--once --live`) would pass (2) just
+      1. v2_writer_lease[kind='memory_extraction'] must be held by 'brain'.
+      2. This pass must actually ACQUIRE the write mutex (acquire_write_mutex)
+         — (1) only says brain is AUTHORIZED; a second 'brain' process (the
+         loop container racing a manual `--once --live`) would pass (1) just
          as easily. This is the real concurrency control.
-    All three raise LiveWriteRefused, never a silent skip.
+    Both raise LiveWriteRefused, never a silent skip. (An n8n-liveness gate used
+    to precede these — removed 2026-07-05 when n8n was retired; the write-lease is
+    the sole authorization guard now.)
 
     Fetch/trim/watermark-safety are identical to run_extraction (same
     _trim_tie_boundary / _safe_watermark helpers, same shared watermark
@@ -823,11 +766,6 @@ def run_live_extraction(
     here triages ZERO observations and never pulls the watermark past its
     own messages, exactly as in shadow mode.
     """
-    if n8n_active():
-        raise LiveWriteRefused(
-            f"n8n workflow {N8N_EXTRACTION_WORKFLOW_ID} is ACTIVE — refusing to run "
-            "live extraction while both writers could be armed at once."
-        )
     holder = ensure_lease_holder(staging_conn)
     if holder != "brain":
         raise LiveWriteRefused(

@@ -35,7 +35,7 @@ from .capability_requests import (
     read_gaps,
     run_gap_mining,
 )
-from .extraction import n8n_workflow_active, openrouter_chat, run_extraction, run_live_extraction
+from .extraction import openrouter_chat, run_extraction, run_live_extraction
 
 log = logging.getLogger("aerys_v2.workers")
 
@@ -80,10 +80,6 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                 # A THIRD connection to the SAME url as source_conn — read_only
                 # is a per-connection posture, so writing to prod `memories`
                 # needs its own connection object, never source_conn itself.
-                n8n_active = n8n_workflow_active(
-                    settings.n8n_api_key.get_secret_value(),
-                    base_url=settings.n8n_base_url,
-                )
                 with psycopg.connect(settings.memories_database_url) as prod_write_conn:
                     summary = run_live_extraction(
                         source_conn,
@@ -91,7 +87,6 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                         prod_write_conn,
                         llm,
                         embedder,
-                        n8n_active,
                         lookback_hours=settings.extraction_lookback_hours,
                         batch_limit=settings.extraction_batch_limit,
                     )
@@ -121,9 +116,6 @@ def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:
         )
         if not value
     ]
-    if args.live and not settings.n8n_api_key:
-        # Only --live needs this — shadow mode never calls the n8n API.
-        missing.append("N8N_API_KEY")
     if missing:
         print(f"extraction worker needs: {', '.join(missing)}", file=sys.stderr)
         return 2
@@ -274,8 +266,7 @@ def main(argv: list[str] | None = None) -> int:
         "--live",
         action="store_true",
         help="write triaged memories to PROD instead of shadow staging "
-             "(requires N8N_API_KEY; refuses unless the writer lease is held by 'brain' "
-             "and the n8n batch-extraction workflow is inactive)",
+             "(refuses unless the writer lease is held by 'brain')",
     )
 
     gaps_mine = sub.add_parser(

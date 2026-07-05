@@ -7,15 +7,12 @@ verbatim (the ms-vs-µs precision bug), prod gets SELECTs only while every write
 lands in aerys_v2 staging, and an empty window is a true no-op.
 """
 
-import io
 import json
 from datetime import datetime, timedelta, timezone
 
-import aerys_v2.workers.extraction as extraction_mod
 from aerys_v2.workers.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     LEASE_KIND,
-    N8N_EXTRACTION_WORKFLOW_ID,
     SOURCE_COLUMNS,
     LiveWriteRefused,
     _safe_watermark,
@@ -24,7 +21,6 @@ from aerys_v2.workers.extraction import (
     acquire_write_mutex,
     batch_date,
     ensure_lease_holder,
-    n8n_workflow_active,
     parse_observations,
     run_extraction,
     run_live_extraction,
@@ -581,23 +577,10 @@ def test_triage_update_case_only_tightens_toward_private_in_sql_text():
 # --- live-mode hard gates ------------------------------------------------------
 
 
-def test_live_refuses_when_n8n_workflow_active():
-    prod, staging, prod_write = FakeConn(), lease_conn(holder="brain"), FakeConn()
-    try:
-        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: True)
-        assert False, "expected LiveWriteRefused"
-    except LiveWriteRefused as e:
-        assert N8N_EXTRACTION_WORKFLOW_ID in str(e)
-    # refused BEFORE any read/write — no watermark or prod query touched.
-    assert prod.calls == []
-    assert not any("v2_extraction_watermark" in s for s, _ in staging.calls)
-    assert prod_write.calls == []
-
-
 def test_live_refuses_when_lease_held_by_n8n():
     prod, staging, prod_write = FakeConn(), lease_conn(holder="n8n"), FakeConn()
     try:
-        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: False)
+        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder)
         assert False, "expected LiveWriteRefused"
     except LiveWriteRefused as e:
         assert LEASE_KIND in str(e)
@@ -611,7 +594,7 @@ def test_live_refuses_and_seeds_lease_row_when_absent():
     refuses exactly as if n8n already held it explicitly."""
     staging = lease_conn(holder=None)
     try:
-        run_live_extraction(FakeConn(), staging, FakeConn(), FakeLlm([]), fake_embedder, lambda: False)
+        run_live_extraction(FakeConn(), staging, FakeConn(), FakeLlm([]), fake_embedder)
         assert False, "expected LiveWriteRefused"
     except LiveWriteRefused as e:
         assert "n8n" in str(e)
@@ -641,7 +624,7 @@ def test_live_refuses_when_write_mutex_already_held():
     prod, prod_write = FakeConn(), FakeConn()
     staging = lease_conn(holder="brain", mutex_acquired=False)
     try:
-        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder, lambda: False)
+        run_live_extraction(prod, staging, prod_write, FakeLlm([]), fake_embedder)
         assert False, "expected LiveWriteRefused"
     except LiveWriteRefused as e:
         assert LEASE_KIND in str(e)
@@ -656,7 +639,7 @@ def test_live_proceeds_and_triages_when_lease_held_by_brain_and_n8n_inactive():
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])  # nothing existing -> insert
     summary = run_live_extraction(
-        prod, staging, prod_write, FakeLlm([OBS]), fake_embedder, lambda: False,
+        prod, staging, prod_write, FakeLlm([OBS]), fake_embedder,
     )
     assert summary["inserted_total"] == 1
     assert summary["updated_total"] == 0
@@ -686,7 +669,7 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West and collect SNES")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])
-    run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder, lambda: False)
+    run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder)
 
     assert calls["n"] == 2  # one fresh embed call per observation, not one for the batch
     inserts = [p for s, p in prod_write.calls if s.lstrip().upper().startswith("INSERT")]
@@ -708,7 +691,7 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "mumble mumble")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])
-    summary = run_live_extraction(prod, staging, prod_write, FakeLlm([bad_obs]), fake_embedder, lambda: False)
+    summary = run_live_extraction(prod, staging, prod_write, FakeLlm([bad_obs]), fake_embedder)
 
     assert summary["inserted_total"] == 0
     assert summary["updated_total"] == 0
@@ -718,68 +701,3 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     assert not any(
         s.lstrip().upper().startswith(("INSERT", "UPDATE")) for s, _ in prod_write.calls
     )
-
-
-# --- n8n_workflow_active: fail CLOSED on an ambiguous 200, not just HTTP errors --
-
-
-class _FakeHTTPResponse(io.BytesIO):
-    """Same minimal fake-urlopen-response shape as test_alerts.py's FakeResponse."""
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-
-def _patch_n8n_urlopen(monkeypatch, body: dict):
-    def fake_urlopen(req, timeout=None):
-        return _FakeHTTPResponse(json.dumps(body).encode())
-
-    monkeypatch.setattr(extraction_mod.urllib.request, "urlopen", fake_urlopen)
-
-
-def test_n8n_active_true_when_active_is_true(monkeypatch):
-    _patch_n8n_urlopen(monkeypatch, {"active": True})
-    assert n8n_workflow_active("key")() is True
-
-
-def test_n8n_active_false_when_active_is_false(monkeypatch):
-    _patch_n8n_urlopen(monkeypatch, {"active": False})
-    assert n8n_workflow_active("key")() is False
-
-
-def test_n8n_active_fails_closed_on_missing_active_key(monkeypatch):
-    # API change / envelope / stale edge-cache: 200 OK but no top-level 'active'.
-    # bool(None) used to silently coerce to False ("not active" -> proceed).
-    _patch_n8n_urlopen(monkeypatch, {"id": "IfqY4BrhBGeQrcTC", "name": "batch extraction"})
-    try:
-        n8n_workflow_active("key")()
-        assert False, "expected LiveWriteRefused on an ambiguous 200 shape"
-    except LiveWriteRefused:
-        pass
-
-
-def test_n8n_active_fails_closed_on_non_bool_active(monkeypatch):
-    _patch_n8n_urlopen(monkeypatch, {"active": "yes"})  # truthy string, not a real bool
-    try:
-        n8n_workflow_active("key")()
-        assert False, "expected LiveWriteRefused"
-    except LiveWriteRefused:
-        pass
-
-
-def test_n8n_active_still_fails_closed_on_http_error(monkeypatch):
-    # The asymmetry this fix must PRESERVE: an outright network/HTTP failure
-    # already refuses (propagates) rather than defaulting to "inactive" —
-    # this fix only closes the malformed-200 gap, not change this path.
-    def raising_urlopen(req, timeout=None):
-        raise OSError("network down")
-
-    monkeypatch.setattr(extraction_mod.urllib.request, "urlopen", raising_urlopen)
-    try:
-        n8n_workflow_active("key")()
-        assert False, "expected the OSError to propagate, not be swallowed into False"
-    except OSError:
-        pass

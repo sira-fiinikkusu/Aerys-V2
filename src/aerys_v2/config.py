@@ -161,14 +161,6 @@ class Settings(BaseSettings):
     extraction_lookback_hours: int = 2      # first-run window when no watermark exists
     extraction_batch_limit: int = 200       # rows per source per pass (v1 LIMIT 200)
 
-    # --live only: the two-armed-writers gate needs to ask n8n whether the
-    # batch-extraction workflow (IfqY4BrhBGeQrcTC) is still active. None =
-    # `--live` refuses to start (same missing-config-refuses pattern as
-    # DATABASE_URL/EMBEDDINGS_API_KEY); shadow mode (the default) never reads
-    # this and needs no n8n reachability at all.
-    n8n_api_key: SecretStr | None = None
-    n8n_base_url: str = "http://jetson.local:5678/api/v1"
-
     # ---- TIER ROUTING (the V1 classify sandwich, folded into the router) ------
     # n8n mapping: V1's three tier sub-workflows (Sonnet/Opus/Gemini agents) and
     # the modelsConfig dict in Load Config. Tiers are named by ROLE, not vendor
