@@ -312,6 +312,94 @@ def main() -> None:
         client.run(settings.discord_bot_token.get_secret_value())
         sys.exit(0)
 
+    if "--telegram" in sys.argv:  # run the Telegram gateway (needs TELEGRAM_BOT_TOKEN in .env)
+        if settings.telegram_bot_token is None:
+            print("--telegram needs TELEGRAM_BOT_TOKEN in .env (BotFather token).")
+            sys.exit(1)
+        # Same env-scare gate as --serve/--discord — this gateway checkpoints turns
+        # too, so a wrong-database DATABASE_URL must refuse here just as hard.
+        try:
+            run_boot_assertions(settings)
+        except BootConfigError as e:
+            log.error(str(e))
+            sys.exit(1)
+        import asyncio  # aiogram's run() is async (Dispatcher.start_polling); discord.py's is sync
+
+        from aerys_v2.factory import (
+            action_allowlist_for,
+            action_stack_for,
+            build_graph,
+            build_model,
+            checkpointer_for,
+            deep_gate_for,
+            load_soul,
+            tier_models_for,
+            turn_recorder_for,
+        )
+        from aerys_v2.service import ask
+        from aerys_v2.transports.telegram_gateway import AerysTelegramClient
+
+        # [01-05 PHOENIX] same degrade-safe arming as --serve/--discord: this
+        # gateway's turns must trace too. No-op unless OTLP_ENDPOINT is set;
+        # failures log and run on.
+        from aerys_v2.tracing import wire_tracing; wire_tracing(settings)
+
+        soul = load_soul(settings.soul_file_path)
+        cp_ctx = checkpointer_for(settings)
+        cp = cp_ctx.__enter__()  # held for the life of the gateway process
+        # Telegram is a text channel just like Discord: greetings ride fast,
+        # conversation rides standard (oauth pool when configured), research earns
+        # deep until the daily cap says otherwise — identical tier routing.
+        graph = build_graph(
+            build_model(settings), soul=soul, checkpointer=cp,
+            tier_models=tier_models_for(settings),
+        )
+        deep_gate = deep_gate_for(settings)
+        # v2_turns audit writer (migration 001) — Telegram turns are audited too,
+        # not just --serve/--discord. None when DATABASE_URL is unset.
+        record_turn = turn_recorder_for(settings)
+        router = action_graph = None
+        stack = action_stack_for(settings, soul)
+        if stack is not None:
+            router, action_graph = stack
+
+        # Identity resolution — the AUTH BOUNDARY (transports/resolver.py), wired
+        # exactly as --discord. With the aerys DB, a known Telegram account resolves
+        # to its real person_id (its OWN memories); a stranger or any second user
+        # resolves COLD and can never inherit the owner. Without a DB everyone is
+        # cold. Both paths set room-scoped privacy_context (dm=private, group=public).
+        if settings.memories_database_url is not None:
+            from aerys_v2.transports.resolver import db_resolver
+
+            resolve = db_resolver(settings.memories_database_url)
+        else:
+            from aerys_v2.transports.resolver import identity_from_lookup
+
+            def resolve(event):  # no DB: everyone cold, still room-scoped
+                return identity_from_lookup(None, event)
+
+        chat_ids = frozenset(
+            int(c) for c in settings.telegram_chat_ids.split(",") if c.strip()
+        )
+        client = AerysTelegramClient(
+            ask_fn=lambda text, identity, thread: ask(
+                graph, text, identity=identity, thread_id=thread,
+                router=router, action_graph=action_graph,
+                deep_allowed=deep_gate,
+                # AUTH GATE: house control + tools are allowlist-only, same as
+                # --discord. A DM'er / group member not in the allowlist gets
+                # chat-only (enforced in ask()). Owner is always in.
+                action_allowlist=action_allowlist_for(settings),
+                record_turn=record_turn,
+            ),
+            resolve_fn=resolve,
+            allowed_chat_ids=chat_ids,
+        )
+        # aiogram's run() is a coroutine (unlike discord.py's blocking run()), so
+        # the CLI owns the event loop here via asyncio.run.
+        asyncio.run(client.run(settings.telegram_bot_token.get_secret_value()))
+        sys.exit(0)
+
     log.info(
         "aerys-v2 ready | model=%s soul=%s otlp=%s",
         settings.model,

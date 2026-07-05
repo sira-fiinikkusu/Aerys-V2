@@ -109,7 +109,7 @@ def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:
         print(f"extraction worker needs: {', '.join(missing)}", file=sys.stderr)
         return 2
 
-    # Same env-scare gate as --serve/--discord: this worker WRITES to
+    # Same env-scare gate as --serve/--discord/--telegram: this worker WRITES to
     # database_url (staging + watermark), so a URL aimed at prod `aerys`
     # must refuse to run, not fail halfway through a pass.
     try:
