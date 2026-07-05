@@ -38,18 +38,23 @@ def test_dm_always_in_no_mention_needed():
     assert gate(is_dm=True, mentions_me=False) is True
 
 
-def test_group_open_by_default_when_no_allowlist_configured():
-    assert gate(allowed_chat_ids=frozenset()) is True
+def test_group_dropped_by_default_when_no_allowlist_configured():
+    # FAIL-CLOSED, mirroring discord's guild lock: with no chat-id allowlist a
+    # group is never served — even a direct @mention is dropped. This is the
+    # analogue of discord refusing every guild until DISCORD_GUILD_ID is set.
+    assert gate(allowed_chat_ids=frozenset()) is False
+    assert gate(allowed_chat_ids=frozenset(), mentions_me=True) is False
 
 
 def test_group_allowlist_enforced_when_set():
-    assert gate(allowed_chat_ids=frozenset({-2002})) is False
-    assert gate(allowed_chat_ids=frozenset({-1001})) is True
+    assert gate(allowed_chat_ids=frozenset({-2002})) is False  # -1001 not allowlisted
+    assert gate(allowed_chat_ids=frozenset({-1001})) is True   # allowlisted + mentioned
 
 
-def test_group_requires_mention():
-    assert gate(mentions_me=False) is False
-    assert gate(allowed_chat_ids=frozenset(), mentions_me=False) is False
+def test_group_requires_mention_even_when_allowlisted():
+    # An allowlisted group still needs an @mention to summon her.
+    assert gate(allowed_chat_ids=frozenset({-1001}), mentions_me=False) is False
+    assert gate(allowed_chat_ids=frozenset({-1001}), mentions_me=True) is True
 
 
 def fake_user(*, user_id: int, full_name: str = "Chris", username: str | None = "chrisp", is_bot: bool = False):

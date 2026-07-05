@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     discord_guild_id: int | None = None          # only this guild is served (None = DMs only)
     discord_reply_channel_ids: str = ""          # csv of guild channel ids to listen in ("" = all)
 
+    # None = Telegram transport OFF (same arming pattern as discord_bot_token — the
+    # runner only wires up when a token is present). One aiogram long-polling
+    # session covers DMs AND groups; n8n mapping is workflow 02-02 Telegram Adapter
+    # (K1jR1tpKZTOiid8N), the webhook that fed the retiring Core Agent.
+    telegram_bot_token: SecretStr | None = None
+    telegram_chat_ids: str = ""                   # csv of group chat ids to serve ("" = DMs only; a group is fail-closed until its chat id is listed — mirrors discord_guild_id)
+
     # HTTP API (--serve). None = the /ask door stays locked shut; callers (HA voice
     # pipeline, future satellites) present this as a Bearer token. LAN-only surface.
     api_token: SecretStr | None = None

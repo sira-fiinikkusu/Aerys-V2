@@ -16,6 +16,24 @@ def test_settings_requires_api_key(monkeypatch):
         Settings(_env_file=None)
 
 
+def test_telegram_settings_default_off(monkeypatch):
+    # Telegram transport is OFF by default — same arming pattern as discord_bot_token.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    s = Settings(_env_file=None)
+    assert s.telegram_bot_token is None
+    assert s.telegram_chat_ids == ""
+
+
+def test_telegram_token_read_as_secret(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_IDS", "-1001,-1002")
+    s = Settings(_env_file=None)
+    assert s.telegram_bot_token is not None
+    assert s.telegram_bot_token.get_secret_value() == "123:abc"
+    assert s.telegram_chat_ids == "-1001,-1002"
+
+
 # ---- empty API_TOKEN must fail closed (cross-review CRITICAL, 2026-07-04) -------
 
 

@@ -79,7 +79,7 @@ missing its DB is visible, not silent.
 
 Shipped in the same block because tiering gave the brain its third prod-adjacent write
 surface (checkpoints, outbox, now v2_model_usage). `run_boot_assertions()` runs in
-`--serve` and `--discord` BEFORE anything binds or connects:
+`--serve`, `--discord`, and `--telegram` BEFORE anything binds or connects:
 
 1. **FATAL:** `DATABASE_URL` targeting anything but `aerys_v2` refuses to start with a
    sentence, not a stack trace — pointed at prod `aerys` it would checkpoint V2 threads

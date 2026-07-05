@@ -58,19 +58,25 @@ def should_handle(
 ) -> bool:
     """Every drop/accept rule in one pure function.
 
-    Mirrors discord's should_handle: bots never get to summon Aerys (the same
-    rule that keeps Kael and Aerys from looping each other), DMs always in,
-    groups only when allowlisted (an empty allowlist means "no chat_id
-    restriction, judge by mention alone" — same non-empty-only enforcement as
-    discord's channel allowlist) AND the message mentions her. Telegram has no
-    self-message problem the way Discord does (long-polling never redelivers
-    the bot's own sends), so there's no author_is_self check here.
+    Mirrors discord's should_handle FAIL-CLOSED group posture: bots never get to
+    summon Aerys (the same rule that keeps Kael and Aerys from looping each
+    other), DMs always in, and a group is served only when its chat_id is in an
+    EXPLICIT allowlist AND the message mentions her. An empty allowed_chat_ids
+    means "serve NO groups" — the direct analogue of discord requiring
+    DISCORD_GUILD_ID before any guild is served (discord_gateway.should_handle:
+    `allowed_guild_id is None → return False`). Telegram has no separate
+    guild-id gate, so the chat-id allowlist IS that primary gate; leaving it
+    empty must DENY every group, not open every group the bot is @mentioned in
+    (otherwise anyone who knows the @username could add the bot to any group and
+    burn the owner's model budget). Telegram has no self-message problem the way
+    Discord does (long-polling never redelivers the bot's own sends), so there's
+    no author_is_self check here.
     """
     if is_bot:
         return False
     if is_dm:
         return True
-    if allowed_chat_ids and chat_id not in allowed_chat_ids:
+    if not allowed_chat_ids or chat_id not in allowed_chat_ids:
         return False
     return mentions_me
 
