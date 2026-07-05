@@ -23,6 +23,11 @@ from aerys_v2.state import Identity
 
 log = logging.getLogger(__name__)
 
+# A bare @mention / sticker-only message normalizes to empty text. Rather than a
+# canned reply, we hand the model this sentinel as the turn so the answer rides the
+# checkpointer and is contextual ("Yes Chris?" mid-thread, "I'm here?" cold).
+EMPTY_PING = "(no message — they just got your attention)"
+
 
 @dataclass(frozen=True)
 class NormalizedEvent:
@@ -163,19 +168,16 @@ class AerysDiscordClient(discord.Client):
         ):
             return
         event = normalize(message, self_id=self.user.id)
-        # A bare @mention / sticker-only / embed-only message normalizes to empty
-        # text, which ask() rejects. The most common summon IS a naked @mention, so
-        # answer with a nudge rather than throwing into silence.
-        if not event.text.strip():
-            await message.channel.send("I'm here — what do you need?")
-            return
         identity: Identity = self._resolve(event)
+        # Empty text (bare @mention, sticker-only) rides the model via EMPTY_PING so
+        # the acknowledgement is contextual and varied, not a fixed string.
+        turn_text = event.text.strip() or EMPTY_PING
         try:
             async with message.channel.typing():
                 # ask() is sync (fine for a one-user spike); the soak test will tell
                 # us whether it needs a thread executor before this leaves spike-hood.
                 reply = await self.loop.run_in_executor(
-                    None, lambda: self._ask(event.text, identity, event.thread_id)
+                    None, lambda: self._ask(turn_text, identity, event.thread_id)
                 )
         except Exception:
             # Never leave a summon on read: any failure inside the turn (model,

@@ -98,10 +98,11 @@ def test_voice_threads_get_emotion_tag_instruction():
 def test_channel_phrase_surfaces():
     assert _channel_phrase("voice:beta") == "a live voice conversation"
     assert _channel_phrase("discord:dm:123") == "a private Discord DM"
-    assert "public Discord" in _channel_phrase("discord:guild:555")
-    # a supplied room name is used verbatim in the public-channel phrase
+    assert "shared Discord server" in _channel_phrase("discord:guild:555")
+    # a supplied room name is used, and the channel id becomes a <#id> mention
     assert "#general" in _channel_phrase("discord:guild:555", "general")
-    assert "reading" in _channel_phrase("discord:guild:555", "general")  # privacy nudge
+    assert "<#555>" in _channel_phrase("discord:guild:555", "general")  # clickable link
+    assert "reading" not in _channel_phrase("discord:guild:555", "general")  # no announce
     assert _channel_phrase("telegram:dm:9") == "a private Telegram chat"
     assert "'fam'" in _channel_phrase("telegram:group:9", "fam")
     assert _channel_phrase("weird:thing") == "a direct message"  # unknown degrades
@@ -120,7 +121,9 @@ def test_system_prompt_carries_clock_and_where():
     )
     # private DM turn
     ask(graph, "hi", identity=CHRIS, thread_id="discord:dm:person-1")
-    assert "Eastern time" in RecordingModel.seen[0]                 # she has a clock now
-    assert "#general channel on public Discord" in RecordingModel.seen[0]  # names the room
-    assert "a private Discord DM" in RecordingModel.seen[1]         # DM says private
-    assert "public Discord" not in RecordingModel.seen[1]           # DM never says public
+    assert "Eastern" in RecordingModel.seen[0]                     # she has a clock now
+    assert "#general" in RecordingModel.seen[0]                    # names the room
+    assert "<#555>" in RecordingModel.seen[0]                      # clickable channel link
+    assert "never cite URLs" in RecordingModel.seen[0]             # no plumbing narration
+    assert "a private Discord DM" in RecordingModel.seen[1]        # DM says private
+    assert "shared Discord server" not in RecordingModel.seen[1]   # DM never says shared

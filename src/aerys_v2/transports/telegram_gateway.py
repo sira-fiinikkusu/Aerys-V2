@@ -28,7 +28,7 @@ from aiogram.types import Message
 
 from aerys_v2.channels.splitter import split_message
 from aerys_v2.state import Identity
-from aerys_v2.transports.discord_gateway import NormalizedEvent
+from aerys_v2.transports.discord_gateway import EMPTY_PING, NormalizedEvent
 
 log = logging.getLogger(__name__)
 
@@ -166,20 +166,17 @@ class AerysTelegramClient:
         ):
             return
         event = normalize(message, bot_username=self._bot_username or "")
-        # Bare @mention / sticker-only messages normalize to empty text, which ask()
-        # rejects — answer with a nudge instead of throwing into silence (parity with
-        # discord_gateway).
-        if not event.text.strip():
-            await message.answer("I'm here — what do you need?")
-            return
         identity: Identity = self._resolve(event)
+        # Empty text (bare @mention, sticker-only) rides the model via EMPTY_PING so
+        # the acknowledgement is contextual, not a fixed string (parity with discord).
+        turn_text = event.text.strip() or EMPTY_PING
         # ask() is sync (same seam and same caveat as discord_gateway: fine for
         # a one-user spike, the soak test will tell us whether it needs more);
         # run_in_executor keeps a slow LLM turn from blocking aiogram's loop.
         loop = asyncio.get_running_loop()
         try:
             reply = await loop.run_in_executor(
-                None, lambda: self._ask(event.text, identity, event.thread_id)
+                None, lambda: self._ask(turn_text, identity, event.thread_id)
             )
         except Exception:
             # Any failure inside the turn becomes a short apology, never dead air.

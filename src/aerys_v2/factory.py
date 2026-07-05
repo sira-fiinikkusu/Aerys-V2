@@ -762,25 +762,21 @@ EASTERN = ZoneInfo("America/New_York")  # Chris's timezone — the clock she rea
 
 def _channel_phrase(thread: str, room: str = "") -> str:
     """Human phrase for WHERE the caller is, from the checkpointer thread key
-    (+ the room label when the transport supplies one). Feeds the system prompt so
-    she can answer "where are we talking," and the public-room cases carry a privacy
-    nudge. Unknown keys degrade to a neutral phrase."""
+    (+ the room label the transport carried). For a public Discord channel the id is
+    pulled from the thread key and offered as a <#id> mention so she can echo it as a
+    clickable link. States the space plainly but does NOT tell her to announce that
+    it's public — she knows (for behavior), she shouldn't narrate it. Unknown keys
+    degrade to a neutral phrase."""
     if thread.startswith("voice"):
         return "a live voice conversation"
     if thread.startswith("discord:dm"):
         return "a private Discord DM"
     if thread.startswith("discord:guild"):
-        return (
-            f"the #{room} channel on public Discord, where other people may be reading"
-            if room
-            else "a public Discord channel where other people may be reading"
-        )
+        cid = thread.rsplit(":", 1)[-1]
+        named = f"#{room} " if room else ""
+        return f"the {named}channel of a shared Discord server (link it as <#{cid}>)"
     if thread.startswith("telegram:group"):
-        return (
-            f"the '{room}' Telegram group, where other people may be reading"
-            if room
-            else "a Telegram group where other people may be reading"
-        )
+        return f"the '{room}' Telegram group" if room else "a shared Telegram group"
     if thread.startswith("telegram"):
         return "a private Telegram chat"
     return "a direct message"
@@ -885,9 +881,10 @@ def build_graph(
         hour12 = now.strftime("%I").lstrip("0") or "12"
         when = f"{now:%A, %B} {now.day}, {now.year} at {hour12}:{now:%M} {now:%p}"
         where_when = (
-            f"\n\nRight now it is {when} Eastern time, "
-            f"and you are speaking with them in "
-            f"{_channel_phrase(str(thread), identity.get('channel_name', ''))}."
+            f"\n\nRight now it is {when} Eastern. You're talking with them in "
+            f"{_channel_phrase(str(thread), identity.get('channel_name', ''))}. "
+            "Treat this as your own awareness — use it naturally, and never cite URLs, "
+            "links, or metadata to the user to explain how you know something."
         )
         system = SystemMessage(
             content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{voice_style}"
