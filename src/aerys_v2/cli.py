@@ -243,6 +243,7 @@ def main() -> None:
             build_graph,
             build_model,
             checkpointer_for,
+            context_fn_for,
             deep_gate_for,
             load_soul,
             tier_models_for,
@@ -265,6 +266,10 @@ def main() -> None:
         # research earns deep until the daily cap says otherwise.
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
+            # long-term memory context: same wiring as --serve so Discord text
+            # chats recall memory too. None when MEMORIES_DATABASE_URL is unset
+            # (degrade-safe: memory-free graph on DB-less boxes).
+            context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
         )
         deep_gate = deep_gate_for(settings)
@@ -331,6 +336,7 @@ def main() -> None:
             build_graph,
             build_model,
             checkpointer_for,
+            context_fn_for,
             deep_gate_for,
             load_soul,
             tier_models_for,
@@ -352,6 +358,10 @@ def main() -> None:
         # deep until the daily cap says otherwise — identical tier routing.
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
+            # long-term memory context: same wiring as --serve/--discord so
+            # Telegram text chats recall memory too. None when
+            # MEMORIES_DATABASE_URL is unset (degrade-safe on DB-less boxes).
+            context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
         )
         deep_gate = deep_gate_for(settings)

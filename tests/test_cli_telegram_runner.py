@@ -62,12 +62,17 @@ def test_telegram_runner_wires_client(monkeypatch):
     monkeypatch.setattr(factory, "turn_recorder_for", lambda s: "RECORDER")
     monkeypatch.setattr(factory, "action_allowlist_for", lambda s: "ALLOW")
     monkeypatch.setattr(factory, "action_stack_for", lambda s, soul: None)  # chat-only
+    # Long-term memory context seam: a sentinel so the assertion proves the runner
+    # calls context_fn_for(settings) and threads its result into build_graph — the
+    # SAME memory wiring --serve has (text chats must recall memory too, not only voice).
+    monkeypatch.setattr(factory, "context_fn_for", lambda s: "CTXFN")
 
     graph_calls = {}
 
-    def fake_build_graph(model, *, soul, checkpointer, tier_models):
+    def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models):
         graph_calls.update(
-            model=model, soul=soul, checkpointer=checkpointer, tier_models=tier_models
+            model=model, soul=soul, checkpointer=checkpointer,
+            context_fn=context_fn, tier_models=tier_models,
         )
         return "GRAPH"
 
@@ -112,10 +117,13 @@ def test_telegram_runner_wires_client(monkeypatch):
     # bot_username left for getMe to resolve live (client's own design).
     assert client.bot_username is None
     # Graph built on the fake model/soul/checkpointer + tier map, same as --discord.
+    # context_fn is now wired from context_fn_for(settings) — long-term memory recall
+    # reaches Telegram text chats, closing the n8n->brain regression gap.
     assert graph_calls == {
         "model": "MODEL",
         "soul": "SOUL",
         "checkpointer": "CP",
+        "context_fn": "CTXFN",
         "tier_models": None,
     }
 
