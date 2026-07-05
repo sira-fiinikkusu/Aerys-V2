@@ -74,6 +74,12 @@ class AerysConversationAgent(ConversationEntity, conversation.AbstractConversati
                 f"{self._base_url}/ask",
                 json={
                     "text": user_input.text,
+                    # Explicit voice signal: this component IS the voice pipeline, so the
+                    # Brain person-keys the turn onto the owner's thread (cross-surface
+                    # continuity) and arms ack-then-act / emotion tags. Without it the
+                    # Brain fell back to the standalone THREAD_ID (the "2nd person_id"
+                    # bug, 2026-07-05). thread_id is now ignored by the Brain when voice.
+                    "voice": True,
                     "thread_id": THREAD_ID,
                     "display_name": DISPLAY_NAME,
                     # The load-bearing field: which satellite started this turn.

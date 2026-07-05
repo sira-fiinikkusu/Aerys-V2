@@ -166,12 +166,15 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # byte-for-byte as before for every non-satellite caller (curl, tests).
         if body.device_id:
             identity["device_id"] = body.device_id
-        # Voice is armed by the EXPLICIT body.voice flag (not a thread-name convention):
-        # a voice caller gets ack-then-act for device commands AND folds into the owner's
-        # person thread (cross-surface continuity), with content tagged fail-closed
-        # 'private' at ingest like a DM. A plain caller (voice=False, the default) is
-        # byte-for-byte unchanged — its own thread_id flows through verbatim.
-        if body.voice:
+        # Voice is armed by the EXPLICIT body.voice flag OR a legacy voice thread name.
+        # The HA aerys_conversation component predates the tie-in and still posts
+        # thread_id="voice:beta" with NO voice flag — so a "voice"-prefixed thread is
+        # treated as a voice turn here too, folding it onto the owner's person thread
+        # instead of stranding it on the standalone voice:beta thread (the "2nd
+        # person_id" bug, 2026-07-05). Both paths get ack-then-act, emotion tags, and
+        # content tagged fail-closed 'private' at ingest like a DM. A plain caller
+        # (voice=False, non-voice thread — curl/tests) is byte-for-byte unchanged.
+        if body.voice or str(body.thread_id or "").startswith("voice"):
             identity["voice"] = True
             thread_id = voice_thread()
         else:

@@ -42,12 +42,28 @@ def test_ask_round_trip_with_defaults():
 
 
 def test_custom_thread_and_name_flow_through():
+    # a NON-voice caller's custom thread flows through verbatim. (A "voice:*" thread
+    # is now treated as a voice turn and person-keyed — see the voice-prefix test —
+    # so a plain flow-through must use a non-voice thread id.)
     r = client().post(
         "/ask",
-        json={"text": "hi", "thread_id": "voice:pe", "display_name": "Chris (Voice)"},
+        json={"text": "hi", "thread_id": "cli:pe", "display_name": "Chris"},
         headers={"Authorization": "Bearer sekrit"},
     )
-    assert r.json()["reply"].endswith("|Chris (Voice)|voice:pe")
+    assert r.json()["reply"].endswith("|Chris|cli:pe")
+
+
+def test_ask_legacy_voice_thread_person_keys_without_flag():
+    # the HA aerys_conversation component posts thread_id="voice:beta" and NO voice
+    # flag (predates the tie-in); the Brain must still person-key it onto the owner
+    # thread rather than stranding it on voice:beta (the "2nd person_id" bug).
+    c = TestClient(build_app(fake_ask, "sekrit", owner_person_id="owner-uuid"))
+    r = c.post(
+        "/ask",
+        json={"text": "hi", "thread_id": "voice:beta", "display_name": "Chris (Voice)"},
+        headers={"Authorization": "Bearer sekrit"},
+    )
+    assert r.json()["thread_id"] == "person:owner-uuid"
 
 
 def test_ask_voice_flag_person_keys_into_owner_thread():
