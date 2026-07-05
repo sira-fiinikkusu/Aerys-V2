@@ -34,6 +34,19 @@ class Identity(TypedDict, total=False):
     # feeds the "where you're talking" line so she can name the public channel
     # she's in. Absent/"" for DMs and single-user channels.
     channel_name: str
+    # The room's WHERE, threaded gateway->resolver->identity alongside channel_name
+    # (track/memory-continuity). Since the checkpointer thread is now person-keyed
+    # ('person:{id}' for every surface), thread_id no longer encodes the surface —
+    # so the resolver carries it here instead: platform ('discord'|'telegram'),
+    # channel_kind ('dm'|'guild'|'group'), and channel_id (the raw platform room id,
+    # a discord channel snowflake or telegram chat id). Consumed by the chat/action
+    # nodes (the "where you're talking" line + the public-channel room block) and by
+    # the v2_turns audit row (channel enum + channel_id column). Absent for the
+    # owner's single-user channels (CLI, voice/HTTP), whose thread_id still names the
+    # surface directly.
+    platform: str
+    channel_kind: str
+    channel_id: str
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}

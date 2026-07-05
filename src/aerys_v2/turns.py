@@ -35,18 +35,22 @@ log = logging.getLogger(__name__)
 # tool_calls / degraded ride in as JSON strings, cast to jsonb (same %s::jsonb
 # convention as tools/home_control.py's outbox writes). person_id is cast to uuid;
 # a None value passes as NULL::uuid, which is exactly the "cold caller" case.
+# channel_id + display_name (migration 005) ride in alongside — the room's raw
+# platform id and speaker label, powering the channel-recent room block. Both
+# NULLABLE; a pre-005 database makes this INSERT fail, which the fail-open recorder
+# swallows (an audit row lost, never a turn).
 INSERT_TURN_SQL = """\
 INSERT INTO v2_turns
-  (thread_id, channel, person_id, platform_identity, resolver_version,
-   classifier_intent, tier, tier_override_source, guard_verdict,
+  (thread_id, channel, channel_id, display_name, person_id, platform_identity,
+   resolver_version, classifier_intent, tier, tier_override_source, guard_verdict,
    input_text, raw_reply, emitted_reply, tool_calls, degraded,
    error, latency_ms, trace_id)
 VALUES
-  (%(thread_id)s, %(channel)s, %(person_id)s::uuid, %(platform_identity)s,
-   %(resolver_version)s, %(classifier_intent)s, %(tier)s, %(tier_override_source)s,
-   %(guard_verdict)s, %(input_text)s, %(raw_reply)s, %(emitted_reply)s,
-   %(tool_calls)s::jsonb, %(degraded)s::jsonb, %(error)s, %(latency_ms)s,
-   %(trace_id)s)
+  (%(thread_id)s, %(channel)s, %(channel_id)s, %(display_name)s, %(person_id)s::uuid,
+   %(platform_identity)s, %(resolver_version)s, %(classifier_intent)s, %(tier)s,
+   %(tier_override_source)s, %(guard_verdict)s, %(input_text)s, %(raw_reply)s,
+   %(emitted_reply)s, %(tool_calls)s::jsonb, %(degraded)s::jsonb, %(error)s,
+   %(latency_ms)s, %(trace_id)s)
 """
 
 
@@ -98,6 +102,26 @@ def derive_channel(thread_id: str) -> str:
         return "http"
     head = tid.split(":", 1)[0].strip()
     return head or "unknown"
+
+
+def channel_enum(platform: object, channel_kind: object) -> str:
+    """The channel enum from the RESOLVED surface (identity.platform + channel_kind).
+
+    Post person-keying, thread_id is 'person:{id}' for every discord/telegram surface,
+    so derive_channel(thread_id) can no longer tell a DM from a guild — the surface
+    now travels on identity instead. This maps it back to the SAME enum values
+    derive_channel produces ('guild'|'discord_dm'|'telegram_group'|...). Returns ''
+    when the surface is unknown (voice/cli/http never set these), signalling the
+    caller to fall back to derive_channel(thread_id), whose thread_id still names
+    those single-user surfaces directly.
+    """
+    p = str(platform or "").lower()
+    k = str(channel_kind or "").lower()
+    if p == "discord":
+        return "discord_dm" if k == "dm" else "guild"
+    if p == "telegram":
+        return "telegram_dm" if k == "dm" else "telegram_group"
+    return ""
 
 
 # ── tool-call classification ────────────────────────────────────────────────
@@ -297,9 +321,18 @@ def build_turn_row(
     person_id = user_id if is_uuid else None
     platform_identity = None if (is_uuid or not user_id) else user_id
 
+    # channel: prefer the RESOLVED surface on identity (person-keyed thread_id no
+    # longer encodes it); fall back to the thread_id prefix for the single-user
+    # surfaces (voice/cli/http) that never set platform/channel_kind.
+    channel = channel_enum(identity.get("platform"), identity.get("channel_kind")) or derive_channel(thread_id)
+
     return {
         "thread_id": str(thread_id or ""),
-        "channel": derive_channel(thread_id),
+        "channel": channel,
+        # migration 005: the room's raw id + speaker label (NULL for single-user
+        # surfaces that carry no channel_id / for a nameless cold caller).
+        "channel_id": (str(identity.get("channel_id") or "").strip() or None),
+        "display_name": (str(identity.get("display_name") or "").strip() or None),
         "person_id": person_id,
         "platform_identity": platform_identity,
         "resolver_version": resolver_version,

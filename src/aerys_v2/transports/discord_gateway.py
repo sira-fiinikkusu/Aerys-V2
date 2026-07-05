@@ -44,15 +44,35 @@ class NormalizedEvent:
 
 
 def thread_key(channel_kind: str, platform_user_id: str, channel_id: str) -> str:
-    """Conversation key for the checkpointer.
+    """Legacy PLATFORM-account conversation key — computed by normalize() before
+    identity resolution, and still carried on the event as the room's channel_id
+    source. NO LONGER the checkpointer key: see person_thread_key.
 
-    DMs follow the PERSON (one continuous conversation regardless of client);
-    guild channels follow the CHANNEL (a shared room is one thread — identity
-    stays per-call, which is exactly why it must never live in checkpointed state).
+    DMs keyed the PERSON's platform account, guild channels keyed the CHANNEL.
     """
     if channel_kind == "dm":
         return f"discord:dm:{platform_user_id}"
     return f"discord:guild:{channel_id}"
+
+
+def person_thread_key(user_id: str) -> str:
+    """The checkpointer key: one continuous thread PER PERSON, across every surface.
+
+    n8n mapping: V1 keyed n8n_chat_histories.session_id = person_id already, but only
+    within a channel; here his DM, a public guild channel, and Telegram all resolve to
+    the SAME 'person:{person_id}' thread, so his conversation follows him wherever he
+    speaks (the cross-surface continuity requirement).
+
+    Computed from the RESOLVED identity's user_id — a real persons.id (UUID) for a
+    known account, or a cold '{platform}:{id}' handle for a stranger (who gets their
+    own inert thread). This is exactly why the key is built AFTER _resolve(), not in
+    normalize(): the platform account is not the person. Identity still rides per-call
+    config and NEVER lands in checkpointed state, so even though a guild channel is no
+    longer a shared thread, the session-contamination guard is unchanged (defense in
+    depth — person-keying removes the shared thread that made contamination possible
+    at all, and the config-only identity rule stays as the belt).
+    """
+    return f"person:{user_id}"
 
 
 def should_handle(
@@ -169,6 +189,12 @@ class AerysDiscordClient(discord.Client):
             return
         event = normalize(message, self_id=self.user.id)
         identity: Identity = self._resolve(event)
+        # Person-keyed threading: the checkpointer key is built from the RESOLVED
+        # identity, AFTER _resolve — so his DM, this guild channel, and Telegram all
+        # share one 'person:{id}' thread (cross-surface continuity). event.thread_id
+        # (the old channel key) is retired as the checkpointer key but still supplies
+        # the room's channel_id, carried on identity by the resolver for the room block.
+        thread_id = person_thread_key(identity["user_id"])
         # Empty text (bare @mention, sticker-only) rides the model via EMPTY_PING so
         # the acknowledgement is contextual and varied, not a fixed string.
         turn_text = event.text.strip() or EMPTY_PING
@@ -177,12 +203,12 @@ class AerysDiscordClient(discord.Client):
                 # ask() is sync (fine for a one-user spike); the soak test will tell
                 # us whether it needs a thread executor before this leaves spike-hood.
                 reply = await self.loop.run_in_executor(
-                    None, lambda: self._ask(turn_text, identity, event.thread_id)
+                    None, lambda: self._ask(turn_text, identity, thread_id)
                 )
         except Exception:
             # Never leave a summon on read: any failure inside the turn (model,
             # memory, tool) becomes a short apology, not a typing-then-nothing.
-            log.exception("ask() failed for thread %s", event.thread_id)
+            log.exception("ask() failed for thread %s", thread_id)
             await message.channel.send(
                 "Sorry — something broke on my end handling that. Try me again in a moment?"
             )
