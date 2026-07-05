@@ -471,9 +471,13 @@ def test_voice_action_passes_spoken_ack_to_subgraph():
     assert stub.configs[0]["configurable"]["thread_id"] == "voice:ack"
 
 
-def test_action_subgraph_sees_only_current_command_despite_toggle_history():
-    # Thread full of on/off ping-pong — the exact history live on voice:beta when
-    # the incident fired. The subgraph must still receive ONLY the current turn.
+def test_voice_action_now_sees_history_but_keeps_never_ask_guard():
+    # 2026-07-05: voice actions gained history too (owner: statelessness is annoying).
+    # The 2026-07-03 garble incident is NOW guarded by the spoken_ack / never-ask
+    # overlay in config, NOT by hiding history. Thread full of on/off ping-pong — the
+    # exact shape from the incident — must now flow INTO the subgraph, WHILE the ack
+    # guard still rides config so the model resolves garble toward the ack instead of
+    # asking over the one-way channel.
     graph = build_graph(fake_model("unused"), soul="s")
     ping_pong = []
     for i in range(3):
@@ -489,12 +493,102 @@ def test_action_subgraph_sees_only_current_command_despite_toggle_history():
         as_node="chat",
     )
     stub = RecordingActionGraph(final="Office light 1 is off.")
-    ask(graph, "turn off office light 1", identity=CHRIS, thread_id="voice:pingpong",
+    # voice is pinned private in production (http_api), so history is NOT redacted
+    ask(graph, "turn off office light 1",
+        identity={**CHRIS, "privacy_context": "private"}, thread_id="voice:pingpong",
         router=action_router, action_graph=stub)
     wait_for_messages(graph, "voice:pingpong", len(ping_pong) + 2)
-    # exactly ONE message reached the subgraph: the current command, verbatim
-    assert len(stub.inputs[0]) == 1
-    assert stub.inputs[0][0].content == "turn off office light 1"
+    # the subgraph NOW sees the full prior history + the current command last
+    seen = [m.content for m in stub.inputs[0]]
+    assert seen[-1] == "turn off office light 1"
+    assert seen[:len(ping_pong)] == [m.content for m in ping_pong]  # history restored
+    # ...and the never-ask guard still rides config (the ACTUAL garble protection)
+    assert stub.configs[0]["configurable"]["spoken_ack"] == "[warmly] Getting that light for you"
+
+
+# ---- 2026-07-05 continuity: the NON-VOICE (text) action path DOES see prior turns --
+# Owner screenshots: "turn them back on" / "does it look like Hsin?" hit the action
+# path with NO history — the action graph is checkpointer-less, so it saw only the
+# current message and lost every referent. The text path now seeds the thread's prior
+# turns (gated for the room). The VOICE path above deliberately stays single-turn (the
+# one-way-channel garble contract); these prove the text path is the opposite.
+
+
+def test_nonvoice_action_seeds_prior_history_private_dm():
+    # A private DM: no redaction, so the full prior exchange rides into the action graph
+    # and "turn them back on" finally has a referent.
+    graph = build_graph(fake_model("unused"), soul="s")
+    graph.update_state(
+        {"configurable": {"thread_id": "t-cont"}},
+        {"messages": [HumanMessage(content="turn off the office lights"),
+                      AIMessage(content="Both office lights are off.")]},
+        as_node="chat",
+    )
+    stub = RecordingActionGraph(final="Office lights back on.")
+    out = ask(graph, "turn them back on",
+              identity={**CHRIS, "privacy_context": "private"}, thread_id="t-cont",
+              router=action_router, action_graph=stub)
+    assert out == "Office lights back on."
+    # the action graph SAW turn 1 + its outcome + the current command — referent restored
+    assert [m.content for m in stub.inputs[0]] == [
+        "turn off the office lights", "Both office lights are off.", "turn them back on"]
+    # and the thread stays coherent: prior(2) + this human + this outcome
+    msgs = graph.get_state({"configurable": {"thread_id": "t-cont"}}).values["messages"]
+    assert [m.content for m in msgs] == [
+        "turn off the office lights", "Both office lights are off.",
+        "turn them back on", "Office lights back on."]
+
+
+def test_nonvoice_action_public_room_redacts_private_priors():
+    # Same seam, PUBLIC room: the short-term privacy gate must still bite. A private
+    # health turn from a DM (tagged 'private') is dropped before the action model sees
+    # it; the public device turn survives so continuity holds. Restoring history must
+    # NOT reopen the leak the chat gate closes.
+    from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY
+
+    graph = build_graph(fake_model("unused"), soul="s")
+    graph.update_state(
+        {"configurable": {"thread_id": "t-pub"}},
+        {"messages": [
+            HumanMessage(content="my resting HR was 48 last night",
+                         additional_kwargs={CONTENT_PRIVACY_KEY: "private"}),
+            AIMessage(content="noted"),
+            HumanMessage(content="turn off the office lights",
+                         additional_kwargs={CONTENT_PRIVACY_KEY: "public"}),
+            AIMessage(content="Both office lights are off."),
+        ]},
+        as_node="chat",
+    )
+    stub = RecordingActionGraph(final="back on")
+    ask(graph, "turn them back on",
+        identity={**CHRIS, "privacy_context": "public"}, thread_id="t-pub",
+        router=action_router, action_graph=stub)
+    seen = [m.content for m in stub.inputs[0]]
+    assert "my resting HR was 48 last night" not in seen  # private DM content stays gated
+    assert seen == ["turn off the office lights", "Both office lights are off.",
+                    "turn them back on"]
+
+
+def test_nonvoice_action_media_followup_sees_prior_image_turn():
+    # The exact "does it look like Hsin?" shape: turn 1 shared a CDN image and she
+    # described it; turn 2 is a bare comparison with no URL. The action/media graph must
+    # now see turn 1's URL + description instead of "nothing came through in this message".
+    graph = build_graph(fake_model("unused"), soul="s")
+    url = "look at https://cdn.discordapp.com/attachments/1/2/kitsune.png?ex=a&is=b&hm=c"
+    graph.update_state(
+        {"configurable": {"thread_id": "t-img"}},
+        {"messages": [HumanMessage(content=url),
+                      AIMessage(content="A silver-haired kitsune character, fan-art style.")]},
+        as_node="chat",
+    )
+    stub = RecordingActionGraph(final="Yeah — that looks like Hsin.")
+    ask(graph, "does it look like hsin from wuthering waves?",
+        identity={**CHRIS, "privacy_context": "private"}, thread_id="t-img",
+        router=action_router, action_graph=stub)
+    seen = [m.content for m in stub.inputs[0]]
+    assert seen[0] == url  # the signed CDN URL from turn 1 is intact in the seed
+    assert "silver-haired kitsune" in seen[1]
+    assert seen[-1] == "does it look like hsin from wuthering waves?"
 
 
 class RecordingToolModel:

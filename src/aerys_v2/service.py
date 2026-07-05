@@ -38,7 +38,12 @@ from typing import Callable
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.router import DEFAULT_TIER, RouteDecision, normalize_tier
-from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY, PRIVATE, PUBLIC
+from aerys_v2.services.content_privacy import (
+    CONTENT_PRIVACY_KEY,
+    PRIVATE,
+    PUBLIC,
+    redact_private_history,
+)
 from aerys_v2.state import Identity, is_voice_turn
 from aerys_v2.turns import build_turn_row, current_trace_id
 
@@ -557,6 +562,47 @@ def _chat_turn(
     return reply
 
 
+def _action_history_seed(graph: object, configurable: dict, text: str) -> list:
+    """Seed the checkpointer-less action graph with the thread's PRIOR turns.
+
+    The chat graph auto-replays history from its checkpointer; the action graph is
+    compiled WITHOUT one (one-shot by design), so on its own it sees ONLY the current
+    message — which is exactly why a follow-up device/media command lost its referent:
+    "turn them back on", "does it look like Hsin?" both arrived with no earlier turn in
+    view (the 2026-07-05 continuity bug). Read the prior turns off the chat graph's
+    checkpointer and hand them to the action graph as its state, GATED for the room
+    exactly like the chat node: a non-private (public/unknown) context drops
+    private-tagged priors before the action model can see them, so restoring continuity
+    never reopens the short-term privacy leak the chat gate closes. The current human
+    turn is appended LAST so redact_private_history's always-keep-the-current-turn rule
+    lands on THIS message, not the last prior one. Degrade-safe: any checkpointer read
+    failure falls back to the current message alone (the pre-fix behavior), never a dead
+    turn.
+
+    Used by BOTH the text action path (_action_turn) and the voice action path
+    (_complete_action, owner ask 2026-07-05: stateless voice commands are annoying).
+    The 2026-07-03 STT-garble incident is guarded on the voice path by VOICE_ACK_OVERLAY
+    (spoken_ack in action_config) — the model is told NEVER to ask over the one-way
+    channel and to resolve garble toward the already-spoken ack — NOT by hiding history.
+    """
+    identity = (configurable or {}).get("identity") or {}
+    try:
+        prior = graph.get_state({"configurable": configurable}).values.get("messages", [])
+    except Exception:
+        log.warning(
+            "action-seed history read failed — running action with current turn only",
+            exc_info=True,
+        )
+        prior = []
+    seeded = [*prior, HumanMessage(content=text)]
+    # Mirror the chat node's fail-closed gate: redact unless the room is EXPLICITLY
+    # private. A public/unknown context drops private-tagged priors; a private DM/voice
+    # context passes the owner's full history through untouched.
+    if identity.get("privacy_context") != PRIVATE:
+        seeded = redact_private_history(seeded)
+    return seeded
+
+
 def _action_turn(
     action_graph: object,
     graph: object,
@@ -582,7 +628,14 @@ def _action_turn(
     from the real tool loop, not the two-line human/ai summary written to history.
     """
     try:
-        result = action_graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+        # Seed the action graph with the thread's prior turns (gated for the room) so a
+        # follow-up command can resolve a reference to an earlier turn — the action graph
+        # is checkpointer-less and would otherwise see ONLY this message (2026-07-05
+        # continuity bug: "turn them back on" / "does it look like Hsin?").
+        result = action_graph.invoke(
+            {"messages": _action_history_seed(graph, config["configurable"], text)},
+            config,
+        )
     except Exception as e:
         # Rail trip / tool-loop blowup on the sequential action path: record the
         # failed turn (classifier_intent='action') before re-raising, same as the
@@ -827,8 +880,16 @@ def _voice_parallel_start(
             failed = False
             result_messages: list = []
             try:
+                # Seed the voice action with thread history too (owner ask 2026-07-05:
+                # stateless voice commands are annoying — "turn them back on" by voice
+                # must resolve like it does by text). The 2026-07-03 garble incident is
+                # guarded by VOICE_ACK_OVERLAY (spoken_ack in action_config): the model
+                # is told NEVER to ask over the one-way channel and to resolve any STT
+                # garble toward the ack already spoken — that instruction, not
+                # statelessness, is what prevents the "did you mean on or off?" stall.
                 result = action_graph.invoke(
-                    {"messages": [HumanMessage(content=text)]}, action_config
+                    {"messages": _action_history_seed(graph, real_configurable, text)},
+                    action_config,
                 )
                 result_messages = result["messages"]
                 final = _reply_text(result_messages[-1])
