@@ -321,10 +321,16 @@ def build_turn_row(
     person_id = user_id if is_uuid else None
     platform_identity = None if (is_uuid or not user_id) else user_id
 
-    # channel: prefer the RESOLVED surface on identity (person-keyed thread_id no
-    # longer encodes it); fall back to the thread_id prefix for the single-user
-    # surfaces (voice/cli/http) that never set platform/channel_kind.
-    channel = channel_enum(identity.get("platform"), identity.get("channel_kind")) or derive_channel(thread_id)
+    # channel: a voice turn is 'voice' by its explicit flag first — person-keying folds
+    # voice into the owner's 'person:{id}' thread, so derive_channel(thread_id) would
+    # otherwise mislabel it 'person'. Otherwise prefer the RESOLVED surface on identity
+    # (person-keyed thread_id no longer encodes it); fall back to the thread_id prefix
+    # for the single-user surfaces (voice:beta/cli/http) that never set platform/kind.
+    channel = (
+        "voice" if identity.get("voice")
+        else channel_enum(identity.get("platform"), identity.get("channel_kind"))
+        or derive_channel(thread_id)
+    )
 
     return {
         "thread_id": str(thread_id or ""),

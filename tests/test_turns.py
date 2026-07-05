@@ -237,6 +237,22 @@ def test_voice_chat_path_records_standard_pinned_row():
     assert row["tier"] == "standard"                 # ChannelPolicy pin
 
 
+def test_person_keyed_voice_turn_still_audits_as_voice_channel():
+    # Post person-keying, a voice turn rides the owner's 'person:{id}' thread — which
+    # derive_channel would mislabel 'person'. The explicit voice flag keeps the audit
+    # row's channel 'voice' (and the standard-tier pin still fires off that flag).
+    rec = Recorder()
+    graph = build_graph(fake_model("spoken reply"), soul="s")
+    voice_owner = {**OWNER, "voice": True}
+    out = ask(graph, "say something nice", identity=voice_owner,
+              thread_id="person:6e6bcbed-03ef-4d17-95d2-89c467414335",
+              router=chat_router, action_graph=StubActionGraph(), record_turn=rec)
+    assert out == "spoken reply"
+    (row,) = rec.wait(1)
+    assert row["channel"] == "voice"                 # NOT 'person' — the flag wins
+    assert row["tier"] == "standard"                 # ChannelPolicy pin off the flag
+
+
 def test_voice_action_path_records_ack_as_emitted_and_final_as_raw():
     rec = Recorder()
     graph = build_graph(fake_model("speculative"), soul="s")

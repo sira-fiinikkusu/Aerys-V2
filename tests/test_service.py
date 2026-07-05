@@ -93,6 +93,36 @@ def test_voice_threads_get_emotion_tag_instruction():
     assert all("memory is durable" in s for s in RecordingModel.seen)  # capability line everywhere
 
 
+VOICE_OWNER = {"user_id": "person-1", "display_name": "Chris (Voice)",
+               "privacy_context": "private", "voice": True}
+
+
+def test_person_keyed_voice_flag_gets_emotion_tags_and_stt_note():
+    # Voice now folds into the owner's 'person:{id}' thread (no 'voice' prefix). The
+    # emotion-tag styling AND the STT-fallibility note must fire off the explicit
+    # identity.voice flag; the same thread WITHOUT the flag (a text turn) stays clean.
+    RecordingModel.seen = []
+    m = RecordingModel(messages=iter([AIMessage(content="a"), AIMessage(content="b")]))
+    graph = build_graph(m, soul="s")
+    ask(graph, "hi", identity=VOICE_OWNER, thread_id="person:p1")   # person-keyed voice
+    ask(graph, "hi", identity=CHRIS, thread_id="person:p1")         # same thread, text turn
+    assert "[warmly]" in RecordingModel.seen[0]                     # emotion tags off the FLAG
+    assert "speech-to-text" in RecordingModel.seen[0]              # STT-fallibility caution
+    assert "[warmly]" not in RecordingModel.seen[1]                # text turn stays clean
+    assert "speech-to-text" not in RecordingModel.seen[1]
+
+
+def test_person_keyed_voice_where_line_reports_voice():
+    # The "where you're talking" line must say a live voice conversation for a
+    # person-keyed voice turn — derived from the flag, since the thread no longer
+    # names 'voice' (would otherwise degrade to "a direct message").
+    RecordingModel.seen = []
+    m = RecordingModel(messages=iter([AIMessage(content="a")]))
+    graph = build_graph(m, soul="s")
+    ask(graph, "where are we", identity=VOICE_OWNER, thread_id="person:p1")
+    assert "a live voice conversation" in RecordingModel.seen[0]
+
+
 # --- #2: "where + when" injection ------------------------------------------
 
 def test_channel_phrase_surfaces():

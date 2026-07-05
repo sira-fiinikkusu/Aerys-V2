@@ -47,9 +47,21 @@ class Identity(TypedDict, total=False):
     platform: str
     channel_kind: str
     channel_id: str
+    # EXPLICIT voice signal (track/memory-continuity): set True by the voice
+    # transport (http_api's /v1/chat/completions shim, and /ask when voice=True).
+    # It is what arms the three voice behaviors — parallel-start (service.py),
+    # ElevenLabs emotion tags (the chat node), and the standard-tier pin — now that
+    # voice folds into the owner's person-keyed thread ('person:{id}') and no longer
+    # names 'voice' in the thread_id. Per-call only (rides config, never checkpointed),
+    # so the SAME person thread is a voice turn or a text turn purely by this flag.
+    voice: bool
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}
+
+# The Identity key the explicit voice flag lives under — one constant so the writer
+# (the voice transport) and every reader (is_voice_turn) can never drift on spelling.
+VOICE_KEY = "voice"
 
 
 def identity_from_config(config: RunnableConfig | None) -> Identity:
@@ -57,3 +69,22 @@ def identity_from_config(config: RunnableConfig | None) -> Identity:
     configurable = (config or {}).get("configurable") or {}
     identity = configurable.get("identity") or {}
     return identity if identity else UNKNOWN_CALLER
+
+
+def is_voice_turn(identity: Identity | dict | None, thread_id: object) -> bool:
+    """Is THIS turn a voice turn? Single source of truth for voice detection.
+
+    The PRIMARY signal is the explicit per-call `voice` flag on identity, set by the
+    voice transport. Person-keying folded voice into the owner's 'person:{id}' thread,
+    so the thread_id no longer names 'voice' — the flag is what carries voice-ness now.
+
+    The legacy thread-prefix check is retained as a FALLBACK: the single-user raw-thread
+    surfaces (and direct callers/tests) that still name a 'voice:*' thread keep working
+    unchanged. A person-keyed voice thread never starts with 'voice', so the fallback
+    never fires there — the flag does. No false positives: the '::spec::' speculative
+    voice thread is 'person:{id}::spec::...' (flag-detected), and a text 'discord:*'/
+    'telegram:*'/'person:*' thread has no flag and no 'voice' prefix.
+    """
+    if (identity or {}).get(VOICE_KEY):
+        return True
+    return str(thread_id or "").startswith("voice")

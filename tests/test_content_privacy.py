@@ -33,6 +33,13 @@ PUBLIC_GUILD = {
     "user_id": "person-1", "display_name": "Chris", "privacy_context": "public",
     "platform": "discord", "channel_kind": "guild", "channel_id": "555",
 }
+# Voice is a PRIVATE modality (owner talking to a satellite at home) that now folds
+# into the SAME person-keyed thread as his text — so it gets DM-identical content
+# protection: fail-closed 'private' at ingest, relaxed off-hot-path by the judge.
+PRIVATE_VOICE = {
+    "user_id": "person-1", "display_name": "Chris (Voice)",
+    "privacy_context": "private", "voice": True,
+}
 
 
 def fake_model(*replies: str) -> GenericFakeChatModel:
@@ -271,6 +278,93 @@ def test_action_path_tags_and_can_relax_human_turn():
         action_graph=StubAction(),
         content_privacy_classifier=lambda _t: "public")
     assert _wait_for_tag(graph, "person:p1", "wifi", "public") == "public"
+
+
+def test_voice_origin_human_tagged_private_failclosed():
+    # Voice ingestion rides the SAME tagging path as a DM: a voice turn starts
+    # fail-closed 'private' on the owner's person thread.
+    graph = build_graph(fake_model("ok"), soul="s")
+    ask(graph, "hey there", identity=PRIVATE_VOICE, thread_id="person:p1")
+    assert _human_tag(graph, "person:p1", "hey there") == "private"
+
+
+def test_private_voice_content_walled_out_of_public_but_seen_in_private():
+    # THE security property for voice: because voice now shares the owner's person
+    # thread, a private thing he said BY VOICE must be gated out of a later PUBLIC
+    # text turn (and its reply too) — yet remain visible in a private turn.
+    CapturingModel.seen = []
+    m = CapturingModel(
+        messages=iter([AIMessage(content="a"), AIMessage(content="b"), AIMessage(content="c")])
+    )
+    graph = build_graph(m, soul="s")
+    # 1) a private VOICE turn on the person thread (no judge -> stays fail-closed private)
+    ask(graph, "my depression has been rough lately", identity=PRIVATE_VOICE, thread_id="person:p1")
+    # 2) a PUBLIC guild text turn on the SAME person-keyed thread
+    ask(graph, "hey everyone", identity=PUBLIC_GUILD, thread_id="person:p1")
+    # 3) a private VOICE turn again
+    ask(graph, "still just me", identity=PRIVATE_VOICE, thread_id="person:p1")
+
+    public_seen = CapturingModel.seen[1]
+    private_seen = CapturingModel.seen[2]
+    # the private voice content — and the reply it produced — never reach public.
+    assert not any("depression" in s for s in public_seen)
+    assert "a" not in public_seen                          # the voice turn's reply is gone too
+    assert any("hey everyone" in s for s in public_seen)   # the current public message stays
+    # ...but a private voice turn is NOT redacted: the owner sees his own history in full.
+    assert any("depression" in s for s in private_seen)
+
+
+def test_judge_relaxes_general_voice_turn_to_public():
+    # A GENERAL thing said by voice must carry into public rooms — the async judge
+    # relaxes its fail-closed 'private' tag exactly as it does for a general DM turn.
+    graph = build_graph(fake_model("noted"), soul="s")
+    ask(graph, "add milk to the grocery list", identity=PRIVATE_VOICE, thread_id="person:p1",
+        content_privacy_classifier=lambda _t: "public")
+    assert _wait_for_tag(graph, "person:p1", "milk", "public") == "public"
+
+
+def test_private_voice_turn_keeps_failclosed_tag_on_private_verdict():
+    # A genuinely private voice line stays 'private' even with a judge wired.
+    graph = build_graph(fake_model("noted"), soul="s")
+    ask(graph, "my anxiety spiked today", identity=PRIVATE_VOICE, thread_id="person:p1",
+        content_privacy_classifier=lambda _t: "private")
+    time.sleep(0.2)
+    assert _human_tag(graph, "person:p1", "anxiety") == "private"
+
+
+def test_voice_parallel_start_chat_relaxes_general_turn():
+    # The PRODUCTION voice path (router + action_graph armed) runs parallel-start; the
+    # human turn lands on the real person thread and must get the SAME off-hot-path
+    # relaxation. A general voice line -> 'public', through the voice-chat branch.
+    from aerys_v2.router import RouteDecision
+
+    class StubAction:
+        def invoke(self, inp, config):
+            return {"messages": [AIMessage(content="unused")]}
+
+    graph = build_graph(fake_model("here's the forecast"), soul="s")
+    ask(graph, "what's the weather tomorrow", identity=PRIVATE_VOICE, thread_id="person:p1",
+        router=lambda _t: RouteDecision(route="chat", ack=""),
+        action_graph=StubAction(),
+        content_privacy_classifier=lambda _t: "public")
+    assert _wait_for_tag(graph, "person:p1", "weather", "public") == "public"
+
+
+def test_voice_parallel_start_action_relaxes_general_turn():
+    # The voice ACTION branch: the human turn is written from the background thread,
+    # then relaxed off the hot path — a general spoken command carries into public.
+    from aerys_v2.router import RouteDecision
+
+    class StubAction:
+        def invoke(self, inp, config):
+            return {"messages": [AIMessage(content="Set a 5 minute timer.")]}
+
+    graph = build_graph(fake_model("speculative"), soul="s")
+    ask(graph, "set a five minute timer", identity=PRIVATE_VOICE, thread_id="person:p1",
+        router=lambda _t: RouteDecision(route="action", ack="[warmly] on it"),
+        action_graph=StubAction(),
+        content_privacy_classifier=lambda _t: "public")
+    assert _wait_for_tag(graph, "person:p1", "timer", "public") == "public"
 
 
 def test_content_privacy_fn_for_arming():

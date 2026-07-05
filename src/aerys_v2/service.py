@@ -10,7 +10,7 @@ an action subgraph. Both None = chat-only, byte-for-byte the old behavior. Both 
 
 - non-voice threads: router first (sequential) — chat routes to the chat graph,
   action routes to the tool subgraph, whose result becomes the reply.
-- voice threads (thread_id startswith "voice"): PARALLEL-START — the router and
+- voice turns (identity.voice flag — is_voice_turn): PARALLEL-START — the router and
   the chat generation launch concurrently. Router says chat -> the chat result
   (already in flight) is the reply and the router cost vanishes into the
   latency shadow. Router says action -> the caller gets the router's generated
@@ -39,7 +39,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.router import DEFAULT_TIER, RouteDecision, normalize_tier
 from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY, PRIVATE, PUBLIC
-from aerys_v2.state import Identity
+from aerys_v2.state import Identity, is_voice_turn
 from aerys_v2.turns import build_turn_row, current_trace_id
 
 log = logging.getLogger(__name__)
@@ -267,9 +267,11 @@ def _reclassify_if_needed(
     origin_privacy: str,
 ) -> None:
     """Fire the async retag only for a candidate turn: a judge must be wired, and the
-    turn must be a fail-closed 'private' DM (a public-origin turn is already public,
-    nothing to relax). Called from the non-voice paths only — voice is the owner's
-    private channel and never enters the public gate."""
+    turn must be a fail-closed 'private' DM/voice turn (a public-origin turn is already
+    public, nothing to relax). Called from BOTH the non-voice paths and the voice path:
+    since person-keying, a private thing said by voice shares the owner's thread with his
+    public text turns, so voice content needs the same relax-general/keep-private
+    treatment as a DM."""
     if classifier is None or origin_privacy != PRIVATE:
         return
     _reclassify_content_privacy(graph, config, msg_id, text, reply, classifier)
@@ -411,18 +413,24 @@ def ask(
             )
             return reply
 
-        if str(thread_id).startswith("voice"):
-            # ChannelPolicy (locked): voice is PINNED to the standard tier —
-            # the ~3.6s budget can't absorb deep latency, and fast-tier
-            # identity wobbles are what got Haiku demoted in V1. The pin is
-            # structural: this path never writes a tier into config, so the
-            # chat node's DEFAULT_TIER (= standard) always applies.
-            # (No content reclassification on voice: it's the owner's private
-            # channel, never person-keyed, and never enters the public gate.)
+        if is_voice_turn(identity, thread_id):
+            # Voice detection now rides the EXPLICIT identity.voice flag (is_voice_turn),
+            # not the thread prefix — because voice folds into the owner's person-keyed
+            # thread ('person:{id}') and no longer names 'voice'. Behavior is unchanged:
+            # ChannelPolicy (locked) PINS voice to the standard tier — the ~3.6s budget
+            # can't absorb deep latency, and fast-tier identity wobbles are what got
+            # Haiku demoted in V1. The pin is structural: this path never writes a tier
+            # into config, so the chat node's DEFAULT_TIER (= standard) always applies.
+            # Content reclassification NOW runs on voice too: person-keying means a voice
+            # turn shares the owner's thread with his public text turns, so a private
+            # thing said by voice must be gated out of public exactly like a DM — the
+            # fail-closed 'private' ingest tag (below) does the gating, and the async
+            # judge relaxes general voice content so it still carries into public rooms.
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
                 followup_router=followup_router,
+                content_privacy_classifier=content_privacy_classifier,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
             )
 
@@ -670,6 +678,7 @@ def _voice_parallel_start(
     followup_skip_s: float,
     record_turn: Callable[[dict], None] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
+    content_privacy_classifier: Callable[[str], str] | None = None,
     human_privacy: str = PRIVATE,
     human_id: str | None = None,
 ) -> str:
@@ -697,7 +706,10 @@ def _voice_parallel_start(
     """
     real_configurable = config["configurable"]
     spec_thread = f"{real_configurable['thread_id']}::spec::{uuid.uuid4().hex}"
-    # keeps the "voice" prefix, so the chat node's voice styling still applies
+    # spec_config copies real_configurable, which carries the identity (incl. the
+    # explicit voice flag) — so the chat node's voice styling still applies to the
+    # speculative generation even though spec_thread ('person:{id}::spec::...') no
+    # longer starts with 'voice'. Voice-ness rides identity now, not the thread name.
     spec_config = {
         **config,
         "configurable": {**real_configurable, "thread_id": spec_thread},
@@ -782,6 +794,15 @@ def _voice_parallel_start(
             )
             if timed_out:
                 raise TurnTimeout(timeout_msg)
+            # Off-hot-path content retag: the human turn just landed on the REAL
+            # person-keyed thread tagged fail-closed 'private'. If a judge is wired and
+            # the content is general, relax it to 'public' so this voice line carries
+            # into the owner's public rooms (a private thing stays private). Same
+            # daemon-thread, zero-latency contract as the DM paths — mirrors non-voice.
+            _reclassify_if_needed(
+                graph, config, human_id, text, reply,
+                content_privacy_classifier, human_privacy,
+            )
             return reply
 
         # Action: the ack goes out NOW; the tool loop finishes in the background.
@@ -842,6 +863,15 @@ def _voice_parallel_start(
                 {"configurable": real_configurable},
                 {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=final)]},
                 as_node="chat",
+            )
+            # Same off-hot-path content retag as the voice-chat and DM paths: the human
+            # turn is now durable on the owner's person thread tagged fail-closed
+            # 'private'; a wired judge relaxes general content to 'public' (private stays
+            # private) so it may carry into his public rooms. Already off the hot path —
+            # this runs inside the background action thread, ack long since spoken.
+            _reclassify_if_needed(
+                graph, config, human_id, text, final,
+                content_privacy_classifier, human_privacy,
             )
             if not chat_cancelled:
                 # Let the speculative run finish before deleting its thread —

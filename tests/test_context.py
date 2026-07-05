@@ -327,8 +327,16 @@ def test_voice_route_resolves_to_owner_person_id():
         json={"messages": [{"role": "user", "content": "hi"}]},
         headers=AUTH,
     )
+    # voice=True is the explicit voice signal the transport now stamps (track/memory-
+    # continuity): it arms parallel-start / emotion tags / the standard-tier pin now
+    # that the thread is person-keyed and no longer names 'voice'.
     assert identities == [
-        {"user_id": OWNER, "display_name": "Chris (Voice)", "privacy_context": "private"}
+        {
+            "user_id": OWNER,
+            "display_name": "Chris (Voice)",
+            "privacy_context": "private",
+            "voice": True,
+        }
     ]
 
 

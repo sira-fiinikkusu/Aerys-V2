@@ -22,7 +22,7 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.config import Settings
 from aerys_v2.router import DEFAULT_TIER, normalize_tier
-from aerys_v2.state import ChatState, identity_from_config
+from aerys_v2.state import ChatState, identity_from_config, is_voice_turn
 from aerys_v2.turns import channel_enum
 from contextlib import contextmanager
 
@@ -936,6 +936,12 @@ def _surface_thread_for_phrase(thread: object, identity: dict) -> str:
     surface for those channels. So no behavior changes where the surface already
     lived in the thread key — only person-keyed discord/telegram turns take the new
     synthesis path."""
+    # Voice folds into the owner's person-keyed thread ('person:{id}'), which no longer
+    # names 'voice' — so synthesize the 'voice' key from the explicit flag, the same way
+    # discord/telegram surfaces are rebuilt below. _channel_phrase then reports "a live
+    # voice conversation" for a person-keyed voice turn just as it did for 'voice:beta'.
+    if identity.get("voice"):
+        return "voice"
     platform = str(identity.get("platform") or "").lower()
     kind = str(identity.get("channel_kind") or "").lower()
     cid = str(identity.get("channel_id") or "")
@@ -1067,15 +1073,21 @@ def build_graph(
 
         thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         voice_style = ""
-        if str(thread).startswith("voice"):
-            # Mini-ChannelPolicy: voice replies carry their own ElevenLabs v3
-            # emotion tags (the n8n polisher's job, done prompt-side for free).
+        if is_voice_turn(identity, thread):
+            # Voice-ness now rides the explicit identity.voice flag (is_voice_turn), not
+            # the thread prefix — the person-keyed voice thread ('person:{id}') no longer
+            # names 'voice'. Mini-ChannelPolicy: voice replies carry their own ElevenLabs
+            # v3 emotion tags (the n8n polisher's job, done prompt-side for free), plus a
+            # transcription-fallibility caution (voice input is STT, not typed).
             voice_style = (
                 "\n\nThis is a VOICE conversation. Keep replies concise and "
                 "speakable. Weave in ElevenLabs v3 emotion tags — [warmly], "
                 "[softly], [playfully], [thoughtfully] — where they fit the "
                 "feeling; the speech engine performs them, listeners never hear "
-                "the bracket text."
+                "the bracket text. Their words reach you via speech-to-text and "
+                "can be misheard — if a line seems garbled, surprising, or out of "
+                "place, treat it with a grain of salt and gently confirm rather "
+                "than assume."
             )
         # Where + when — the text path had no clock (she couldn't say what day it
         # was) and no sense of which surface she's on. Both derived per turn: the
