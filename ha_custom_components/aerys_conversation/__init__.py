@@ -36,7 +36,7 @@ CONF_API_TOKEN = "api_token"
 
 # The Brain listens on the LAN here (config.api_port default 8300). This is a
 # non-secret default that pre-fills the config-flow form; the owner can override.
-DEFAULT_BASE_URL = "http://192.168.1.107:8300"
+DEFAULT_BASE_URL = "http://jetson.local:8300"
 
 PLATFORMS = [Platform.CONVERSATION]
 

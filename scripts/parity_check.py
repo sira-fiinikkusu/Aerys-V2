@@ -7,7 +7,7 @@ Retrieval) return for the same inputs. The connection is forced read-only at the
 session level, so even a bug here cannot write.
 
 Usage:
-    DATABASE_URL='postgresql://sira:<pw>@192.168.1.231:5432/aerys' \\
+    DATABASE_URL='postgresql://user:<pw>@localhost:5432/aerys' \\
     OPENROUTER_API_KEY='sk-or-...' \\
     uv run python scripts/parity_check.py \\
         --platform discord --platform-user-id <discord_snowflake> \\

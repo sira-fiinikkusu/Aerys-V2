@@ -16,7 +16,7 @@ each one carries retirement criteria, not a permanent seat.
 One production n8n webhook per capability, versioned by path:
 
 ```
-POST http://192.168.1.107:5678/webhook/hands/<capability>-v1
+POST http://jetson.local:5678/webhook/hands/<capability>-v1
 Headers: X-Hands-Key: <shared secret, .env both sides>
 Body:    { "intent_id": "<v2_outbox idempotency_key>",
            "person_id": "<uuid>",

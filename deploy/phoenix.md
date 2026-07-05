@@ -44,21 +44,21 @@ Verify:
 
 ```bash
 docker ps --filter name=phoenix          # Up, port 6006
-curl -s http://192.168.1.107:6006 | head -1   # HTML back = UI alive
+curl -s http://jetson.local:6006 | head -1   # HTML back = UI alive
 ```
 
-UI: `http://192.168.1.107:6006` from the LAN.
+UI: `http://jetson.local:6006` from the LAN.
 
 ## Point the brain at it
 
 In the brain's `.env` (pydantic maps `OTLP_ENDPOINT` → `Settings.otlp_endpoint`):
 
 ```bash
-OTLP_ENDPOINT=http://192.168.1.107:6006/v1/traces
+OTLP_ENDPOINT=http://jetson.local:6006/v1/traces
 ```
 
 The path matters — `/v1/traces` is the OTLP/HTTP ingest route, not just the host.
-When the brain runs as a container ON the same Jetson, `192.168.1.107` still works
+When the brain runs as a container ON the same Jetson, `jetson.local` still works
 (LAN IP resolves fine from inside the container); `localhost` would not.
 
 Restart the brain (`--serve`). Startup log says `tracing armed | otlp=...` when
@@ -68,7 +68,7 @@ degrades (the rule in `src/aerys_v2/tracing.py`).
 ## Security posture (the work-approved conditions)
 
 - **LAN-only.** Port 6006 is bound on the Jetson's LAN interface and must NOT be
-  exposed through the Cloudflare tunnel. Nothing outside 192.168.1.0/24 reaches it.
+  exposed through the Cloudflare tunnel. Nothing outside 192.0.2.0/24 reaches it.
 - **Telemetry off** (`PHOENIX_ENABLE_TELEMETRY=false`) — see above; non-negotiable.
 - **Treat the trace store AT DATA SENSITIVITY.** Spans contain full prompts and
   replies — which means soul.md content, memory context, and real conversation

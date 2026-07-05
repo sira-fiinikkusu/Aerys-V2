@@ -10,8 +10,8 @@ router already read the message, it also drafts the immediately-speakable
 acknowledgment for the action path ("[warmly] Getting the office light for you")
 so voice never sits silent while the tool loop runs.
 
-The tier is a HINT, not a correctness input (Chip's normalize_tier doctrine,
-adopted via the dossier): an unknown or missing tier silently normalizes to
+The tier is a HINT, not a correctness input (the normalize_tier doctrine):
+an unknown or missing tier silently normalizes to
 "standard" — a misclassified tier costs pennies or a slightly weaker answer,
 never a wrong route. Contrast route, which IS a correctness input and is
 validated strictly below.

@@ -469,7 +469,7 @@ def n8n_workflow_active(
     api_key: str,
     *,
     workflow_id: str = N8N_EXTRACTION_WORKFLOW_ID,
-    base_url: str = "http://192.168.1.107:5678/api/v1",
+    base_url: str = "http://jetson.local:5678/api/v1",
     timeout_s: float = 10.0,
 ) -> N8nActiveCheck:
     """The real N8nActiveCheck seam: GET the workflow, read `.active`.

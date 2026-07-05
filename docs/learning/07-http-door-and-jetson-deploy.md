@@ -30,7 +30,7 @@ conversation state is now machine-independent. That's what "durable" buys.
 ```
 docker ps --filter name=aerys-brain      # Up, healthy
 docker logs aerys-brain --tail 20
-curl -s http://192.168.1.107:8300/health
+curl -s http://jetson.local:8300/health
 ```
 
 ## Deferred on purpose

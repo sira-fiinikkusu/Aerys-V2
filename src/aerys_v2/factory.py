@@ -987,8 +987,8 @@ def build_graph(
     nothing beyond the thread; set = each turn asks it (person_id, latest user text)
     and injects whatever comes back into the system prompt.
 
-    tier_models is the model-as-a-per-call-parameter seam (Chip's tiering
-    pattern via the dossier): the router's tier rides `configurable` — per
+    tier_models is the model-as-a-per-call-parameter seam (a per-call
+    model-tiering pattern): the router's tier rides `configurable` — per
     call, never checkpointed, same channel as identity — and the chat node
     picks the model for THIS turn from the map. None (or a tier missing from
     the map) = `model`, so every pre-tier caller behaves byte-for-byte as
@@ -1122,7 +1122,7 @@ def build_graph(
             content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{voice_style}"
         )
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
-        # just ask() — Chip's belt-and-braces: whatever garbage reaches config,
+        # just ask() — belt-and-braces: whatever garbage reaches config,
         # the node answers with a REAL model and the trace shows which).
         tier = normalize_tier(((config or {}).get("configurable") or {}).get("tier", DEFAULT_TIER))
         turn_model = (tier_models or {}).get(tier, model)

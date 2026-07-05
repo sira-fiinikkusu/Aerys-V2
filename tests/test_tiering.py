@@ -241,8 +241,8 @@ def test_tier_models_for_oauth_backend_keeps_standard_on_the_pool():
 
 # ---- boot assertions: the env-scare prevention ------------------------------------
 
-V2_URL = "postgresql://sira:pw@192.168.1.231:5432/aerys_v2"
-PROD_URL = "postgresql://sira:pw@192.168.1.231:5432/aerys"
+V2_URL = "postgresql://user:pw@localhost:5432/aerys_v2"
+PROD_URL = "postgresql://user:pw@localhost:5432/aerys"
 
 
 def test_database_name_parses_url_shapes():

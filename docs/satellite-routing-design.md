@@ -6,7 +6,7 @@ No code changed writing this doc; this is the plan to execute against.*
 ## Problem statement
 
 The owner has three voice I/O devices: a ReSpeaker Lite satellite
-(`assist_satellite.aerys_satellite_assist_satellite`, 192.168.1.109), a Home
+(`assist_satellite.aerys_satellite_assist_satellite`, 192.0.2.109), a Home
 Assistant Voice PE, and a phone running a headless Myo-triggered satellite app.
 When aerys-v2 speaks a *follow-up* (the async spoken result of a device action,
 see below), it always announces to one hardcoded entity — regardless of which
@@ -57,7 +57,7 @@ The turn has two different response paths, and only one of them is broken:
   This design is that fix.
 
 - **A second, independent wrinkle — verified live against HA Green
-  (192.168.1.155) on 2026-07-04, load-bearing for the morning session:** the
+  (homeassistant.local) on 2026-07-04, load-bearing for the morning session:** the
   two ESPHome satellites aren't even both wired to aerys-v2 today. Each
   satellite has its own per-device pipeline selector
   (`select.<satellite>_assistant`), and they're currently split:
@@ -317,7 +317,7 @@ risk — this is a pure widening of the existing seam.
 
 ### 3b. Home Assistant side — new custom component
 
-Create `custom_components/aerys_conversation/` on HA Green (192.168.1.155):
+Create `custom_components/aerys_conversation/` on HA Green (homeassistant.local):
 
 - `manifest.json` — domain `aerys_conversation`, `config_flow: true` (or skip
   config_flow for tonight, see below). No external requirements — `aiohttp` is
@@ -358,7 +358,7 @@ class AerysConversationAgent(ConversationEntity, conversation.AbstractConversati
 ```
 
 - `config_flow.py` — fastest legitimate path for tonight: a single form asking
-  `base_url` (default `http://192.168.1.107:8300`) and `api_token`. Even faster:
+  `base_url` (default `http://jetson.local:8300`) and `api_token`. Even faster:
   hardcode both as module constants for the first cut and add a real config
   flow once it's proven working — this is a one-owner LAN box, not a HACS
   release.

@@ -27,8 +27,8 @@ role names survive model swaps by construction.
 
 ## Tier is a hint; route is a contract
 
-The two outputs of the router carry different trust levels, deliberately (Chip's
-`normalize_tier` doctrine, adopted via the dossier):
+The two outputs of the router carry different trust levels, deliberately (the
+`normalize_tier` doctrine):
 
 - **route** is a correctness input — validated strictly, exactly `"chat"` or
   `"action"`, nothing coerced. A wrong route gaslights the caller.

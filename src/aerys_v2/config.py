@@ -56,7 +56,7 @@ class Settings(BaseSettings):
 
     # None = DB-backed services OFF. Tests and CI never need a live Postgres —
     # the services take an injected connection, and nothing connects unless this
-    # is set. When set: postgresql://sira:***@192.168.1.231:5432/aerys_v2 — the
+    # is set. When set: postgresql://user:pass@localhost:5432/aerys_v2 — the
     # brain's OWN database on the NAS (checkpoints, outbox, model-usage cap).
     # MUST target `aerys_v2`, never prod `aerys` — run_boot_assertions() below
     # refuses to start otherwise (the two-database footgun, made unbootable).
@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # path: router + subgraph) simply doesn't exist — same arming pattern as
     # discord_bot_token. n8n mapping: this is the 07-01 "HA Action" workflow's
     # credential check, done at construction time instead of per-execution.
-    ha_base_url: str = "http://192.168.1.155:8123"   # HA Green on the LAN
+    ha_base_url: str = "http://homeassistant.local:8123"   # HA Green on the LAN
     ha_token: SecretStr | None = None
     # csv of entity_ids the Brain may WRITE to during beta (reads unrestricted).
     # e.g. "light.office_lamp,switch.desk_fan". Empty = every write refused —
@@ -167,7 +167,7 @@ class Settings(BaseSettings):
     # DATABASE_URL/EMBEDDINGS_API_KEY); shadow mode (the default) never reads
     # this and needs no n8n reachability at all.
     n8n_api_key: SecretStr | None = None
-    n8n_base_url: str = "http://192.168.1.107:5678/api/v1"
+    n8n_base_url: str = "http://jetson.local:5678/api/v1"
 
     # ---- TIER ROUTING (the V1 classify sandwich, folded into the router) ------
     # n8n mapping: V1's three tier sub-workflows (Sonnet/Opus/Gemini agents) and

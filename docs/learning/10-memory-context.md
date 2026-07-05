@@ -113,7 +113,7 @@ uv run pytest tests/test_context.py -v  # watch the graceful paths by name
 Then live wiring is four `.env` lines and a restart of `--serve`:
 
 ```bash
-MEMORIES_DATABASE_URL=postgresql://sira:***@192.168.1.231:5432/aerys
+MEMORIES_DATABASE_URL=postgresql://user:pass@localhost:5432/aerys
 OWNER_PERSON_ID=6e6bcbed-03ef-4d17-95d2-89c467414335
 EMBEDDINGS_API_KEY=sk-or-...            # OpenRouter; base_url defaults there
 ```

@@ -1,7 +1,7 @@
 # LEARNING — factory.py, service.py, and the ask() seam (01-02 completion)
 
 *2026-07-02. First doc of the new rhythm: Kael builds, you gate + learn from these. Every
-concept below is mapped to something you already run in n8n/Torq.*
+concept below is mapped to something you already run in n8n.*
 
 ## The one-sentence version
 

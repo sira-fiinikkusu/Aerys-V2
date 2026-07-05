@@ -17,7 +17,7 @@ incapable of taking the brain down, because tracing is a passenger, never the dr
 
 | V1 (n8n) | aerys-v2 | what changed |
 |---|---|---|
-| Executions tab — free, automatic, per-node I/O | Phoenix UI at `http://192.168.1.107:6006` fed by OTel spans | same per-node visibility, plus token counts and latency breakdowns |
+| Executions tab — free, automatic, per-node I/O | Phoenix UI at `http://jetson.local:6006` fed by OTel spans | same per-node visibility, plus token counts and latency breakdowns |
 | Execution data pruned on a timer — history evaporates | Phoenix's SQLite store on a named docker volume (`phoenix-data`) | traces survive container recreation; retention is OUR decision |
 | "Which prompt actually went to the model?" = re-run and hope | every span carries the full prompt/reply | debugging a bad turn = opening its trace |
 | 06-03 Central Error Handler — observed failures, never caused them | THE DEGRADE-SAFE RULE (below) | same posture, enforced by structure |
@@ -49,7 +49,7 @@ means nothing is imported, nothing connects, `wire_tracing` returns False before
 try block. Dev, tests, and CI never touch OTel. Arming is one `.env` line:
 
 ```bash
-OTLP_ENDPOINT=http://192.168.1.107:6006/v1/traces   # the /v1/traces path matters
+OTLP_ENDPOINT=http://jetson.local:6006/v1/traces   # the /v1/traces path matters
 ```
 
 ## Why ONE call covers everything
