@@ -127,6 +127,7 @@ def main() -> None:
         from aerys_v2.factory import (
             action_allowlist_for,
             action_stack_for,
+            guest_action_graph_for,
             build_graph,
             build_model,
             checkpointer_for,
@@ -179,10 +180,11 @@ def main() -> None:
             # EMBEDDINGS_API_KEY (media) is set (the api key the router/tool
             # model needs is structurally required by Settings). None = ask()
             # runs chat-only, exactly as before tools existed.
-            router = action_graph = None
+            router = action_graph = guest_action_graph = None
             stack = action_stack_for(settings, soul)
             if stack is not None:
                 router, action_graph = stack
+                guest_action_graph = guest_action_graph_for(settings, soul)
                 log.info("action stack armed | ha=%s canary=[%s] media=%s",
                          settings.ha_base_url if settings.ha_token else "(off)",
                          settings.ha_canary_entities,
@@ -209,7 +211,7 @@ def main() -> None:
             app = build_app(
                 lambda text, identity, thread: ask(
                     graph, text, identity=identity, thread_id=thread,
-                    router=router, action_graph=action_graph,
+                    router=router, action_graph=action_graph, guest_action_graph=guest_action_graph,
                     speak_fn=speak_fn, satellite_for=satellite_for,
                     followup_router=followup_router,
                     followup_skip_s=settings.voice_followup_skip_s,
@@ -240,6 +242,7 @@ def main() -> None:
         from aerys_v2.factory import (
             action_allowlist_for,
             action_stack_for,
+            guest_action_graph_for,
             build_graph,
             build_model,
             checkpointer_for,
@@ -276,10 +279,11 @@ def main() -> None:
         # v2_turns audit writer (migration 001) — the soak container's turns must
         # be audited too, not just --serve. None when DATABASE_URL is unset.
         record_turn = turn_recorder_for(settings)
-        router = action_graph = None
+        router = action_graph = guest_action_graph = None
         stack = action_stack_for(settings, soul)
         if stack is not None:
             router, action_graph = stack
+            guest_action_graph = guest_action_graph_for(settings, soul)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
         # aerys DB wired, a known platform account resolves to its real person_id
@@ -302,7 +306,7 @@ def main() -> None:
         client = AerysDiscordClient(
             ask_fn=lambda text, identity, thread: ask(
                 graph, text, identity=identity, thread_id=thread,
-                router=router, action_graph=action_graph,
+                router=router, action_graph=action_graph, guest_action_graph=guest_action_graph,
                 deep_allowed=deep_gate,
                 # AUTH GATE: house control + tools are allowlist-only. A guild
                 # member / DM'er not in the allowlist gets chat-only (enforced in
@@ -333,6 +337,7 @@ def main() -> None:
         from aerys_v2.factory import (
             action_allowlist_for,
             action_stack_for,
+            guest_action_graph_for,
             build_graph,
             build_model,
             checkpointer_for,
@@ -368,10 +373,11 @@ def main() -> None:
         # v2_turns audit writer (migration 001) — Telegram turns are audited too,
         # not just --serve/--discord. None when DATABASE_URL is unset.
         record_turn = turn_recorder_for(settings)
-        router = action_graph = None
+        router = action_graph = guest_action_graph = None
         stack = action_stack_for(settings, soul)
         if stack is not None:
             router, action_graph = stack
+            guest_action_graph = guest_action_graph_for(settings, soul)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py), wired
         # exactly as --discord. With the aerys DB, a known Telegram account resolves
@@ -394,7 +400,7 @@ def main() -> None:
         client = AerysTelegramClient(
             ask_fn=lambda text, identity, thread: ask(
                 graph, text, identity=identity, thread_id=thread,
-                router=router, action_graph=action_graph,
+                router=router, action_graph=action_graph, guest_action_graph=guest_action_graph,
                 deep_allowed=deep_gate,
                 # AUTH GATE: house control + tools are allowlist-only, same as
                 # --discord. A DM'er / group member not in the allowlist gets

@@ -642,7 +642,7 @@ def build_action_graph(
     return graph.compile()
 
 
-def action_tools_for(settings: Settings) -> list:
+def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
     """Every tool the action subgraph gets, assembled from what Settings arms.
 
     Two independently-armed halves, same pattern as every optional transport:
@@ -654,11 +654,17 @@ def action_tools_for(settings: Settings) -> list:
       tJwLt494G1VugToU). The OpenRouter credential is the embedder's, reused —
       exactly like n8n credential gvgPllzFhLSds5Qv serving both jobs.
 
+    guest=True drops ONLY the HOME half — the reduced set a non-allowlisted caller
+    gets (see guest_action_graph_for): media + web search, but no house control,
+    presence, or timers. Reading media someone shares and searching the public web
+    are not sensitive; actuating the house or disclosing presence is, so HOME is
+    dropped structurally (the tool isn't in the list, so it can't be called).
+
     Empty list = nothing armed = the caller keeps ask() chat-only.
     """
     tools: list = []
 
-    if settings.ha_token is not None:
+    if not guest and settings.ha_token is not None:
         from aerys_v2.tools.home_control import (
             build_home_control_tool,
             build_search_entities_tool,
@@ -712,6 +718,8 @@ def action_tools_for(settings: Settings) -> list:
         )
 
     if settings.tavily_api_key is not None:
+        # Web search is public info — available to everyone, guest included (owner
+        # decision 2026-07-05). Only the HOME half stays behind the allowlist.
         from aerys_v2.tools.web_search import build_web_search_tool
 
         tools.append(
@@ -721,15 +729,18 @@ def action_tools_for(settings: Settings) -> list:
     return tools
 
 
-def action_overlay_for(settings: Settings) -> str:
+def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
     """Compose the action-subgraph system overlay from the armed tool halves.
 
     The prompt must only mention tools that EXIST this boot — telling the model
     to "use the home_control tool" on a box without ha_token is asking for the
-    V1 hallucinated-tool-call failure with extra steps.
+    V1 hallucinated-tool-call failure with extra steps. guest mirrors
+    action_tools_for: drops only the HOME overlay, so a non-owner's model is told
+    about media + search (which it has) but never house/timer tools (which it
+    doesn't).
     """
     parts = []
-    if settings.ha_token is not None:
+    if not guest and settings.ha_token is not None:
         parts.append(ACTION_OVERLAY)
         parts.append(TIMER_OVERLAY)
     if settings.embeddings_api_key is not None:
@@ -760,6 +771,26 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         overlay=action_overlay_for(settings),
     )
     return router_for(settings, soul), action_graph
+
+
+def guest_action_graph_for(settings: Settings, soul: str) -> object | None:
+    """The REDUCED action graph handed to NON-allowlisted callers: media tools
+    (analyze_image / read_document / youtube_summary) + web search — but no house
+    control, no presence reads, no timers. Anyone can share an image or ask her to
+    look something up, while the owner-only house tools stay STRUCTURALLY out of
+    reach (they aren't in this graph, so a confused model can't call them — defense
+    in depth on top of the ask() allowlist gate). None when neither media nor search
+    is armed, in which case the gate keeps non-owners fully chat-only, as before."""
+    tools = action_tools_for(settings, guest=True)
+    if not tools:
+        return None
+    return build_action_graph(
+        build_api_tool_model(settings, tools),
+        soul,
+        tools,
+        context_fn=context_fn_for(settings, profile_only=True),
+        overlay=action_overlay_for(settings, guest=True),
+    )
 
 
 EASTERN = ZoneInfo("America/New_York")  # Chris's timezone — the clock she reasons in

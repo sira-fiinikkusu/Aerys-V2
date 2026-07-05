@@ -842,3 +842,70 @@ def test_action_node_carries_the_clock():
         {"configurable": {"thread_id": "discord:guild:555", "identity": CHRIS}, "recursion_limit": 10},
     )
     assert "Eastern" in seen[0]  # the clock rides the tool path now, no web search
+
+
+# ---- #5: media is open to EVERYONE, house/presence stay owner-only --------------
+
+def test_non_allowlisted_caller_gets_media_graph_not_house():
+    # A stranger sending an image reaches the MEDIA-only graph; the full (house)
+    # graph is NEVER touched. This is the structural half of the auth split.
+    graph = build_graph(fake_model("never"), soul="s")
+    house = StubActionGraph("HOUSE — light on")
+    media = StubActionGraph("MEDIA — that's a cat")
+    out = ask(
+        graph, "look at https://cdn.discordapp.com/attachments/x/y/z.png",
+        identity=STRANGER, thread_id="t1",
+        router=action_router, action_graph=house, guest_action_graph=media,
+        action_allowlist=frozenset({CHRIS["user_id"]}),
+    )
+    assert out == "MEDIA — that's a cat"  # served by the media graph
+    assert house.calls == []              # house graph never invoked for a stranger
+    assert media.calls != []              # media graph handled it
+
+
+def test_allowlisted_owner_still_gets_full_house_graph():
+    # #5 must not weaken the owner path: Chris still reaches the full house graph.
+    graph = build_graph(fake_model("never"), soul="s")
+    house = StubActionGraph("HOUSE — light on")
+    media = StubActionGraph("MEDIA")
+    out = ask(
+        graph, "turn on the light", identity=CHRIS, thread_id="t1",
+        router=action_router, action_graph=house, guest_action_graph=media,
+        action_allowlist=frozenset({CHRIS["user_id"]}),
+    )
+    assert out == "HOUSE — light on"
+    assert house.calls == ["turn on the light"]
+    assert media.calls == []  # owner never downgraded to media-only
+
+
+def test_non_allowlisted_no_media_graph_falls_chat_only():
+    # Backward compat: no media graph armed -> stranger is fully chat-only, exactly
+    # as before the split (guest_action_graph defaults to None).
+    graph = build_graph(fake_model("chat-only"), soul="s")
+    house = StubActionGraph("HOUSE")
+    out = ask(
+        graph, "turn on the light", identity=STRANGER, thread_id="t1",
+        router=action_router, action_graph=house, guest_action_graph=None,
+        action_allowlist=frozenset({CHRIS["user_id"]}),
+    )
+    assert out == "chat-only"
+    assert house.calls == []
+
+
+def test_action_tools_guest_drops_only_the_house_half():
+    # The structural guarantee behind #5: guest keeps media + web search but drops
+    # the HOME half — the reduced graph a stranger gets literally cannot call house
+    # control, presence, or timer tools.
+    from aerys_v2.factory import action_tools_for
+    s = Settings(
+        _env_file=None, anthropic_api_key="sk-test",
+        ha_token="tok", ha_base_url="http://ha.test",
+        embeddings_api_key="emb-test", tavily_api_key="tav-test",
+    )
+    full = {t.name for t in action_tools_for(s)}
+    guest = {t.name for t in action_tools_for(s, guest=True)}
+    assert {"home_control", "search_entities", "timer", "search_web", "analyze_image"} <= full
+    # guest keeps media + public web search...
+    assert {"analyze_image", "read_document", "youtube_summary", "search_web"} <= guest
+    # ...but the HOME half (house control, presence reads, timers) is structurally gone
+    assert not ({"home_control", "search_entities", "timer"} & guest)

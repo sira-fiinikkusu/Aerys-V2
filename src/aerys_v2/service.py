@@ -227,6 +227,7 @@ def ask(
     rails: Rails = Rails(),
     router: Callable[[str], RouteDecision] | None = None,
     action_graph: object | None = None,
+    guest_action_graph: object | None = None,
     speak_fn: Callable[[str, str], None] | None = None,
     satellite_for: Callable[[str | None], str] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
@@ -261,14 +262,19 @@ def ask(
       ONLY when a text-thread chat turn actually classified deep, so voice
       turns and downgrades never burn a v2_model_usage credit. None = cap
       unenforced (dev boxes); the gate saying False downgrades to standard.
-    - action_allowlist: the AUTH gate for the TOOLS block. The action stack (house
-      control + every tool) is restricted to an allowlist of person_ids: a caller
-      NOT in it is forced onto the chat-only path here, regardless of what the
-      transport armed. The memory boundary makes a stranger's identity COLD (no
-      memories) but does NOTHING to the tools — so this is the one thing between a
-      guild member and the owner's house. The owner is always in the set; more can
-      be added by config (e.g. Megan) with no code change (factory.action_allowlist_for).
-      None = unenforced (dev boxes), same posture as deep_allowed.
+    - action_allowlist: the AUTH gate for the SENSITIVE tools. House control,
+      presence reads, and web search are restricted to an allowlist of person_ids: a
+      caller NOT in it is swapped onto guest_action_graph (analyze_image /
+      read_document / youtube only) — or fully chat-only if no media graph is armed.
+      Reading media someone shares is not sensitive; actuating the house or
+      disclosing presence is. The memory boundary makes a stranger's identity COLD
+      (no memories) but does NOTHING to the tools — so this gate is the one thing
+      between a guild member and the owner's house. The owner is always in the set;
+      more can be added by config (e.g. Megan) with no code change
+      (factory.action_allowlist_for). None = unenforced (dev boxes).
+    - guest_action_graph: the reduced action graph (media tools only) used for
+      non-allowlisted callers, from factory.guest_action_graph_for. None = they get
+      no tools at all (chat-only), preserving the pre-media-split behavior.
     - record_turn: the v2_turns audit seam (factory.turn_recorder_for). Called
       once per completed turn on EVERY path with the fully-built row, off the hot
       path and fail-open (see _fire_turn_record). None = no auditing (dev/CI, no
@@ -281,8 +287,13 @@ def ask(
     # allowlist never reaches home_control / search_entities / get_state — closing
     # both the unauthorized-actuation and the presence-disclosure (reads) risks.
     if action_allowlist is not None and identity.get("user_id") not in action_allowlist:
-        router = None
-        action_graph = None
+        # Non-allowlisted callers lose house control + presence + web search, but
+        # KEEP media (analyze_image / read_document / youtube) — reading what someone
+        # shares is not sensitive. Swap to the media-only graph; if none is armed,
+        # fall fully chat-only (router None), exactly the old behavior.
+        action_graph = guest_action_graph
+        if action_graph is None:
+            router = None
 
     started = time.monotonic()
     config = {
