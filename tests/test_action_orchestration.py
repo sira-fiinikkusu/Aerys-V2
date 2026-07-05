@@ -824,3 +824,21 @@ def test_voice_followup_announces_on_originating_satellite():
     wait_for_messages(graph, "voice:sat", 2)
     # spoke the refusal, and did so on the ORIGINATING device's satellite
     assert spoken == [("I can't touch that one yet.", "assist_satellite.office")]
+
+
+def test_action_node_carries_the_clock():
+    # regression: "what time is it" web-searched and punted to the lock screen
+    # because the ACTION node had no clock. Both nodes must inject where/when now.
+    seen: list[str] = []
+
+    class CaptureModel:
+        def invoke(self, messages, *a, **k):
+            seen.append(str(messages[0].content))
+            return AIMessage(content="It's mid-morning.")
+
+    graph = build_action_graph(CaptureModel(), soul="s", tools=[home_tool()])
+    graph.invoke(
+        {"messages": [HumanMessage(content="what time is it")]},
+        {"configurable": {"thread_id": "discord:guild:555", "identity": CHRIS}, "recursion_limit": 10},
+    )
+    assert "Eastern" in seen[0]  # the clock rides the tool path now, no web search

@@ -617,8 +617,13 @@ def build_action_graph(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
+        # Same clock+location the chat node injects, so a time/where question answers
+        # identically whichever path the router chose. Its absence here is exactly why
+        # "what time is it" web-searched on the tool path and punted to the lock screen.
+        thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
+        where_when = _where_when_line(thread, identity)
         system = SystemMessage(
-            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}"
+            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}"
         )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
@@ -782,6 +787,23 @@ def _channel_phrase(thread: str, room: str = "") -> str:
     return "a direct message"
 
 
+def _where_when_line(thread: object, identity: dict) -> str:
+    """The per-turn "right now it is X, you're talking in Y" line, shared by BOTH
+    the chat and action nodes so a time/where question answers identically no matter
+    which path the router picks. The action node lacking this is why "what time is
+    it" web-searched and failed — it had no clock. Portable date format (no %-d/%-I,
+    glibc-only; the repo avoids them — see extraction.py)."""
+    now = datetime.now(EASTERN)
+    hour12 = now.strftime("%I").lstrip("0") or "12"
+    when = f"{now:%A, %B} {now.day}, {now.year} at {hour12}:{now:%M} {now:%p}"
+    return (
+        f"\n\nRight now it is {when} Eastern. You're talking with them in "
+        f"{_channel_phrase(str(thread), identity.get('channel_name', ''))}. "
+        "Treat this as your own awareness — use it naturally, and never cite URLs, "
+        "links, or metadata to the user to explain how you know something."
+    )
+
+
 def build_graph(
     model: BaseChatModel,
     soul: str,
@@ -875,17 +897,7 @@ def build_graph(
         # same seam the voice branch uses above) plus the room label the resolver
         # carried on identity. The public-room phrasing also nudges her privacy
         # posture behaviorally ("others may be reading").
-        now = datetime.now(EASTERN)
-        # Portable format — no %-d/%-I (glibc-only; the repo already avoids them,
-        # see extraction.py's "# no %-d" note). Strip the hour's leading zero by hand.
-        hour12 = now.strftime("%I").lstrip("0") or "12"
-        when = f"{now:%A, %B} {now.day}, {now.year} at {hour12}:{now:%M} {now:%p}"
-        where_when = (
-            f"\n\nRight now it is {when} Eastern. You're talking with them in "
-            f"{_channel_phrase(str(thread), identity.get('channel_name', ''))}. "
-            "Treat this as your own awareness — use it naturally, and never cite URLs, "
-            "links, or metadata to the user to explain how you know something."
-        )
+        where_when = _where_when_line(thread, identity)
         system = SystemMessage(
             content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{voice_style}"
         )
