@@ -221,6 +221,31 @@ def _in_ctx(fn: Callable, *args):
     return lambda: ctx.run(fn, *args)
 
 
+# The reclassify retag is a read-modify-write on a person-keyed thread that is SHARED
+# across every surface (DM, guild, telegram, voice) AND every container (soak/telegram/
+# brain). A turn that lands between our read and write branches the checkpoint and
+# ORPHANS the retag onto a dead sibling (confirmed 2026-07-05: ~95% lost under
+# back-to-back turns). Re-read the head and re-apply until the tag is observed on the
+# current head, bounded. Human-paced turns leave a gap within a few hundred ms and the
+# retag then wins for good — later turns build on the checkpoint that carries it. If it
+# never sticks (sustained churn), the message stays 'private' (over-hidden) — fail-safe:
+# a lost retag hides a benign thing, it never leaks a private one.
+_RETAG_MAX_ATTEMPTS = 6
+_RETAG_BACKOFF_S = 0.4
+
+
+def _retag_landed(graph: object, configurable: dict, msg_id: str) -> bool:
+    """True when msg_id is present on the CURRENT head with a 'public' tag."""
+    from aerys_v2.services.content_privacy import content_privacy_of
+
+    try:
+        msgs = graph.get_state({"configurable": configurable}).values.get("messages", [])
+    except Exception:
+        return False
+    m = next((x for x in msgs if getattr(x, "id", None) == msg_id), None)
+    return m is not None and content_privacy_of(m) == PUBLIC
+
+
 def _reclassify_content_privacy(
     graph: object,
     config: dict,
@@ -247,12 +272,23 @@ def _reclassify_content_privacy(
 
     def run() -> None:
         try:
-            if classifier(f"{text}\n{reply}") == PUBLIC:
+            if classifier(f"{text}\n{reply}") != PUBLIC:
+                return  # judge kept it private — the ingest tag already is; nothing to do
+            configurable = config["configurable"]
+            # Retry-with-verify against the concurrent-turn race (see the constants note).
+            for _ in range(_RETAG_MAX_ATTEMPTS):
                 graph.update_state(
-                    {"configurable": config["configurable"]},
+                    {"configurable": configurable},
                     {"messages": [_human_turn(text, PUBLIC, msg_id)]},
                     as_node="chat",
                 )
+                if _retag_landed(graph, configurable, msg_id):
+                    return  # observed on the head — later turns build on it now
+                time.sleep(_RETAG_BACKOFF_S)
+            log.warning(
+                "content-privacy retag never stuck after %d attempts (thread churn) — "
+                "message stays private (fail-safe)", _RETAG_MAX_ATTEMPTS,
+            )
         except Exception:
             log.warning("content-privacy reclassification failed — tag stays private", exc_info=True)
 

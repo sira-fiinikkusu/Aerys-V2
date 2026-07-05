@@ -332,6 +332,83 @@ def test_private_voice_turn_keeps_failclosed_tag_on_private_verdict():
     assert _human_tag(graph, "person:p1", "anxiety") == "private"
 
 
+def test_retag_survives_lost_update_race_via_retry(monkeypatch):
+    # Regression for the concurrent-update_state race (confirmed 2026-07-05: a turn
+    # landing between the retag's read and write orphaned it ~95% of the time on the
+    # shared person thread). The retry-with-verify loop must RE-APPLY until the tag is
+    # observed on the head. FlakyRetagGraph models the race deterministically: the first
+    # two update_states "don't stick" (a racing turn orphaned them), the third does.
+    from types import SimpleNamespace
+
+    from aerys_v2 import service
+    from aerys_v2.service import _reclassify_content_privacy
+
+    monkeypatch.setattr(service, "_RETAG_BACKOFF_S", 0.01)  # keep the test fast
+
+    class FlakyRetagGraph:
+        def __init__(self, msg_id, lose_first):
+            self.msg_id, self.lose_first = msg_id, lose_first
+            self.update_calls = 0
+            self._tag = "private"
+
+        def update_state(self, cfg, values, as_node=None):
+            self.update_calls += 1
+            if self.update_calls > self.lose_first:  # a clear window: the write finally sticks
+                self._tag = "public"
+
+        def get_state(self, cfg):
+            msg = HumanMessage(
+                content="the drink is cotton candy", id=self.msg_id,
+                additional_kwargs={CONTENT_PRIVACY_KEY: self._tag},
+            )
+            return SimpleNamespace(values={"messages": [msg]})
+
+    g = FlakyRetagGraph("mid-1", lose_first=2)
+    _reclassify_content_privacy(
+        g, {"configurable": {"thread_id": "person:p1"}}, "mid-1",
+        "the drink is cotton candy", "noted", classifier=lambda _t: "public",
+    )
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline and g._tag != "public":
+        time.sleep(0.01)
+    assert g._tag == "public"          # the retag WON despite the first two being lost
+    assert g.update_calls == 3         # 2 orphaned attempts + the one that stuck
+
+
+def test_retag_gives_up_fail_safe_after_max_attempts(monkeypatch):
+    # If churn never lets the retag stick, it gives up after the bounded attempts and
+    # leaves the tag PRIVATE — fail-safe: a lost retag over-hides a benign thing, it
+    # never leaks a private one.
+    from types import SimpleNamespace
+
+    from aerys_v2 import service
+    from aerys_v2.service import _reclassify_content_privacy
+
+    monkeypatch.setattr(service, "_RETAG_BACKOFF_S", 0.005)
+
+    class NeverSticksGraph:
+        def __init__(self):
+            self.update_calls = 0
+
+        def update_state(self, cfg, values, as_node=None):
+            self.update_calls += 1  # always "lost" — a racing turn orphans every attempt
+
+        def get_state(self, cfg):
+            msg = HumanMessage(content="x", id="mid-1",
+                               additional_kwargs={CONTENT_PRIVACY_KEY: "private"})
+            return SimpleNamespace(values={"messages": [msg]})
+
+    g = NeverSticksGraph()
+    _reclassify_content_privacy(
+        g, {"configurable": {"thread_id": "person:p1"}}, "mid-1",
+        "x", "noted", classifier=lambda _t: "public",
+    )
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline and g.update_calls < service._RETAG_MAX_ATTEMPTS:
+        time.sleep(0.01)
+    assert g.update_calls == service._RETAG_MAX_ATTEMPTS  # bounded — no infinite retry
+
+
 def test_voice_parallel_start_chat_relaxes_general_turn():
     # The PRODUCTION voice path (router + action_graph armed) runs parallel-start; the
     # human turn lands on the real person thread and must get the SAME off-hot-path
