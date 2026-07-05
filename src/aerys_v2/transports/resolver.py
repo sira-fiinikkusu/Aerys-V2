@@ -57,18 +57,29 @@ def identity_from_lookup(row: dict | None, event: Any) -> Identity:
     """
     privacy = _privacy_for(event.channel_kind)
     room = getattr(event, "channel_name", "") or ""  # "" for DMs / events without the field
+    # The room's WHERE, carried onto identity so it survives person-keyed threading
+    # (thread_id is now 'person:{id}' and no longer encodes the surface). getattr with
+    # defaults keeps the pure mapper working for minimal test-event fakes that only
+    # pin the fields a given test cares about.
+    surface = {
+        "platform": getattr(event, "platform", "") or "",
+        "channel_kind": getattr(event, "channel_kind", "") or "",
+        "channel_id": str(getattr(event, "channel_id", "") or ""),
+    }
     if row is None:
         return {
             "user_id": f"{event.platform}:{event.platform_user_id}",
             "display_name": event.display_name,
             "privacy_context": privacy,
             "channel_name": room,
+            **surface,
         }
     return {
         "user_id": row["person_id"],
         "display_name": row.get("display_name") or event.display_name,
         "privacy_context": privacy,
         "channel_name": room,
+        **surface,
     }
 
 

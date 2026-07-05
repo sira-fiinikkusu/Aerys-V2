@@ -131,12 +131,14 @@ def main() -> None:
             build_graph,
             build_model,
             checkpointer_for,
+            content_privacy_fn_for,
             context_fn_for,
             deep_gate_for,
             followup_router_for,
             gaps_reader_for,
             load_soul,
             resolve_announce_entity,
+            room_context_fn_for,
             satellite_map_from,
             speak_fn_for,
             tier_models_for,
@@ -167,6 +169,13 @@ def main() -> None:
                      settings.tier_fast_model,
                      settings.model if settings.model_backend == "oauth" else settings.tier_standard_model,
                      settings.tier_deep_model, settings.deep_daily_cap)
+            # Cross-surface continuity seams (track/memory-continuity), both DB-gated
+            # on database_url / a judge — None keeps each feature off. room_context
+            # injects the last N public-channel turns; content_privacy relaxes a DM
+            # turn's fail-closed tag once a judge deems it general. Built ONCE (the
+            # judge holds a model client) and reused per request.
+            room_context = room_context_fn_for(settings)
+            content_privacy = content_privacy_fn_for(settings)
             graph = build_graph(
                 build_model(settings),
                 soul=soul,
@@ -175,6 +184,7 @@ def main() -> None:
                 # set (read-only prod aerys DB); None keeps the graph memory-free
                 context_fn=context_fn_for(settings),
                 tier_models=tier_models,
+                room_context_fn=room_context,
             )
             # TOOLS block (Option C): arms when HA_TOKEN (home) and/or
             # EMBEDDINGS_API_KEY (media) is set (the api key the router/tool
@@ -218,6 +228,7 @@ def main() -> None:
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,
                     record_turn=record_turn,
+                    content_privacy_classifier=content_privacy,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
@@ -246,9 +257,11 @@ def main() -> None:
             build_graph,
             build_model,
             checkpointer_for,
+            content_privacy_fn_for,
             context_fn_for,
             deep_gate_for,
             load_soul,
+            room_context_fn_for,
             tier_models_for,
             turn_recorder_for,
         )
@@ -267,6 +280,12 @@ def main() -> None:
         # Discord IS the text channel tier routing exists for: greetings ride
         # fast, conversation rides standard (oauth pool when configured), and
         # research earns deep until the daily cap says otherwise.
+        # Cross-surface continuity seams (track/memory-continuity): person-keyed
+        # threads make Discord DM + guild + Telegram one thread per person; the room
+        # block restores the shared-channel view, and the content-privacy judge lets
+        # general DM content carry into public rooms while private content never does.
+        room_context = room_context_fn_for(settings)
+        content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             # long-term memory context: same wiring as --serve so Discord text
@@ -274,6 +293,7 @@ def main() -> None:
             # (degrade-safe: memory-free graph on DB-less boxes).
             context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
+            room_context_fn=room_context,
         )
         deep_gate = deep_gate_for(settings)
         # v2_turns audit writer (migration 001) — the soak container's turns must
@@ -313,6 +333,7 @@ def main() -> None:
                 # ask()). Owner is always in; add others via house_control_person_ids.
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
+                content_privacy_classifier=content_privacy,
             ),
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,
@@ -341,9 +362,11 @@ def main() -> None:
             build_graph,
             build_model,
             checkpointer_for,
+            content_privacy_fn_for,
             context_fn_for,
             deep_gate_for,
             load_soul,
+            room_context_fn_for,
             tier_models_for,
             turn_recorder_for,
         )
@@ -361,6 +384,12 @@ def main() -> None:
         # Telegram is a text channel just like Discord: greetings ride fast,
         # conversation rides standard (oauth pool when configured), research earns
         # deep until the daily cap says otherwise — identical tier routing.
+        # Cross-surface continuity seams (track/memory-continuity), same wiring as
+        # --discord: a Telegram DM/group joins the person's cross-surface thread, the
+        # room block restores the shared-channel view, and the content-privacy judge
+        # governs what DM content may carry into public.
+        room_context = room_context_fn_for(settings)
+        content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             # long-term memory context: same wiring as --serve/--discord so
@@ -368,6 +397,7 @@ def main() -> None:
             # MEMORIES_DATABASE_URL is unset (degrade-safe on DB-less boxes).
             context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
+            room_context_fn=room_context,
         )
         deep_gate = deep_gate_for(settings)
         # v2_turns audit writer (migration 001) — Telegram turns are audited too,
@@ -407,6 +437,7 @@ def main() -> None:
                 # chat-only (enforced in ask()). Owner is always in.
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
+                content_privacy_classifier=content_privacy,
             ),
             resolve_fn=resolve,
             allowed_chat_ids=chat_ids,

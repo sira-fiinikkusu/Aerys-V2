@@ -50,6 +50,31 @@ def test_custom_thread_and_name_flow_through():
     assert r.json()["reply"].endswith("|Chris (Voice)|voice:pe")
 
 
+def test_ask_voice_flag_person_keys_into_owner_thread():
+    # voice=True folds the /ask turn into the owner's continuous 'person:{id}' thread
+    # (cross-surface continuity) — the caller's own thread_id is overridden.
+    c = TestClient(build_app(fake_ask, "sekrit", owner_person_id="owner-uuid"))
+    r = c.post(
+        "/ask",
+        json={"text": "hi", "thread_id": "whatever", "voice": True},
+        headers={"Authorization": "Bearer sekrit"},
+    )
+    body = r.json()
+    assert body["thread_id"] == "person:owner-uuid"        # response reports the used thread
+    assert body["reply"].endswith("|person:owner-uuid")    # ask_fn saw the person thread
+
+
+def test_ask_without_voice_flag_is_unchanged():
+    # default voice=False: the caller's thread_id flows through verbatim (byte-for-byte
+    # the old behavior), even with an owner configured.
+    c = TestClient(build_app(fake_ask, "sekrit", owner_person_id="owner-uuid"))
+    r = c.post(
+        "/ask", json={"text": "hi", "thread_id": "http:default"},
+        headers={"Authorization": "Bearer sekrit"},
+    )
+    assert r.json()["thread_id"] == "http:default"
+
+
 def test_empty_text_rejected_by_validation():
     r = client().post("/ask", json={"text": ""}, headers={"Authorization": "Bearer sekrit"})
     assert r.status_code == 422

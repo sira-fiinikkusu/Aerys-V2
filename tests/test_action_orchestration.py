@@ -175,6 +175,48 @@ def test_voice_action_route_returns_ack_immediately_then_result_lands():
     assert sum(1 for m in msgs if getattr(m, "type", "") == "human") == 1
 
 
+# ---- voice armed by the EXPLICIT flag on a PERSON-KEYED thread (no 'voice' prefix) --
+# Post track/memory-continuity, voice folds into the owner's 'person:{id}' thread, which
+# does NOT start with 'voice'. These prove the three voice behaviors fire off the
+# identity.voice flag (is_voice_turn), not the thread name.
+
+VOICE_OWNER = {"user_id": "person-1", "display_name": "Chris (Voice)",
+               "privacy_context": "private", "voice": True}
+
+
+def test_person_keyed_voice_flag_parallel_starts_chat():
+    # chat verdict on a person-keyed voice turn: the speculative gen (already in flight)
+    # is the reply — parallel-start fired off the flag, not a 'voice:*' thread name.
+    graph = build_graph(fake_model("spoken chat reply"), soul="s")
+    stub = StubActionGraph()
+    out = ask(graph, "tell me something nice", identity=VOICE_OWNER, thread_id="person:p1",
+              router=chat_router, action_graph=stub)
+    assert out == "spoken chat reply"
+    assert stub.calls == []  # action path never touched
+
+
+def test_person_keyed_voice_flag_action_acks_then_lands_in_person_thread():
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = StubActionGraph("done — desk light on")
+    out = ask(graph, "turn on the desk light", identity=VOICE_OWNER, thread_id="person:p1",
+              router=action_router, action_graph=stub)
+    assert out == "[warmly] Getting that light for you"   # ack-then-act off the flag
+    msgs = wait_for_messages(graph, "person:p1", 2)       # outcome lands on the person thread
+    assert msgs[-1].content == "done — desk light on"
+    assert msgs[0].content == "turn on the desk light"
+
+
+def test_same_person_thread_without_flag_is_NOT_voice():
+    # Same 'person:p1' thread, NO voice flag -> the SEQUENTIAL (non-voice) path: the
+    # action RESULT is returned, not an ack. The flag — not the thread — is the switch.
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("light is on")
+    out = ask(graph, "turn on the light", identity=CHRIS, thread_id="person:p1",
+              router=action_router, action_graph=stub)
+    assert out == "light is on"       # non-voice: the reply IS the outcome, no ack
+    assert stub.calls == ["turn on the light"]
+
+
 def test_voice_action_failure_lands_honestly_in_thread():
     class ExplodingActionGraph:
         def invoke(self, inp, config):
@@ -605,8 +647,10 @@ def test_voice_speculative_chat_sees_real_thread_history():
                       AIMessage(content="I remember.")]},
         as_node="chat",
     )
-    out = ask(graph, "tell me more", identity=CHRIS, thread_id="voice:hist",
-              router=chat_router, action_graph=StubActionGraph())
+    # voice is pinned private in production (http_api) — so the privacy gate never
+    # redacts it and the speculative gen keeps its full seeded history.
+    out = ask(graph, "tell me more", identity={**CHRIS, "privacy_context": "private"},
+              thread_id="voice:hist", router=chat_router, action_graph=StubActionGraph())
     assert out == "and that's the story"
     prompt = model.prompts[0]  # [system, *history, human]
     assert [m.content for m in prompt[1:]] == [

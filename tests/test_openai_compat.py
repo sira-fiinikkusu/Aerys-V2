@@ -52,3 +52,20 @@ def test_no_user_message_400():
 def test_models_list_for_ha_validation():
     r = client().get("/v1/models", headers=AUTH)
     assert r.json()["data"][0]["id"] == "aerys-v2"
+
+
+def test_voice_compat_folds_into_owner_person_thread():
+    # With an owner configured, the voice pipeline's turn rides the owner's continuous
+    # 'person:{id}' thread (cross-surface continuity) — no longer the shared 'voice:beta'.
+    c = TestClient(build_app(fake_ask, "sekrit", owner_person_id="owner-uuid"))
+    r = c.post("/v1/chat/completions", headers=AUTH,
+               json={"messages": [{"role": "user", "content": "hey"}]})
+    assert r.json()["choices"][0]["message"]["content"] == "echo:hey|person:owner-uuid"
+
+
+def test_voice_compat_falls_back_to_voice_thread_without_owner():
+    # No owner (dev/CI): there's no owner thread to join, so keep the legacy shared
+    # voice thread. Voice-ness still rides the explicit flag (see test_context.py).
+    r = client().post("/v1/chat/completions", headers=AUTH,
+                      json={"messages": [{"role": "user", "content": "hey"}]})
+    assert r.json()["choices"][0]["message"]["content"] == "echo:hey|voice:beta"

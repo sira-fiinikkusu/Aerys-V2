@@ -65,6 +65,20 @@ def test_cold_display_name_falls_back_to_platform():
     assert ident["display_name"] == "ScreenName"
 
 
+def test_identity_carries_the_room_surface():
+    # The resolver carries platform/channel_kind/channel_id onto identity so they
+    # survive person-keyed threading (thread_id is now 'person:{id}', surface-blind).
+    ident = identity_from_lookup(
+        None, event(channel_kind="guild", channel_id="555", channel_name="general")
+    )
+    assert ident["platform"] == "discord"
+    assert ident["channel_kind"] == "guild"
+    assert ident["channel_id"] == "555"
+    assert ident["channel_name"] == "general"
+    # missing channel_id (a minimal event) degrades to '' rather than raising
+    assert identity_from_lookup(None, event())["channel_id"] == ""
+
+
 def test_known_missing_db_name_falls_back_to_platform():
     row = {"person_id": OWNER, "display_name": None, "is_new": False}
     ident = identity_from_lookup(row, event(display_name="ScreenName"))

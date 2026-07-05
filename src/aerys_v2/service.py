@@ -10,7 +10,7 @@ an action subgraph. Both None = chat-only, byte-for-byte the old behavior. Both 
 
 - non-voice threads: router first (sequential) — chat routes to the chat graph,
   action routes to the tool subgraph, whose result becomes the reply.
-- voice threads (thread_id startswith "voice"): PARALLEL-START — the router and
+- voice turns (identity.voice flag — is_voice_turn): PARALLEL-START — the router and
   the chat generation launch concurrently. Router says chat -> the chat result
   (already in flight) is the reply and the router cost vanishes into the
   latency shadow. Router says action -> the caller gets the router's generated
@@ -38,10 +38,32 @@ from typing import Callable
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.router import DEFAULT_TIER, RouteDecision, normalize_tier
-from aerys_v2.state import Identity
+from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY, PRIVATE, PUBLIC
+from aerys_v2.state import Identity, is_voice_turn
 from aerys_v2.turns import build_turn_row, current_trace_id
 
 log = logging.getLogger(__name__)
+
+
+# ── per-message content-privacy tagging (the short-term privacy gate's write half) ──
+# Every human turn is tagged 'public'|'private' in additional_kwargs (checkpointer-
+# persisted) so the chat node's public-room gate (services.content_privacy) can drop
+# private DM content. The tag is set SYNCHRONOUSLY here (public channel -> public;
+# anything else -> fail-closed 'private') with ZERO added latency, then RELAXED
+# off the hot path by an optional judge — see _reclassify_content_privacy.
+def _origin_privacy(identity: Identity | dict | None) -> str:
+    """The ingest-time tag. A public channel is public-by-origin (no classification);
+    a DM / the owner's private channels start fail-closed 'private' and only ever get
+    relaxed to 'public' by a judge that has read the actual content."""
+    return PUBLIC if (identity or {}).get("privacy_context") == "public" else PRIVATE
+
+
+def _human_turn(text: str, origin_privacy: str, msg_id: str) -> HumanMessage:
+    """A tagged HumanMessage with a STABLE id — the id lets the async judge retag THIS
+    exact message later (add_messages replaces by id, in place)."""
+    return HumanMessage(
+        content=text, id=msg_id, additional_kwargs={CONTENT_PRIVACY_KEY: origin_privacy}
+    )
 
 
 # ── v2_turns audit seam (migration 001; recorder wired by factory.turn_recorder_for) ──
@@ -194,6 +216,67 @@ def _in_ctx(fn: Callable, *args):
     return lambda: ctx.run(fn, *args)
 
 
+def _reclassify_content_privacy(
+    graph: object,
+    config: dict,
+    msg_id: str,
+    text: str,
+    reply: str,
+    classifier: Callable[[str], str],
+) -> None:
+    """OFF THE HOT PATH: re-judge a DM turn's CONTENT and, if general, relax its
+    fail-closed 'private' tag to 'public' so it may carry into public rooms.
+
+    The judge reads the human turn AND the reply together — so a benign-looking
+    question whose ANSWER is private (a balance read, a symptom named back) stays
+    private even though the question alone looked general. A 'private' verdict is a
+    no-op (the ingest tag is already private); only 'public' rewrites, via update_state
+    replacing the message by its stable id (add_messages semantics — content/position
+    preserved, only additional_kwargs change).
+
+    Fires on a daemon thread the caller never joins (the same background-update_state
+    pattern as the voice _complete_action path). FAIL-OPEN and FAIL-CLOSED at once: any
+    trouble — judge error, a thread that won't start, an update_state hiccup — leaves
+    the SAFE 'private' tag in place. Worst case a general DM message never carries into
+    public (conservative), never a private one leaking."""
+
+    def run() -> None:
+        try:
+            if classifier(f"{text}\n{reply}") == PUBLIC:
+                graph.update_state(
+                    {"configurable": config["configurable"]},
+                    {"messages": [_human_turn(text, PUBLIC, msg_id)]},
+                    as_node="chat",
+                )
+        except Exception:
+            log.warning("content-privacy reclassification failed — tag stays private", exc_info=True)
+
+    try:
+        threading.Thread(target=_in_ctx(run), daemon=True).start()
+    except RuntimeError:  # thread exhaustion — never crash the turn over a retag
+        log.warning("content-privacy reclassify thread could not start", exc_info=True)
+
+
+def _reclassify_if_needed(
+    graph: object,
+    config: dict,
+    msg_id: str,
+    text: str,
+    reply: str,
+    classifier: Callable[[str], str] | None,
+    origin_privacy: str,
+) -> None:
+    """Fire the async retag only for a candidate turn: a judge must be wired, and the
+    turn must be a fail-closed 'private' DM/voice turn (a public-origin turn is already
+    public, nothing to relax). Called from BOTH the non-voice paths and the voice path:
+    since person-keying, a private thing said by voice shares the owner's thread with his
+    public text turns, so voice content needs the same relax-general/keep-private
+    treatment as a DM."""
+    if classifier is None or origin_privacy != PRIVATE:
+        return
+    _reclassify_content_privacy(graph, config, msg_id, text, reply, classifier)
+
+
 @dataclass(frozen=True)
 class Rails:
     """Per-request safety limits (cross-review #13) — enforced at the seam, not by prompts.
@@ -235,6 +318,7 @@ def ask(
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
     record_turn: Callable[[dict], None] | None = None,
+    content_privacy_classifier: Callable[[str], str] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -279,9 +363,21 @@ def ask(
       once per completed turn on EVERY path with the fully-built row, off the hot
       path and fail-open (see _fire_turn_record). None = no auditing (dev/CI, no
       DATABASE_URL), byte-for-byte the old behavior.
+    - content_privacy_classifier: the OFF-hot-path judge (factory.content_privacy_fn_for)
+      that relaxes a DM turn's fail-closed 'private' content tag to 'public' when the
+      content is general, so general things said in a DM carry into public rooms while
+      private-CONTENT things never do. None = feature off: DM turns stay 'private' and
+      simply never carry into public. Never touches latency (daemon thread) and never
+      loosens the public-origin path (those turns are already 'public').
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
+
+    # Content-privacy tagging (short-term gate, write half): compute THIS turn's ingest
+    # tag once, and mint a stable id so the async judge can retag this exact human
+    # message. Both ride down into whichever path builds the main-thread human message.
+    origin_privacy = _origin_privacy(identity)
+    turn_msg_id = str(uuid.uuid4())
 
     # Gate the action stack BEFORE anything else can arm it. A caller outside the
     # allowlist never reaches home_control / search_entities / get_state — closing
@@ -307,18 +403,35 @@ def ask(
             # forced off it by the allowlist gate above. No router ran, so
             # classifier_intent/tier stay NULL — the row records what actually
             # happened, not a tier decision that was never made.
-            return _chat_turn(graph, text, config, rails, started, record_turn=record_turn)
+            reply = _chat_turn(
+                graph, text, config, rails, started, record_turn=record_turn,
+                human_privacy=origin_privacy, human_id=turn_msg_id,
+            )
+            _reclassify_if_needed(
+                graph, config, turn_msg_id, text, reply,
+                content_privacy_classifier, origin_privacy,
+            )
+            return reply
 
-        if str(thread_id).startswith("voice"):
-            # ChannelPolicy (locked): voice is PINNED to the standard tier —
-            # the ~3.6s budget can't absorb deep latency, and fast-tier
-            # identity wobbles are what got Haiku demoted in V1. The pin is
-            # structural: this path never writes a tier into config, so the
-            # chat node's DEFAULT_TIER (= standard) always applies.
+        if is_voice_turn(identity, thread_id):
+            # Voice detection now rides the EXPLICIT identity.voice flag (is_voice_turn),
+            # not the thread prefix — because voice folds into the owner's person-keyed
+            # thread ('person:{id}') and no longer names 'voice'. Behavior is unchanged:
+            # ChannelPolicy (locked) PINS voice to the standard tier — the ~3.6s budget
+            # can't absorb deep latency, and fast-tier identity wobbles are what got
+            # Haiku demoted in V1. The pin is structural: this path never writes a tier
+            # into config, so the chat node's DEFAULT_TIER (= standard) always applies.
+            # Content reclassification NOW runs on voice too: person-keying means a voice
+            # turn shares the owner's thread with his public text turns, so a private
+            # thing said by voice must be gated out of public exactly like a DM — the
+            # fail-closed 'private' ingest tag (below) does the gating, and the async
+            # judge relaxes general voice content so it still carries into public rooms.
             return _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
                 followup_router=followup_router,
+                content_privacy_classifier=content_privacy_classifier,
+                human_privacy=origin_privacy, human_id=turn_msg_id,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -328,10 +441,16 @@ def ask(
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
             log.info("route decision | thread=%s route=action", thread_id)
-            return _action_turn(
+            reply = _action_turn(
                 action_graph, graph, text, config, add_human=True,
                 record_turn=record_turn, started=started,
+                human_privacy=origin_privacy, human_id=turn_msg_id,
             )
+            _reclassify_if_needed(
+                graph, config, turn_msg_id, text, reply,
+                content_privacy_classifier, origin_privacy,
+            )
+            return reply
 
         # Chat route on a TEXT thread: the router's tier picks the model. This
         # is where the deep cap bites — the gate is an atomic spend against
@@ -353,11 +472,17 @@ def ask(
             downgrade_marker = ["deep_cap_downgraded"]
         log.info("route decision | thread=%s route=chat tier=%s", thread_id, tier)
         config["configurable"]["tier"] = tier
-        return _chat_turn(
+        reply = _chat_turn(
             graph, text, config, rails, started, record_turn=record_turn,
             classifier_intent="chat", tier=tier,
             tier_override_source=override_source, extra_degraded=downgrade_marker,
+            human_privacy=origin_privacy, human_id=turn_msg_id,
         )
+        _reclassify_if_needed(
+            graph, config, turn_msg_id, text, reply,
+            content_privacy_classifier, origin_privacy,
+        )
+        return reply
 
 
 def _chat_turn(
@@ -372,6 +497,8 @@ def _chat_turn(
     tier: str | None = None,
     tier_override_source: str | None = None,
     extra_degraded: list[str] | None = None,
+    human_privacy: str = PRIVATE,
+    human_id: str | None = None,
 ) -> str:
     """The original chat path: invoke, budget-check, extract — now also audited.
 
@@ -382,7 +509,9 @@ def _chat_turn(
     prompt-side emotion tags), so what the model said IS what the channel emits.
     """
     try:
-        result = graph.invoke({"messages": [HumanMessage(content=text)]}, config)
+        result = graph.invoke(
+            {"messages": [_human_turn(text, human_privacy, human_id)]}, config
+        )
     except Exception as e:
         # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
         # for forensics and the capability loop — record it BEFORE re-raising so the
@@ -437,6 +566,8 @@ def _action_turn(
     add_human: bool,
     record_turn: Callable[[dict], None] | None = None,
     started: float | None = None,
+    human_privacy: str = PRIVATE,
+    human_id: str | None = None,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -464,7 +595,9 @@ def _action_turn(
     final = _reply_text(result_messages[-1])
     messages: list = [AIMessage(content=final)]
     if add_human:
-        messages.insert(0, HumanMessage(content=text))
+        # The tagged, stable-id human turn (so the async judge can retag it) — the
+        # action graph never touched the main thread, so THIS is where it lands.
+        messages.insert(0, _human_turn(text, human_privacy, human_id))
     graph.update_state(
         {"configurable": config["configurable"]}, {"messages": messages}, as_node="chat"
     )
@@ -545,6 +678,9 @@ def _voice_parallel_start(
     followup_skip_s: float,
     record_turn: Callable[[dict], None] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
+    content_privacy_classifier: Callable[[str], str] | None = None,
+    human_privacy: str = PRIVATE,
+    human_id: str | None = None,
 ) -> str:
     """Voice hot path: race the router against the chat generation.
 
@@ -570,7 +706,10 @@ def _voice_parallel_start(
     """
     real_configurable = config["configurable"]
     spec_thread = f"{real_configurable['thread_id']}::spec::{uuid.uuid4().hex}"
-    # keeps the "voice" prefix, so the chat node's voice styling still applies
+    # spec_config copies real_configurable, which carries the identity (incl. the
+    # explicit voice flag) — so the chat node's voice styling still applies to the
+    # speculative generation even though spec_thread ('person:{id}::spec::...') no
+    # longer starts with 'voice'. Voice-ness rides identity now, not the thread name.
     spec_config = {
         **config,
         "configurable": {**real_configurable, "thread_id": spec_thread},
@@ -619,7 +758,7 @@ def _voice_parallel_start(
                 reply_message = result["messages"][-1]
                 graph.update_state(
                     {"configurable": real_configurable},
-                    {"messages": [HumanMessage(content=text), reply_message]},
+                    {"messages": [_human_turn(text, human_privacy, human_id), reply_message]},
                     as_node="chat",
                 )
             except Exception as e:
@@ -655,6 +794,15 @@ def _voice_parallel_start(
             )
             if timed_out:
                 raise TurnTimeout(timeout_msg)
+            # Off-hot-path content retag: the human turn just landed on the REAL
+            # person-keyed thread tagged fail-closed 'private'. If a judge is wired and
+            # the content is general, relax it to 'public' so this voice line carries
+            # into the owner's public rooms (a private thing stays private). Same
+            # daemon-thread, zero-latency contract as the DM paths — mirrors non-voice.
+            _reclassify_if_needed(
+                graph, config, human_id, text, reply,
+                content_privacy_classifier, human_privacy,
+            )
             return reply
 
         # Action: the ack goes out NOW; the tool loop finishes in the background.
@@ -713,8 +861,17 @@ def _voice_parallel_start(
             # interleave to wait out — the durable record lands immediately.
             graph.update_state(
                 {"configurable": real_configurable},
-                {"messages": [HumanMessage(content=text), AIMessage(content=final)]},
+                {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=final)]},
                 as_node="chat",
+            )
+            # Same off-hot-path content retag as the voice-chat and DM paths: the human
+            # turn is now durable on the owner's person thread tagged fail-closed
+            # 'private'; a wired judge relaxes general content to 'public' (private stays
+            # private) so it may carry into his public rooms. Already off the hot path —
+            # this runs inside the background action thread, ack long since spoken.
+            _reclassify_if_needed(
+                graph, config, human_id, text, final,
+                content_privacy_classifier, human_privacy,
             )
             if not chat_cancelled:
                 # Let the speculative run finish before deleting its thread —

@@ -28,7 +28,11 @@ from aiogram.types import Message
 
 from aerys_v2.channels.splitter import split_message
 from aerys_v2.state import Identity
-from aerys_v2.transports.discord_gateway import EMPTY_PING, NormalizedEvent
+from aerys_v2.transports.discord_gateway import (
+    EMPTY_PING,
+    NormalizedEvent,
+    person_thread_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +171,10 @@ class AerysTelegramClient:
             return
         event = normalize(message, bot_username=self._bot_username or "")
         identity: Identity = self._resolve(event)
+        # Person-keyed threading (parity with discord_gateway): the checkpointer key
+        # is derived from the RESOLVED identity, so a Telegram DM/group joins the SAME
+        # 'person:{id}' thread as his Discord surfaces (cross-surface continuity).
+        thread_id = person_thread_key(identity["user_id"])
         # Empty text (bare @mention, sticker-only) rides the model via EMPTY_PING so
         # the acknowledgement is contextual, not a fixed string (parity with discord).
         turn_text = event.text.strip() or EMPTY_PING
@@ -176,11 +184,11 @@ class AerysTelegramClient:
         loop = asyncio.get_running_loop()
         try:
             reply = await loop.run_in_executor(
-                None, lambda: self._ask(turn_text, identity, event.thread_id)
+                None, lambda: self._ask(turn_text, identity, thread_id)
             )
         except Exception:
             # Any failure inside the turn becomes a short apology, never dead air.
-            log.exception("ask() failed for thread %s", event.thread_id)
+            log.exception("ask() failed for thread %s", thread_id)
             await message.answer(
                 "Sorry — something broke on my end handling that. Try me again in a moment?"
             )
