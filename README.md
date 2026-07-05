@@ -1,6 +1,6 @@
 # Aerys
 
-**A self-hosted, memory-having AI companion built on LangGraph.**
+**A self-hosted AI companion with persistent memory, built on LangGraph.**
 
 Aerys is a personal AI companion you talk to wherever you already are — Discord, Telegram, or by voice through Home Assistant satellites — and it stays *one continuous presence* across all of them. Every surface funnels into a single `ask()` seam in front of a checkpointed [LangGraph](https://langchain-ai.github.io/langgraph/) graph, so long-term memory, model tiering, a privacy gate, and a tool/action layer are built once and cover every channel at once.
 
