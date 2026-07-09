@@ -46,7 +46,8 @@ def read_gaps() -> str:
     """Run the owner /gaps reader inside the image (same DB env); return its digest."""
     out = subprocess.run(
         [DOCKER, "run", "--rm", "--network", "host", "--env-file", ENV_PATH,
-         "--entrypoint", "python", IMAGE, "-m", "aerys_v2.workers", "gaps"],
+         "--entrypoint", "python", IMAGE, "-m", "aerys_v2.workers", "gaps",
+         "--status", "open"],  # only surface OPEN gaps — built/resolved ones drop off
         capture_output=True, text=True, timeout=180,
     )
     return out.stdout.strip()
