@@ -322,3 +322,58 @@ def test_search_no_match_and_unreachable_are_honest_strings():
         client=httpx.Client(transport=httpx.MockTransport(boom)),
     )
     assert "unreachable" in dead.invoke({"query": "desk"})
+
+
+def test_search_retries_once_on_transient_transport_error_then_succeeds():
+    """A momentary transport blip (HA mid-restart) is retried once and succeeds,
+    so it never surfaces as an unreachable/degraded turn (build A, 2026-07-09)."""
+    calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("blip")
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "entity_id": "light.desk",
+                    "state": "on",
+                    "attributes": {"friendly_name": "Desk Lamp"},
+                }
+            ],
+        )
+
+    tool = build_search_entities_tool(
+        base_url="http://ha.test:8123",
+        token="t0ken",
+        client=httpx.Client(transport=httpx.MockTransport(flaky)),
+    )
+    out = tool.invoke({"query": "desk"})
+    assert calls["n"] == 2  # retried exactly once
+    assert "light.desk" in out  # the second attempt's data came through
+    assert "unreachable" not in out
+
+
+def test_get_state_retries_once_on_transient_transport_error_then_succeeds():
+    """home_control get_state gets the same single-retry resilience as search."""
+    calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("blip")
+        return httpx.Response(
+            200, json={"state": "on", "attributes": {"friendly_name": "Desk Lamp"}}
+        )
+
+    tool = build_home_control_tool(
+        base_url="http://ha.test:8123",
+        token="t0ken",
+        canary_entities=frozenset(),
+        client=httpx.Client(transport=httpx.MockTransport(flaky)),
+    )
+    out = tool.invoke({"operation": "get_state", "entity_id": "light.desk"})
+    assert calls["n"] == 2
+    assert "unreachable" not in out
+    assert "on" in out

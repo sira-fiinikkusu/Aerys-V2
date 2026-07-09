@@ -25,6 +25,7 @@ Three safety layers, outermost first:
 
 import json
 import logging
+import time
 import uuid
 from typing import Any, Callable
 
@@ -55,6 +56,29 @@ STATE_TRUNCATE_AT = 60
 # HA's "nothing home" states — noise in a discovery listing, filtered unless
 # they're literally all we found (then honesty beats tidiness: show them).
 DEAD_STATES = frozenset({"unavailable", "unknown"})
+
+# A transient transport failure (connection refused / DNS / timeout — a network
+# blip or HA mid-restart) gets ONE quick retry after a short backoff before we
+# fall back to the honest "unreachable" message. httpx.TransportError is the
+# connect/timeout family ONLY — it excludes HTTPStatusError, so a real 404/500
+# is never retried (that's a genuine answer, not a blip). Reads only: writes
+# keep their single-shot + outbox path so a retry can never double-fire a toggle.
+_READ_RETRY_BACKOFF_S = 0.6
+
+
+def _get_with_retry(http: httpx.Client, url: str, headers: dict) -> httpx.Response:
+    """GET, retrying ONCE on a transient transport error (never on a status).
+
+    On a momentary HA outage (today's SSD-reboot blip is the canonical case) the
+    second attempt after a short backoff usually succeeds — so a brief restart
+    no longer surfaces as an unreachable/degraded turn. If both attempts fail the
+    final error propagates to the caller's existing graceful except-block.
+    """
+    try:
+        return http.get(url, headers=headers)
+    except httpx.TransportError:
+        time.sleep(_READ_RETRY_BACKOFF_S)
+        return http.get(url, headers=headers)  # final attempt; may raise → caught upstream
 
 
 def canary_set(csv: str) -> frozenset[str]:
@@ -174,7 +198,7 @@ def build_home_control_tool(
         # ---- reads: unrestricted (looking can't break anything) -------------
         if op == "get_state":
             try:
-                r = http.get(f"{base}/api/states/{entity}", headers=headers)
+                r = _get_with_retry(http, f"{base}/api/states/{entity}", headers)
                 if r.status_code == 404:
                     return f"Home Assistant has no entity named {entity}."
                 r.raise_for_status()
@@ -280,7 +304,7 @@ def build_search_entities_tool(
         if not terms:
             return "search_entities needs at least one word to search for."
         try:
-            r = http.get(f"{base}/api/states", headers=headers)
+            r = _get_with_retry(http, f"{base}/api/states", headers)
             r.raise_for_status()
             states = r.json()
         except (httpx.HTTPError, ValueError) as e:
