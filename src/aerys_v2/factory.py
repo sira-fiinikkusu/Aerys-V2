@@ -517,7 +517,14 @@ def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
         req = urllib.request.Request(
             url,
             data=_json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "Authorization": f"Bot {token}"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bot {token}",
+                # Discord (via Cloudflare) 403s Python-urllib's default UA —
+                # observed live 2026-07-11 (curl sailed through, urllib got
+                # HTTP 403). Discord asks bots for this exact UA shape.
+                "User-Agent": "DiscordBot (https://github.com/sira-fiinikkusu/aerys-v2, 1.0)",
+            },
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
