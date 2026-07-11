@@ -737,6 +737,16 @@ SEARCH_OVERLAY = (
     "say so plainly — do not invent an answer."
 )
 
+LOG_GAP_OVERLAY = (
+    "You can file capability gaps with the log_gap tool — it writes to the "
+    "owner's real gaps board (the one his coding agent works from). CALL IT "
+    "IMMEDIATELY when the owner says anything like 'log a gap', 'log a "
+    "complaint', 'file an issue', or 'note that for the coding agent' — and "
+    "on your own initiative when you hit a genuine limitation (a missing "
+    "tool, something rendering wrong). One-line summary, optional details. "
+    "Never claim something was logged unless the tool confirmed it."
+)
+
 EMAIL_OVERLAY = (
     "You have YOUR OWN email inbox (you, Aerys — not the owner's mail). Four "
     "tools: search_email and read_email to look through it, draft_email and "
@@ -957,6 +967,25 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
             build_web_search_tool(api_key=settings.tavily_api_key.get_secret_value())
         )
 
+    if not guest and settings.database_url is not None:
+        # SELF-REPORTED GAPS (2026-07-11): the deliberate half of the gaps
+        # pipeline — the miner infers complaints from reply text after the
+        # fact; log_gap lets her file one on purpose ("log that for the coding
+        # agent"). Owner-side only: the gaps board is operator telemetry, and
+        # a guest-writable complaint channel is an invitation. Same trust lane
+        # as mined complaints either way (stringent — migration 007).
+        import psycopg as _psycopg
+
+        from aerys_v2.tools.log_gap import build_log_gap_tool
+
+        _gaps_url = settings.database_url
+
+        def gaps_conn_factory():
+            return _psycopg.connect(_gaps_url, connect_timeout=5,
+                                    options="-c statement_timeout=5000")
+
+        tools.append(build_log_gap_tool(gaps_conn_factory))
+
     if not guest and settings.email_app_password is not None and settings.email_address:
         # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:
         # her inbox contents and her outgoing voice are not for guests, so the
@@ -1012,6 +1041,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(MEDIA_OVERLAY)
     if settings.tavily_api_key is not None:
         parts.append(SEARCH_OVERLAY)
+    if not guest and settings.database_url is not None:
+        parts.append(LOG_GAP_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:
         parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)
