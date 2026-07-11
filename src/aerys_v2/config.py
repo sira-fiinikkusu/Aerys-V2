@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     discord_bot_token: SecretStr | None = None
     discord_guild_id: int | None = None          # only this guild is served (None = DMs only)
     discord_reply_channel_ids: str = ""          # csv of guild channel ids to listen in ("" = all)
+    # The Aerys Admin role (guild role id) gating /admin-link + /admin-unlink.
+    # None = admin slash commands always refuse (fail-closed, same posture as
+    # every other optional credential). n8n mapping: 03-02's "Check Admin Role"
+    # HTTP call — discord.py reads roles off the interaction, no API round-trip.
+    discord_admin_role_id: int | None = None
 
     # None = Telegram transport OFF (same arming pattern as discord_bot_token — the
     # runner only wires up when a token is present). One aiogram long-polling
@@ -63,12 +68,14 @@ class Settings(BaseSettings):
     database_url: str | None = None
 
     # ---- MEMORY-RETRIEVAL block (long-term context) --------------------------
-    # None = memory context OFF. Points at the PROD aerys database — the same
-    # memories/core_claim tables the live n8n pipeline writes. V2 treats this
-    # connection as READ-ONLY (retrieval only): while both brains coexist, the
-    # n8n batch-extraction workflow stays the sole writer. Kept separate from
-    # database_url on purpose — the checkpointer may live in its own DB, and
-    # "durable threads" vs "prod memories" are different blast radii.
+    # None = memory context OFF. Points at the PROD aerys database (memories/
+    # persons/platform_identities/audit_log). Retrieval treats its connections
+    # as READ-ONLY; since the 7/5 cutover the WRITE doors on this URL are the
+    # extraction worker (behind the v2_writer_lease memory_extraction lease)
+    # and the owner-facing slash commands (/aerys-tell, -forget, -correct —
+    # explicit user edits, audit-logged). Kept separate from database_url on
+    # purpose — the checkpointer may live in its own DB, and "durable threads"
+    # vs "prod memories" are different blast radii.
     memories_database_url: str | None = None
 
     # Channel-recent room context (cross-surface continuity, multi-person half):
@@ -150,6 +157,22 @@ class Settings(BaseSettings):
     # current events / news / weather / prices instead of guessing from stale
     # training knowledge.
     tavily_api_key: SecretStr | None = None
+
+    # ---- EMAIL (her own mailbox — scope decided 2026-07-11) -------------------
+    # Aerys's OWN Gmail account over IMAP/SMTP with an app password — the
+    # rebuild of n8n's email trio (Email Sub-Agent kbKrKBVUgwU6n9gg, Gmail
+    # Trigger 48toI7JVcl3MnL4n) minus the OAuth dance and minus the morning
+    # brief (dropped by owner decision). None app password = the whole email
+    # surface (watcher worker + email tools) doesn't exist — the standard
+    # arming pattern. The owner's mail is a LATER add behind its own creds.
+    email_address: str | None = None              # her Gmail address (also SMTP From)
+    email_app_password: SecretStr | None = None   # Google app password (not the account password)
+    email_imap_host: str = "imap.gmail.com"
+    email_smtp_host: str = "smtp.gmail.com"
+    email_poll_seconds: int = 180                 # watcher cadence
+    # Where arrival pings land: the owner's Discord user id (DM via the bot's
+    # REST API — the watcher is its own container and holds no gateway session).
+    email_notify_discord_user_id: str | None = None
 
     # ---- EXTRACTION WORKER (shadow mode) --------------------------------------
     # The n8n batch extraction (IfqY4BrhBGeQrcTC) re-run as a V2 worker that reads

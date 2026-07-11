@@ -9,7 +9,7 @@ canvas; each node function is a Code node that receives state instead of $json.
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from langchain_anthropic import ChatAnthropic
@@ -439,6 +439,101 @@ def gaps_reader_for(settings: Settings) -> Callable[[], str] | None:
     return read
 
 
+def prod_rw_conn_factory_for(settings: Settings) -> Callable[[], Any] | None:
+    """Fresh short-lived READ-WRITE connection to PROD aerys, for the slash-command
+    write doors (/aerys-tell, -forget, -correct, /link's merge) and audit_log.
+
+    None when memories_database_url is unset — the interactions layer then never
+    attaches (the commands need the identity tables at minimum). Same bounded-
+    blocking timeouts as every other seam: a wedged NAS turns a command into an
+    apology, never a held connection. psycopg's connection context manager commits
+    on clean exit and rolls back on exception — exactly the per-command transaction
+    shape the pure handlers document.
+    """
+    if settings.memories_database_url is None:
+        return None
+    import psycopg
+
+    url = settings.memories_database_url
+
+    def connect() -> Any:
+        return psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000")
+
+    return connect
+
+
+def telegram_notify_for(settings: Settings) -> Callable[[str, str], bool] | None:
+    """(chat_id, text) -> delivered? — the admin-link cross-platform courtesy ping.
+
+    n8n mapping: 03-02's "Notify Telegram User" node. stdlib urllib, fire-and-forget
+    with a bool verdict (the caller folds a failure into the admin's ephemeral reply
+    instead of pretending it landed). None when the Telegram transport isn't armed.
+    """
+    if settings.telegram_bot_token is None:
+        return None
+    import json as _json
+    import urllib.request
+
+    token = settings.telegram_bot_token.get_secret_value()
+
+    def notify(chat_id: str, text: str) -> bool:
+        try:
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=_json.dumps({"chat_id": chat_id, "text": text}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return bool(_json.loads(resp.read().decode() or "{}").get("ok"))
+        except Exception:
+            log.warning("telegram admin-link notify failed", exc_info=True)
+            return False
+
+    return notify
+
+
+def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
+    """text -> the owner's Discord DM, over the bot's REST API — the email
+    watcher's ping delivery.
+
+    The watcher is its own container with no gateway session, so this is plain
+    REST: create-DM once (channel id cached in the closure), then one message
+    POST per ping. RAISES on any failure — email_watch's whole watermark
+    posture (hold the mark below an un-notified message) depends on a failed
+    ping raising, not shrugging. None when the bot token or the owner's Discord
+    user id isn't configured.
+    """
+    if settings.discord_bot_token is None or not settings.email_notify_discord_user_id:
+        return None
+    import json as _json
+    import urllib.request
+
+    token = settings.discord_bot_token.get_secret_value()
+    recipient = settings.email_notify_discord_user_id
+    channel_id: list[str] = []  # closure cache — resolved on first ping
+
+    def _post(url: str, payload: dict) -> dict:
+        req = urllib.request.Request(
+            url,
+            data=_json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Authorization": f"Bot {token}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return _json.loads(resp.read().decode() or "{}")
+
+    def notify(text: str) -> None:
+        if not channel_id:
+            dm = _post("https://discord.com/api/v10/users/@me/channels",
+                       {"recipient_id": recipient})
+            channel_id.append(dm["id"])
+        _post(f"https://discord.com/api/v10/channels/{channel_id[0]}/messages",
+              {"content": text[:1990]})
+
+    return notify
+
+
 # The channel-recent room-context seam: (channel_id, channel) -> the last N turns of
 # that PUBLIC channel (all people), formatted, or '' when there is nothing/an error.
 # Injectable exactly like context_fn — tests pass a lambda, --serve/--discord pass
@@ -633,6 +728,19 @@ SEARCH_OVERLAY = (
     "question from memory: run search_web, then ground your answer strictly in what "
     "it returns and mention what you found. If the search fails or returns nothing, "
     "say so plainly — do not invent an answer."
+)
+
+EMAIL_OVERLAY = (
+    "You have YOUR OWN email inbox (you, Aerys — not the owner's mail). Four "
+    "tools: search_email and read_email to look through it, draft_email and "
+    "send_email to write. CALL search_email IMMEDIATELY when the owner asks "
+    "about your email, whether something arrived, or anything 'in your inbox'; "
+    "read_email before summarizing any message — never summarize mail you "
+    "haven't read. Sending is a two-step ritual, no exceptions: draft_email "
+    "first, show the owner the exact draft, and call send_email with "
+    "confirmed=true ONLY after the owner explicitly approves that draft in "
+    "their most recent message. Never invent a recipient address — if the "
+    "owner didn't give one, ask."
 )
 
 # Appended to the system prompt ONLY when service.py hands us the ack the router
@@ -842,6 +950,40 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
             build_web_search_tool(api_key=settings.tavily_api_key.get_secret_value())
         )
 
+    if not guest and settings.email_app_password is not None and settings.email_address:
+        # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:
+        # her inbox contents and her outgoing voice are not for guests, so the
+        # whole half is dropped structurally from the guest graph. Factories are
+        # lazy logins: nothing dials until a tool actually runs.
+        import imaplib
+        import smtplib
+
+        from aerys_v2.tools.email_tool import build_email_tools
+
+        host_imap, host_smtp = settings.email_imap_host, settings.email_smtp_host
+        addr = settings.email_address
+        pw = settings.email_app_password.get_secret_value()
+
+        def imap_factory(_h=host_imap, _a=addr, _p=pw):
+            # timeout covers connect AND every later socket op — a hung server
+            # or teardown must never hold a turn open (review caveat).
+            client = imaplib.IMAP4_SSL(_h, 993, timeout=30)
+            client.login(_a, _p)
+            return client
+
+        def smtp_factory(_h=host_smtp, _a=addr, _p=pw):
+            client = smtplib.SMTP_SSL(_h, 465, timeout=30)
+            client.login(_a, _p)
+            return client
+
+        tools.extend(
+            build_email_tools(
+                imap_factory=imap_factory,
+                smtp_factory=smtp_factory,
+                self_address=addr,
+            )
+        )
+
     return tools
 
 
@@ -863,6 +1005,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(MEDIA_OVERLAY)
     if settings.tavily_api_key is not None:
         parts.append(SEARCH_OVERLAY)
+    if not guest and settings.email_app_password is not None and settings.email_address:
+        parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)
 
 

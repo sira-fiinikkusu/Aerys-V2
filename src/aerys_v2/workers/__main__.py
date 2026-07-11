@@ -3,6 +3,7 @@
 Subcommands:
   extraction [--once] [--live]  — memory extraction (n8n 04-02 port; shadow/live)
   gaps-mine  [--once]           — capability-request miner (self-iteration, Phase A)
+  email-watch [--once]          — her-inbox arrival pings (n8n 05-03 Gmail Trigger, IMAP rebuild)
   gaps       [--status] [--limit] — the owner READ path for mined gaps (/gaps)
 
 n8n mapping: the Schedule Trigger node. `--once` is a manual "Execute Workflow"
@@ -235,6 +236,78 @@ def _gaps_mine_main(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _email_watch_once(settings: Settings, notify_fn) -> dict:
+    """One watch pass over her inbox. AUTOCOMMIT connection on purpose: the
+    watcher saves the watermark PER pinged message, and that durability story
+    (module docstring) only holds if each save lands as it happens — a deferred
+    commit would roll back every earlier save when a mid-burst failure aborts
+    the transaction."""
+    import psycopg
+
+    from .email_watch import imap_login_factory, run_once
+
+    imap_factory = imap_login_factory(
+        settings.email_imap_host,
+        settings.email_address,
+        settings.email_app_password.get_secret_value(),
+    )
+    with psycopg.connect(settings.database_url, connect_timeout=10,
+                         autocommit=True) as conn:
+        conn.execute("SET statement_timeout = '30s'")
+        stats = run_once(conn, imap_factory, notify_fn)
+    log.info("email watch pass: %s", json.dumps(stats))
+    return stats
+
+
+def _email_watch_main(settings: Settings, args: argparse.Namespace) -> int:
+    """`email-watch [--once]` — her-inbox arrival pings (the notification half
+    of n8n 05-03 Gmail Trigger, rebuilt on IMAP; scope decided 2026-07-11)."""
+    from ..factory import discord_dm_notify_for
+
+    notify_fn = discord_dm_notify_for(settings)
+    missing = [
+        name
+        for name, value in (
+            ("DATABASE_URL", settings.database_url),
+            ("EMAIL_ADDRESS", settings.email_address),
+            ("EMAIL_APP_PASSWORD", settings.email_app_password),
+        )
+        if not value
+    ]
+    if notify_fn is None:
+        missing.append("DISCORD_BOT_TOKEN + EMAIL_NOTIFY_DISCORD_USER_ID")
+    if missing:
+        print(f"email watcher needs: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    # Same env-scare gate as the other workers: this one WRITES the watermark
+    # to database_url, so a URL aimed at prod `aerys` must refuse to run.
+    try:
+        run_boot_assertions(settings)
+    except BootConfigError as e:
+        print(f"email watcher refusing to start: {e}", file=sys.stderr)
+        return 2
+
+    if args.once:
+        stats = _email_watch_once(settings, notify_fn)
+        print(json.dumps(stats, indent=2))
+        return 0 if stats.get("ok") else 1
+
+    from apscheduler.schedulers.blocking import BlockingScheduler
+
+    scheduler = BlockingScheduler(timezone="UTC")
+    # Seconds cadence (not the minutes seam) — mail pings want the 3-minute
+    # default, and run_once already catches everything, so a failed pass just
+    # waits for the next tick. Same no-next_run_time rule as _add_interval_job.
+    scheduler.add_job(lambda: _email_watch_once(settings, notify_fn),
+                      "interval", seconds=settings.email_poll_seconds)
+    log.info("email watch loop armed: every %ss on %s",
+             settings.email_poll_seconds, settings.email_address)
+    _email_watch_once(settings, notify_fn)  # immediate T0 pass, then the interval
+    scheduler.start()  # blocks until SIGINT/SIGTERM
+    return 0
+
+
 def _gaps_read_main(settings: Settings, args: argparse.Namespace) -> int:
     """`gaps [--status] [--limit]` — the owner READ path (/gaps). Read-only."""
     if not settings.database_url:
@@ -274,6 +347,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     gaps_mine.add_argument("--once", action="store_true", help="single pass, then exit")
 
+    email_watch = sub.add_parser(
+        "email-watch", help="poll her Gmail inbox over IMAP, ping the owner on new mail"
+    )
+    email_watch.add_argument("--once", action="store_true", help="single pass, then exit")
+
     gaps = sub.add_parser("gaps", help="read the mined capability gaps (owner /gaps path)")
     gaps.add_argument(
         "--status", default=None,
@@ -289,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
         return _extraction_main(settings, args)
     if args.worker == "gaps-mine":
         return _gaps_mine_main(settings, args)
+    if args.worker == "email-watch":
+        return _email_watch_main(settings, args)
     if args.worker == "gaps":
         return _gaps_read_main(settings, args)
     return 2  # unreachable: subparsers is required=True

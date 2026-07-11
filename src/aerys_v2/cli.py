@@ -339,6 +339,30 @@ def main() -> None:
             allowed_guild_id=settings.discord_guild_id,
             allowed_channel_ids=channel_ids,
         )
+        # Slash commands (the n8n 03-02/04-03 + CF-worker chain, ported): attach
+        # only when the identity DB and a guild are both wired — the interactions
+        # layer needs prod-aerys tables and a guild to register against. Without
+        # them the gateway runs message-only, exactly as before this existed.
+        if settings.memories_database_url is not None and settings.discord_guild_id is not None:
+            from aerys_v2.factory import (
+                gaps_reader_for,
+                prod_rw_conn_factory_for,
+                telegram_notify_for,
+            )
+            from aerys_v2.services.context import embedder_from_settings
+            from aerys_v2.transports.discord_interactions import attach_interactions
+
+            attach_interactions(
+                client,
+                guild_id=settings.discord_guild_id,
+                admin_role_id=settings.discord_admin_role_id,
+                conn_factory=prod_rw_conn_factory_for(settings),
+                embedder=embedder_from_settings(settings),
+                gaps_fn=gaps_reader_for(settings),
+                owner_person_id=settings.owner_person_id,
+                telegram_notify=telegram_notify_for(settings),
+            )
+            log.info("slash commands attached (guild %s)", settings.discord_guild_id)
         client.run(settings.discord_bot_token.get_secret_value())
         sys.exit(0)
 
