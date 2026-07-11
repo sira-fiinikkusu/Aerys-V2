@@ -108,6 +108,21 @@ _SEARCH_MARKERS = (
     "weather", "forecast", "who won", "score of", "right now online",
 )
 
+# Email / gap-logging shapes for the degraded path — the 2026-07-11 additions.
+# Same over-trigger-toward-action bias: a needless action hop costs a tool
+# refusal, while a chat route here either hallucinates mail she never read or
+# claims a log she never wrote. Discovered the hard way the same day the tools
+# shipped: the router's vocabulary is part of every tool's wiring — a tool the
+# router can't route to does not exist, no matter how armed the action graph is.
+_EMAIL_MARKERS = (
+    "email", "e-mail", "inbox", "mailbox", "your mail",
+)
+_GAP_MARKERS = (
+    "log a gap", "log that gap", "log the gap", "file a gap", "log a complaint",
+    "file a complaint", "file an issue", "log an issue", "record a gap",
+    "for the coding agent", "log it as a gap",
+)
+
 _ROUTER_INSTRUCTIONS = """\
 You are the routing layer in front of Aerys's brain. Read the user's message and
 decide which path handles it:
@@ -135,6 +150,15 @@ decide which path handles it:
   You cannot know today's world without a web search, and only the action path
   carries the search tool. "What's the weather this weekend?", "search for the
   latest on the merger", "look up who won last night" are ALL "action".
+  EMAIL is "action" too: anything about your inbox or mail — did something
+  arrive, search/read/summarize an email, draft or send one. "Did the
+  confirmation email come in?", "read me that email from the county",
+  "send them a reply" are ALL "action" — only the action path carries the
+  email tools.
+  LOGGING A GAP is "action" too: when the user asks you to log/file/record a
+  gap, complaint, issue, limitation, or "note that for the coding agent" —
+  the log_gap tool that performs the write lives only on the action path.
+  "Log that as a gap", "file a complaint about the lens cutoff" are "action".
 - "chat": pure conversation — feelings, memories, opinions about the world,
   timeless general knowledge, planning that needs no device reading, no
   attachment, and no live lookup. "Do you think cats love us?" is chat; "do you
@@ -218,6 +242,18 @@ def plausibly_wants_web_search(text: str) -> bool:
     return any(marker in lowered for marker in _SEARCH_MARKERS)
 
 
+def plausibly_wants_email(text: str) -> bool:
+    """Degraded-path heuristic: does this text concern her mailbox?"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _EMAIL_MARKERS)
+
+
+def plausibly_logs_a_gap(text: str) -> bool:
+    """Degraded-path heuristic: an explicit ask to log/file a gap or complaint."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _GAP_MARKERS)
+
+
 def fallback_decision(text: str) -> RouteDecision:
     """What we do when the router's answer is unusable: heuristic, biased to action.
 
@@ -228,6 +264,8 @@ def fallback_decision(text: str) -> RouteDecision:
         plausibly_commands_device(text)
         or plausibly_references_media(text)
         or plausibly_wants_web_search(text)
+        or plausibly_wants_email(text)
+        or plausibly_logs_a_gap(text)
     ):
         return RouteDecision(route="action", ack=FALLBACK_ACK)
     return RouteDecision(route="chat", ack="")

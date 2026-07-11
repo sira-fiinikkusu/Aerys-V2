@@ -182,3 +182,33 @@ def test_garbled_state_reply_fails_toward_action():
     )
     assert decision.route == "action"
     assert decision.ack == FALLBACK_ACK
+
+
+# ---- 2026-07-11: email + gap-logging routes (the invisible-tool lesson) --------
+# A tool the router can't route to does not exist. Both tool sets shipped today
+# armed correctly on the action graph and were unreachable until the router's
+# vocabulary learned them — pinned here so the next tool family fails this test
+# instead of failing live.
+
+from aerys_v2.router import plausibly_logs_a_gap, plausibly_wants_email
+
+
+def test_email_asks_route_action_on_the_degraded_path():
+    assert plausibly_wants_email("did the confirmation email come in?")
+    assert plausibly_wants_email("anything new in your inbox?")
+    assert not plausibly_wants_email("do you think cats love us?")
+
+
+def test_gap_logging_routes_action_on_the_degraded_path():
+    assert plausibly_logs_a_gap("can you log a gap about the lens cutoff")
+    assert plausibly_logs_a_gap("file a complaint for me")
+    assert plausibly_logs_a_gap("note that for the coding agent")
+    assert not plausibly_logs_a_gap("mind the gap when boarding")
+
+
+def test_router_instructions_name_the_new_action_families():
+    from aerys_v2.router import _ROUTER_INSTRUCTIONS
+    low = _ROUTER_INSTRUCTIONS.lower()
+    assert "email" in low
+    assert "logging a gap" in low
+    assert "log_gap" in low
