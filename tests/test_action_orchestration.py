@@ -144,7 +144,9 @@ def test_nonvoice_action_route_returns_action_result_and_lands_in_thread():
     out = ask(graph, "turn on the light", identity=CHRIS, thread_id="t1",
               router=action_router, action_graph=stub)
     assert out == "light is on"
-    assert stub.calls == ["turn on the light"]
+    # zero-tool action stub -> the honesty gate bounces it once; the FIRST invoke
+    # carried the command (the second is the corrective re-prompt).
+    assert stub.calls[0] == "turn on the light"
     # history is coherent: the human turn AND the outcome are in the thread
     msgs = graph.get_state({"configurable": {"thread_id": "t1"}}).values["messages"]
     assert [m.content for m in msgs] == ["turn on the light", "light is on"]
@@ -214,7 +216,7 @@ def test_same_person_thread_without_flag_is_NOT_voice():
     out = ask(graph, "turn on the light", identity=CHRIS, thread_id="person:p1",
               router=action_router, action_graph=stub)
     assert out == "light is on"       # non-voice: the reply IS the outcome, no ack
-    assert stub.calls == ["turn on the light"]
+    assert stub.calls[0] == "turn on the light"  # reached the stack (zero-tool -> gate bounces once)
 
 
 def test_voice_action_failure_lands_honestly_in_thread():
@@ -795,7 +797,7 @@ def test_action_gate_allows_owner():
               router=action_router, action_graph=stub,
               action_allowlist=frozenset({CHRIS["user_id"]}))
     assert out == "light is on"
-    assert stub.calls == ["turn on the light"]
+    assert stub.calls[0] == "turn on the light"  # owner reached the stack (gate bounces zero-tool once)
 
 
 def test_action_gate_allows_second_allowlisted_person():
@@ -807,7 +809,7 @@ def test_action_gate_allows_second_allowlisted_person():
     out = ask(graph, "turn on the light", identity=MEGAN, thread_id="t1",
               router=action_router, action_graph=stub, action_allowlist=allow)
     assert out == "light is on"
-    assert stub.calls == ["turn on the light"]
+    assert stub.calls[0] == "turn on the light"  # reached the stack (gate bounces zero-tool once)
 
 
 def test_action_gate_unenforced_when_no_allowlist():
@@ -818,7 +820,7 @@ def test_action_gate_unenforced_when_no_allowlist():
     out = ask(graph, "turn on the light", identity=STRANGER, thread_id="t1",
               router=action_router, action_graph=stub, action_allowlist=None)
     assert out == "light is on"
-    assert stub.calls == ["turn on the light"]
+    assert stub.calls[0] == "turn on the light"  # reached the stack (gate bounces zero-tool once)
 
 
 def test_action_gate_blocks_stranger_on_voice_thread_too():
@@ -1012,7 +1014,7 @@ def test_allowlisted_owner_still_gets_full_house_graph():
         action_allowlist=frozenset({CHRIS["user_id"]}),
     )
     assert out == "HOUSE — light on"
-    assert house.calls == ["turn on the light"]
+    assert house.calls[0] == "turn on the light"  # full house graph reached (gate bounces zero-tool once)
     assert media.calls == []  # owner never downgraded to media-only
 
 

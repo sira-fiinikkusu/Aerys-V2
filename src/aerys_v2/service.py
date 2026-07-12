@@ -29,11 +29,14 @@ import concurrent.futures
 import contextlib
 import contextvars
 import logging
+import re
 import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -45,7 +48,7 @@ from aerys_v2.services.content_privacy import (
     redact_private_history,
 )
 from aerys_v2.state import Identity, is_voice_turn
-from aerys_v2.turns import build_turn_row, current_trace_id
+from aerys_v2.turns import build_turn_row, current_trace_id, extract_tool_calls
 
 log = logging.getLogger(__name__)
 
@@ -163,12 +166,17 @@ def _record_turn_failure(
     tier: str | None = None,
     tier_override_source: str | None = None,
     base_degraded: list[str] | None = None,
+    emitted_reply: str | None = None,
 ) -> None:
     """One v2_turns row for a turn whose invoke RAISED, fired before the caller
-    re-raises. Degraded marker is 'recursion_limit' for a rail trip, else
-    'turn_failed'; the exception text rides `error`. This is what makes the docstring
-    promise — a row on the error exits, not just the timeout exit — literally true
-    (cross-review correctness H)."""
+    re-raises OR emits an honest fallback. Degraded marker is 'recursion_limit' for a
+    rail trip, else 'turn_failed'; the exception text rides `error`. This is what makes
+    the docstring promise — a row on the error exits, not just the timeout exit —
+    literally true (cross-review correctness H).
+
+    emitted_reply is set on the FIX-2 path: when the failure is converted to an honest
+    rate-limit line the caller returns instead of raising, the row records what the
+    user actually heard (no longer NULL) while degraded still carries 'turn_failed'."""
     marker = (
         "recursion_limit" if type(exc).__name__ == "GraphRecursionError" else "turn_failed"
     )
@@ -180,6 +188,7 @@ def _record_turn_failure(
         tier_override_source=tier_override_source,
         extra_degraded=[*(base_degraded or []), marker],
         error=str(exc) or type(exc).__name__,
+        emitted_reply=emitted_reply,
     )
 
 
@@ -340,6 +349,178 @@ def _reply_text(message: object) -> str:
     # .text is a property in current langchain-core (calling it is deprecated)
     text_attr = getattr(message, "text", None)
     return text_attr if isinstance(text_attr, str) else str(message.content)
+
+
+# ── FIX 1: the action-honesty gate (the anti-hallucinated-action rail) ──────────
+# Production incident 2026-07-12: "turn off the office lights" routed to 'action' but
+# the model answered "Both office lights are off." with tool_calls=[] — a completed
+# device action CLAIMED with no tool ever run (the lights stayed on). The router
+# already fails TOWARD action to keep this off the chat path; this closes the last
+# hole — an action turn that TOUCHED nothing yet SPOKE as if it had. It is the same
+# V1 hallucinated-tool-call failure the whole TOOLS block exists to kill.
+#
+# The DECISION is a pure function (route, executed tool calls, retry-state) -> verdict
+# so it is unit-testable in the codebase's pure-handler idiom; the wiring in
+# _action_turn / _complete_action re-invokes the action graph on a 'retry' verdict.
+GATE_EMIT = "emit"      # honest — send the reply as-is
+GATE_RETRY = "retry"    # zero-tool action turn, first pass — bounce once with a correction
+GATE_MARK = "mark"      # still zero-tool after the bounce — emit but flag the pattern
+
+# Appended (as the caller's next turn) when a retry is needed. Verbatim spirit from
+# the fix brief: call the tool, or admit no action was taken — never fake a done deal.
+ACTION_NO_TOOL_CORRECTION = (
+    "You produced an answer without calling any tool. Either call the tool that "
+    "performs the request, or state plainly that you did NOT perform any action. "
+    "Never describe an action as done unless a tool call actually did it."
+)
+
+# The degraded marker recorded in v2_turns when a bounced action turn STILL ran no
+# tool — so the pattern (a legit zero-tool action, or a stubborn hallucination that
+# survived the correction) stays visible to the capability loop / forensics.
+NO_TOOL_ACTION_MARKER = "no_tool_action"
+
+
+def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) -> str:
+    """Pure verdict for the action-honesty gate: emit | retry | mark.
+
+    - A non-action route is NEVER gated (chat may legitimately answer with no tool) ->
+      emit.
+    - An action turn that executed at least one tool is honest -> emit. A FAILED tool
+      call still counts as executed (the tool ran and returned an honest error) — we
+      only bounce turns that touched nothing at all.
+    - An action turn with ZERO executed tool calls, first pass -> retry (bounce once).
+    - The same, but AFTER the one allowed bounce -> mark: emit the reply but attach
+      NO_TOOL_ACTION_MARKER. Legitimate zero-tool action turns (an honest "I can't see
+      that" answer, a compose request misrouted to action) survive the retry because
+      the correction explicitly permits stating no action was taken; they land here
+      marked, not suppressed.
+
+    tool_calls is the structured list from turns.extract_tool_calls (one entry per
+    EXECUTED ToolMessage); only its emptiness matters here.
+    """
+    if route != "action":
+        return GATE_EMIT
+    if tool_calls:
+        return GATE_EMIT
+    return GATE_MARK if already_retried else GATE_RETRY
+
+
+def _run_action_gated(
+    action_graph: object, seeded_messages: list, config: dict
+) -> tuple[dict, list[str]]:
+    """Invoke the action graph, then enforce the action-honesty gate.
+
+    Returns (result, extra_degraded). An action turn that ran ZERO tools is bounced
+    ONCE — the graph is re-invoked with its own no-tool answer plus a corrective
+    message appended — and if it STILL runs no tool, extra_degraded carries
+    NO_TOOL_ACTION_MARKER so the reply is emitted but the pattern is audited.
+
+    One extra model call on the rare zero-tool action turn is the accepted cost of
+    never again emitting a fabricated "done" (fix brief, 2026-07-12)."""
+    result = action_graph.invoke({"messages": seeded_messages}, config)
+    verdict = action_honesty_gate(
+        "action", extract_tool_calls(result["messages"]), already_retried=False
+    )
+    if verdict != GATE_RETRY:
+        return result, []
+    log.info("action-honesty gate: zero tool calls — bouncing once with a correction")
+    retry_messages = [*result["messages"], HumanMessage(content=ACTION_NO_TOOL_CORRECTION)]
+    result = action_graph.invoke({"messages": retry_messages}, config)
+    verdict = action_honesty_gate(
+        "action", extract_tool_calls(result["messages"]), already_retried=True
+    )
+    if verdict == GATE_MARK:
+        log.info(
+            "action-honesty gate: STILL zero tool calls after the bounce — "
+            "emitting with the %s marker", NO_TOOL_ACTION_MARKER,
+        )
+        return result, [NO_TOOL_ACTION_MARKER]
+    return result, []
+
+
+# ── FIX 2: an honest reply when the turn is rate-limited (never silence) ─────────
+# Production incident 2026-07-12: "Are you sure?" died as degraded=['turn_failed'],
+# error="oauth backend error: ... result=\"You've hit your session limit · resets
+# 7:10pm (UTC)\" ...", emitted_reply=None — the turn RAISED and the user got NOTHING
+# on their glasses. The oauth (Max-pool) chat backend surfaces a session/word-budget
+# cap as a RuntimeError; rather than re-raising into silence we emit a short, honest,
+# in-voice line (with the reset time converted to Eastern when parseable). It rides
+# the normal emitted_reply path, so EVERY transport benefits at once.
+EASTERN = ZoneInfo("America/New_York")  # Chris's timezone — the clock she reasons in
+
+# "resets 7:10pm (UTC)" / "resets 7pm" / "resets 07:10 pm UTC" — hour, optional
+# minutes, am/pm, optional trailing zone. Case-insensitive; scans anywhere in the text.
+_RESET_RE = re.compile(
+    r"reset[s]?\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)\s*\(?\s*([A-Za-z_/]+)?",
+    re.IGNORECASE,
+)
+# Signatures that mean "the model's word/usage budget is spent", not a normal error.
+_RATE_LIMIT_SIGNALS = ("session limit", "rate limit", "usage limit", "rate_limit")
+
+
+def _parse_reset_eastern(error_text: str, *, now: datetime | None = None) -> str | None:
+    """Pull a 'resets <time> (<zone>)' out of a limit error and render it in Eastern,
+    e.g. 'resets 7:10pm (UTC)' -> '3:10pm'. None when nothing parseable is present.
+
+    The zone defaults to UTC (the backend reports UTC); an unknown zone label also
+    falls back to UTC rather than failing. If the reset clock time is already past
+    relative to `now`, it is rolled to the next day — a limit 'resets 7:10pm' names
+    the upcoming boundary, never one in the past. `now` is injectable so the
+    conversion is deterministic under test."""
+    m = _RESET_RE.search(error_text or "")
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    if not (1 <= hour <= 12) or minute > 59:
+        return None
+    ampm = m.group(3).lower()
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    zone = (m.group(4) or "UTC").upper()
+    try:
+        src_tz = ZoneInfo("UTC") if zone in ("UTC", "GMT", "Z") else ZoneInfo(m.group(4))
+    except Exception:
+        src_tz = ZoneInfo("UTC")
+    now = now or datetime.now(EASTERN)
+    now_src = now.astimezone(src_tz)
+    reset = now_src.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= now_src:
+        reset = reset + timedelta(days=1)
+    eastern = reset.astimezone(EASTERN)
+    h12 = eastern.strftime("%I").lstrip("0") or "12"
+    suffix = eastern.strftime("%p").lower()
+    return f"{h12}:{eastern:%M}{suffix}"
+
+
+def rate_limit_reply(error_text: str, *, now: datetime | None = None) -> str | None:
+    """An honest, in-voice reply for a rate/session-limit failure — or None when the
+    error is any OTHER failure class (those keep the historical re-raise; the caller
+    decides). No emotion tags on purpose: the SAME string goes to voice AND text
+    transports, and a bracketed tag would print literally in a Discord/Telegram
+    message (the voice pipeline is the only surface that strips them)."""
+    low = (error_text or "").lower()
+    if not any(sig in low for sig in _RATE_LIMIT_SIGNALS):
+        return None
+    reset = _parse_reset_eastern(error_text, now=now)
+    if reset:
+        return (
+            "I'm rate-limited right now — my brain's word budget is tapped until "
+            f"about {reset}. Try me again after that."
+        )
+    return (
+        "I'm rate-limited right now — my brain's word budget is tapped for a bit. "
+        "Try me again in a little while."
+    )
+
+
+def _honest_reply_for_failure(exc: BaseException) -> str | None:
+    """The emittable, in-voice reply for a turn whose model invoke RAISED — or None to
+    keep the historical re-raise-into-silence for every other failure class. Today the
+    only converted class is the oauth/session rate-limit cap (FIX 2)."""
+    return rate_limit_reply(str(exc) or type(exc).__name__)
 
 
 def ask(
@@ -557,15 +738,22 @@ def _chat_turn(
         # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
         # for forensics and the capability loop — record it BEFORE re-raising so the
         # 'row on EVERY completion path incl. error' contract actually holds
-        # (cross-review correctness H). Then propagate unchanged: the caller still sees
-        # the failure exactly as before.
+        # (cross-review correctness H). FIX 2: if the failure is a rate/session-limit
+        # cap, emit an honest in-voice line instead of raising into silence (the
+        # 2026-07-12 "Are you sure?" glasses turn got NO reply) — the row then records
+        # what the user actually heard, with 'turn_failed' still on degraded. Every
+        # other failure class re-raises exactly as before.
+        honest = _honest_reply_for_failure(e)
         _record_turn_failure(
             record_turn, config, text, started, e,
             classifier_intent=classifier_intent,
             tier=tier,
             tier_override_source=tier_override_source,
             base_degraded=extra_degraded,
+            emitted_reply=honest,
         )
+        if honest is not None:
+            return honest
         raise
     reply = _reply_text(result["messages"][-1])
 
@@ -667,18 +855,27 @@ def _action_turn(
         # Seed the action graph with the thread's prior turns (gated for the room) so a
         # follow-up command can resolve a reference to an earlier turn — the action graph
         # is checkpointer-less and would otherwise see ONLY this message (2026-07-05
-        # continuity bug: "turn them back on" / "does it look like Hsin?").
-        result = action_graph.invoke(
-            {"messages": _action_history_seed(graph, config["configurable"], text)},
+        # continuity bug: "turn them back on" / "does it look like Hsin?"). FIX 1: the
+        # gate re-invokes once if the model answered with zero tool calls (a claimed
+        # action that touched nothing), and marks the row 'no_tool_action' if it still
+        # runs no tool after the correction.
+        result, gate_degraded = _run_action_gated(
+            action_graph,
+            _action_history_seed(graph, config["configurable"], text),
             config,
         )
     except Exception as e:
         # Rail trip / tool-loop blowup on the sequential action path: record the
-        # failed turn (classifier_intent='action') before re-raising, same as the
-        # chat path (cross-review correctness H).
+        # failed turn (classifier_intent='action') before re-raising — or, on a
+        # rate/session-limit cap, emit the honest line instead of silence (FIX 2),
+        # same as the chat path (cross-review correctness H).
+        honest = _honest_reply_for_failure(e)
         _record_turn_failure(
-            record_turn, config, text, started, e, classifier_intent="action"
+            record_turn, config, text, started, e, classifier_intent="action",
+            emitted_reply=honest,
         )
+        if honest is not None:
+            return honest
         raise
     result_messages = result["messages"]
     final = _reply_text(result_messages[-1])
@@ -698,6 +895,7 @@ def _action_turn(
         raw_reply=final,
         emitted_reply=final,
         messages=result_messages,
+        extra_degraded=gate_degraded or None,
     )
     return final
 
@@ -842,6 +1040,7 @@ def _voice_parallel_start(
             # latency hid entirely inside the chat call's shadow. It ran on the
             # throwaway thread, so the turn must be copied into the REAL thread
             # here or the conversation never durably happened.
+            spec_failed: str | None = None
             try:
                 result = chat_future.result()
                 reply_message = result["messages"][-1]
@@ -853,14 +1052,21 @@ def _voice_parallel_start(
             except Exception as e:
                 # Speculative voice-chat generation raised: record the failed voice
                 # turn (pinned standard) before re-raising, so the error exit audits
-                # like the others (cross-review correctness H).
+                # like the others (cross-review correctness H). FIX 2: a rate/session-
+                # limit cap emits an honest spoken line instead of silence — voice is a
+                # transport too, and this was the exact 2026-07-12 glasses failure.
+                spec_failed = _honest_reply_for_failure(e)
                 _record_turn_failure(
                     record_turn, config, text, started, e,
                     classifier_intent="chat", tier=DEFAULT_TIER,
+                    emitted_reply=spec_failed,
                 )
-                raise
+                if spec_failed is None:
+                    raise
             finally:
                 _discard_speculative()
+            if spec_failed is not None:
+                return spec_failed
             elapsed = time.monotonic() - started
             timed_out = elapsed > rails.wall_clock_s
             timeout_msg = (
@@ -915,6 +1121,7 @@ def _voice_parallel_start(
         def _complete_action() -> None:
             failed = False
             result_messages: list = []
+            gate_degraded: list[str] = []
             try:
                 # Seed the voice action with thread history too (owner ask 2026-07-05:
                 # stateless voice commands are annoying — "turn them back on" by voice
@@ -923,15 +1130,21 @@ def _voice_parallel_start(
                 # is told NEVER to ask over the one-way channel and to resolve any STT
                 # garble toward the ack already spoken — that instruction, not
                 # statelessness, is what prevents the "did you mean on or off?" stall.
-                result = action_graph.invoke(
-                    {"messages": _action_history_seed(graph, real_configurable, text)},
+                # FIX 1: the gate bounces a zero-tool action once and marks the row
+                # 'no_tool_action' if it still touched nothing.
+                result, gate_degraded = _run_action_gated(
+                    action_graph,
+                    _action_history_seed(graph, real_configurable, text),
                     action_config,
                 )
                 result_messages = result["messages"]
                 final = _reply_text(result_messages[-1])
             except Exception as e:  # honest failure into history, never silence
                 log.warning("background action turn failed", exc_info=True)
-                final = f"(The action didn't complete — {e})"
+                # FIX 2: a rate/session-limit cap gets the honest in-voice line;
+                # anything else keeps the raw diagnostic (this path already spoke
+                # rather than staying silent, so it was never the empty-glasses bug).
+                final = _honest_reply_for_failure(e) or f"(The action didn't complete — {e})"
                 failed = True
 
             # Spoken follow-up: failures ALWAYS speak; otherwise the
@@ -992,7 +1205,7 @@ def _voice_parallel_start(
                 raw_reply=final,
                 emitted_reply=decision.ack,
                 messages=result_messages,
-                extra_degraded=["action_failed"] if failed else None,
+                extra_degraded=(["action_failed"] if failed else gate_degraded) or None,
                 error=final if failed else None,
             )
 
