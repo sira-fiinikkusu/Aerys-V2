@@ -1219,9 +1219,26 @@ def build_graph(
         # Capability overlay, anti-UNDERclaim direction: the soul was written for a
         # brain that couldn't see its own memory. This one can — telling her stops
         # replies like "that won't survive this session" (heard live, voice, 7/3).
+        # #1 honesty guardrail (2026-07-18): the CHAT path has NO device tools, so a
+        # misrouted action request lands here toolless — and she has fabricated
+        # "it's off now" with zero tool calls (v2_turns receipts, 2026-07-18). The
+        # action overlay's "never claim success" line has no effect on this path;
+        # this is its chat-side mirror. The real fix is routing (#2, deferred to a
+        # fresh session); this stops the lie at the source.
         capability = (
             "Your conversation memory is durable: this thread persists across "
             "restarts and sessions. You may confidently say you'll remember."
+            " In this conversational mode you have NO home/device-control or "
+            "device-state tools: you cannot turn anything on or off, and you cannot "
+            "read any device's current state. NEVER say you turned something on or "
+            "off, that a device is on or off, or otherwise imply you performed or "
+            "verified a physical action. If asked to control or check a device, say "
+            "you're on it / handing it to your control path — never state a device "
+            "result you did not get from a tool. And never say you are going to "
+            "check, look up, or fetch something and then stop: this mode has no "
+            "follow-up turn, so a 'let me check…' with nothing after it is a dead "
+            "end. Either give the answer now if you already know it, or say plainly "
+            "that you can't retrieve it from here — don't promise-and-abandon."
         )
         if context_fn is not None:
             # Claims follow facts: this sentence exists ONLY when retrieval is
