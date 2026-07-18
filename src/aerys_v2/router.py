@@ -47,6 +47,19 @@ ROUTER_MODEL = "claude-haiku-4-5"
 # no generated ack to use. Normal operation never speaks this string.
 FALLBACK_ACK = "On it."
 
+# The RETURN-LOOP contract (owner design, 2026-07-18): the router sees only the
+# CURRENT message, so a short follow-up ("yes, go ahead", "what about tomorrow?")
+# whose action-ness lives entirely in prior turns is unclassifiable here and lands
+# on the chat path — where the model, which DOES see full history, knows the turn
+# needs hands. The chat prompt (factory.py capability block) tells it to open its
+# reply with this exact token plus one natural handoff line; service.py detects
+# the token, discards/patches the chat reply, and re-runs the turn on the action
+# graph — the second half of the router's own doctrine ("fail TOWARD the action
+# path"), executed late by the one component that had enough context to know.
+# One hop only: nothing on the action side knows this token, so escalation can
+# never ping-pong. Any emitted text is stripped of the token defensively.
+HANDOFF_MARKER = "<<HANDOFF>>"
+
 # The tier vocabulary — V1's gemini/sonnet/opus renamed for what they MEAN, not
 # which vendor serves them (the Parse Classification safety-check lesson: the
 # 'haiku'→'gemini' rename left a dead name in the validation array; naming tiers

@@ -21,7 +21,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.config import Settings
-from aerys_v2.router import DEFAULT_TIER, normalize_tier
+from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config, is_voice_turn
 from aerys_v2.turns import channel_enum
 from contextlib import contextmanager
@@ -1223,22 +1223,33 @@ def build_graph(
         # misrouted action request lands here toolless — and she has fabricated
         # "it's off now" with zero tool calls (v2_turns receipts, 2026-07-18). The
         # action overlay's "never claim success" line has no effect on this path;
-        # this is its chat-side mirror. The real fix is routing (#2, deferred to a
-        # fresh session); this stops the lie at the source.
+        # this is its chat-side mirror.
+        # #2 RETURN LOOP (same day, owner design): "say you're handing it off" was
+        # a dead end — nothing was listening. Now something is: opening the reply
+        # with HANDOFF_MARKER makes service.py re-run the turn on the action graph
+        # (see router.HANDOFF_MARKER for the full doctrine). The chat model is the
+        # only component that sees full history, so IT catches the follow-up-shaped
+        # misroutes ("yes, go ahead") the current-message-only router can't.
         capability = (
             "Your conversation memory is durable: this thread persists across "
             "restarts and sessions. You may confidently say you'll remember."
-            " In this conversational mode you have NO home/device-control or "
-            "device-state tools: you cannot turn anything on or off, and you cannot "
-            "read any device's current state. NEVER say you turned something on or "
-            "off, that a device is on or off, or otherwise imply you performed or "
-            "verified a physical action. If asked to control or check a device, say "
-            "you're on it / handing it to your control path — never state a device "
-            "result you did not get from a tool. And never say you are going to "
-            "check, look up, or fetch something and then stop: this mode has no "
-            "follow-up turn, so a 'let me check…' with nothing after it is a dead "
-            "end. Either give the answer now if you already know it, or say plainly "
-            "that you can't retrieve it from here — don't promise-and-abandon."
+            " In this conversational mode you have NO tools: no device control or "
+            "device-state reads, no email, no live web/weather/news lookup, no eyes "
+            "on attachments. You cannot turn anything on or off and you cannot read "
+            "any device's current state — NEVER say you did, and never state a "
+            "device result you did not get from a tool. When the request needs any "
+            "of those — touching or reading a device, mail, current information, a "
+            "file or image — and this includes short follow-ups like 'yes, go "
+            "ahead', 'try it now', or 'what about tomorrow?' whose meaning earlier "
+            "turns make clear: do NOT answer from guesswork and do NOT say you "
+            f"can't. Instead begin your reply with the exact token {HANDOFF_MARKER} "
+            "followed by one short natural line in your voice about getting it "
+            f'done, e.g. "{HANDOFF_MARKER} Let me actually flip that for you." '
+            "The system then hands this turn to your tool-equipped side, "
+            "which does the real work; your line covers the meantime. Never use "
+            f"{HANDOFF_MARKER} for what this mode CAN do — conversation, memory, "
+            "opinions, timeless general knowledge — and never anywhere but the "
+            "very start of a reply."
         )
         if context_fn is not None:
             # Claims follow facts: this sentence exists ONLY when retrieval is
