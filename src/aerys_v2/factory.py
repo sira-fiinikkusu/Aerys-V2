@@ -113,6 +113,20 @@ def satellite_map_from(csv: str) -> dict[str, str]:
     return dict(p.split("=", 1) for p in pairs)
 
 
+def face_pusher_for(settings: Settings) -> Callable[[str, str], None] | None:
+    """The panel-face seam: (phase, text) -> her desk avatar (panel.FacePusher).
+
+    None unless panel_state_url is set — same arming pattern as every optional
+    transport. The service layer decides WHEN a phase changes; panel.py knows
+    HOW (mood mapping, the speaking auto-flip, fire-and-forget delivery).
+    """
+    if not settings.panel_state_url:
+        return None
+    from .panel import build_face_pusher
+
+    return build_face_pusher(settings.panel_state_url)
+
+
 def speak_fn_for(settings: Settings) -> Callable[[str, str], None] | None:
     """The spoken-follow-up delivery seam: (text, entity_id) -> the room, via HA
     announce.

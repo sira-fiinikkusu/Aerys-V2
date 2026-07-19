@@ -142,6 +142,7 @@ def main() -> None:
             satellite_map_from,
             speak_fn_for,
             tier_models_for,
+            face_pusher_for,
             turn_recorder_for,
         )
         from aerys_v2.service import ask
@@ -162,6 +163,9 @@ def main() -> None:
             # v2_turns audit writer (migration 001): one row per ask() turn to
             # aerys_v2, off the hot path + fail-open. None when DATABASE_URL unset.
             record_turn = turn_recorder_for(settings)
+            # Panel-face seam: her desk avatar mirrors the turn's phase. None
+            # unless PANEL_STATE_URL is set — fire-and-forget, fail-open.
+            face_push = face_pusher_for(settings)
             # /gaps READ seam for the HTTP door (self-iteration Phase A) — same
             # arming as record_turn; None DB-less. Fail-open, read-only.
             gaps_fn = gaps_reader_for(settings)
@@ -229,6 +233,7 @@ def main() -> None:
                     action_allowlist=action_allow,
                     record_turn=record_turn,
                     content_privacy_classifier=content_privacy,
+                    face_push=face_push,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
@@ -263,6 +268,7 @@ def main() -> None:
             load_soul,
             room_context_fn_for,
             tier_models_for,
+            face_pusher_for,
             turn_recorder_for,
         )
         from aerys_v2.service import ask
@@ -299,6 +305,8 @@ def main() -> None:
         # v2_turns audit writer (migration 001) — the soak container's turns must
         # be audited too, not just --serve. None when DATABASE_URL is unset.
         record_turn = turn_recorder_for(settings)
+        # Panel-face seam: text turns move her desk face too (working/mood).
+        face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
         stack = action_stack_for(settings, soul)
         if stack is not None:
@@ -334,6 +342,7 @@ def main() -> None:
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
                 content_privacy_classifier=content_privacy,
+                face_push=face_push,
             ),
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,
@@ -392,6 +401,7 @@ def main() -> None:
             load_soul,
             room_context_fn_for,
             tier_models_for,
+            face_pusher_for,
             turn_recorder_for,
         )
         from aerys_v2.service import ask
@@ -427,6 +437,8 @@ def main() -> None:
         # v2_turns audit writer (migration 001) — Telegram turns are audited too,
         # not just --serve/--discord. None when DATABASE_URL is unset.
         record_turn = turn_recorder_for(settings)
+        # Panel-face seam: text turns move her desk face too (working/mood).
+        face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
         stack = action_stack_for(settings, soul)
         if stack is not None:
@@ -462,6 +474,7 @@ def main() -> None:
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
                 content_privacy_classifier=content_privacy,
+                face_push=face_push,
             ),
             resolve_fn=resolve,
             allowed_chat_ids=chat_ids,

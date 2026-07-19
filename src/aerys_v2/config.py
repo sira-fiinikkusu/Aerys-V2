@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # None = those callers are asked to name a speaker instead of guessing.
     ha_music_default_player: str | None = None
 
+    # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
+    # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
+    # the brain mirrors each turn's phase onto her face: working while tools
+    # grind, speaking while words play, mood-idle after. None = no panel, zero
+    # cost — same arming pattern as every optional half. The address stays in
+    # the environment: it's a LAN IP and this repo is public.
+    panel_state_url: str | None = None
+
     # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
     # Owner rule (2026-07-03): if a device action completes within this many
     # seconds of the ack going out, the spoken follow-up is SKIPPED — the light

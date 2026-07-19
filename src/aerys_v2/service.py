@@ -211,6 +211,20 @@ except Exception:  # pragma: no cover
     _TRACER = None
 
 
+def _face(
+    face_push: Callable[[str, str], None] | None, phase: str, text: str = ""
+) -> None:
+    """The panel-face seam, double fail-open: FacePusher already swallows its own
+    errors, but the seam guards against non-conforming fakes too — her desk face
+    is decoration, and decoration never costs a turn anything."""
+    if face_push is None:
+        return
+    try:
+        face_push(phase, text)
+    except Exception:
+        log.debug("face push seam failed (harmless)", exc_info=True)
+
+
 def _turn_span(thread_id: str, text: str):
     """One span per ask() turn — every model call underneath parents into it."""
     if _TRACER is None:
@@ -594,6 +608,7 @@ def ask(
     action_allowlist: frozenset[str] | None = None,
     record_turn: Callable[[dict], None] | None = None,
     content_privacy_classifier: Callable[[str], str] | None = None,
+    face_push: Callable[[str, str], None] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -638,6 +653,10 @@ def ask(
       once per completed turn on EVERY path with the fully-built row, off the hot
       path and fail-open (see _fire_turn_record). None = no auditing (dev/CI, no
       DATABASE_URL), byte-for-byte the old behavior.
+    - face_push: the panel-face seam (factory.face_pusher_for) — (phase, text)
+      with phase working|speaking|idle, fired at the turn's phase changes so
+      her desk avatar mirrors what the brain is doing. Fire-and-forget and
+      fail-open by construction; None = no panel (dev/CI), zero cost.
     - content_privacy_classifier: the OFF-hot-path judge (factory.content_privacy_fn_for)
       that relaxes a DM turn's fail-closed 'private' content tag to 'public' when the
       content is general, so general things said in a DM carry into public rooms while
@@ -701,6 +720,7 @@ def ask(
                 graph, config, turn_msg_id, text, reply,
                 content_privacy_classifier, origin_privacy,
             )
+            _face(face_push, "idle", reply)
             return reply
 
         if is_voice_turn(identity, thread_id):
@@ -722,6 +742,7 @@ def ask(
                 followup_router=followup_router,
                 content_privacy_classifier=content_privacy_classifier,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
+                face_push=face_push,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -731,6 +752,7 @@ def ask(
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
             log.info("route decision | thread=%s route=action", thread_id)
+            _face(face_push, "working")
             reply = _action_turn(
                 action_graph, graph, text, config, add_human=True,
                 record_turn=record_turn, started=started,
@@ -740,6 +762,7 @@ def ask(
                 graph, config, turn_msg_id, text, reply,
                 content_privacy_classifier, origin_privacy,
             )
+            _face(face_push, "idle", reply)
             return reply
 
         # Chat route on a TEXT thread: the router's tier picks the model. This
@@ -781,6 +804,7 @@ def ask(
             log.info(
                 "chat handoff — escalating to action | thread=%s", thread_id
             )
+            _face(face_push, "working")
             reply = _action_turn(
                 action_graph, graph, text, config, add_human=False,
                 record_turn=record_turn, started=started,
@@ -792,6 +816,7 @@ def ask(
             graph, config, turn_msg_id, text, reply,
             content_privacy_classifier, origin_privacy,
         )
+        _face(face_push, "idle", reply)
         return reply
 
 
@@ -1100,6 +1125,7 @@ def _voice_parallel_start(
     content_privacy_classifier: Callable[[str], str] | None = None,
     human_privacy: str = PRIVATE,
     human_id: str | None = None,
+    face_push: Callable[[str, str], None] | None = None,
 ) -> str:
     """Voice hot path: race the router against the chat generation.
 
@@ -1173,6 +1199,10 @@ def _voice_parallel_start(
             speaker NOW, a background thread finishes the tool loop, lands the real
             outcome in the thread, and follows up per the silent-success rule."""
             ack_at = time.monotonic()  # the ack leaves for the speaker ~now
+            # Her face speaks the ack; the pusher defers the working face until
+            # the ack's estimated playback runs out (panel.py owns that timing).
+            _face(face_push, "speaking", ack)
+            _face(face_push, "working")
 
             # The ack the caller just heard rides `configurable` into the subgraph
             # (2026-07-03 incident): the action model must execute CONSISTENT with
@@ -1227,10 +1257,17 @@ def _voice_parallel_start(
                 # phone -> the aerys_followup event; None falls back to the legacy
                 # speak_fn/satellite_for announce (tests, dev boxes).
                 device_id = real_configurable.get("identity", {}).get("device_id")
-                if failed or _needs_spoken_followup(result_messages, elapsed, followup_skip_s):
+                spoke_followup = failed or _needs_spoken_followup(
+                    result_messages, elapsed, followup_skip_s
+                )
+                if spoke_followup:
                     _deliver_followup(
                         final, device_id, followup_router, speak_fn, satellite_for
                     )
+                # The action settled: speak the follow-up on her face too, or just
+                # settle to the outcome's mood (silent success = the device was
+                # the feedback; her face still relaxes out of 'working').
+                _face(face_push, "speaking" if spoke_followup else "idle", final)
 
                 # History write happens EITHER WAY (silent record) — the next turn's
                 # model must see what actually happened, spoken aloud or not. The
@@ -1333,6 +1370,8 @@ def _voice_parallel_start(
                     # lands); every other exit discards it right here.
                     _discard_speculative()
             if spec_failed is not None:
+                # The honest rate-limit line IS spoken by the pipeline.
+                _face(face_push, "speaking", spec_failed)
                 return spec_failed
             if escalate_ack is not None:
                 log.info(
@@ -1372,6 +1411,9 @@ def _voice_parallel_start(
                 graph, config, human_id, text, reply,
                 content_privacy_classifier, human_privacy,
             )
+            # The pipeline TTS speaks this return value; the pusher's estimate
+            # settles her back to the reply's mood-idle when the words run out.
+            _face(face_push, "speaking", reply)
             return reply
 
         # Action: the ack goes out NOW; the tool loop finishes in the background
