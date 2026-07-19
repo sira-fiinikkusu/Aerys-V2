@@ -326,7 +326,7 @@ def test_media_half_arms_from_embeddings_key_alone():
 def test_home_half_arms_from_ha_token_alone():
     tools = action_tools_for(settings_with(ha_token="ha-token"))
     # the timer tool rides the same HA door as home_control/search_entities
-    assert tool_names(tools) == {"home_control", "search_entities", "timer"}
+    assert tool_names(tools) == {"home_control", "search_entities", "timer", "get_weather", "get_weather"}
 
 
 def test_both_halves_arm_together():
@@ -334,7 +334,7 @@ def test_both_halves_arm_together():
         settings_with(ha_token="ha-token", embeddings_api_key="or-key")
     )
     assert tool_names(tools) == {
-        "home_control", "search_entities", "timer",
+        "home_control", "search_entities", "timer", "get_weather",
         "analyze_image", "read_document", "youtube_summary",
     }
 
@@ -390,7 +390,7 @@ def test_all_three_halves_arm_together():
         )
     )
     assert tool_names(tools) == {
-        "home_control", "search_entities", "timer",
+        "home_control", "search_entities", "timer", "get_weather",
         "analyze_image", "read_document", "youtube_summary",
         "search_web",
     }

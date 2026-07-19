@@ -981,6 +981,18 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
                 fallback_entity=settings.ha_timer_fallback_entity,
             )
         )
+        # WEATHER (2026-07-19, the Rotonda-Switzerland incident): local weather
+        # reads the house's own HA entity, never search_web — same read-only HA
+        # door, armed whenever HA is.
+        from aerys_v2.tools.weather import build_weather_tool
+
+        tools.append(
+            build_weather_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+                entity_id=settings.ha_weather_entity,
+            )
+        )
 
         if settings.ha_music_config_entry:
             # MUSIC (07-01 Play Music reborn, owner ask post-n8n-retirement):

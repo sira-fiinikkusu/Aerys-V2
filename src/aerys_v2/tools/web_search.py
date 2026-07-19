@@ -73,9 +73,14 @@ def build_web_search_tool(*, api_key: str, client: httpx.Client | None = None):
         CALL THIS TOOL IMMEDIATELY when the answer depends on anything you cannot
         know from training alone:
         - current events, breaking news, "what happened with..."
-        - today's weather, forecasts, scores, prices, stock quotes, exchange rates
+        - scores, prices, stock quotes, exchange rates
         - the user says "search for", "look up", "google", "find out", "what's the
           latest on..."
+
+        EXCEPTION — local/home weather: use get_weather instead, ALWAYS. Web
+        results resolve the home town's name wrong (wrong continent, wrong
+        data); get_weather reads the house's own weather provider. Only search
+        the web for weather in OTHER, explicitly-named far-away places.
         - ANY fact that could have changed after your knowledge cutoff, or that
           you are not certain about.
 

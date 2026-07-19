@@ -137,6 +137,11 @@ class Settings(BaseSettings):
     # None = those callers are asked to name a speaker instead of guessing.
     ha_music_default_player: str | None = None
 
+    # The house's weather entity — get_weather reads current conditions and
+    # forecasts from it (weather.get_forecasts). Local weather must come from
+    # HERE, not web search (the Rotonda-Switzerland incident, 2026-07-19).
+    ha_weather_entity: str = "weather.forecast_home"
+
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
     # the brain mirrors each turn's phase onto her face: working while tools
