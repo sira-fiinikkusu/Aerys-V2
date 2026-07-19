@@ -201,6 +201,13 @@ a state question is a guess. The same bias applies to media and to web lookups:
 unsure whether an attachment needs the tools or whether an answer needs current
 information, choose "action".
 
+Some messages arrive via speech-to-text and can be mangled — words prepended,
+dropped, or misheard ("can you play Against the Tide" may arrive as "To play
+against the tide."). A message that CONTAINS a command shape — "play <title>",
+"turn on/off <thing>", a timer, volume, or lookup ask — is "action" even when
+the sentence as a whole reads oddly or poetically. Judge the fragment, not the
+grammar.
+
 Also grade how much thinking the reply deserves, as "tier":
 - "fast": greetings, one-word acknowledgments, small talk, trivial system
   questions — anything a small model answers perfectly.

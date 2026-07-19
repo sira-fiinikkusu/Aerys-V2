@@ -1343,7 +1343,15 @@ def build_graph(
                 "the bracket text. Their words reach you via speech-to-text and "
                 "can be misheard — if a line seems garbled, surprising, or out of "
                 "place, treat it with a grain of salt and gently confirm rather "
-                "than assume."
+                "than assume. EXCEPTION (live incident 2026-07-18: 'can you play "
+                "Against the Tide' arrived as 'To play against the tide.' and got "
+                "a clarifying question instead of music): when a garbled line "
+                "still contains a clear command shape — 'play <something>', 'turn "
+                "on/off <something>', a timer or volume ask — do NOT ask what "
+                f"they meant. Open with {HANDOFF_MARKER} and hand it off: the tool "
+                "search is the best disambiguator (it finds the song or fails "
+                "honestly), and a clarifying question on a one-way voice channel "
+                "costs far more than a wrong-but-correctable guess."
             )
         # Where + when — the text path had no clock (she couldn't say what day it
         # was) and no sense of which surface she's on. Both derived per turn: the
