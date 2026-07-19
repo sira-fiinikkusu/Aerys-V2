@@ -136,6 +136,19 @@ _GAP_MARKERS = (
     "for the coding agent", "log it as a gap",
 )
 
+# Music shapes for the degraded path — the 2026-07-18 addition (the music tool's
+# wiring, same day it shipped: a tool the router can't route to does not exist).
+# Same over-trigger-toward-action bias: a needless action hop costs a tool
+# refusal, while a chat route here claims playback she never started. "play " is
+# deliberately broad (trailing space keeps "player"/"display" out); the chat
+# path's return loop catches whatever still slips through.
+_MUSIC_MARKERS = (
+    "play ", "music", "song", "playlist", "spotify", "album",
+    "pause", "skip this", "next track", "next song", "previous track",
+    "turn it up", "turn it down", "volume",
+    "what's playing", "whats playing", "now playing",
+)
+
 _ROUTER_INSTRUCTIONS = """\
 You are the routing layer in front of Aerys's brain. Read the user's message and
 decide which path handles it:
@@ -172,6 +185,11 @@ decide which path handles it:
   gap, complaint, issue, limitation, or "note that for the coding agent" —
   the log_gap tool that performs the write lives only on the action path.
   "Log that as a gap", "file a complaint about the lens cutoff" are "action".
+  MUSIC is "action" too: playing a song/artist/album/playlist, pausing,
+  resuming, skipping, stopping the music, changing volume, or asking what is
+  currently playing. "Play some daft punk", "put on my focus playlist",
+  "pause the music", "next song", "turn it up" are ALL "action" — the music
+  tool lives only on the action path.
 - "chat": pure conversation — feelings, memories, opinions about the world,
   timeless general knowledge, planning that needs no device reading, no
   attachment, and no live lookup. "Do you think cats love us?" is chat; "do you
@@ -267,6 +285,12 @@ def plausibly_logs_a_gap(text: str) -> bool:
     return any(marker in lowered for marker in _GAP_MARKERS)
 
 
+def plausibly_wants_music(text: str) -> bool:
+    """Degraded-path heuristic: does this text want playback control?"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _MUSIC_MARKERS)
+
+
 def fallback_decision(text: str) -> RouteDecision:
     """What we do when the router's answer is unusable: heuristic, biased to action.
 
@@ -279,6 +303,7 @@ def fallback_decision(text: str) -> RouteDecision:
         or plausibly_wants_web_search(text)
         or plausibly_wants_email(text)
         or plausibly_logs_a_gap(text)
+        or plausibly_wants_music(text)
     ):
         return RouteDecision(route="action", ack=FALLBACK_ACK)
     return RouteDecision(route="chat", ack="")

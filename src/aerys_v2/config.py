@@ -121,6 +121,22 @@ class Settings(BaseSettings):
     # rest of the home half.
     ha_timer_fallback_entity: str | None = None
 
+    # ---- MUSIC (Music Assistant + Spotify, the 07-01 Play Music rebirth) -----
+    # The Music Assistant CONFIG ENTRY id in HA (Settings → Devices & Services →
+    # Music Assistant) — music_assistant.search requires it. Empty = the music
+    # tool doesn't exist this boot, same arming pattern as every optional half.
+    ha_music_config_entry: str = ""
+    # csv of "device_id=media_player_entity" pairs mapping an originating
+    # satellite's device_id to the Music Assistant player in THAT room — the
+    # owner spec: music plays on the device that heard the request. Same CSV
+    # convention as ha_satellite_map. This map is ALSO the complete allowlist of
+    # speakers the tool may drive; named targets resolve against it and nothing
+    # else.
+    ha_music_players: str = ""
+    # Where music goes for turns with no originating device (text/DM/CLI).
+    # None = those callers are asked to name a speaker instead of guessing.
+    ha_music_default_player: str | None = None
+
     # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
     # Owner rule (2026-07-03): if a device action completes within this many
     # seconds of the ack going out, the spoken follow-up is SKIPPED — the light

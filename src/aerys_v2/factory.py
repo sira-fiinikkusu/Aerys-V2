@@ -724,6 +724,26 @@ TIMER_OVERLAY = (
 # tool instead of answering from stale memory. The tool name here MUST match the
 # @tool function name in tools/web_search.py — `search_web` — or the model calls
 # a tool that isn't registered (the V1 toolWorkflow name-mismatch bug, kept dead).
+# Music half of the action overlay — appended when ha_music_config_entry is set
+# (rides the same HA door as home_control; the player map is the allowlist).
+# Concrete triggers again (the V1 "specificity beats generality" lesson), and the
+# "device that heard you" line is load-bearing exactly like the timer's: it stops
+# the model asking WHICH speaker on a one-way voice channel — the tool resolves
+# the originating device itself. Tool name MUST match tools/music.py's @tool
+# function name — `music` (the V1 toolWorkflow name-mismatch bug, kept dead).
+MUSIC_OVERLAY = (
+    "You can play Spotify music on the house speakers with the music tool. Call "
+    "music IMMEDIATELY whenever the user asks to play a song, artist, album, or "
+    "playlist ('play some daft punk', 'put on my focus playlist'), or to "
+    "pause/resume/skip/stop the music or change volume ('pause the music', 'next "
+    "song', 'volume 40', 'what's playing?'). operation=play with query in the "
+    "user's words; pass media_type only when they were explicit ('the album', "
+    "'my playlist'). Music plays on the device that heard the request "
+    "AUTOMATICALLY — leave target empty and NEVER ask which speaker; pass target "
+    "ONLY when the user names a room ('in the living room'). Never claim music "
+    "is playing or changed unless the tool's reply said so."
+)
+
 SEARCH_OVERLAY = (
     "You can also search the live web with the search_web tool. Call search_web "
     "IMMEDIATELY whenever the honest answer depends on something you cannot know "
@@ -948,6 +968,23 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
             )
         )
 
+        if settings.ha_music_config_entry:
+            # MUSIC (07-01 Play Music reborn, owner ask post-n8n-retirement):
+            # same HA door; its player map doubles as the speaker allowlist, and
+            # the origin-device default reuses the HA_SATELLITE_MAP csv parser —
+            # one format for every device_id=entity map.
+            from aerys_v2.tools.music import build_music_tool
+
+            tools.append(
+                build_music_tool(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    config_entry_id=settings.ha_music_config_entry,
+                    players=satellite_map_from(settings.ha_music_players),
+                    default_player=settings.ha_music_default_player,
+                )
+            )
+
     if settings.embeddings_api_key is not None:
         from aerys_v2.tools.media import build_media_tools
 
@@ -1037,6 +1074,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
     if not guest and settings.ha_token is not None:
         parts.append(ACTION_OVERLAY)
         parts.append(TIMER_OVERLAY)
+        if settings.ha_music_config_entry:
+            parts.append(MUSIC_OVERLAY)
     if settings.embeddings_api_key is not None:
         parts.append(MEDIA_OVERLAY)
     if settings.tavily_api_key is not None:
