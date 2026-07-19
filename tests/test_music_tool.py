@@ -154,6 +154,19 @@ def test_play_prefers_tracks_and_reports_resolved_name():
     play = next(b for p, b in ha.calls if p.endswith("/play_media"))
     assert play["media_id"] == "spotify://track/t1"
     assert play["media_type"] == "track"
+    # single-track asks keep the music going (owner call, 2026-07-18)
+    assert play["radio_mode"] is True
+
+
+def test_playlist_play_keeps_natural_scope_no_radio_mode():
+    ha = FakeHA()
+    tool = make_tool(ha)
+    tool.invoke(
+        {"operation": "play", "query": "focus", "media_type": "playlist"},
+        config=cfg(OFFICE_DEV),
+    )
+    play = next(b for p, b in ha.calls if p.endswith("/play_media"))
+    assert "radio_mode" not in play
 
 
 def test_media_type_override_picks_that_category():

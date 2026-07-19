@@ -276,11 +276,18 @@ def build_music_tool(
         name, uri = _item_line(item)
         if not uri:
             return f"Music search returned '{name}' without a playable id — try rephrasing."
+        payload = {"entity_id": player, "media_id": uri, "media_type": chosen_type}
+        if chosen_type == "track":
+            # Owner call (2026-07-18): asking for ONE song means "start music",
+            # not "play 3:44 then silence" — radio mode keeps similar tracks
+            # coming after the requested one. Albums/playlists/artists keep
+            # their natural scope and end; "stop" works anytime.
+            payload["radio_mode"] = True
         try:
             r = http.post(
                 f"{base}/api/services/music_assistant/play_media",
                 headers=headers,
-                json={"entity_id": player, "media_id": uri, "media_type": chosen_type},
+                json=payload,
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
