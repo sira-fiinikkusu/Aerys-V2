@@ -149,6 +149,13 @@ class Settings(BaseSettings):
     # cost — same arming pattern as every optional half. The address stays in
     # the environment: it's a LAN IP and this repo is public.
     panel_state_url: str | None = None
+    # Her circadian rhythm (owner ask 2026-07-19): the --serve container runs a
+    # presence watcher that darkens the panel when this occupancy entity goes
+    # off AND the listed lights are out (the vacancy automation's fingerprint),
+    # and wakes it with a little emote when occupancy returns. Empty = no
+    # watcher — same arming pattern as every optional half.
+    panel_presence_entity: str | None = None
+    panel_presence_lights: str = ""
 
     # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
     # Owner rule (2026-07-03): if a device action completes within this many

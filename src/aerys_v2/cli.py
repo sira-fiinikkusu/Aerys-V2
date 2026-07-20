@@ -241,6 +241,14 @@ def main() -> None:
                 owner_person_id=settings.owner_person_id,
                 gaps_fn=gaps_fn,
             )
+            # Her circadian rhythm: ONE watcher, in --serve only (the other
+            # transports must not fight over her eyelids). Daemon thread;
+            # None unless panel + HA + occupancy entity are all configured.
+            from aerys_v2.panel_presence import start_panel_presence
+
+            if start_panel_presence(settings) is not None:
+                log.info("panel presence watcher armed | entity=%s",
+                         settings.panel_presence_entity)
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
