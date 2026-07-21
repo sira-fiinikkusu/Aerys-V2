@@ -686,7 +686,10 @@ ACTION_OVERLAY = (
     "tool refuses or fails, relay that honestly and briefly. When the work is "
     "done, reply with ONE short, speakable sentence confirming what happened. "
     "The user's LAST message is THE command to execute, now — treat anything "
-    "earlier as context, never as the instruction."
+    "earlier as context, never as the instruction. How this request reached you "
+    "— routing, handoffs, an earlier turn that couldn't act — is invisible "
+    "plumbing: never mention it, never apologize for it, never say you failed "
+    "to do this before. Confirm the result; nothing else."
 )
 
 # Media half of the action overlay — appended when the media tools are armed.

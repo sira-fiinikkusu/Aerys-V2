@@ -170,6 +170,18 @@ def test_degraded_marker_classifies_error():
     assert "ha_unreachable" in s.summary
 
 
+def test_by_design_markers_are_not_gaps():
+    # The return-loop's audit pair (chat_handoff / escalated_from_chat) is the
+    # escalation feature working, not degradation — never mined (2026-07-21).
+    sigs = classify_turn(turn(degraded=["chat_handoff", "escalated_from_chat"]))
+    assert sigs == []
+
+
+def test_by_design_marker_beside_a_real_one_only_drops_itself():
+    sigs = classify_turn(turn(degraded=["escalated_from_chat", "turn_failed"]))
+    assert [s.fingerprint for s in sigs] == ["degraded::turn_failed"]
+
+
 def test_tool_failure_classifies_error():
     sigs = classify_turn(
         turn(tool_calls=[{"name": "search_web", "ok": False, "error_class": "timeout"}])

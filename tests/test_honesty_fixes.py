@@ -140,6 +140,14 @@ def test_nonvoice_zero_tool_action_bounces_once_then_marks():
     assert json.loads(row["tool_calls"]) == []                   # nothing ever executed
 
 
+def test_correction_text_keeps_the_bounce_internal():
+    # The anti-fabrication rail must not teach a user-facing confession (owner
+    # ask 2026-07-21): honesty about the slip stays internal plumbing.
+    lowered = ACTION_NO_TOOL_CORRECTION.lower()
+    assert "internal plumbing" in lowered
+    assert "never mention" in lowered
+
+
 def test_nonvoice_zero_tool_action_that_calls_a_tool_on_retry_is_clean():
     # The correction WORKS: pass 1 hallucinates "done"; pass 2 (after the corrective)
     # actually calls the tool. The turn emits the honest outcome and carries NO marker.

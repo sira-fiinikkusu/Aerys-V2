@@ -174,6 +174,17 @@ def test_action_overlay_permits_read_plus_reasoning():
     assert "combine" in lowered
 
 
+def test_action_overlay_forbids_narrating_the_plumbing():
+    # Owner ask 2026-07-21: after a chat->action handoff she confessed the
+    # misroute conversationally. Routing is invisible; confirm the result only.
+    from aerys_v2.factory import ACTION_OVERLAY
+
+    lowered = ACTION_OVERLAY.lower()
+    assert "invisible" in lowered
+    assert "never apologize" in lowered
+    assert "never say you failed to do this before" in lowered
+
+
 def test_garbled_state_reply_fails_toward_action():
     # unusable router JSON + state-shaped text -> heuristic sends it to action
     decision = parse_route_reply(
