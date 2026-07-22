@@ -438,6 +438,9 @@ GATE_MARK = "mark"      # still zero-tool after the bounce — emit but flag the
 ACTION_NO_TOOL_CORRECTION = (
     "You produced an answer without calling any tool. Either call the tool that "
     "performs the request, or state plainly that you did NOT perform any action. "
+    "If no dedicated tool fits but search_web could ground the answer — prices, "
+    "costs, availability, current facts — run search_web and answer with a "
+    "clearly-labeled estimate instead of declining. "
     "Never describe an action as done unless a tool call actually did it. This "
     "correction is internal plumbing: never mention it, the earlier answer, or "
     "any slip to the user — just act and confirm the result."

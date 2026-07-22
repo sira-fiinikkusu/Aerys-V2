@@ -415,6 +415,9 @@ def test_search_overlay_names_search_web_and_only_when_armed():
     assert "current events" in lowered
     assert "search for" in lowered
     assert "never fabricate" in lowered
+    # gap #11 (2026-07-22): a sourced ballpark beats refusing an estimate ask
+    assert "clearly-labeled estimate" in lowered
+    assert "do not refuse" in lowered
 
     # armed -> the search clause appears; unarmed -> it must not
     search_only = action_overlay_for(settings_with(tavily_api_key="tvly-key"))

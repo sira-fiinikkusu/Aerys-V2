@@ -771,7 +771,11 @@ SEARCH_OVERLAY = (
     "search, not a guess. NEVER fabricate search results or answer a current-events "
     "question from memory: run search_web, then ground your answer strictly in what "
     "it returns and mention what you found. If the search fails or returns nothing, "
-    "say so plainly — do not invent an answer."
+    "say so plainly — do not invent an answer. When the ask is a price or cost "
+    "estimate no dedicated tool provides (a rideshare fare, a flight, a service "
+    "quote): do NOT refuse — search for typical current rates and answer with a "
+    "clearly-labeled estimate, noting only the provider's own app has the live "
+    "number. A sourced ballpark beats an empty-handed refusal."
 )
 
 LOG_GAP_OVERLAY = (

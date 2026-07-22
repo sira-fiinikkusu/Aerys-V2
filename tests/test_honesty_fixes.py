@@ -146,6 +146,8 @@ def test_correction_text_keeps_the_bounce_internal():
     lowered = ACTION_NO_TOOL_CORRECTION.lower()
     assert "internal plumbing" in lowered
     assert "never mention" in lowered
+    # gap #11: the bounce offers the search_web door before the refusal door
+    assert "search_web" in lowered
 
 
 def test_nonvoice_zero_tool_action_that_calls_a_tool_on_retry_is_clean():
