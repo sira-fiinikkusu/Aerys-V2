@@ -980,12 +980,16 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
         # — no canary/outbox: a timer is HA-durable countdown state HA already owns,
         # not a device write. fallback_entity powers the no-device (text/DM) degrade.
         from aerys_v2.tools.timer import build_timer_tool
+        from aerys_v2.panel import build_timer_strip
 
         tools.append(
             build_timer_tool(
                 base_url=settings.ha_base_url,
                 token=settings.ha_token.get_secret_value(),
                 fallback_entity=settings.ha_timer_fallback_entity,
+                # Mirrors active timers onto the desk panel's top strip —
+                # armed off the same knob as the face (PANEL_STATE_URL).
+                strip_push=build_timer_strip(settings.panel_state_url),
             )
         )
         # WEATHER (2026-07-19, the Rotonda-Switzerland incident): local weather

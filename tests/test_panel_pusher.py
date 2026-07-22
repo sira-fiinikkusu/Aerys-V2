@@ -221,3 +221,79 @@ def test_seam_survives_a_raising_face_push():
     graph = build_graph(fake_model("still fine"), soul="s")
     reply = ask(graph, "hello", identity=CHRIS, thread_id="t-bomb", face_push=bomb)
     assert reply == "still fine"
+
+
+# ── captions (the top strip's highest-priority slot) ────────────────────────
+
+
+class BodyRecordingClient:
+    def __init__(self):
+        self.posts: list[tuple[str, dict]] = []
+
+    def post(self, url, json=None, **kwargs):
+        self.posts.append((url, json))
+
+
+def test_caption_of_sanitizes_for_the_panel_font():
+    from aerys_v2.panel import caption_of
+
+    assert caption_of("[warmly] It's 88° out — “nice” \U0001f60a today") == (
+        "It's 88 out - \"nice\" today"
+    )
+    long = "word " * 100
+    capped = caption_of(long)
+    assert len(capped) <= 220 and capped.endswith("...")
+
+
+def test_speaking_carries_caption_and_the_idle_flip_clears_it(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.05)
+    client = BodyRecordingClient()
+    p = FacePusher("http://panel:8300/state", client=client, async_send=False)
+    p("speaking", "[warmly] Forecast looks clear all day")
+    assert client.posts[0][1] == {
+        "state": "happy_speaking", "text": "Forecast looks clear all day"
+    }
+    time.sleep(0.2)
+    # the settle flip carries NO text key -> the panel clears the caption
+    assert client.posts[1][1] == {"state": "happy_idle"}
+
+
+def test_same_state_with_new_words_still_sends(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    client = BodyRecordingClient()
+    p = FacePusher("http://panel:8300/state", client=client, async_send=False)
+    p("speaking", "[softly] first thing")
+    p("speaking", "[softly] second thing")
+    assert [b["text"] for _, b in client.posts] == ["first thing", "second thing"]
+
+
+# ── the timer strip (middle-priority slot) ──────────────────────────────────
+
+
+def test_timer_strip_posts_line_and_cancel_clears():
+    from aerys_v2.panel import TimerStrip
+
+    client = BodyRecordingClient()
+    s = TimerStrip("http://panel:8300/strip", client=client, async_send=False)
+    s(300, "5 minutes", "pasta")
+    url, body = client.posts[0]
+    assert url == "http://panel:8300/strip"
+    assert body["timer"].startswith("Timer 5 minutes 'pasta' - rings ")
+    s(None)
+    assert client.posts[1][1] == {"timer": ""}
+
+
+def test_timer_strip_dead_panel_never_raises():
+    from aerys_v2.panel import TimerStrip
+
+    s = TimerStrip("http://panel:8300/strip", client=ExplodingClient(), async_send=False)
+    s(60, "1 minute", "")  # no raise = contract held
+
+
+def test_build_timer_strip_arming_and_url_derivation():
+    from aerys_v2.panel import build_timer_strip
+
+    assert build_timer_strip(None) is None
+    assert build_timer_strip("") is None
+    s = build_timer_strip("http://panel:8300/state", async_send=False)
+    assert s._url == "http://panel:8300/strip"

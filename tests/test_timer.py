@@ -339,3 +339,57 @@ def test_action_graph_wires_device_id_from_config_into_timer_intent():
     tool_note = next(m.content for m in result["messages"] if getattr(m, "type", "") == "tool")
     assert not tool_note.startswith(WRITE_OK_PREFIX)
     assert "10 minutes" in tool_note
+
+
+# ---- panel strip mirroring (the desk panel's timer slot) ------------------------
+
+
+class StripRecorder:
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def __call__(self, seconds, desc="", label=""):
+        self.calls.append((seconds, desc, label))
+
+
+def make_tool_with_strip(ha: FakeHA, strip):
+    return build_timer_tool(
+        base_url="http://ha.test:8123",
+        token="t0ken",
+        client=ha.client(),
+        strip_push=strip,
+    )
+
+
+def test_start_success_mirrors_to_the_panel_strip():
+    ha, strip = FakeHA(), StripRecorder()
+    tool = make_tool_with_strip(ha, strip)
+    tool.invoke({"action": "start", "duration": "5 minutes", "name": "pasta"}, cfg("dev-1"))
+    assert strip.calls == [(300, "5 minutes", "pasta")]
+
+
+def test_start_failure_never_touches_the_strip():
+    ha, strip = FakeHA(intent_response=ERROR_RESP), StripRecorder()
+    tool = make_tool_with_strip(ha, strip)
+    tool.invoke({"action": "start", "duration": "5 minutes"}, cfg("dev-1"))
+    assert strip.calls == []
+
+
+def test_cancel_success_clears_the_strip():
+    ha, strip = FakeHA(), StripRecorder()
+    tool = make_tool_with_strip(ha, strip)
+    tool.invoke({"action": "cancel"}, cfg("dev-1"))
+    assert strip.calls == [(None, "", "")]
+
+
+def test_raising_strip_never_breaks_the_timer_turn():
+    def explode(*a, **k):
+        raise ConnectionError("panel dark")
+
+    ha = FakeHA()
+    tool = build_timer_tool(
+        base_url="http://ha.test:8123", token="t0ken", client=ha.client(),
+        strip_push=explode,
+    )
+    out = tool.invoke({"action": "start", "duration": "5 minutes"}, cfg("dev-1"))
+    assert "Timer set for 5 minutes" in str(out)

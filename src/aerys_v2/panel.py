@@ -103,6 +103,28 @@ def speaking_estimate_s(text: str) -> float:
     return max(2.5, min(20.0, 1.5 + len(visible) / 16.0))
 
 
+# The panel's LVGL Montserrat font covers printable ASCII — emojis and exotic
+# glyphs render as gaps. Curly punctuation gets flattened, everything else
+# non-ASCII drops. Length-capped: the strip shows a beat of what she's saying,
+# not the whole essay (LONG_DOT on the panel is the belt for anything longer).
+_CAPTION_CHARS = 220
+_CAPTION_FLATTEN = str.maketrans(
+    {"‘": "'", "’": "'", "“": '"', "”": '"',
+     "—": "-", "–": "-", "…": "..."}
+)
+
+
+def caption_of(text: str) -> str:
+    """Panel-safe caption from a spoken reply: tags stripped, punctuation
+    flattened, non-ASCII dropped, whitespace collapsed, length-capped."""
+    visible = _TAG_RE.sub("", text or "").translate(_CAPTION_FLATTEN)
+    ascii_only = visible.encode("ascii", "ignore").decode()
+    collapsed = " ".join(ascii_only.split())
+    if len(collapsed) > _CAPTION_CHARS:
+        collapsed = collapsed[: _CAPTION_CHARS - 3].rstrip() + "..."
+    return collapsed
+
+
 class FacePusher:
     """Callable seam: ``push(phase, text)`` with phase in working|speaking|idle.
 
@@ -119,6 +141,7 @@ class FacePusher:
         self._async = async_send
         self._lock = threading.Lock()
         self._last_state: str | None = None
+        self._last_caption = ""
         self._gen = 0
         self._timer: threading.Timer | None = None
         self._timer_fires_at = 0.0
@@ -132,6 +155,10 @@ class FacePusher:
                 state = _SPEAKING.get(mood, "neutral_speaking")
             else:
                 state = _IDLE.get(mood, "neutral_idle")
+            # Her words ride the speaking push into the panel's top strip;
+            # every other phase clears the caption (the strip falls back to
+            # timer/glance).
+            caption = caption_of(text) if phase == "speaking" else ""
 
             now = time.monotonic()
             with self._lock:
@@ -143,15 +170,18 @@ class FacePusher:
                     return
                 self._gen += 1      # invalidate any pending deferred send
                 self._cancel_timer()
-                dup = state == self._last_state
+                # A same-state push with NEW words must still go out — the
+                # caption is part of what the panel shows.
+                dup = state == self._last_state and caption == self._last_caption
                 self._last_state = state
+                self._last_caption = caption
                 if phase == "speaking":
                     # Settle back to this mood's idle face when the words run out.
                     self._arm_timer(
                         speaking_estimate_s(text), _IDLE.get(mood, "neutral_idle")
                     )
             if not dup:
-                self._send(state)
+                self._send(state, caption)
         except Exception:  # the panel must never cost a turn anything
             log.debug("face push failed (harmless)", exc_info=True)
 
@@ -180,24 +210,30 @@ class FacePusher:
                     return  # a newer push owns the face now
                 self._timer = None
                 self._timer_fires_at = 0.0
-                if state == self._last_state:
+                # The idle flip also wipes the words off the strip — send even
+                # on a same-state flip if a caption is still showing.
+                if state == self._last_state and self._last_caption == "":
                     return
                 self._last_state = state
-            self._send(state)
+                self._last_caption = ""
+            self._send(state, "")
         except Exception:
             log.debug("face deferred push failed (harmless)", exc_info=True)
 
-    def _send(self, state: str) -> None:
+    def _send(self, state: str, caption: str = "") -> None:
         if self._async:
             threading.Thread(
-                target=self._post, args=(state,), daemon=True
+                target=self._post, args=(state, caption), daemon=True
             ).start()
         else:
-            self._post(state)
+            self._post(state, caption)
 
-    def _post(self, state: str) -> None:
+    def _post(self, state: str, caption: str = "") -> None:
         try:
-            self._client.post(self._url, json={"state": state})
+            body: dict = {"state": state}
+            if caption:
+                body["text"] = caption
+            self._client.post(self._url, json=body)
         except Exception:
             log.debug("panel unreachable (harmless)", exc_info=True)
 
@@ -211,3 +247,75 @@ def build_face_pusher(
     if not url:
         return None
     return FacePusher(url, client=client, async_send=async_send)
+
+
+class TimerStrip:
+    """The strip's middle-priority slot: an active-timer line on the panel.
+
+    ``(seconds, desc, label)`` shows "Timer 15 minutes 'pasta' — rings 7:47 PM"
+    and self-clears shortly after ring time; ``(None, ...)`` clears now (cancel).
+    Same contract as everything panel-shaped: fire-and-forget daemon threads,
+    every failure swallowed — the strip must never cost a timer turn anything.
+    """
+
+    _CLEAR_GRACE_S = 90.0  # the ring itself deserves a moment on the strip
+
+    def __init__(self, strip_url: str, *, client=None, async_send: bool = True) -> None:
+        import httpx
+
+        self._url = strip_url
+        self._client = client or httpx.Client(timeout=2.0)
+        self._async = async_send
+        self._lock = threading.Lock()
+        self._clear_timer: threading.Timer | None = None
+
+    def __call__(self, seconds: int | None, desc: str = "", label: str = "") -> None:
+        try:
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
+
+            if seconds is None or seconds <= 0:
+                line = ""
+            else:
+                rings = datetime.now(ZoneInfo("America/New_York")) + timedelta(
+                    seconds=seconds
+                )
+                named = f" '{label}'" if label else ""
+                line = f"Timer {desc}{named} - rings {rings.strftime('%-I:%M %p')}"
+            with self._lock:
+                if self._clear_timer is not None:
+                    self._clear_timer.cancel()
+                    self._clear_timer = None
+                if line:
+                    t = threading.Timer(
+                        seconds + self._CLEAR_GRACE_S, self._post, ("",)
+                    )
+                    t.daemon = True
+                    t.start()
+                    self._clear_timer = t
+            self._send(line)
+        except Exception:
+            log.debug("timer strip push failed (harmless)", exc_info=True)
+
+    def _send(self, line: str) -> None:
+        if self._async:
+            threading.Thread(target=self._post, args=(line,), daemon=True).start()
+        else:
+            self._post(line)
+
+    def _post(self, line: str) -> None:
+        try:
+            self._client.post(self._url, json={"timer": line})
+        except Exception:
+            log.debug("panel unreachable (harmless)", exc_info=True)
+
+
+def build_timer_strip(
+    panel_state_url: str | None, *, client=None, async_send: bool = True
+) -> Callable[[int | None, str, str], None] | None:
+    """Timer-strip seam, armed off the SAME env knob as the face (the /strip
+    endpoint lives beside /state on the panel)."""
+    if not panel_state_url:
+        return None
+    strip_url = panel_state_url.replace("/state", "/strip")
+    return TimerStrip(strip_url, client=client, async_send=async_send)

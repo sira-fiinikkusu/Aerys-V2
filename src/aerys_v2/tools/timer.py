@@ -187,6 +187,7 @@ def build_timer_tool(
     token: str,
     client: httpx.Client | None = None,
     fallback_entity: str | None = None,
+    strip_push: Callable[[int | None, str, str], None] | None = None,
 ):
     """Close over the HA config and return the LangChain timer tool.
 
@@ -195,10 +196,22 @@ def build_timer_tool(
     ha_token (reused from the home-control half — the timer needs the same HA
     door). fallback_entity is an optional generic `timer.*` helper for the
     no-device (text/DM) path; None = honest refusal there instead.
+
+    strip_push (panel.TimerStrip) mirrors the timer onto the desk panel's top
+    strip: (seconds, desc, label) on a successful start, (None, "", "") on a
+    successful cancel. Optional and fail-open — a dark panel costs nothing.
     """
     base = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     http = client or httpx.Client(timeout=TIMER_TIMEOUT_S)
+
+    def _strip(seconds: int | None, desc: str = "", label: str = "") -> None:
+        if strip_push is None:
+            return
+        try:
+            strip_push(seconds, desc, label)
+        except Exception:  # never let the panel cost a timer turn
+            log.debug("timer strip push failed (harmless)", exc_info=True)
 
     def _handle_intent(intent_name: str, data: dict, device_id: str) -> str | None:
         """POST the native intent for `device_id`; return an honest error string,
@@ -289,6 +302,7 @@ def build_timer_tool(
                     named = f" '{label}'" if label else ""
                     return f"I couldn't start the{named} timer — Home Assistant said: {err}"
                 named = f" '{label}'" if label else ""
+                _strip(total, desc, label)
                 # NO WRITE_OK_PREFIX on START: a timer has no universal visual — the
                 # LED ring is VPE-only, so on every other satellite a silent success
                 # is zero feedback. START confirms OUT LOUD, duration included, so a
@@ -304,6 +318,7 @@ def build_timer_tool(
                 )
                 if err:
                     return f"I couldn't start the fallback timer — {err}"
+                _strip(total, desc, label)
                 return (
                     f"Heads up — I don't know which voice device you're on, so I "
                     f"can't set a timer that rings on a speaker or shows a light. I "
@@ -323,12 +338,14 @@ def build_timer_tool(
             if err:
                 return f"I couldn't cancel the timer — Home Assistant said: {err}"
             named = f" '{label}'" if label else ""
+            _strip(None)
             return f"{WRITE_OK_PREFIX} cancelled the{named} timer on your device."
 
         if fallback_entity:
             err = _fallback_service("cancel", {"entity_id": fallback_entity})
             if err:
                 return f"I couldn't cancel the fallback timer — {err}"
+            _strip(None)
             return "Cancelled the background timer in Home Assistant."
         return (
             "I can't tell which voice device you're on from here, so there's no "
