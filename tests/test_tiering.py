@@ -58,8 +58,11 @@ def chat_router_with_tier(tier: str):
 
 
 class StubActionGraph:
+    def __init__(self, final: str = "acted"):
+        self.final = final
+
     def invoke(self, inp, config):
-        return {"messages": [AIMessage(content="acted")]}
+        return {"messages": [AIMessage(content=self.final)]}
 
 
 # ---- tier parsing: a hint, normalized — never a rejected turn ---------------------
@@ -200,14 +203,15 @@ def test_tier_decision_lands_in_router_logs(caplog):
     assert any("route=chat tier=fast" in r.message for r in caplog.records)
 
 
-def test_voice_thread_stays_pinned_standard():
-    # ChannelPolicy (locked): the router said deep, but voice never leaves
-    # standard — the ~3.6s budget can't absorb opus latency
+def test_voice_ignores_tier_verdicts_entirely():
+    # voice-always-action: a voice turn never touches the tier models at all —
+    # even a deep verdict can't summon opus; the action graph is the only model.
     graph = tiered_graph()
     out = ask(graph, "audit the plan", identity=CHRIS, thread_id="voice:beta",
-              router=chat_router_with_tier("deep"), action_graph=StubActionGraph(),
+              router=chat_router_with_tier("deep"),
+              action_graph=StubActionGraph("action-side reply"),
               deep_allowed=lambda: True)
-    assert out == "standard reply"
+    assert out == "action-side reply"
 
 
 def test_no_tier_models_keeps_old_behavior():

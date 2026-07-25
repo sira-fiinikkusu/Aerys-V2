@@ -14,6 +14,7 @@ rows pair up (chat_handoff ↔ escalated_from_chat).
 """
 
 import threading
+import json
 import time
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -21,6 +22,7 @@ from langchain_core.messages import AIMessage
 
 from aerys_v2.factory import build_graph
 from aerys_v2.router import FALLBACK_ACK, HANDOFF_MARKER, RouteDecision
+from aerys_v2.service import VOICE_EMPTY_REPLY
 from aerys_v2.service import HANDOFF_UNARMED_REPLY, ask
 
 CHRIS = {"user_id": "person-1", "display_name": "Chris"}
@@ -185,55 +187,147 @@ def test_guest_handoff_escalates_into_guest_graph_only():
 
 # ---- voice path ------------------------------------------------------------------
 
-def test_voice_handoff_speaks_own_line_then_action_lands():
-    graph = build_graph(
-        fake_model(f"{HANDOFF_MARKER} Let me actually check the forecast."), soul="s"
-    )
+def test_voice_chat_verdict_runs_action_graph_no_handoff_needed():
+    # VOICE-ALWAYS-ACTION (2026-07-25): the voice handoff dance is gone — a chat
+    # verdict runs the tool-armed action graph directly, so "what about
+    # tomorrow?" gets its answer in ONE synchronous reply, no marker involved.
+    graph = build_graph(fake_model("never spoken"), soul="s")
     stub = SeedCapturingActionGraph("rain until 6pm, then clear")
     out = ask(graph, "what about tomorrow?", identity=CHRIS, thread_id="voice:h1",
               router=chat_router, action_graph=stub)
-    # the model's OWN handoff line is the immediate spoken ack
-    assert out == "Let me actually check the forecast."
-    # ...and the real outcome lands in the REAL thread in the background
-    msgs = wait_for_messages(graph, "voice:h1", 2)
-    assert msgs[-1].content == "rain until 6pm, then clear"
-    assert msgs[0].content == "what about tomorrow?"
+    assert out == "rain until 6pm, then clear"
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:h1"}}).values["messages"]
+    assert [m.content for m in msgs] == ["what about tomorrow?", "rain until 6pm, then clear"]
     assert sum(1 for m in msgs if getattr(m, "type", "") == "human") == 1
-    assert all(HANDOFF_MARKER not in str(m.content) for m in msgs)
 
 
-def test_voice_handoff_marker_only_falls_back_to_stock_ack():
-    graph = build_graph(fake_model(HANDOFF_MARKER), soul="s")
-    stub = SeedCapturingActionGraph("done")
+def test_voice_banter_reply_marker_stripped_and_never_empty():
+    # Defensive: if the ACTION graph's reply somehow carries the marker it is
+    # stripped; a reply that strips to NOTHING becomes the honest empty-reply
+    # line — a voice channel never emits silence or a bare token.
+    graph = build_graph(fake_model("never spoken"), soul="s")
     out = ask(graph, "go ahead", identity=CHRIS, thread_id="voice:h1",
-              router=chat_router, action_graph=stub)
-    assert out == FALLBACK_ACK  # never speak a bare token
-    wait_for_messages(graph, "voice:h1", 2)
+              router=chat_router,
+              action_graph=SeedCapturingActionGraph(f"{HANDOFF_MARKER} still here"))
+    assert out == "still here"
+    out2 = ask(graph, "go ahead again", identity=CHRIS, thread_id="voice:h1b",
+               router=chat_router,
+               action_graph=SeedCapturingActionGraph(HANDOFF_MARKER))
+    assert out2 == VOICE_EMPTY_REPLY
 
 
-def test_voice_handoff_delivers_spoken_followup():
+def test_voice_banter_is_synchronous_and_never_fires_followup():
+    # Cross-review history invariant: a banter turn produces exactly ONE reply —
+    # returned to the pipeline synchronously — and never a spoken follow-up.
     spoken: list[tuple[str, str]] = []
-    graph = build_graph(fake_model(f"{HANDOFF_MARKER} Checking."), soul="s")
-    stub = SeedCapturingActionGraph("72 and sunny")  # no tool notes -> must speak
-    ask(graph, "what's it like out?", identity=CHRIS, thread_id="voice:h1",
-        router=chat_router, action_graph=stub,
-        speak_fn=lambda text, entity: spoken.append((text, entity)),
-        satellite_for=lambda _device: "assist_satellite.office")
-    deadline = time.monotonic() + 3.0
-    while time.monotonic() < deadline and not spoken:
-        time.sleep(0.02)
-    assert spoken == [("72 and sunny", "assist_satellite.office")]
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = SeedCapturingActionGraph("72 and sunny")
+    out = ask(graph, "what's it like out?", identity=CHRIS, thread_id="voice:h1",
+              router=chat_router, action_graph=stub,
+              speak_fn=lambda text, entity: spoken.append((text, entity)),
+              satellite_for=lambda _device: "assist_satellite.office")
+    assert out == "72 and sunny"
+    time.sleep(0.2)  # give any (wrong) background machinery a chance to show
+    assert spoken == []
 
 
-def test_voice_handoff_audit_row_is_escalated_action():
+def test_voice_banter_effectful_claim_gate_bounces_and_marks():
+    # The 2026-07-25 22:08 fabrication class, closed at the last line of defense:
+    # a ZERO-tool banter reply claiming an effectful act is bounced once with the
+    # corrective message; still claiming tool-free -> emitted but marked.
+    class LyingActionGraph:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, inp, config):
+            self.calls += 1
+            return {"messages": [AIMessage(content="Sent it over to Kael just now.")]}
+
     rec = Recorder()
-    graph = build_graph(fake_model(f"{HANDOFF_MARKER} On it."), soul="s")
-    ask(graph, "yes, do it", identity=CHRIS, thread_id="voice:h1",
-        router=chat_router, action_graph=SeedCapturingActionGraph(),
-        record_turn=rec)
-    rows = rec.wait(1)
-    action_row = next(r for r in rows if r.get("classifier_intent") == "action")
-    assert "escalated_from_chat" in (action_row.get("degraded") or [])
-    # emitted = the handoff line the caller heard; raw = the action's real outcome
-    assert action_row.get("emitted_reply") == "On it."
-    assert action_row.get("raw_reply") == "light is off now"
+    lying = LyingActionGraph()
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    out = ask(graph, "did you tell kael?", identity=CHRIS, thread_id="voice:h2",
+              router=chat_router, action_graph=lying, record_turn=rec)
+    assert out == "Sent it over to Kael just now."   # emitted (transparent) ...
+    assert lying.calls == 2                            # ... but it WAS bounced once
+    (row,) = rec.wait(1)
+    assert "no_tool_action" in json.loads(row["degraded"])  # ... and audited
+
+
+def test_voice_banter_honest_zero_tool_reply_is_not_gated():
+    # General conversation never trips the effectful-claim gate: one invoke,
+    # clean audit row.
+    class HonestActionGraph:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, inp, config):
+            self.calls += 1
+            return {"messages": [AIMessage(content="[warmly] Today was lovely, thanks for asking.")]}
+
+    rec = Recorder()
+    honest = HonestActionGraph()
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    out = ask(graph, "how was your day?", identity=CHRIS, thread_id="voice:h3",
+              router=chat_router, action_graph=honest, record_turn=rec)
+    assert out == "[warmly] Today was lovely, thanks for asking."
+    assert honest.calls == 1
+    (row,) = rec.wait(1)
+    assert row.get("degraded") in (None, "[]") or "no_tool_action" not in json.loads(row["degraded"])
+
+
+def test_voice_banter_gate_retry_never_emits_silence():
+    # Cross-review fix 2: even the effectful-claim RETRY keeps the empty-reply
+    # fallback — a marker-only second answer becomes the honest line, not "".
+    class LieThenMarkerGraph:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, inp, config):
+            self.calls += 1
+            reply = "Sent it over to Kael." if self.calls == 1 else HANDOFF_MARKER
+            return {"messages": [AIMessage(content=reply)]}
+
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    out = ask(graph, "did you send it?", identity=CHRIS, thread_id="voice:h4",
+              router=chat_router, action_graph=LieThenMarkerGraph())
+    assert out == VOICE_EMPTY_REPLY
+
+
+def test_voice_banter_rate_limit_lands_honest_line_in_history():
+    # Cross-review fix 4: the spoken rate-limit line must be VISIBLE to the next
+    # turn's model — human + honest line land on the real thread.
+    class RateLimitedGraph:
+        def invoke(self, inp, config):
+            raise RuntimeError("You've hit your session limit, try again later.")
+
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    out = ask(graph, "how are you?", identity=CHRIS, thread_id="voice:h5",
+              router=chat_router, action_graph=RateLimitedGraph())
+    assert "rate-limited" in out
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:h5"}}).values["messages"]
+    assert [m.content for m in msgs] == ["how are you?", out]
+
+
+def test_voice_action_human_turn_lands_at_ack_time():
+    # Cross-review fix 1 (cheap half): the USER's words land when the ack goes
+    # out — a slow background action can never place them after a newer turn.
+    import threading as _threading
+
+    release = _threading.Event()
+
+    class SlowActionGraph:
+        def invoke(self, inp, config):
+            release.wait(timeout=3.0)
+            return {"messages": [AIMessage(content="finally done")]}
+
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    ack = ask(graph, "kill the lights", identity=CHRIS, thread_id="voice:h6",
+              router=lambda _t: RouteDecision(route="action", ack="On it."),
+              action_graph=SlowActionGraph())
+    assert ack  # ack returned while the action still runs
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:h6"}}).values["messages"]
+    assert [m.content for m in msgs] == ["kill the lights"]  # human already durable
+    release.set()
+    msgs = wait_for_messages(graph, "voice:h6", 2)
+    assert [m.content for m in msgs] == ["kill the lights", "finally done"]

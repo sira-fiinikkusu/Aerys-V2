@@ -154,13 +154,15 @@ def test_nonvoice_action_route_returns_action_result_and_lands_in_thread():
 
 # ---- ask() branching: voice (parallel-start) ------------------------------------
 
-def test_voice_chat_route_returns_chat_result():
-    graph = build_graph(fake_model("spoken chat reply"), soul="s")
-    stub = StubActionGraph()
+def test_voice_chat_route_runs_action_graph_synchronously():
+    # VOICE-ALWAYS-ACTION (2026-07-25): a chat verdict on a voice turn runs the
+    # tool-armed action graph synchronously — the chat graph is never invoked.
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("spoken banter reply")
     out = ask(graph, "tell me something nice", identity=CHRIS, thread_id="voice:beta",
               router=chat_router, action_graph=stub)
-    assert out == "spoken chat reply"
-    assert stub.calls == []
+    assert out == "spoken banter reply"
+    assert stub.calls == ["tell me something nice"]
 
 
 def test_voice_action_route_returns_ack_immediately_then_result_lands():
@@ -186,15 +188,15 @@ VOICE_OWNER = {"user_id": "person-1", "display_name": "Chris (Voice)",
                "privacy_context": "private", "voice": True}
 
 
-def test_person_keyed_voice_flag_parallel_starts_chat():
-    # chat verdict on a person-keyed voice turn: the speculative gen (already in flight)
-    # is the reply — parallel-start fired off the flag, not a 'voice:*' thread name.
-    graph = build_graph(fake_model("spoken chat reply"), soul="s")
-    stub = StubActionGraph()
+def test_person_keyed_voice_flag_routes_banter_to_action_graph():
+    # chat verdict on a person-keyed voice turn fires the voice branch off the
+    # identity.voice flag (not a 'voice:*' thread name) and runs the action graph.
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    stub = StubActionGraph("spoken banter reply")
     out = ask(graph, "tell me something nice", identity=VOICE_OWNER, thread_id="person:p1",
               router=chat_router, action_graph=stub)
-    assert out == "spoken chat reply"
-    assert stub.calls == []  # action path never touched
+    assert out == "spoken banter reply"
+    assert stub.calls == ["tell me something nice"]  # the action graph handled it
 
 
 def test_person_keyed_voice_flag_action_acks_then_lands_in_person_thread():
@@ -708,15 +710,15 @@ def test_voice_action_route_never_persists_speculative_chat_text():
     assert tids == {"voice:clean"}
 
 
-def test_voice_chat_route_persists_reply_and_leaves_no_speculative_thread():
-    graph = build_graph(fake_model("spoken chat reply"), soul="s")
+def test_voice_chat_route_persists_reply_and_creates_no_extra_threads():
+    graph = build_graph(fake_model("never spoken"), soul="s")
     out = ask(graph, "tell me something nice", identity=CHRIS, thread_id="voice:persist",
-              router=chat_router, action_graph=StubActionGraph())
-    assert out == "spoken chat reply"
-    # route=chat: the turn IS copied into the real thread (durable conversation)
+              router=chat_router, action_graph=StubActionGraph("spoken banter reply"))
+    assert out == "spoken banter reply"
+    # the banter turn lands on the real thread: exactly one human + one reply
     msgs = graph.get_state({"configurable": {"thread_id": "voice:persist"}}).values["messages"]
-    assert [m.content for m in msgs] == ["tell me something nice", "spoken chat reply"]
-    # cleanup is synchronous on the chat path — no ::spec:: thread survives
+    assert [m.content for m in msgs] == ["tell me something nice", "spoken banter reply"]
+    # no speculative machinery exists anymore — the real thread is the only thread
     assert all_thread_ids(graph) == {"voice:persist"}
 
 
@@ -732,24 +734,33 @@ class RecordingChatModel:
         return AIMessage(content=self.reply)
 
 
-def test_voice_speculative_chat_sees_real_thread_history():
-    # isolation must not cost context: the throwaway thread is SEEDED with the
-    # real history, so the speculative gen answers with full conversation memory.
-    model = RecordingChatModel("and that's the story")
-    graph = build_graph(model, soul="s")
+class SeedRecordingActionGraph:
+    """Action-graph stub that records the seeded messages each invoke received."""
+
+    def __init__(self, final: str = "ok"):
+        self.final = final
+        self.seeds: list[list] = []
+
+    def invoke(self, inp: dict, config: dict) -> dict:
+        self.seeds.append(list(inp["messages"]))
+        return {"messages": [AIMessage(content=self.final)]}
+
+
+def test_voice_banter_action_graph_sees_real_thread_history():
+    # Continuity must not cost context: the banter branch seeds the action graph
+    # with the real thread's prior turns (same seam as voice device commands).
+    stub = SeedRecordingActionGraph("and that's the story")
+    graph = build_graph(fake_model("never spoken"), soul="s")
     graph.update_state(
         {"configurable": {"thread_id": "voice:hist"}},
         {"messages": [HumanMessage(content="remember the lighthouse"),
                       AIMessage(content="I remember.")]},
         as_node="chat",
     )
-    # voice is pinned private in production (http_api) — so the privacy gate never
-    # redacts it and the speculative gen keeps its full seeded history.
     out = ask(graph, "tell me more", identity={**CHRIS, "privacy_context": "private"},
-              thread_id="voice:hist", router=chat_router, action_graph=StubActionGraph())
+              thread_id="voice:hist", router=chat_router, action_graph=stub)
     assert out == "and that's the story"
-    prompt = model.prompts[0]  # [system, *history, human]
-    assert [m.content for m in prompt[1:]] == [
+    assert [m.content for m in stub.seeds[0]] == [
         "remember the lighthouse", "I remember.", "tell me more"]
     msgs = graph.get_state({"configurable": {"thread_id": "voice:hist"}}).values["messages"]
     assert [m.content for m in msgs] == [

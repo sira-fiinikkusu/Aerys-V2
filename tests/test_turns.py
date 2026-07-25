@@ -227,9 +227,10 @@ def test_deep_cap_downgrade_is_recorded():
 
 def test_voice_chat_path_records_standard_pinned_row():
     rec = Recorder()
-    graph = build_graph(fake_model("spoken reply"), soul="s")
+    graph = build_graph(fake_model("never spoken"), soul="s")
     out = ask(graph, "say something nice", identity=OWNER, thread_id="voice:beta",
-              router=chat_router, action_graph=StubActionGraph(), record_turn=rec)
+              router=chat_router, action_graph=StubActionGraph("spoken reply"),
+              record_turn=rec)
     assert out == "spoken reply"
     (row,) = rec.wait(1)
     assert row["channel"] == "voice"
@@ -242,11 +243,12 @@ def test_person_keyed_voice_turn_still_audits_as_voice_channel():
     # derive_channel would mislabel 'person'. The explicit voice flag keeps the audit
     # row's channel 'voice' (and the standard-tier pin still fires off that flag).
     rec = Recorder()
-    graph = build_graph(fake_model("spoken reply"), soul="s")
+    graph = build_graph(fake_model("never spoken"), soul="s")
     voice_owner = {**OWNER, "voice": True}
     out = ask(graph, "say something nice", identity=voice_owner,
               thread_id="person:6e6bcbed-03ef-4d17-95d2-89c467414335",
-              router=chat_router, action_graph=StubActionGraph(), record_turn=rec)
+              router=chat_router, action_graph=StubActionGraph("spoken reply"),
+              record_turn=rec)
     assert out == "spoken reply"
     (row,) = rec.wait(1)
     assert row["channel"] == "voice"                 # NOT 'person' — the flag wins
@@ -433,11 +435,17 @@ def test_nonvoice_action_raise_records_failure_row():
 
 
 def test_voice_chat_raise_records_failure_row():
+    # voice-always-action: the banter branch runs the ACTION graph, so the
+    # failure source is a raising action graph (the chat graph is untouched).
+    class _RaisingActionGraph:
+        def invoke(self, inp, config):
+            raise RuntimeError("voice model 500")
+
     rec = Recorder()
     with pytest.raises(RuntimeError):
-        ask(_RaisingVoiceGraph(RuntimeError("voice model 500")), "say hi",
+        ask(build_graph(fake_model("never spoken"), soul="s"), "say hi",
             identity=OWNER, thread_id="voice:beta",
-            router=chat_router, action_graph=StubActionGraph(), record_turn=rec)
+            router=chat_router, action_graph=_RaisingActionGraph(), record_turn=rec)
     (row,) = rec.wait(1)
     assert row["channel"] == "voice"
     assert row["tier"] == "standard"                  # pinned even on the error exit

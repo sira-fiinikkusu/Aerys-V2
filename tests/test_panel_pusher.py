@@ -183,13 +183,14 @@ def test_text_action_turn_pushes_working_then_idle():
 
 
 def test_voice_chat_turn_pushes_speaking():
-    graph = build_graph(fake_model("[warmly] it's sunny all day"), soul="s")
+    # voice-always-action: the banter reply comes from the action graph now
+    graph = build_graph(fake_model("never spoken"), soul="s")
     face = FaceLog()
     reply = ask(
         graph, "what's the weather", identity={**CHRIS, "voice": True},
         thread_id="person:person-1",
         router=lambda _t: RouteDecision(route="chat", ack=""),
-        action_graph=StubActionGraph(), face_push=face,
+        action_graph=StubActionGraph("[warmly] it's sunny all day"), face_push=face,
     )
     assert reply == "[warmly] it's sunny all day"
     assert ("speaking", "[warmly] it's sunny all day") in face.calls

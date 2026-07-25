@@ -1114,6 +1114,26 @@ def _deliver_followup(
         log.warning("spoken follow-up delivery failed", exc_info=True)
 
 
+# Narrow effectful-claim detector for the voice banter branch (cross-review
+# addition, 2026-07-25): fires ONLY on claims of externally-visible acts a tool
+# performs — sends/logs/schedules/device writes — never on general conversation.
+# False positives cost one bounced model call; false negatives cost a lie, so
+# the verb list leans specific over clever.
+# Spoken when the banter branch's reply strips to nothing (marker-only or empty
+# model output — pathological but a voice channel must never emit silence).
+VOICE_EMPTY_REPLY = "Hm — I lost that thought. Ask me again?"
+
+_EFFECTFUL_CLAIM_RE = re.compile(
+    r"\b(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|"
+    r"logged|filed|scheduled|queued|posted|"
+    r"set (?:a |the |your )?(?:timer|alarm|reminder)|"
+    r"turned (?:it |them |the .{1,40}? )?(?:on|off)|"
+    r"switched (?:it |them |the .{1,40}? )?(?:on|off)|"
+    r"(?:started|queued up|put on) (?:the |some |your )?(?:music|song|playlist))\b",
+    re.IGNORECASE,
+)
+
+
 def _voice_parallel_start(
     graph: object,
     text: str,
@@ -1132,306 +1152,244 @@ def _voice_parallel_start(
     human_id: str | None = None,
     face_push: Callable[[str, str], None] | None = None,
 ) -> str:
-    """Voice hot path: race the router against the chat generation.
+    """Voice hot path — VOICE-ALWAYS-ACTION (owner's simplification, 2026-07-25).
 
-    Two threads (concurrent.futures): the router is ~300ms of Haiku, the chat
-    generation is seconds of the daily driver. Both start NOW; the router's
-    verdict decides which one the caller ever hears about.
+    Every voice turn runs the tool-armed ACTION graph; the router's verdict now
+    picks only the UX SHAPE, never the capability:
 
-    SPECULATIVE ISOLATION (2026-07-03 history-pollution fix): graph.invoke
-    checkpoints unconditionally, so the speculative chat gen must NEVER run on
-    the real thread — when the router said action and the cancel lost the race
-    (it almost always does once the model call starts), the speculative reply
-    ("Office light one's on.") was persisted as durable history claiming a
-    device change that never happened, and the next turn's model read it as
-    fact. The speculative gen now runs on a THROWAWAY thread (real history
-    seeded in, unique suffix). route=chat is the only moment its text becomes
-    real: the turn is copied into the real thread then. route=action discards
-    it entirely — only the human turn + the real action outcome land.
+    - route=action: the proven ack-then-act path, unchanged — the router's ack
+      goes to the speaker NOW, the tool loop finishes in a background thread,
+      the real outcome lands in history + spoken follow-up per the silent-
+      success rule.
+    - route=chat (banter): the action graph runs SYNCHRONOUSLY on the real
+      thread and its reply is spoken directly — single-reply UX, tools in hand
+      if the model decides it needs one after all.
 
-    Every submitted callable is wrapped in _in_ctx so the worker threads carry
-    the turn's contextvars — OTel context above all: router, speculative chat
-    gen, and the background action subgraph all parent under the SAME Phoenix
-    trace instead of scattering into orphaned roots.
+    What this deleted (and why): the speculative chat generation on a throwaway
+    checkpointer thread, its seeding/copy-back/discard machinery, and the
+    <<HANDOFF>> escalation branch for voice. The chat graph is out of the voice
+    path entirely — which structurally removes both 2026-07-25 voice failures:
+    the fabrication class ("Got it to Kael — sent" with zero tools: the chat
+    graph HAD no tools, so it could only confabulate; the action graph has the
+    tool in hand, and models with the tool in hand call it) and the chat
+    backend's unreliable warm client. A router misroute is now a UX blemish
+    (ack-shaped banter or direct-reply-shaped action), never a capability gap.
+
+    Cross-review (Codex, GO-WITH-CHANGES) additions live here too: the banter
+    branch carries a narrow EFFECTFUL-CLAIM postcondition (a zero-tool reply
+    claiming a send/log/schedule is bounced once, then marked — general banter
+    is never gated), and VOICE_BANTER_OVERLAY in factory.py keeps her voice
+    persona intact on the tool-armed graph. The name is kept for history's
+    sake; nothing races anymore.
     """
     real_configurable = config["configurable"]
-    spec_thread = f"{real_configurable['thread_id']}::spec::{uuid.uuid4().hex}"
-    # spec_config copies real_configurable, which carries the identity (incl. the
-    # explicit voice flag) — so the chat node's voice styling still applies to the
-    # speculative generation even though spec_thread ('person:{id}::spec::...') no
-    # longer starts with 'voice'. Voice-ness rides identity now, not the thread name.
-    spec_config = {
-        **config,
-        "configurable": {**real_configurable, "thread_id": spec_thread},
-    }
 
-    def _speculative_chat() -> dict:
-        # Seed the throwaway with the real thread's history so the speculative
-        # generation sees exactly what a real chat turn would have seen.
-        history = (
-            graph.get_state({"configurable": real_configurable})
-            .values.get("messages", [])
+    def _launch_background_action(ack: str, *, escalated: bool) -> str:
+        """The ack-then-act tail: `ack` goes to the speaker NOW, a background
+        thread finishes the tool loop, lands the real outcome in the thread,
+        and follows up per the silent-success rule. (escalated= is kept for
+        the audit-marker contract; nothing escalates from voice anymore.)"""
+        ack_at = time.monotonic()  # the ack leaves for the speaker ~now
+        # Her face speaks the ack; the pusher defers the working face until
+        # the ack's estimated playback runs out (panel.py owns that timing).
+        _face(face_push, "speaking", ack)
+        _face(face_push, "working")
+
+        # The ack the caller just heard rides `configurable` into the subgraph
+        # (2026-07-03 incident): the action model must execute CONSISTENT with
+        # what was already spoken — and must never ask a clarifying question,
+        # because the announce channel is one-way. See VOICE_ACK_OVERLAY in
+        # factory.py for the prompt-side half of this contract.
+        action_config = {
+            **config,
+            "configurable": {**config["configurable"], "spoken_ack": ack},
+        }
+
+        # Seed BEFORE the human turn lands (the seed appends the current human
+        # itself), then write the human turn NOW — at ack time — so a slow
+        # background action can never place the USER's words after a newer
+        # turn's (cross-review finding 1). Only the AI result appends late,
+        # which is semantically true: the action DID finish later. (Residual:
+        # a late AI result can still land after a newer turn's pair — the full
+        # placeholder-replace fix is deliberately out of tonight's scope.)
+        seeded_messages = _action_history_seed(graph, real_configurable, text)
+        graph.update_state(
+            {"configurable": real_configurable},
+            {"messages": [_human_turn(text, human_privacy, human_id)]},
+            as_node="chat",
         )
-        if history:
+
+        def _complete_action() -> None:
+            failed = False
+            result_messages: list = []
+            gate_degraded: list[str] = []
+            try:
+                # Stateless-voice continuity (owner ask 2026-07-05) rides the
+                # precomputed seed; the 2026-07-03 garble incident is guarded by
+                # VOICE_ACK_OVERLAY (spoken_ack in action_config). The gate
+                # bounces a zero-tool action once and marks 'no_tool_action' if
+                # it still touched nothing.
+                result, gate_degraded = _run_action_gated(
+                    action_graph,
+                    seeded_messages,
+                    action_config,
+                )
+                result_messages = result["messages"]
+                final = _strip_handoff(_reply_text(result_messages[-1]))
+            except Exception as e:  # honest failure into history, never silence
+                log.warning("background action turn failed", exc_info=True)
+                final = _honest_reply_for_failure(e) or f"(The action didn't complete — {e})"
+                failed = True
+
+            # Spoken follow-up: failures ALWAYS speak; otherwise the
+            # silent-success rule decides (fast clean write = the device is
+            # the feedback, say nothing).
+            elapsed = time.monotonic() - ack_at
+            device_id = real_configurable.get("identity", {}).get("device_id")
+            spoke_followup = failed or _needs_spoken_followup(
+                result_messages, elapsed, followup_skip_s
+            )
+            if spoke_followup:
+                _deliver_followup(
+                    final, device_id, followup_router, speak_fn, satellite_for
+                )
+            _face(face_push, "speaking" if spoke_followup else "idle", final)
+
+            # History write happens EITHER WAY (silent record) — the next turn's
+            # model must see what actually happened, spoken aloud or not. The
+            # human turn already landed at ack time; only the outcome appends.
             graph.update_state(
-                {"configurable": spec_config["configurable"]},
-                {"messages": history},
+                {"configurable": real_configurable},
+                {"messages": [AIMessage(content=final)]},
                 as_node="chat",
             )
-        return graph.invoke({"messages": [HumanMessage(content=text)]}, spec_config)
-
-    def _discard_speculative() -> None:
-        # Best-effort cleanup: the throwaway is garbage either way; a failed
-        # delete costs orphan checkpointer rows, never correctness — nothing
-        # ever reads a ::spec:: thread again.
-        checkpointer = getattr(graph, "checkpointer", None)
-        if checkpointer is None:
-            return
-        try:
-            checkpointer.delete_thread(spec_thread)
-        except Exception:
-            log.debug("speculative thread cleanup failed (harmless)", exc_info=True)
-
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    try:
-        route_future = pool.submit(_in_ctx(router, text))
-        chat_future = pool.submit(_in_ctx(_speculative_chat))
-        decision = route_future.result()
-
-        def _launch_background_action(ack: str, *, escalated: bool, wait_spec: bool) -> str:
-            """Shared tail of BOTH action entries — the router's verdict and the chat
-            model's escalation (the return loop) converge here: `ack` goes to the
-            speaker NOW, a background thread finishes the tool loop, lands the real
-            outcome in the thread, and follows up per the silent-success rule."""
-            ack_at = time.monotonic()  # the ack leaves for the speaker ~now
-            # Her face speaks the ack; the pusher defers the working face until
-            # the ack's estimated playback runs out (panel.py owns that timing).
-            _face(face_push, "speaking", ack)
-            _face(face_push, "working")
-
-            # The ack the caller just heard rides `configurable` into the subgraph
-            # (2026-07-03 incident): the action model must execute CONSISTENT with
-            # what was already spoken — and must never ask a clarifying question,
-            # because the announce channel is one-way. See VOICE_ACK_OVERLAY in
-            # factory.py for the prompt-side half of this contract.
-            action_config = {
-                **config,
-                "configurable": {**config["configurable"], "spoken_ack": ack},
-            }
-
-            def _complete_action() -> None:
-                failed = False
-                result_messages: list = []
-                gate_degraded: list[str] = []
-                try:
-                    # Seed the voice action with thread history too (owner ask 2026-07-05:
-                    # stateless voice commands are annoying — "turn them back on" by voice
-                    # must resolve like it does by text). The 2026-07-03 garble incident is
-                    # guarded by VOICE_ACK_OVERLAY (spoken_ack in action_config): the model
-                    # is told NEVER to ask over the one-way channel and to resolve any STT
-                    # garble toward the ack already spoken — that instruction, not
-                    # statelessness, is what prevents the "did you mean on or off?" stall.
-                    # FIX 1: the gate bounces a zero-tool action once and marks the row
-                    # 'no_tool_action' if it still touched nothing. (No escalated= seed
-                    # tweak here even for the return loop: the speculative turn lived on
-                    # the throwaway thread, so the REAL thread has no handoff line to drop.)
-                    result, gate_degraded = _run_action_gated(
-                        action_graph,
-                        _action_history_seed(graph, real_configurable, text),
-                        action_config,
-                    )
-                    result_messages = result["messages"]
-                    final = _strip_handoff(_reply_text(result_messages[-1]))
-                except Exception as e:  # honest failure into history, never silence
-                    log.warning("background action turn failed", exc_info=True)
-                    # FIX 2: a rate/session-limit cap gets the honest in-voice line;
-                    # anything else keeps the raw diagnostic (this path already spoke
-                    # rather than staying silent, so it was never the empty-glasses bug).
-                    final = _honest_reply_for_failure(e) or f"(The action didn't complete — {e})"
-                    failed = True
-
-                # Spoken follow-up: failures ALWAYS speak; otherwise the
-                # silent-success rule decides (fast clean write = the device is
-                # the feedback, say nothing). Speak BEFORE waiting on the
-                # speculative chat future — the room shouldn't wait on a
-                # generation nobody asked for.
-                elapsed = time.monotonic() - ack_at
-                # Resolve WHERE the follow-up goes from the originating satellite's
-                # device_id (rides the per-call identity). followup_router (when wired)
-                # owns per-device routing — mapped satellite -> announce, the headless
-                # phone -> the aerys_followup event; None falls back to the legacy
-                # speak_fn/satellite_for announce (tests, dev boxes).
-                device_id = real_configurable.get("identity", {}).get("device_id")
-                spoke_followup = failed or _needs_spoken_followup(
-                    result_messages, elapsed, followup_skip_s
-                )
-                if spoke_followup:
-                    _deliver_followup(
-                        final, device_id, followup_router, speak_fn, satellite_for
-                    )
-                # The action settled: speak the follow-up on her face too, or just
-                # settle to the outcome's mood (silent success = the device was
-                # the feedback; her face still relaxes out of 'working').
-                _face(face_push, "speaking" if spoke_followup else "idle", final)
-
-                # History write happens EITHER WAY (silent record) — the next turn's
-                # model must see what actually happened, spoken aloud or not. The
-                # speculative gen wrote ONLY to the throwaway thread, so the human
-                # turn is never in the real thread yet and there is no checkpoint
-                # interleave to wait out — the durable record lands immediately.
-                graph.update_state(
-                    {"configurable": real_configurable},
-                    {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=final)]},
-                    as_node="chat",
-                )
-                # Same off-hot-path content retag as the voice-chat and DM paths: the human
-                # turn is now durable on the owner's person thread tagged fail-closed
-                # 'private'; a wired judge relaxes general content to 'public' (private stays
-                # private) so it may carry into his public rooms. Already off the hot path —
-                # this runs inside the background action thread, ack long since spoken.
-                _reclassify_if_needed(
-                    graph, config, human_id, text, final,
-                    content_privacy_classifier, human_privacy,
-                )
-                if wait_spec:
-                    # Let the speculative run finish before deleting its thread —
-                    # deleting under a live invoke would just let it respawn rows.
-                    try:
-                        chat_future.result()
-                    except Exception:
-                        pass
-                _discard_speculative()
-
-                # Audit the voice action turn — from INSIDE this already-background
-                # thread, so it's off the hot path by construction (the caller got the
-                # ack long ago). emitted_reply is the ACK the caller actually heard;
-                # raw_reply is the action's real outcome (the provenance split the
-                # schema exists for). tool_calls/degraded come from result_messages;
-                # a raised background action is an honest error + 'action_failed' marker.
-                # An escalated turn (the return loop) additionally carries
-                # ESCALATED_MARKER, pairing it with the chat row that raised its hand.
-                degraded = ["action_failed"] if failed else list(gate_degraded or [])
-                if escalated:
-                    degraded.append(ESCALATED_MARKER)
-                _fire_turn_record(
-                    record_turn, config, text,
-                    int((time.monotonic() - started) * 1000),
-                    classifier_intent="action",
-                    raw_reply=final,
-                    emitted_reply=ack,
-                    messages=result_messages,
-                    extra_degraded=degraded or None,
-                    error=final if failed else None,
-                )
-
-            threading.Thread(target=_in_ctx(_complete_action), daemon=True).start()
-            return ack
-
-        if decision.route != "action":
-            # Chat wins: the generation is already in flight — the router's
-            # latency hid entirely inside the chat call's shadow. It ran on the
-            # throwaway thread, so the turn must be copied into the REAL thread
-            # here or the conversation never durably happened.
-            spec_failed: str | None = None
-            escalate_ack: str | None = None
-            try:
-                result = chat_future.result()
-                reply_message = result["messages"][-1]
-                reply = _reply_text(reply_message)
-                if HANDOFF_MARKER in reply:
-                    # VOICE RETURN LOOP: the chat model — full history in view —
-                    # says this turn needs hands; the current-message-only router
-                    # missed it ("yes, go ahead"-shaped follow-ups). The
-                    # speculative turn stays on the throwaway thread (never
-                    # copied), its own handoff line becomes the spoken ack, and
-                    # the turn pivots onto the SAME background-action tail as a
-                    # router action verdict. Marker-only reply -> the router's
-                    # degraded-path ack, never a spoken token.
-                    escalate_ack = _strip_handoff(reply) or FALLBACK_ACK
-                else:
-                    graph.update_state(
-                        {"configurable": real_configurable},
-                        {"messages": [_human_turn(text, human_privacy, human_id), reply_message]},
-                        as_node="chat",
-                    )
-            except Exception as e:
-                # Speculative voice-chat generation raised: record the failed voice
-                # turn (pinned standard) before re-raising, so the error exit audits
-                # like the others (cross-review correctness H). FIX 2: a rate/session-
-                # limit cap emits an honest spoken line instead of silence — voice is a
-                # transport too, and this was the exact 2026-07-12 glasses failure.
-                spec_failed = _honest_reply_for_failure(e)
-                _record_turn_failure(
-                    record_turn, config, text, started, e,
-                    classifier_intent="chat", tier=DEFAULT_TIER,
-                    emitted_reply=spec_failed,
-                )
-                if spec_failed is None:
-                    raise
-            finally:
-                if escalate_ack is None:
-                    # Escalation hands the throwaway thread to the launcher's
-                    # background tail instead (it discards after the action
-                    # lands); every other exit discards it right here.
-                    _discard_speculative()
-            if spec_failed is not None:
-                # The honest rate-limit line IS spoken by the pipeline.
-                _face(face_push, "speaking", spec_failed)
-                return spec_failed
-            if escalate_ack is not None:
-                log.info(
-                    "voice chat handoff — escalating to action | thread=%s",
-                    real_configurable.get("thread_id"),
-                )
-                return _launch_background_action(
-                    escalate_ack, escalated=True, wait_spec=False
-                )
-            elapsed = time.monotonic() - started
-            timed_out = elapsed > rails.wall_clock_s
-            timeout_msg = (
-                f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
-                if timed_out else None
-            )
-            # Voice is pinned to standard (ChannelPolicy) — record that, not the
-            # router's ignored tier hint. config carries the REAL thread_id, so
-            # the row is a 'voice' turn even though generation ran on the throwaway.
-            _fire_turn_record(
-                record_turn, config, text, int(elapsed * 1000),
-                classifier_intent="chat",
-                tier=DEFAULT_TIER,
-                raw_reply=reply,
-                emitted_reply=reply,
-                messages=[reply_message],
-                extra_degraded=["wall_clock_exceeded"] if timed_out else None,
-                error=timeout_msg,
-            )
-            if timed_out:
-                raise TurnTimeout(timeout_msg)
-            # Off-hot-path content retag: the human turn just landed on the REAL
-            # person-keyed thread tagged fail-closed 'private'. If a judge is wired and
-            # the content is general, relax it to 'public' so this voice line carries
-            # into the owner's public rooms (a private thing stays private). Same
-            # daemon-thread, zero-latency contract as the DM paths — mirrors non-voice.
             _reclassify_if_needed(
-                graph, config, human_id, text, reply,
+                graph, config, human_id, text, final,
                 content_privacy_classifier, human_privacy,
             )
-            # The pipeline TTS speaks this return value; the pusher's estimate
-            # settles her back to the reply's mood-idle when the words run out.
-            _face(face_push, "speaking", reply)
-            return reply
 
-        # Action: the ack goes out NOW; the tool loop finishes in the background
-        # (the shared launcher above). Best-effort cancel of the speculative chat
-        # call — if it already started (fake models finish instantly; real ones
-        # usually haven't begun streaming), it burns tokens into the throwaway
-        # thread and gets deleted by the launcher's tail. Its text can never
-        # reach the real thread on this path.
-        chat_cancelled = chat_future.cancel()
-        return _launch_background_action(
-            decision.ack, escalated=False, wait_spec=not chat_cancelled
+            # Audit — off the hot path by construction (the caller got the ack
+            # long ago). emitted_reply is the ACK the caller actually heard;
+            # raw_reply is the action's real outcome.
+            degraded = ["action_failed"] if failed else list(gate_degraded or [])
+            if escalated:
+                degraded.append(ESCALATED_MARKER)
+            _fire_turn_record(
+                record_turn, config, text,
+                int((time.monotonic() - started) * 1000),
+                classifier_intent="action",
+                raw_reply=final,
+                emitted_reply=ack,
+                messages=result_messages,
+                extra_degraded=degraded or None,
+                error=final if failed else None,
+            )
+
+        threading.Thread(target=_in_ctx(_complete_action), daemon=True).start()
+        return ack
+
+    decision = router(text)
+    if decision.route == "action":
+        log.info(
+            "voice route decision | thread=%s route=action",
+            real_configurable.get("thread_id"),
         )
-    finally:
-        # Never block the reply on stragglers — the background thread (plain
-        # threading.Thread, not pool-owned) outlives this scope by design.
-        pool.shutdown(wait=False)
+        return _launch_background_action(decision.ack, escalated=False)
+
+    # ---- banter branch: synchronous action-graph turn, single spoken reply ----
+    log.info(
+        "voice route decision | thread=%s route=chat (action graph, synchronous)",
+        real_configurable.get("thread_id"),
+    )
+    _face(face_push, "working")
+    gate_degraded: list[str] = []
+    try:
+        # NO spoken_ack in config: that's the signal (factory.act) to style the
+        # reply for voice banter instead of arming the ack-consistency overlay.
+        result = action_graph.invoke(
+            {"messages": _action_history_seed(graph, real_configurable, text)},
+            config,
+        )
+        result_messages = result["messages"]
+        reply = _strip_handoff(_reply_text(result_messages[-1])) or VOICE_EMPTY_REPLY
+        # Effectful-claim postcondition (the 2026-07-25 22:08 fabrication class,
+        # narrowed per cross-review): a ZERO-tool reply claiming an externally
+        # effectful act gets one bounce with the same correction the action gate
+        # uses; still claiming tool-free -> emit but mark for the audit trail.
+        if not extract_tool_calls(result_messages) and _EFFECTFUL_CLAIM_RE.search(reply):
+            log.info("voice banter effectful-claim gate: zero tools — bouncing once")
+            retry_messages = [
+                *result_messages, HumanMessage(content=ACTION_NO_TOOL_CORRECTION),
+            ]
+            result = action_graph.invoke({"messages": retry_messages}, config)
+            result_messages = result["messages"]
+            reply = _strip_handoff(_reply_text(result_messages[-1])) or VOICE_EMPTY_REPLY
+            if not extract_tool_calls(result_messages) and _EFFECTFUL_CLAIM_RE.search(reply):
+                log.info(
+                    "voice banter effectful-claim gate: STILL claiming with zero "
+                    "tools — emitting with the %s marker", NO_TOOL_ACTION_MARKER,
+                )
+                gate_degraded = [NO_TOOL_ACTION_MARKER]
+    except Exception as e:
+        # A rate/session-limit cap gets the honest in-voice line (the 2026-07-12
+        # empty-glasses fix); anything else records the failure and re-raises.
+        honest = _honest_reply_for_failure(e)
+        _record_turn_failure(
+            record_turn, config, text, started, e,
+            classifier_intent="chat", tier=DEFAULT_TIER,
+            emitted_reply=honest,
+        )
+        if honest is None:
+            raise
+        # The user HEARS this line — so the thread must carry it too, exactly
+        # like the background path's honest failures (cross-review finding 4:
+        # a spoken reply the next turn's model can't see is a continuity hole).
+        graph.update_state(
+            {"configurable": real_configurable},
+            {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=honest)]},
+            as_node="chat",
+        )
+        _face(face_push, "speaking", honest)
+        return honest
+
+    # The action graph has no checkpointer — the turn lands on the REAL thread
+    # here, exactly one human + one assistant message (cross-review history
+    # invariant: a banter turn must never produce a reply AND a follow-up).
+    graph.update_state(
+        {"configurable": real_configurable},
+        {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=reply)]},
+        as_node="chat",
+    )
+
+    elapsed = time.monotonic() - started
+    timed_out = elapsed > rails.wall_clock_s
+    timeout_msg = (
+        f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
+        if timed_out else None
+    )
+    # Voice banter stays recorded as intent=chat (the router's honest verdict);
+    # the graph it ran on is an implementation detail the audit needn't rename.
+    _fire_turn_record(
+        record_turn, config, text, int(elapsed * 1000),
+        classifier_intent="chat",
+        tier=DEFAULT_TIER,
+        raw_reply=reply,
+        emitted_reply=reply,
+        messages=result_messages,
+        extra_degraded=(gate_degraded + (["wall_clock_exceeded"] if timed_out else [])) or None,
+        error=timeout_msg,
+    )
+    if timed_out:
+        # Late but REAL: the reply exists and is already in history, so return
+        # it (the pipeline may still be listening) instead of raising into a
+        # 500 — a raise here would leave the audit claiming an emitted reply
+        # nobody heard and her face stuck on 'working' (cross-review finding 3).
+        log.warning("voice banter turn exceeded wall clock: %s", timeout_msg)
+    _reclassify_if_needed(
+        graph, config, human_id, text, reply,
+        content_privacy_classifier, human_privacy,
+    )
+    # The pipeline TTS speaks this return value; the pusher's estimate settles
+    # her back to the reply's mood-idle when the words run out.
+    _face(face_push, "speaking", reply)
+    return reply

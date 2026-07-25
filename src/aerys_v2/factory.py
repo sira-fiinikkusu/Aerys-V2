@@ -835,6 +835,27 @@ VOICE_ACK_OVERLAY = (
 )
 
 
+# Appended to the action graph's system prompt for a VOICE turn with NO spoken
+# ack — the voice-always-action banter branch (owner's 2026-07-25 simplification:
+# voice never runs the chat graph; conversational turns run HERE, tools in hand).
+# Two jobs: keep her voice-persona intact on a tool-armed graph (concise,
+# ElevenLabs v3 tags — the chat node's voice styling, minus its handoff-marker
+# instruction, which must never leak from this graph), and bias against
+# unnecessary tool use so banter stays banter (cross-review note: tool-armed
+# graphs drift procedural without a behavioral hint).
+VOICE_BANTER_OVERLAY = (
+    "This is a VOICE conversation. Keep replies concise and speakable. Weave "
+    "in ElevenLabs v3 emotion tags — [warmly], [softly], [playfully], "
+    "[thoughtfully] — where they fit the feeling; the speech engine performs "
+    "them, listeners never hear the bracket text. Their words reach you via "
+    "speech-to-text and can be misheard — treat a garbled-seeming line with a "
+    "grain of salt. You have your tools in hand: use one when the request "
+    "actually needs it (a device, a message, a search, a timer), and just "
+    "talk when it doesn't — most conversation needs no tool at all. Never "
+    "claim you did something a tool didn't actually do."
+)
+
+
 def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
     """The tool-turn model: ALWAYS metered API, tools bound (Option C, ratified).
 
@@ -885,9 +906,14 @@ def build_action_graph(
         # because on that path the ack was already spoken and no reply channel
         # exists for a question.
         spoken_ack = (config.get("configurable") or {}).get("spoken_ack")
-        ack_block = (
-            f"\n\n{VOICE_ACK_OVERLAY.format(ack=spoken_ack)}" if spoken_ack else ""
-        )
+        if spoken_ack:
+            ack_block = f"\n\n{VOICE_ACK_OVERLAY.format(ack=spoken_ack)}"
+        elif identity.get("voice"):
+            # Voice-always-action banter branch: no ack was spoken (synchronous
+            # single-reply turn) — style the reply for voice instead.
+            ack_block = f"\n\n{VOICE_BANTER_OVERLAY}"
+        else:
+            ack_block = ""
         # Identity facts for the action path (2026-07-03 live gap): "does the
         # car have enough charge to get to Tampa FROM HOME?" routed here, the
         # tool read the battery fine, but this prompt had no profile block —
