@@ -27,22 +27,22 @@ class FakeWorld:
         self.states = states or {}
         self.panel_calls: list[tuple[str, dict]] = []
 
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.startswith("/api/states/"):
+            entity = path.split("/api/states/")[1]
+            if entity not in self.states:
+                return httpx.Response(404)
+            return httpx.Response(200, json={"state": self.states[entity]})
+        if path in ("/state", "/display"):
+            import json
+
+            self.panel_calls.append((path, json.loads(request.content)))
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
     def client(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            path = request.url.path
-            if path.startswith("/api/states/"):
-                entity = path.split("/api/states/")[1]
-                if entity not in self.states:
-                    return httpx.Response(404)
-                return httpx.Response(200, json={"state": self.states[entity]})
-            if path in ("/state", "/display"):
-                import json
-
-                self.panel_calls.append((path, json.loads(request.content)))
-                return httpx.Response(200, json={})
-            return httpx.Response(404)
-
-        return httpx.Client(transport=httpx.MockTransport(handler))
+        return httpx.Client(transport=httpx.MockTransport(self.handle))
 
 
 def watcher(world, **kwargs):
@@ -133,6 +133,92 @@ def test_dead_panel_never_raises():
     w = watcher(DeadPanelWorld({OCC: "off", L1: "off", L2: "off"}))
     w.tick()  # no raise = fail-open held; state machine still advanced
     assert w.asleep is True
+
+
+class HealthWorld(FakeWorld):
+    """FakeWorld plus a panel /health + /reboot surface.
+
+    frames advance by 100 per read while `advancing`; a /reboot flips
+    `advancing` True (the wedge cleared by a restart)."""
+
+    def __init__(self, states=None, *, player="playing", display=True, advancing=True):
+        super().__init__(states)
+        self.player = player
+        self.display = display
+        self.advancing = advancing
+        self.frames = 1000
+        self.reboots = 0
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/health":
+            if self.advancing:
+                self.frames += 100
+            return httpx.Response(200, json={
+                "ok": True, "player": self.player, "state": "neutral_idle",
+                "frames": self.frames, "display": self.display,
+            })
+        if path == "/reboot":
+            self.reboots += 1
+            self.advancing = True
+            return httpx.Response(200, text="ok — rebooting\n")
+        return super().handle(request)
+
+
+def test_wake_verify_reboots_a_wedged_panel_and_rewakes_her():
+    # display claims on, player claims playing, frames frozen = the sabbatical
+    world = HealthWorld({OCC: "on"}, advancing=False)
+    w = watcher(world)
+    w.asleep = True
+    w.tick()
+    assert world.reboots == 1
+    # after the reboot she gets display-on + idle re-pushed
+    assert world.panel_calls[-2:] == [
+        ("/display", {"on": True}),
+        ("/state", {"state": IDLE_STATE}),
+    ]
+
+
+def test_wake_verify_trusts_wake_when_health_is_unknowable():
+    # FakeWorld has no /health (old firmware) — wake must not reboot-loop
+    world = FakeWorld({OCC: "on"})
+    w = watcher(world)
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False
+    assert all(path != "/reboot" for path, _ in world.panel_calls)
+
+
+def test_daytime_wedge_needs_three_stalled_ticks_then_reboots():
+    world = HealthWorld({OCC: "on"}, advancing=False)
+    w = watcher(world)
+    for _ in range(3):
+        w.tick()
+    assert world.reboots == 0  # strikes 0,1,2 — still patient
+    w.tick()
+    assert world.reboots == 1  # third stalled comparison = reboot
+
+
+def test_stopped_player_never_counts_as_a_wedge():
+    # player "stopped" = an OTA in flight or a deliberate stop — a reboot
+    # here would corrupt the push. Frames frozen is EXPECTED then.
+    world = HealthWorld({OCC: "on"}, player="stopped", advancing=False)
+    w = watcher(world)
+    for _ in range(6):
+        w.tick()
+    assert world.reboots == 0
+
+
+def test_reboot_cooldown_prevents_a_reboot_loop():
+    world = HealthWorld({OCC: "on"}, advancing=False)
+    w = watcher(world)
+    for _ in range(4):
+        w.tick()
+    assert world.reboots == 1
+    world.advancing = False  # it wedges AGAIN right after recovering
+    for _ in range(6):
+        w.tick()
+    assert world.reboots == 1  # within cooldown — no reboot-looping her
 
 
 def test_arming_requires_all_three_halves():
