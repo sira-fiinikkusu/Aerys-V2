@@ -25,6 +25,8 @@ from aerys_v2.workers.capability_requests import (
     _complaint_signals,
     _error_signals,
     classify_turn,
+    TERMINAL_STATUSES,
+    format_active_gaps,
     format_gaps,
     read_gaps,
     run_gap_mining,
@@ -519,3 +521,33 @@ def test_format_gaps_fences_and_badges_provenance():
 
 def test_format_gaps_empty():
     assert "(none)" in format_gaps([])
+
+
+def _row(id, status, origin_class="error"):
+    return {"id": id, "created_at": T0, "signal_kind": "degraded",
+            "origin_class": origin_class, "required_tier": "standard",
+            "status": status, "how_often": 1,
+            "first_seen_at": T0, "last_seen_at": T0, "summary": f"gap {id}"}
+
+
+def test_format_active_gaps_hides_terminal_with_honest_footer():
+    rows = [_row(1, "open"), _row(2, "built"), _row(3, "wont_fix"),
+            _row(4, "building"), _row(5, "rejected")]
+    out = format_active_gaps(rows)
+    assert "gap 1" in out and "gap 4" in out                 # active stay
+    assert "gap 2" not in out and "gap 3" not in out and "gap 5" not in out
+    assert "(3 resolved/declined gaps hidden" in out         # honest footer
+
+
+def test_format_active_gaps_no_footer_when_nothing_hidden():
+    out = format_active_gaps([_row(1, "open")])
+    assert "hidden" not in out
+
+
+def test_format_active_gaps_all_terminal_reads_none():
+    out = format_active_gaps([_row(1, "built")])
+    assert "(none)" in out and "(1 resolved/declined gap hidden" in out
+
+
+def test_terminal_statuses_are_exactly_the_closed_set():
+    assert TERMINAL_STATUSES == {"built", "rejected", "wont_fix"}

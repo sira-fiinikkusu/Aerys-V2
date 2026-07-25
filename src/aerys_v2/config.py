@@ -142,6 +142,15 @@ class Settings(BaseSettings):
     # HERE, not web search (the Rotonda-Switzerland incident, 2026-07-19).
     ha_weather_entity: str = "weather.forecast_home"
 
+    # ---- KAEL DESK LINE (gap #14 — her own ask, 2026-07-25) ------------------
+    # Kael's channel-server endpoint for real-time pings (e.g.
+    # "http://<host>:8399/aerys/message") + her lane's bearer token. Both set =
+    # the message_kael tool arms; either None = tool absent, zero cost — same
+    # arming pattern as every optional half. Address and token stay in the
+    # environment: a LAN IP and a credential, and this repo is public.
+    kael_desk_url: str | None = None
+    kael_desk_token: SecretStr | None = None
+
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
     # the brain mirrors each turn's phase onto her face: working while tools

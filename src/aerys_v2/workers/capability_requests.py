@@ -573,6 +573,30 @@ def read_gaps(conn: Any, *, status: str | None = None, limit: int = 50) -> list[
     return [dict(zip(GAPS_COLUMNS, r)) for r in rows]
 
 
+# Statuses that mean "this gap's story is over" — resolved (built) or declined
+# (rejected / wont_fix). The owner's /gaps view hides these by default (owner
+# report 2026-07-25: closed gaps kept cluttering the board); the workers `gaps`
+# CLI still lists every status for the full-museum view.
+TERMINAL_STATUSES = frozenset({"built", "rejected", "wont_fix"})
+
+
+def format_active_gaps(rows: list[dict]) -> str:
+    """The owner's /gaps rendering: active rows only, with an honest footer
+    naming how many closed rows are hidden (so "board looks short" never reads
+    as "data missing"). Pure over rows — the DB read stays unfiltered so the
+    hidden-count is real."""
+    active = [r for r in rows if r["status"] not in TERMINAL_STATUSES]
+    text = format_gaps(active)
+    hidden = len(rows) - len(active)
+    if hidden:
+        plural = "s" if hidden != 1 else ""
+        text += (
+            f"\n  ({hidden} resolved/declined gap{plural} hidden — "
+            f"full board: workers `gaps` CLI)"
+        )
+    return text
+
+
 def format_gaps(rows: list[dict]) -> str:
     """Render the /gaps read for the owner — fenced, provenance-badged.
 

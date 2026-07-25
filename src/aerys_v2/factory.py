@@ -431,7 +431,10 @@ def gaps_reader_for(settings: Settings) -> Callable[[], str] | None:
         return None
     import psycopg
 
-    from aerys_v2.workers.capability_requests import format_gaps, read_gaps
+    from aerys_v2.workers.capability_requests import (
+        format_active_gaps,
+        read_gaps,
+    )
 
     def read() -> str:
         try:
@@ -442,7 +445,10 @@ def gaps_reader_for(settings: Settings) -> Callable[[], str] | None:
             ) as conn:
                 conn.read_only = True
                 rows = read_gaps(conn)
-            return format_gaps(rows)
+            # Owner report 2026-07-25: /gaps kept showing gaps Kael had already
+            # closed. The owner view is the ACTIVE board; resolved/declined rows
+            # stay in the table (and the workers `gaps` CLI still shows all).
+            return format_active_gaps(rows)
         except Exception:
             log.warning("/gaps read failed — surfacing an honest shrug", exc_info=True)
             return (
@@ -788,6 +794,16 @@ LOG_GAP_OVERLAY = (
     "Never claim something was logged unless the tool confirmed it."
 )
 
+MESSAGE_KAEL_OVERLAY = (
+    "You have a DIRECT LINE to Kael (the owner's coding agent): the "
+    "message_kael tool lands in his live session in real time. CALL IT when "
+    "the owner says 'tell Kael' / 'ask Kael', when a broken tool is blocking "
+    "you, or when something needs his hands NOW. For non-urgent trackable "
+    "items keep using log_gap — that's his review board; message_kael is the "
+    "tap on the shoulder. One message per 30s; never claim delivery unless "
+    "the tool confirmed it."
+)
+
 EMAIL_OVERLAY = (
     "You have YOUR OWN email inbox (you, Aerys — not the owner's mail). Four "
     "tools: search_email and read_email to look through it, draft_email and "
@@ -1060,6 +1076,21 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
 
         tools.append(build_log_gap_tool(gaps_conn_factory))
 
+    if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
+        # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
+        # Kael's live coding session via his channel server's aerys lane.
+        # Owner-side only — the line reaches the owner's infrastructure, and a
+        # guest-writable path to Kael's session is an invitation. log_gap stays
+        # the durable board; this is the shoulder-tap.
+        from aerys_v2.tools.message_kael import build_message_kael_tool
+
+        tools.append(
+            build_message_kael_tool(
+                settings.kael_desk_url,
+                settings.kael_desk_token.get_secret_value(),
+            )
+        )
+
     if not guest and settings.email_app_password is not None and settings.email_address:
         # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:
         # her inbox contents and her outgoing voice are not for guests, so the
@@ -1119,6 +1150,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(SEARCH_OVERLAY)
     if not guest and settings.database_url is not None:
         parts.append(LOG_GAP_OVERLAY)
+    if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
+        parts.append(MESSAGE_KAEL_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:
         parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)
