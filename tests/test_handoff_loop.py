@@ -481,3 +481,32 @@ def test_claim_gate_leaves_device_small_talk_alone():
               thread_id="t-smalltalk", router=chat_router, action_graph=stub)
     assert out == "They turned off because the motion timer expired."
     assert stub.seeds == []
+
+
+# ---- spoken-name variants (Chris, 2026-07-28) ------------------------------
+# STT does not reliably hear "Kael"; a literal match misses on the voice path
+# exactly when the request is spoken.
+
+
+@pytest.mark.parametrize("text", [
+    "tell kayle the deploy is done",
+    "ask cale to look at the lens bug",
+    "let kale know I'm heading out",
+    "message kail about the crash",
+    "send cael the logs",
+    "tell kael hi",
+])
+def test_router_hears_garbled_kael_as_an_action(text):
+    from aerys_v2.router import plausibly_messages_kael
+    assert plausibly_messages_kael(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "how do I roast kale in the oven",
+    "I had a kale salad for lunch",
+    "what temperature for kale chips",
+    "add kale to the shopping list",
+])
+def test_the_vegetable_is_still_a_vegetable(text):
+    from aerys_v2.router import plausibly_messages_kael
+    assert plausibly_messages_kael(text) is False

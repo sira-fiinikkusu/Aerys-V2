@@ -143,10 +143,25 @@ _GAP_MARKERS = (
 # That is this file's own documented law (see _EMAIL_MARKERS): a tool the
 # router can't route to does not exist, no matter how armed the action graph
 # is. Same over-trigger bias — a needless action hop costs one tool refusal.
-_KAEL_MARKERS = (
-    "tell kael", "ask kael", "message kael", "ping kael", "let kael know",
-    "send kael", "kael know", "reach kael", "for kael", "to kael",
-)
+# ⚠️ SPOKEN-NAME VARIANTS (Chris, 2026-07-28): speech-to-text does NOT reliably
+# hear "Kael" — it lands as kayle / cale / kale / kail / cael. A literal "kael"
+# match therefore misses on the VOICE path exactly when the ask is spoken, which
+# is most of them. Markers are phrase-anchored ("tell <name>"), so the vegetable
+# collision is harmless: "how do I roast kale" carries no request verb.
+_KAEL_NAMES = ("kael", "kayle", "cale", "kale", "kail", "cael", "kaehl")
+_KAEL_VERBS = ("tell", "ask", "message", "ping", "send", "reach", "text")
+# "kale" is also a vegetable, so it earns a name reading ONLY behind a request
+# verb ("tell kale ..."). The loose forms — "for X", "to X", "X know" — stay on
+# spellings that are nobody's grocery list ("what temperature for kale chips"
+# is a recipe question, and must route like one).
+_KAEL_UNAMBIGUOUS = tuple(n for n in _KAEL_NAMES if n != "kale")
+_KAEL_MARKERS = tuple(
+    f"{verb} {name}" for verb in _KAEL_VERBS for name in _KAEL_NAMES
+) + tuple(
+    phrase.format(name=name)
+    for name in _KAEL_UNAMBIGUOUS
+    for phrase in ("let {name} know", "{name} know", "for {name}", "to {name}")
+) + ("let kale know",)   # explicit enough to be safe even for the vegetable
 
 # Music shapes for the degraded path — the 2026-07-18 addition (the music tool's
 # wiring, same day it shipped: a tool the router can't route to does not exist).
@@ -215,6 +230,9 @@ decide which path handles it:
   action path. "Tell Kael the deploy is done", "ask Kael to look at the lens
   bug", "let Kael know I'm heading out" are ALL "action". Routing one of these
   to chat is how a turn ends up SAYING it reached him without reaching him.
+  Speech-to-text mangles his name constantly — "kayle", "cale", "kale",
+  "kail", "cael" are all KAEL when they appear where a person's name belongs
+  ("tell kale I'm running late" is a message for Kael, not about a vegetable).
 - "chat": pure conversation — feelings, memories, opinions about the world,
   timeless general knowledge, planning that needs no device reading, no
   attachment, and no live lookup. "Do you think cats love us?" is chat; "do you

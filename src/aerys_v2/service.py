@@ -1161,7 +1161,7 @@ _CLAIM_VERBS = (
     r"(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|notified|"
     r"logged|filed|recorded|scheduled|queued|posted|shared|"
     r"passed (?:it |that |them )?(?:along|on)|"
-    r"let (?:kael|him|her|them) know|got it to \w+)"
+    r"let (?:kael|kayle|cale|kale|kail|cael|him|her|them) know|got it to \w+)"
 )
 # What a BARE (subject-less) completion claim looks like: the verb takes a
 # pronoun/particle object or simply ends. Narration takes a noun instead —

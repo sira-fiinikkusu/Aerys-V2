@@ -60,7 +60,10 @@ def build_message_kael_tool(url: str, token: str, client: httpx.Client | None = 
         CALL THIS TOOL when something needs Kael's attention NOW: the owner
         says "tell Kael ..." / "ask Kael ...", a tool of yours is broken and
         blocking you, you notice something wrong with the house systems he
-        maintains, or a task clearly needs his hands. For non-urgent feature
+        maintains, or a task clearly needs his hands. Speech-to-text garbles
+        his name constantly — "kayle", "cale", "kale", "kail", "cael" in the
+        place a person's name belongs ALL mean Kael, so "tell kale I'm running
+        late" is a message for him, not a note about a vegetable. For non-urgent feature
         requests, limitations, and trackable work items use log_gap instead —
         that's the durable board he reviews; this is the tap on the shoulder.
 
