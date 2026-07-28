@@ -17,12 +17,14 @@ import threading
 import json
 import time
 
+import pytest
+
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
 from aerys_v2.factory import build_graph
 from aerys_v2.router import FALLBACK_ACK, HANDOFF_MARKER, RouteDecision
-from aerys_v2.service import VOICE_EMPTY_REPLY
+from aerys_v2.service import VOICE_EMPTY_REPLY, claims_effect_done
 from aerys_v2.service import HANDOFF_UNARMED_REPLY, ask
 
 CHRIS = {"user_id": "person-1", "display_name": "Chris"}
@@ -331,3 +333,151 @@ def test_voice_action_human_turn_lands_at_ack_time():
     release.set()
     msgs = wait_for_messages(graph, "voice:h6", 2)
     assert [m.content for m in msgs] == ["kill the lights", "finally done"]
+
+
+# ---- THE CLAIM GATE (gap #15, owner-approved 2026-07-28) --------------------
+# Text still routes through a tool-less chat node, so the 2026-07-25 fabrication
+# ("Got it to Kael — sent", zero tools) can still happen there. The gate turns
+# that claim into a real action instead of a scolding.
+
+
+def test_claim_gate_escalates_a_toolless_completion_claim():
+    graph = build_graph(fake_model("Got it to Kael — sent."), soul="s")
+    stub = SeedCapturingActionGraph("Delivered — Kael has it now.")
+    out = ask(graph, "tell kael the deploy is done", identity=CHRIS, thread_id="t-claim",
+              router=chat_router, action_graph=stub)
+    # the user gets the REAL outcome, not the unbacked claim
+    assert out == "Delivered — Kael has it now."
+    msgs = graph.get_state({"configurable": {"thread_id": "t-claim"}}).values["messages"]
+    contents = [m.content for m in msgs]
+    assert "Got it to Kael — sent." not in contents  # the lie never survives in history
+    assert contents == ["tell kael the deploy is done", "Delivered — Kael has it now."]
+
+
+def test_claim_gate_marks_the_audit_row():
+    rec = Recorder()
+    graph = build_graph(fake_model("Logged that for you."), soul="s")
+    ask(graph, "log a gap about the glasses", identity=CHRIS, thread_id="t-claim2",
+        router=chat_router, action_graph=SeedCapturingActionGraph(), record_turn=rec)
+    rows = rec.wait(1)
+    action_row = next(r for r in rows if r.get("classifier_intent") == "action")
+    degraded = json.loads(action_row["degraded"])
+    assert "claim_gate_escalated" in degraded   # countable, distinct from...
+    assert "escalated_from_chat" in degraded    # ...the model raising its own hand
+
+
+def test_claim_gate_ignores_ordinary_reminiscing():
+    """The user must have ASKED for something done. Talking ABOUT past actions
+    is not a fabrication — this is the false-positive the gate must never fire on."""
+    graph = build_graph(fake_model("Yeah, you turned the lights off before bed."), soul="s")
+    stub = SeedCapturingActionGraph("(action path — must not run)")
+    out = ask(graph, "do you remember last night?", identity=CHRIS, thread_id="t-claim3",
+              router=chat_router, action_graph=stub)
+    assert out == "Yeah, you turned the lights off before bed."
+    assert stub.seeds == []  # never escalated
+
+
+def test_claim_gate_ignores_an_honest_chat_reply():
+    """An action-shaped ask answered honestly (no completion claim) stays chat."""
+    graph = build_graph(
+        fake_model("I can't reach the lights from this conversation."), soul="s"
+    )
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, "turn off the office lights", identity=CHRIS, thread_id="t-claim4",
+              router=chat_router, action_graph=stub)
+    assert out == "I can't reach the lights from this conversation."
+    assert stub.seeds == []
+
+
+def test_claim_gate_no_op_without_an_action_graph():
+    """Chat-only deployments (dev boxes) have nothing to escalate TO — the reply
+    stands rather than crashing the turn."""
+    graph = build_graph(fake_model("Sent it."), soul="s")
+    out = ask(graph, "send that to kael", identity=CHRIS, thread_id="t-claim5")
+    assert out == "Sent it."
+
+
+def test_claim_gate_does_not_double_stamp_a_model_handoff():
+    """A model-raised handoff already escalates. The gate must not ALSO claim
+    credit — the audit row should show the model raised its hand, not the gate.
+    (Seed count is NOT the check: a zero-tool action stub legitimately gets one
+    honesty-gate bounce, which is a re-invoke of the same single hop.)"""
+    rec = Recorder()
+    graph = build_graph(fake_model(f"{HANDOFF_MARKER} On it — sent."), soul="s")
+    out = ask(graph, "send that to kael", identity=CHRIS, thread_id="t-claim6",
+              router=chat_router, action_graph=SeedCapturingActionGraph("done"),
+              record_turn=rec)
+    assert out == "done"
+    rows = rec.wait(1)
+    action_row = next(r for r in rows if r.get("classifier_intent") == "action")
+    degraded = json.loads(action_row["degraded"])
+    assert "escalated_from_chat" in degraded
+    assert "claim_gate_escalated" not in degraded
+
+
+# ---- claim-detector precision (cross-review 2026-07-28) ---------------------
+# Every string below was named in review as a way normal conversation could be
+# mistaken for a fabrication. Honest refusals and narration must NEVER escalate.
+
+
+@pytest.mark.parametrize("reply", [
+    "Nothing was sent — I don't have a way to reach him from here.",
+    "I haven't logged that yet.",
+    "I didn't send it; I can't from this conversation.",
+    "The email was forwarded yesterday, before we talked.",   # third-party narration
+    "They turned off because the motion timer expired.",       # explaining, not claiming
+    "You turned the lights off before bed.",                   # about HIM
+    "I can't send that — no tool on this path.",
+    "I'm not able to log it right now, unfortunately.",
+    # round-2 review: subject-less NARRATION takes a noun, not a pronoun
+    "Sent messages appear in the log.",
+    "Forwarded mail lands in that folder.",
+    "Logged entries pile up over time.",
+])
+def test_claim_detector_ignores_honest_and_narrated_text(reply):
+    assert claims_effect_done(reply) is False
+
+
+@pytest.mark.parametrize("reply", [
+    "Got it to Kael — sent.",                # the actual 2026-07-25 fabrication
+    "Sent it over to Kael just now.",
+    "I've logged that for you.",
+    "I let Kael know.",
+    "Passed it along.",
+    "Done.",
+    "I just turned the office lights off for you.",
+    "I sent it, but I couldn't reach the second one.",  # negation AFTER the claim
+    # round-2 review: timer confirmations in either voice
+    "Timer set for 5 minutes.",
+    "I set your alarm.",
+    "Logged that for you.",
+])
+def test_claim_detector_catches_real_completion_claims(reply):
+    assert claims_effect_done(reply) is True
+
+
+def test_claim_gate_does_not_escalate_an_honest_refusal_on_an_action_ask():
+    """The highest-stakes false positive: she correctly says she CAN'T, on a
+    request that is genuinely action-shaped. Escalating here would punish the
+    exact behavior the honesty work exists to produce."""
+    graph = build_graph(
+        fake_model("I can't reach the lights from this conversation."), soul="s"
+    )
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, "turn off the office lights please", identity=CHRIS,
+              thread_id="t-honest", router=chat_router, action_graph=stub)
+    assert out == "I can't reach the lights from this conversation."
+    assert stub.seeds == []
+
+
+def test_claim_gate_leaves_device_small_talk_alone():
+    """Review's example: an action-shaped WORD in the question plus a matching
+    verb in an explanatory answer must not become an action turn."""
+    graph = build_graph(
+        fake_model("They turned off because the motion timer expired."), soul="s"
+    )
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, "why did the office lights turn off?", identity=CHRIS,
+              thread_id="t-smalltalk", router=chat_router, action_graph=stub)
+    assert out == "They turned off because the motion timer expired."
+    assert stub.seeds == []

@@ -136,6 +136,18 @@ _GAP_MARKERS = (
     "for the coding agent", "log it as a gap",
 )
 
+# Kael-line shapes — the message_kael wiring, retrofitted 2026-07-28 after the
+# gap #15 dig showed it was MISSING: the tool shipped 7/25 with no router
+# vocabulary, so "tell Kael the deploy is done" routed to chat, and the
+# tool-less chat node answered "Got it to Kael — sent" having sent nothing.
+# That is this file's own documented law (see _EMAIL_MARKERS): a tool the
+# router can't route to does not exist, no matter how armed the action graph
+# is. Same over-trigger bias — a needless action hop costs one tool refusal.
+_KAEL_MARKERS = (
+    "tell kael", "ask kael", "message kael", "ping kael", "let kael know",
+    "send kael", "kael know", "reach kael", "for kael", "to kael",
+)
+
 # Music shapes for the degraded path — the 2026-07-18 addition (the music tool's
 # wiring, same day it shipped: a tool the router can't route to does not exist).
 # Same over-trigger-toward-action bias: a needless action hop costs a tool
@@ -147,6 +159,13 @@ _MUSIC_MARKERS = (
     "pause", "skip this", "next track", "next song", "previous track",
     "turn it up", "turn it down", "volume",
     "what's playing", "whats playing", "now playing",
+)
+
+# Timer shapes — the timer tool is armed on the action path but had no
+# fallback vocabulary (cross-review finding, 2026-07-28): "set a 5 minute
+# timer" -> chat -> "Timer set" was reachable.
+_TIMER_MARKERS = (
+    "timer", "alarm", "remind me", "reminder", "wake me", "set a countdown",
 )
 
 _ROUTER_INSTRUCTIONS = """\
@@ -190,6 +209,12 @@ decide which path handles it:
   currently playing. "Play some daft punk", "put on my focus playlist",
   "pause the music", "next song", "turn it up" are ALL "action" — the music
   tool lives only on the action path.
+  REACHING KAEL is "action" too: when the user asks you to tell/ask/message/
+  ping Kael (the owner's coding agent) anything, or to pass something along to
+  him — the message_kael tool that actually delivers it lives only on the
+  action path. "Tell Kael the deploy is done", "ask Kael to look at the lens
+  bug", "let Kael know I'm heading out" are ALL "action". Routing one of these
+  to chat is how a turn ends up SAYING it reached him without reaching him.
 - "chat": pure conversation — feelings, memories, opinions about the world,
   timeless general knowledge, planning that needs no device reading, no
   attachment, and no live lookup. "Do you think cats love us?" is chat; "do you
@@ -298,20 +323,45 @@ def plausibly_wants_music(text: str) -> bool:
     return any(marker in lowered for marker in _MUSIC_MARKERS)
 
 
-def fallback_decision(text: str) -> RouteDecision:
-    """What we do when the router's answer is unusable: heuristic, biased to action.
+def plausibly_messages_kael(text: str) -> bool:
+    """Degraded-path heuristic: does this text ask her to reach Kael?"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _KAEL_MARKERS)
 
-    Tier is always DEFAULT_TIER here — the degraded path must never spend the
-    rationed deep tier on a guess (fail cheap, same direction as the cap).
+
+def plausibly_sets_a_timer(text: str) -> bool:
+    """Degraded-path heuristic: a timer/alarm/reminder ask."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _TIMER_MARKERS)
+
+
+def plausibly_asks_for_action(text: str) -> bool:
+    """Does this text ask for something DONE (any armed capability)?
+
+    The same union fallback_decision uses, exposed on its own so the text-side
+    claim gate (service.py) can ask "was this turn even an action request?"
+    before treating a completion claim as a fabrication. Keeps ordinary
+    reminiscing — "remember when you turned the lights off?" — out of the gate.
     """
-    if (
+    return (
         plausibly_commands_device(text)
         or plausibly_references_media(text)
         or plausibly_wants_web_search(text)
         or plausibly_wants_email(text)
         or plausibly_logs_a_gap(text)
         or plausibly_wants_music(text)
-    ):
+        or plausibly_messages_kael(text)
+        or plausibly_sets_a_timer(text)
+    )
+
+
+def fallback_decision(text: str) -> RouteDecision:
+    """What we do when the router's answer is unusable: heuristic, biased to action.
+
+    Tier is always DEFAULT_TIER here — the degraded path must never spend the
+    rationed deep tier on a guess (fail cheap, same direction as the cap).
+    """
+    if plausibly_asks_for_action(text):
         return RouteDecision(route="action", ack=FALLBACK_ACK)
     return RouteDecision(route="chat", ack="")
 

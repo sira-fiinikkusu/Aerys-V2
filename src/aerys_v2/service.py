@@ -46,6 +46,7 @@ from aerys_v2.router import (
     HANDOFF_MARKER,
     RouteDecision,
     normalize_tier,
+    plausibly_asks_for_action,
 )
 from aerys_v2.services.content_privacy import (
     CONTENT_PRIVACY_KEY,
@@ -450,6 +451,10 @@ ACTION_NO_TOOL_CORRECTION = (
 # tool — so the pattern (a legit zero-tool action, or a stubborn hallucination that
 # survived the correction) stays visible to the capability loop / forensics.
 NO_TOOL_ACTION_MARKER = "no_tool_action"
+# Set on the ACTION row of a turn the claim gate rescued, so the miner can count
+# how often the tool-less chat node claims work it never did (distinct from
+# chat_handoff, which is the model raising its own hand).
+CLAIM_GATE_MARKER = "claim_gate_escalated"
 
 
 def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) -> str:
@@ -796,6 +801,27 @@ def ask(
             tier_override_source=override_source, extra_degraded=downgrade_marker,
             human_privacy=origin_privacy, human_id=turn_msg_id,
         )
+        claim_escalation = False
+        if not handoff and action_graph is not None and _claims_effect_without_doing_it(
+            text, reply
+        ):
+            # THE CLAIM GATE (gap #15, owner-approved 2026-07-28). The chat model
+            # said it did something while holding no tools. Voice can't reach this
+            # state any more — every voice turn runs the tool-armed graph — but
+            # text still routes through a tool-less chat node, so this is the
+            # remaining door the 7/25 fabrication came through.
+            #
+            # The response is to ESCALATE, not to scold: bouncing a tool-less node
+            # with "call the tool" only teaches it to apologize, whereas the action
+            # graph HAS the tool and will either do the thing or refuse honestly.
+            # Reuses the return loop's machinery verbatim — the checkpointed claim
+            # is replaced by the real outcome, so history never keeps the lie.
+            log.info(
+                "claim gate: tool-less chat reply claimed an effectful act — "
+                "escalating to action | thread=%s", thread_id
+            )
+            handoff = True
+            claim_escalation = True
         if handoff:
             # THE RETURN LOOP (owner design, 2026-07-18): the chat model — the only
             # component that saw full history — says this turn needs hands. Re-run
@@ -816,6 +842,7 @@ def ask(
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 replace_message_id=_last_ai_message_id(graph, config["configurable"]),
                 escalated=True,
+                extra_degraded=[CLAIM_GATE_MARKER] if claim_escalation else None,
             )
         _reclassify_if_needed(
             graph, config, turn_msg_id, text, reply,
@@ -982,6 +1009,7 @@ def _action_turn(
     human_id: str | None = None,
     replace_message_id: str | None = None,
     escalated: bool = False,
+    extra_degraded: list[str] | None = None,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -1022,7 +1050,9 @@ def _action_turn(
         honest = _honest_reply_for_failure(e)
         _record_turn_failure(
             record_turn, config, text, started, e, classifier_intent="action",
-            base_degraded=[ESCALATED_MARKER] if escalated else None,
+            base_degraded=(
+                ([ESCALATED_MARKER] if escalated else []) + list(extra_degraded or [])
+            ) or None,
             emitted_reply=honest,
         )
         if honest is not None:
@@ -1050,6 +1080,7 @@ def _action_turn(
     degraded = list(gate_degraded or [])
     if escalated:
         degraded.append(ESCALATED_MARKER)
+    degraded.extend(extra_degraded or [])
     latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
     _fire_turn_record(
         record_turn, config, text, latency_ms,
@@ -1114,24 +1145,95 @@ def _deliver_followup(
         log.warning("spoken follow-up delivery failed", exc_info=True)
 
 
-# Narrow effectful-claim detector for the voice banter branch (cross-review
-# addition, 2026-07-25): fires ONLY on claims of externally-visible acts a tool
-# performs — sends/logs/schedules/device writes — never on general conversation.
-# False positives cost one bounced model call; false negatives cost a lie, so
-# the verb list leans specific over clever.
-# Spoken when the banter branch's reply strips to nothing (marker-only or empty
-# model output — pathological but a voice channel must never emit silence).
+# ---- effectful-claim detection (voice banter branch + text claim gate) ------
+# Fires ONLY on a first-person, affirmative claim that an externally-visible act
+# is DONE. Three tightenings came out of cross-review (2026-07-28), each closing
+# a way normal conversation could have been mistaken for a fabrication:
+#   - first person only: "the email was forwarded yesterday" is narration, not a
+#     claim about this turn;
+#   - affirmative only: a negation in the run-up ("I haven't sent it", "nothing
+#     was logged") vetoes the match — refusing honestly is the BEHAVIOR WE WANT
+#     and must never be punished by an escalation;
+#   - the vocabulary covers how she actually phrases delivery ("passed it along",
+#     "let Kael know", "Got it to Kael", a bare "Done."), because the gap this
+#     serves was a Kael-relay claim.
+_CLAIM_VERBS = (
+    r"(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|notified|"
+    r"logged|filed|recorded|scheduled|queued|posted|shared|"
+    r"passed (?:it |that |them )?(?:along|on)|"
+    r"let (?:kael|him|her|them) know|got it to \w+)"
+)
+# What a BARE (subject-less) completion claim looks like: the verb takes a
+# pronoun/particle object or simply ends. Narration takes a noun instead —
+# "Sent messages appear in the log", "Forwarded mail lands in that folder" —
+# and must not trip the gate (cross-review round 2, 2026-07-28).
+_CLAIM_TAIL = (
+    r"(?:\s+(?:it|that|this|them|those))?"
+    r"(?:\s+(?:along|over|on|off|through|already|now|just now|for you|"
+    r"to \w+|your way))*"
+    r"\s*(?:[.!?]|$)"
+)
+_CLAIM_PATTERNS = (
+    # "I sent it", "I've already logged that", "I just let Kael know"
+    re.compile(
+        rf"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?{_CLAIM_VERBS}\b",
+        re.I,
+    ),
+    # terse, subject-less: "Sent.", "Sent it over.", "— logged.", "Got it to Kael"
+    re.compile(rf"(?:^|[.!?]\s+|[—-]\s*){_CLAIM_VERBS}{_CLAIM_TAIL}", re.I),
+    # device + timer writes, first person only
+    re.compile(
+        r"\b(?:i|i've|i have)\s+(?:just\s+)?(?:turned|switched|set)\s+"
+        r"(?:it|them|the|a|an|your)\b",
+        re.I,
+    ),
+    # timer/alarm confirmations in either voice ("Timer set", "I set your alarm")
+    re.compile(r"\b(?:timer|alarm|reminder)\s+(?:is\s+)?set\b", re.I),
+    # a bare completion report
+    re.compile(r"^\s*(?:done|all set|taken care of)\b", re.I),
+)
+# Checked in the run-up to a match, not across the whole reply, so "I sent it,
+# but I couldn't reach the second one" still counts as a claim.
+_NEGATION_RE = re.compile(
+    r"\b(?:haven'?t|hasn'?t|hadn'?t|didn'?t|don'?t|doesn'?t|won'?t|can'?t|"
+    r"cannot|couldn'?t|unable|never|not|nothing|no|without|failed|unfortunately)\b",
+    re.I,
+)
+_NEGATION_WINDOW = 45
+
+
+def claims_effect_done(text: str) -> bool:
+    """Does this reply claim, in its own voice, that an effectful act happened?"""
+    if not text:
+        return False
+    for pattern in _CLAIM_PATTERNS:
+        for m in pattern.finditer(text):
+            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+            if not _NEGATION_RE.search(window):
+                return True
+    return False
+
+
 VOICE_EMPTY_REPLY = "Hm — I lost that thought. Ask me again?"
 
-_EFFECTFUL_CLAIM_RE = re.compile(
-    r"\b(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|"
-    r"logged|filed|scheduled|queued|posted|"
-    r"set (?:a |the |your )?(?:timer|alarm|reminder)|"
-    r"turned (?:it |them |the .{1,40}? )?(?:on|off)|"
-    r"switched (?:it |them |the .{1,40}? )?(?:on|off)|"
-    r"(?:started|queued up|put on) (?:the |some |your )?(?:music|song|playlist))\b",
-    re.IGNORECASE,
-)
+def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
+    """Did a TOOL-LESS chat reply claim it performed an effectful act?
+
+    The 2026-07-25 incident, text side: asked to pass something to Kael, the
+    chat-routed turn answered "Got it to Kael — sent" having called nothing.
+    It COULDN'T have called anything: the chat graph carries no tools, so on
+    this path a completion claim is unbacked by construction — there is no
+    tool-call list to check, only the claim itself.
+
+    Both signals are required, and the first is what keeps ordinary talk out of
+    the gate: the user must have actually asked for something DONE (the
+    router's own action heuristics), so reminiscing ("remember when you turned
+    the lights off?") or hypotheticals never trip it — only a real request that
+    the router sent to chat, answered as though it had been carried out.
+    """
+    return bool(
+        plausibly_asks_for_action(user_text) and claims_effect_done(reply)
+    )
 
 
 def _voice_parallel_start(
@@ -1316,7 +1418,7 @@ def _voice_parallel_start(
         # narrowed per cross-review): a ZERO-tool reply claiming an externally
         # effectful act gets one bounce with the same correction the action gate
         # uses; still claiming tool-free -> emit but mark for the audit trail.
-        if not extract_tool_calls(result_messages) and _EFFECTFUL_CLAIM_RE.search(reply):
+        if not extract_tool_calls(result_messages) and claims_effect_done(reply):
             log.info("voice banter effectful-claim gate: zero tools — bouncing once")
             retry_messages = [
                 *result_messages, HumanMessage(content=ACTION_NO_TOOL_CORRECTION),
@@ -1324,7 +1426,7 @@ def _voice_parallel_start(
             result = action_graph.invoke({"messages": retry_messages}, config)
             result_messages = result["messages"]
             reply = _strip_handoff(_reply_text(result_messages[-1])) or VOICE_EMPTY_REPLY
-            if not extract_tool_calls(result_messages) and _EFFECTFUL_CLAIM_RE.search(reply):
+            if not extract_tool_calls(result_messages) and claims_effect_done(reply):
                 log.info(
                     "voice banter effectful-claim gate: STILL claiming with zero "
                     "tools — emitting with the %s marker", NO_TOOL_ACTION_MARKER,
