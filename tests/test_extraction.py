@@ -15,6 +15,8 @@ from aerys_v2.workers.extraction import (
     LEASE_KIND,
     SOURCE_COLUMNS,
     LiveWriteRefused,
+    LlmReply,
+    _unwrap_observations,
     _safe_watermark,
     _trim_tie_boundary,
     _value_text_from_content,
@@ -82,7 +84,13 @@ class FakeConn:
 
 
 class FakeLlm:
-    """Records every (system, user) call, replays canned reply texts."""
+    """Records every (system, user) call, replays canned replies.
+
+    A canned reply may be a plain string — a COMPLETE reply, the common case, so
+    the twenty-odd call sites below stay readable — or an explicit LlmReply when a
+    test needs to say the reply was TRUNCATED. That distinction is load-bearing:
+    truncated holds the watermark, complete-but-unparseable gets recovered.
+    """
 
     def __init__(self, replies):
         self.replies = list(replies)
@@ -90,7 +98,13 @@ class FakeLlm:
 
     def __call__(self, system, user):
         self.calls.append((system, user))
-        return self.replies.pop(0) if self.replies else "[]"
+        reply = self.replies.pop(0) if self.replies else "[]"
+        return reply if isinstance(reply, LlmReply) else LlmReply(reply, False)
+
+
+def cut_off(text):
+    """A reply the API cut off mid-flight (finish_reason != "stop")."""
+    return LlmReply(text, True)
 
 
 def fake_embedder(text):
@@ -228,7 +242,7 @@ def test_parse_failure_on_the_very_first_row_freezes_the_watermark():
         row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raw_chris),
     ])])
     staging = FakeConn([("last_processed_at", [(existing_wm,)])])
-    summary = run_extraction(prod, staging, FakeLlm(["not json at all -- truncated"]), fake_embedder)
+    summary = run_extraction(prod, staging, FakeLlm([cut_off("not json at all -- truncated")]), fake_embedder)
 
     assert not any("v2_memories_staging" in s for s, _ in staging.calls)  # nothing staged
     saves = [(s, p) for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s]
@@ -251,7 +265,7 @@ def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
         row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS, "not json at all -- truncated"])
+    llm = FakeLlm([OBS, OBS, cut_off("not json at all -- truncated")])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     # both successful groups still staged — one failure doesn't block the rest
@@ -270,11 +284,114 @@ def test_parse_failure_never_reaches_staging_but_success_in_same_source_still_la
             privacy="private", thread="voice:beta", raw="2026-07-03 09:00:00.5+00"),
     ])])
     prod = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm(["<<garbled, not json>>"]), fake_embedder)
+    summary = run_extraction(prod, staging, FakeLlm([cut_off("<<garbled, not json>>")]), fake_embedder)
 
     assert not any("v2_memories_staging" in s for s, _ in staging.calls)
     assert summary["sources"]["v2_turns"]["parse_failures"] == 1
     assert summary["sources"]["v2_turns"]["observations"] == 0
+
+
+# --- format recovery: a COMPLETE non-answer is not a truncation --------------
+# Regression cover for the 2026-07-29 stall: Haiku honored the JSON contract
+# whenever it HAD observations and reverted to prose every time the honest answer
+# was "nothing worth remembering". Read as a parse failure, one 20-message group
+# of test chatter pinned the watermark for 24 days and held 292 real turns.
+
+PROSE = "I reviewed the transcript. Nothing here has lasting value worth extracting."
+
+
+def test_complete_prose_reply_retries_once_then_counts_as_empty():
+    """finish_reason == stop + unparseable: nothing is hidden, so recover.
+    One corrective retry, and if that is prose too, take the model at its word —
+    watermark ADVANCES, and parse_failures stays clean because nothing is stuck."""
+    raw = "2026-07-03 12:00:00.000001+00"
+    prod = FakeConn([("FROM n8n_chat_histories",
+                      [row(CHRIS, "turn off office lights", id="a", at=T0, raw=raw)])])
+    staging = FakeConn()
+    llm = FakeLlm([PROSE, PROSE])
+    summary = run_extraction(prod, staging, llm, fake_embedder)
+
+    assert len(llm.calls) == 2, "exactly one corrective retry, not a loop"
+    assert "prose, not JSON" in llm.calls[1][1], "the retry names the defect"
+    stats = summary["sources"]["prod_chat"]
+    assert (stats["format_retries"], stats["format_empty"]) == (1, 1)
+    assert stats["parse_failures"] == 0, "nothing is stuck, so nothing to alarm on"
+    assert not any("v2_memories_staging" in s for s, _ in staging.calls)  # empty means empty
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == raw, "the watermark MOVES — this is the whole point"
+
+
+def test_corrective_retry_that_complies_stages_normally():
+    """The common recovery: told its reply was the wrong shape, the model complies."""
+    prod = FakeConn([("FROM n8n_chat_histories",
+                      [row(CHRIS, "I live in Rotonda West", id="a")])])
+    staging = FakeConn()
+    llm = FakeLlm([PROSE, OBS])
+    summary = run_extraction(prod, staging, llm, fake_embedder)
+
+    stats = summary["sources"]["prod_chat"]
+    assert (stats["format_retries"], stats["format_empty"]) == (1, 0)
+    assert stats["observations"] == 1
+    assert any("v2_memories_staging" in s for s, _ in staging.calls)
+
+
+def test_truncated_reply_is_never_retried_and_still_holds_the_watermark():
+    """The invariant the recovery must not weaken: a cut-off reply may be hiding
+    real observations, so it gets NO retry, NO empty treatment, and the watermark
+    stays put."""
+    existing_wm = "2026-07-03 11:00:00+00"
+    prod = FakeConn([("FROM n8n_chat_histories",
+                      [row(CHRIS, "I drive a Dodge Ram", id="a", at=T0,
+                           raw="2026-07-03 12:00:00.000001+00")])])
+    staging = FakeConn([("last_processed_at", [(existing_wm,)])])
+    llm = FakeLlm([cut_off('[{"key_label": "basic.loc')])
+    summary = run_extraction(prod, staging, llm, fake_embedder)
+
+    assert len(llm.calls) == 1, "truncation earns no retry — it is not a format problem"
+    stats = summary["sources"]["prod_chat"]
+    assert stats["parse_failures"] == 1
+    assert (stats["format_retries"], stats["format_empty"]) == (0, 0)
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == existing_wm, "frozen, not advanced"
+
+
+def test_truncated_on_the_retry_also_holds_the_watermark():
+    """Prose first, then cut off: the retry's truncation must win over the
+    would-be empty treatment, or a truncated reply sneaks past the guard."""
+    existing_wm = "2026-07-03 11:00:00+00"
+    prod = FakeConn([("FROM n8n_chat_histories",
+                      [row(CHRIS, "hi", id="a", at=T0, raw="2026-07-03 12:00:00.1+00")])])
+    staging = FakeConn([("last_processed_at", [(existing_wm,)])])
+    summary = run_extraction(prod, staging, FakeLlm([PROSE, cut_off("[{")]), fake_embedder)
+
+    stats = summary["sources"]["prod_chat"]
+    assert stats["parse_failures"] == 1
+    assert stats["format_empty"] == 0
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == existing_wm
+
+
+# --- the schema wrapper stays inside the transport seam ----------------------
+
+
+def test_unwrap_observations_returns_the_array_text():
+    """Schema-enforced replies arrive as {"observations": [...]}; every caller
+    downstream is written against a bare array, so the seam unwraps."""
+    wrapped = json.dumps({"observations": [{"key_label": "basic.x", "value_text": "y"}]})
+    assert json.loads(_unwrap_observations(wrapped)) == [
+        {"key_label": "basic.x", "value_text": "y"}
+    ]
+    assert json.loads(_unwrap_observations('{"observations": []}')) == []
+
+
+def test_unwrap_observations_passes_through_anything_else():
+    """It unwraps; it never validates. A bare array, prose from a route that
+    ignored response_format, or an unrelated object all reach parse_observations
+    unchanged so its judgment stays the only one."""
+    assert _unwrap_observations(OBS) == OBS
+    assert _unwrap_observations("nothing worth remembering") == "nothing worth remembering"
+    assert _unwrap_observations('{"something": "else"}') == '{"something": "else"}'
+    assert _unwrap_observations("") == "[]"
 
 
 # --- watermark safety: LIMIT-boundary ties must never be split ---------------
@@ -701,3 +818,59 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     assert not any(
         s.lstrip().upper().startswith(("INSERT", "UPDATE")) for s, _ in prod_write.calls
     )
+
+
+# --- the stall alarm: absence of writes needs a voice ------------------------
+
+
+def test_stall_warns_only_after_a_run_of_zero_insert_passes(caplog):
+    """The real bug on 2026-07-29 was silence, not the parse. Three consecutive
+    passes that READ rows and stored nothing must say so at WARNING."""
+    import logging
+
+    from aerys_v2.workers import __main__ as wm
+
+    wm._zero_insert_streak = 0
+    stalled = {"inserted_total": 0,
+               "sources": {"v2_turns": {"rows": 200, "parse_failures": 1,
+                                        "watermark": "2026-07-05 21:48:52+00"}}}
+    with caplog.at_level(logging.WARNING, logger=wm.log.name):
+        wm._check_stalled(stalled)
+        wm._check_stalled(stalled)
+        assert not caplog.records, "one or two quiet passes are not a stall"
+        wm._check_stalled(stalled)
+
+    assert len(caplog.records) == 1
+    body = caplog.records[0].getMessage()
+    assert "extraction stalled" in body
+    assert "2026-07-05 21:48:52+00" in body, "names what it is stuck behind"
+
+
+def test_stall_alarm_ignores_a_genuinely_idle_window(caplog):
+    """Zero rows read is nothing to do, not a stall — otherwise a quiet night
+    trains him to ignore the alarm."""
+    import logging
+
+    from aerys_v2.workers import __main__ as wm
+
+    wm._zero_insert_streak = 0
+    idle = {"inserted_total": 0, "sources": {"v2_turns": {"rows": 0, "watermark": None}}}
+    with caplog.at_level(logging.WARNING, logger=wm.log.name):
+        for _ in range(5):
+            wm._check_stalled(idle)
+    assert not caplog.records
+
+
+def test_a_successful_pass_resets_the_stall_streak(caplog):
+    import logging
+
+    from aerys_v2.workers import __main__ as wm
+
+    wm._zero_insert_streak = 0
+    stalled = {"inserted_total": 0, "sources": {"v2_turns": {"rows": 50}}}
+    with caplog.at_level(logging.WARNING, logger=wm.log.name):
+        wm._check_stalled(stalled)
+        wm._check_stalled(stalled)
+        wm._check_stalled({"inserted_total": 4, "sources": {"v2_turns": {"rows": 50}}})
+        wm._check_stalled(stalled)
+    assert not caplog.records, "the streak restarts after a pass that stored something"

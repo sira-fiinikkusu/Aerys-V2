@@ -83,14 +83,42 @@ import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from ..services.memory import Embedder, embedding_to_pgvector
 
-# text in (system, user), model text out — injectable so tests never touch the
+
+class LlmReply(NamedTuple):
+    """A reply plus the one fact the caller cannot recover from the text itself.
+
+    `truncated` is the API's `finish_reason != "stop"` — a STRUCTURAL signal, not
+    a guess from the text's shape. It is the only thing separating two situations
+    that look identical to parse_observations:
+
+      - truncated: we were cut off mid-array, so real observations may be sitting
+        in the part we never received. Advancing the watermark past that group
+        would lose them forever, so we hold the line.
+      - complete but unparseable: the model finished and ignored the output
+        contract (typically explaining in prose that there was nothing worth
+        remembering, instead of replying `[]`). Nothing is hidden. Recoverable.
+
+    Conflating them cost 24 days of memory formation on v2_turns and 26 on
+    prod_chat: one 20-message group of "turn off office lights" chit-chat sat one
+    second past the watermark, drew a prose "nothing here has lasting value"
+    reply every hour, was read as a parse failure, and pinned 292 real turns
+    behind it (found 2026-07-29). The emptiest possible content blocked memory
+    formation entirely, because "the model declined to answer in JSON" and "we
+    truncated the model" were the same value.
+    """
+
+    text: str
+    truncated: bool
+
+
+# text in (system, user), LlmReply out — injectable so tests never touch the
 # network, same seam shape as services.memory.Embedder.
-Llm = Callable[[str, str], str]
+Llm = Callable[[str, str], LlmReply]
 
 BATCH_SIZE = 20          # messages per LLM call (Group Messages sliced at 20)
 DEFAULT_LOOKBACK_H = 2   # first run with no watermark: 2 hours ago (v1 default)
@@ -622,6 +650,58 @@ def _safe_watermark(rows: list[dict], failed_row_ids: set[str], after: str) -> s
     return max(older, key=lambda r: r["created_at"])["created_at_raw"]
 
 
+#: Appended for the one retry a COMPLETE-but-unparseable reply earns. Names the
+#: defect explicitly ("was prose, not JSON") because a bare repeat of the original
+#: instruction is what the model already ignored.
+_FORMAT_CORRECTION = (
+    "\n\nYour previous reply was prose, not JSON. Reply with a JSON array and "
+    "nothing else. If there is nothing worth remembering, reply exactly: []"
+)
+
+
+def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | None, LlmReply]:
+    """One group's observations, or None when the watermark must be held.
+
+    None now means TRUNCATION AND NOTHING ELSE. A complete reply that ignored the
+    output contract is recovered here instead:
+
+      1. Retry once, telling the model its last reply was the wrong shape
+         (`_FORMAT_CORRECTION`) — usually enough on its own.
+      2. If it comes back complete and unparseable a SECOND time, the model has
+         now said in two different ways that there is nothing here. Take it at its
+         word, return [], and let the watermark move.
+
+    Step 2 is a deliberate, owner-approved trade (Chris, 2026-07-29): the
+    alternative is what actually happened for 24 days — the emptiest possible
+    content (test chatter, "turn off office lights") pinning every real turn
+    behind it, forever, because a prose refusal was indistinguishable from a
+    truncation. Truncation still holds the line unconditionally; only a FINISHED
+    reply can be read as "nothing here".
+
+    `stats` is mutated in place (format_retries / format_empty) so a recovery is
+    never silent — and so `parse_failures` gets its original meaning back: it now
+    counts only the case where the watermark is genuinely stuck and someone
+    should look.
+    """
+    prompt = (
+        "Extract observations from this conversation:\n\n"
+        f"{build_transcript(group['messages'])}"
+    )
+    reply = llm(EXTRACTION_SYSTEM_PROMPT, prompt)
+    observations = parse_observations(reply.text)
+    if observations is not None or reply.truncated:
+        return observations, reply
+
+    stats["format_retries"] += 1
+    reply = llm(EXTRACTION_SYSTEM_PROMPT, prompt + _FORMAT_CORRECTION)
+    observations = parse_observations(reply.text)
+    if observations is not None or reply.truncated:
+        return observations, reply
+
+    stats["format_empty"] += 1
+    return [], reply
+
+
 def run_extraction(
     source_conn: Any,
     staging_conn: Any,
@@ -667,6 +747,11 @@ def run_extraction(
         stats = {
             "rows": len(rows), "groups": 0, "observations": 0, "inserted": 0,
             "parse_failures": 0, "watermark": None,
+            # format_retries: complete replies that ignored the JSON contract and
+            # earned one corrective retry. format_empty: those that ignored it
+            # twice and were taken at their word as "nothing here" (the watermark
+            # moves). parse_failures now means TRUNCATION — the watermark is stuck.
+            "format_retries": 0, "format_empty": 0,
         }
         summary["sources"][name] = stats
         if not rows:
@@ -677,14 +762,12 @@ def run_extraction(
         failed_row_ids: set[str] = set()
 
         for group in groups:
-            reply = llm(
-                EXTRACTION_SYSTEM_PROMPT,
-                f"Extract observations from this conversation:\n\n{build_transcript(group['messages'])}",
-            )
-            observations = parse_observations(reply)
+            observations, reply = _extract_group(llm, group, stats)
             if observations is None:
-                # Parse failure, not "nothing here" — never stage anything for
-                # this group, and never let the watermark advance past it.
+                # TRUNCATION only, now that a complete non-answer is recovered in
+                # _extract_group. Never stage anything for this group, and never
+                # let the watermark advance past it — the reply we didn't receive
+                # may have held real memories.
                 stats["parse_failures"] += 1
                 failed_row_ids.update(m["id"] for m in group["messages"])
                 continue
@@ -801,6 +884,11 @@ def run_live_extraction(
             "rows": len(rows), "groups": 0, "observations": 0,
             "inserted": 0, "updated": 0, "replaced": 0, "skipped": 0,
             "parse_failures": 0, "watermark": None,
+            # format_retries: complete replies that ignored the JSON contract and
+            # earned one corrective retry. format_empty: those that ignored it
+            # twice and were taken at their word as "nothing here" (the watermark
+            # moves). parse_failures now means TRUNCATION — the watermark is stuck.
+            "format_retries": 0, "format_empty": 0,
         }
         summary["sources"][name] = stats
         if not rows:
@@ -811,13 +899,9 @@ def run_live_extraction(
         failed_row_ids: set[str] = set()
 
         for group in groups:
-            reply = llm(
-                EXTRACTION_SYSTEM_PROMPT,
-                f"Extract observations from this conversation:\n\n{build_transcript(group['messages'])}",
-            )
-            observations = parse_observations(reply)
+            observations, reply = _extract_group(llm, group, stats)
             if observations is None:
-                # Parse failure, not "nothing here" — never triage anything for
+                # TRUNCATION only (see _extract_group). Never triage anything for
                 # this group, and never let the watermark advance past it.
                 stats["parse_failures"] += 1
                 failed_row_ids.update(m["id"] for m in group["messages"])
@@ -854,6 +938,52 @@ def run_live_extraction(
     return summary
 
 
+#: The extraction reply's shape, enforced by the API instead of requested in the
+#: prompt. The prompt already said "Return a JSON array only -- no preamble, no
+#: explanation" and "If nothing worth remembering, return []" — and the model
+#: complied whenever it HAD observations, then reverted to prose every time the
+#: honest answer was "nothing here". A promise a model keeps only on the happy
+#: path is not a contract, so this stops asking and constrains it.
+#:
+#: An OBJECT root with an `observations` array, not a bare array root: JSON-schema
+#: modes are reliably supported at an object root and patchy on arrays. llm()
+#: unwraps it, so parse_observations and every caller still see the array text
+#: they always did.
+_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "extraction",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "observations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "key_label": {"type": "string"},
+                            "value_text": {"type": "string"},
+                            "context": {"type": "string"},
+                            "event_date": {"type": "string"},
+                        },
+                        "required": ["key_label", "value_text", "context", "event_date"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["observations"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+#: Raised from v1's 1200 now that truncation is DETECTABLE rather than silently
+#: indistinguishable from a refusal (see LlmReply). A schema-constrained reply is
+#: denser than prose, so this is headroom for a genuinely busy group, not slack.
+MAX_OUTPUT_TOKENS = 4000
+
+
 def openrouter_chat(api_key: str, *, model: str = LLM_MODEL,
                     base_url: str = "https://openrouter.ai/api/v1",
                     timeout_s: float = 120.0) -> Llm:
@@ -861,17 +991,23 @@ def openrouter_chat(api_key: str, *, model: str = LLM_MODEL,
 
     Same OpenRouter host/key the embedder uses (settings.embeddings_api_key IS an
     OpenRouter key); stdlib urllib for the same dependency-free reason as
-    services.memory.openrouter_embedder. temperature/max_tokens match v1 exactly.
+    services.memory.openrouter_embedder. temperature matches v1 exactly;
+    max_tokens is raised (MAX_OUTPUT_TOKENS) and the reply shape is now
+    schema-enforced (_RESPONSE_FORMAT).
+
+    Returns an LlmReply so the caller can tell a truncated reply from a complete
+    one — the distinction the old `-> str` signature made impossible.
     """
 
-    def llm(system: str, user: str) -> str:
+    def llm(system: str, user: str) -> LlmReply:
         request = urllib.request.Request(
             f"{base_url}/chat/completions",
             data=json.dumps(
                 {
                     "model": model,
                     "temperature": 0.1,
-                    "max_tokens": 1200,
+                    "max_tokens": MAX_OUTPUT_TOKENS,
+                    "response_format": _RESPONSE_FORMAT,
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
@@ -882,6 +1018,29 @@ def openrouter_chat(api_key: str, *, model: str = LLM_MODEL,
         )
         with urllib.request.urlopen(request, timeout=timeout_s) as resp:
             payload = json.load(resp)
-        return payload["choices"][0]["message"]["content"] or "[]"
+        choice = (payload.get("choices") or [{}])[0]
+        content = (choice.get("message") or {}).get("content") or ""
+        # An ABSENT finish_reason counts as truncated: unknown completeness has to
+        # fail toward holding the watermark, never toward "it finished cleanly".
+        truncated = choice.get("finish_reason") != "stop"
+        return LlmReply(text=_unwrap_observations(content), truncated=truncated)
 
     return llm
+
+
+def _unwrap_observations(content: str) -> str:
+    """Schema wrapper -> the array text every caller already expects.
+
+    Keeps the object-root detail INSIDE this seam: parse_observations, the group
+    loops, and every test stay written against a JSON array. A reply that isn't
+    the wrapper (a route that ignored response_format, a provider fallback, prose)
+    passes through untouched so parse_observations can judge it exactly as before
+    — this unwraps, it never validates.
+    """
+    try:
+        obj = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return content or "[]"
+    if isinstance(obj, dict) and isinstance(obj.get("observations"), list):
+        return json.dumps(obj["observations"])
+    return content or "[]"

@@ -101,7 +101,51 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                     batch_limit=settings.extraction_batch_limit,
                 )
     log.info("extraction pass (%s): %s", "live" if live else "shadow", json.dumps(summary))
+    _check_stalled(summary)
     return summary
+
+
+#: Consecutive passes that read rows and stored nothing before we say so out loud.
+#: 3 (hourly loop) = ~3h, long enough that a run of genuinely unmemorable chatter
+#: doesn't cry wolf, short enough to catch a stall the same day.
+STALL_PASSES = 3
+
+#: Module-level because the scheduler calls _run_once repeatedly in one process.
+_zero_insert_streak = 0
+
+
+def _check_stalled(summary: dict) -> None:
+    """Say it OUT LOUD when the worker is reading rows and storing nothing.
+
+    The 2026-07-29 outage was not really a parse bug. The parse bug cost 24 days
+    because `inserted_total: 0`, pass after pass, existed ONLY in a log line
+    nobody was reading — every container reported healthy, the brain stayed up,
+    and the watermark guard was working exactly as designed while memory formation
+    was completely stopped. Absence of writes is a signal; it needs a voice.
+
+    Fires on the PATTERN, never a single quiet hour: a window with no rows is a
+    genuinely idle interval, not a stall. WARNING (not INFO) so it separates from
+    the routine pass log, and it carries the watermarks + parse_failures so the
+    first question ("what is it stuck behind?") is answered in the line itself.
+    """
+    global _zero_insert_streak
+    sources = summary.get("sources") or {}
+    had_rows = any((s or {}).get("rows") for s in sources.values())
+    if summary.get("inserted_total") or not had_rows:
+        _zero_insert_streak = 0
+        return
+    _zero_insert_streak += 1
+    if _zero_insert_streak < STALL_PASSES:
+        return
+    log.warning(
+        "extraction stalled: %s",
+        json.dumps({
+            "consecutive_passes": _zero_insert_streak,
+            "rows_read": {n: (s or {}).get("rows") for n, s in sources.items()},
+            "parse_failures": {n: (s or {}).get("parse_failures") for n, s in sources.items()},
+            "watermarks": {n: (s or {}).get("watermark") for n, s in sources.items()},
+        }),
+    )
 
 
 def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:
