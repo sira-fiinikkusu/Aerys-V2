@@ -29,6 +29,12 @@ from contextlib import contextmanager
 log = logging.getLogger(__name__)
 
 
+#: Pooled connections for the checkpointer. Small on purpose — turns are
+#: serialized per thread and a roundtrip is ~1ms, so this is about having a
+#: SPARE to swap to when one dies, not about throughput.
+CHECKPOINT_POOL_MAX = 4
+
+
 @contextmanager
 def checkpointer_for(settings: Settings):
     """Yield the right checkpointer for the environment (the durability seam).
@@ -41,15 +47,57 @@ def checkpointer_for(settings: Settings):
     Benchmarked 2026-07-02 from the Jetson: ~1ms roundtrip to NAS Postgres —
     single-digit ms per turn against a ~3.6s voice budget. The pluggable seam
     stays anyway (cross-review #9).
+
+    ★ POOLED WITH A LIVENESS CHECK, and that is the whole point of this shape.
+    `PostgresSaver.from_conn_string` holds ONE connection for the life of the
+    process. When Postgres goes away — a NAS reboot, a storage wedge, a network
+    blip — that connection dies and NEVER comes back, so every turn afterwards
+    raises `OperationalError: the connection is closed` while the container
+    still reports healthy and `/health` still returns 200. It stays broken until
+    a human notices and restarts three containers.
+
+    That happened TWICE inside 24 hours (2026-07-30/31): the NAS wedged on a
+    full LVM-thin pool, and even after it recovered and the containers were
+    restarted, the connection died again and she served 500s for ~13.5 hours
+    overnight — discovered only because the daily loop ran a real turn instead
+    of trusting a health endpoint.
+
+    `check=ConnectionPool.check_connection` is the fix: the pool validates a
+    connection before handing it out and transparently discards a dead one for
+    a fresh connection. The failure becomes a sub-millisecond reconnect instead
+    of an outage that needs a person.
+
+    Fail-fast on boot is DELIBERATELY preserved: `pool.open(wait=True)` raises
+    if Postgres is unreachable at startup, exactly as `from_conn_string` did. A
+    brain that cannot reach its own memory should not come up quietly.
     """
     if settings.database_url is None:
         yield InMemorySaver()
         return
     from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
 
-    with PostgresSaver.from_conn_string(settings.database_url) as saver:
+    pool = ConnectionPool(
+        conninfo=settings.database_url,
+        min_size=1,
+        max_size=CHECKPOINT_POOL_MAX,
+        # The self-heal. Without this the pool would hand back the same dead
+        # connection forever, which is the bug this whole docstring is about.
+        check=ConnectionPool.check_connection,
+        # PostgresSaver requires all three: it manages its own transactions,
+        # reads rows as dicts, and prepared statements must not be cached
+        # across pooled connections (langgraph's own pooling guidance).
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        open=False,
+    )
+    pool.open(wait=True, timeout=settings.checkpoint_pool_open_timeout_s)
+    try:
+        saver = PostgresSaver(pool)
         saver.setup()
         yield saver
+    finally:
+        pool.close()
 
 FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and honest."
 

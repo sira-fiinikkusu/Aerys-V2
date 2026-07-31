@@ -229,6 +229,14 @@ class Settings(BaseSettings):
     extraction_lookback_hours: int = 2      # first-run window when no watermark exists
     extraction_batch_limit: int = 200       # rows per source per pass (v1 LIMIT 200)
 
+    # ---- CHECKPOINTER POOL ----------------------------------------------------
+    # How long boot waits for the first checkpointer connection. Deliberately
+    # fail-fast: a brain that cannot reach its own memory should not come up
+    # quietly. Generous enough to ride out a NAS that is still finishing its
+    # own boot, short enough that a genuinely dead DB surfaces as a crash loop
+    # rather than a container hanging in "starting" forever.
+    checkpoint_pool_open_timeout_s: float = 30.0
+
     # ---- TIER ROUTING (the V1 classify sandwich, folded into the router) ------
     # n8n mapping: V1's three tier sub-workflows (Sonnet/Opus/Gemini agents) and
     # the modelsConfig dict in Load Config. Tiers are named by ROLE, not vendor
