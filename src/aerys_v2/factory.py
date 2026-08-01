@@ -99,6 +99,94 @@ def checkpointer_for(settings: Settings):
     finally:
         pool.close()
 
+
+#: How long the /health probe waits for a pooled connection before calling the
+#: store unreachable. Deliberately under the Dockerfile HEALTHCHECK timeout (5s)
+#: so a WEDGED Postgres — reachable TCP, no query progress — surfaces as an
+#: honest 503 instead of a hung probe that the healthcheck kills as a timeout.
+HEALTH_PROBE_TIMEOUT_S = 2.0
+
+
+def health_probe_for(checkpointer: BaseCheckpointSaver) -> Callable[[], None] | None:
+    """Returns a callable that raises if her durable store is unreachable — None
+    when there is nothing to probe (InMemorySaver on a DB-less box).
+
+    ★ WHY THIS EXISTS. `/health` returned a hardcoded `{"status": "ok"}` — a
+    literal that cannot fail. On 2026-07-30/31 the NAS wedged, every turn raised
+    `OperationalError`, and the endpoint kept answering 200: docker reported the
+    container healthy and the operator dashboard stayed green while she served
+    500s for ~13.5 hours overnight. The outage was found by a human running a
+    REAL turn. A health check that cannot fail is not a health check; it is a
+    green light welded on.
+
+    The probe goes through the CHECKPOINTER'S OWN POOL rather than opening a
+    fresh connection, and that distinction is the whole point. A fresh connect
+    would have succeeded during the second incident — Postgres was up; it was
+    the long-lived pooled connection that was dead. Probing the same pool the
+    turns use means /health answers the only question that matters: can the next
+    turn actually reach her memory?
+
+    It therefore also catches pool EXHAUSTION (all CHECKPOINT_POOL_MAX
+    connections wedged), which no independent connection test can see.
+    """
+    pool = getattr(checkpointer, "conn", None)
+    # InMemorySaver has no pool; a bare psycopg Connection (not our shape) has no
+    # .connection() context manager worth probing. Either way: nothing to check,
+    # and /health stays trivially ok rather than inventing a failure.
+    if pool is None or not hasattr(pool, "connection"):
+        return None
+
+    def probe() -> None:
+        """Raises on an unreachable/wedged store; returns None when healthy."""
+        # timeout= bounds the WAIT FOR A CONNECTION, which is the part that hangs
+        # when the pool is exhausted or Postgres stopped answering. check_connection
+        # (wired above) does the liveness validation and swaps out a dead connection
+        # transparently, so reaching the SELECT already proves the store is live.
+        with pool.connection(timeout=HEALTH_PROBE_TIMEOUT_S) as conn:
+            conn.execute("SELECT 1")
+
+    return probe
+
+
+def store_reachable(database_url: str | None,
+                    timeout_s: float = HEALTH_PROBE_TIMEOUT_S) -> bool:
+    """Can a FRESH connection reach Postgres right now? True when there's no DB
+    configured (nothing to be unreachable).
+
+    This is the `aerys-v2 --health` half, and it answers a different question
+    than health_probe_for(). That one probes a LIVE process's pool over HTTP and
+    is the sharper check — but docker's HEALTHCHECK spawns a brand-new process
+    that shares nothing with the server, so it structurally cannot see that pool.
+    What it CAN see is whether the NAS is answering at all, which is the failure
+    that actually took her down on 2026-07-30/31.
+
+    Before this, `--health` printed "ok" as soon as Settings PARSED. Five
+    containers reported "(healthy)" through a 13.5 hour outage on the strength
+    of environment variables being syntactically valid. Config-loads is not
+    health; it is a smoke test of the .env file.
+
+    Deliberately returns bool rather than raising: the caller is a healthcheck,
+    and every failure mode here means the same thing — the store is not there.
+    """
+    if not database_url:
+        return True
+    import psycopg
+
+    try:
+        # connect_timeout bounds the TCP/auth handshake so a black-holed NAS
+        # fails fast instead of hanging past docker's 5s healthcheck timeout
+        # (a hung probe is reported as failure anyway, but slowly and without
+        # the log line that tells the operator WHY).
+        with psycopg.connect(database_url, connect_timeout=int(timeout_s) or 1) as conn:
+            conn.execute("SELECT 1")
+        return True
+    except Exception as e:
+        # The healthcheck's stdout is the operator's only breadcrumb here, but
+        # psycopg errors embed the DSN (password included) — log the TYPE, never
+        # the message. Same reasoning as the /health 503 body.
+        log.error("health: checkpoint store unreachable (%s)", type(e).__name__)
+        return False
+
 FALLBACK_SOUL = "You are Aerys, a personal AI companion. Be warm, direct, and honest."
 
 # The memory-context seam: (person_id, latest_user_text, privacy_context) -> prompt

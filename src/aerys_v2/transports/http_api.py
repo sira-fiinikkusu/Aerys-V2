@@ -10,11 +10,15 @@ taught the pattern — the header check happens before ANYTHING else runs.
 """
 
 import hmac
+import logging
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from aerys_v2.state import Identity
+
+log = logging.getLogger(__name__)
 
 
 class AskRequest(BaseModel):
@@ -42,7 +46,7 @@ class AskReply(BaseModel):
 
 
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
-              gaps_fn=None) -> FastAPI:
+              gaps_fn=None, health_probe=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -51,6 +55,11 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
     persons.id — the key the memory-context seam retrieves by. That's how
     voice-Chris gets HIS memories instead of an anonymous "http-caller" bucket.
     display_name stays whatever the caller said (channel flavor, not identity).
+
+    health_probe: a zero-arg callable that RAISES when her durable store is
+    unreachable (factory.health_probe_for). None = nothing to probe, and /health
+    reports ok — the DB-less dev/CI shape. See the /health handler for why this
+    seam exists at all.
     """
     # openapi_url=None too: docs_url/redoc_url only hide the HTML pages; the raw
     # /openapi.json schema is a separate default and would otherwise leak the exact
@@ -88,9 +97,35 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             raise HTTPException(status_code=401, detail="bad token")
 
     @app.get("/health")
-    def health() -> dict:
-        # Unauthenticated on purpose: docker HEALTHCHECK + HA availability probes.
-        return {"status": "ok"}
+    def health() -> JSONResponse:
+        """Liveness AND reachability of her memory — 200 healthy, 503 degraded.
+
+        Unauthenticated on purpose: docker HEALTHCHECK + HA availability probes.
+
+        This used to `return {"status": "ok"}` — a literal that could not fail.
+        It reported healthy through a ~13.5 hour outage on 2026-07-30/31 while
+        every real turn raised OperationalError against a dead pooled connection.
+        An endpoint that always says ok teaches everyone downstream to stop
+        believing it, so it now answers with something it can actually be wrong
+        about: a real query through the same pool the turns use.
+
+        ★ The 503 body is DELIBERATELY generic. This route is unauthenticated and
+        reachable through the Cloudflare tunnel, and psycopg's exception text
+        embeds the connection string — host, user, and password. The operator
+        gets the real exception in the logs; an anonymous prober gets six words.
+        """
+        if health_probe is None:
+            return JSONResponse({"status": "ok"})
+        try:
+            health_probe()
+        except Exception:
+            # exception(): full traceback to the operator's side, never the wire.
+            log.exception("health probe failed — checkpoint store unreachable")
+            return JSONResponse(
+                status_code=503,
+                content={"status": "degraded", "detail": "checkpoint store unreachable"},
+            )
+        return JSONResponse({"status": "ok"})
 
     @app.get("/v1/models")
     def models(_: None = Depends(require_token)) -> dict:

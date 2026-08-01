@@ -40,7 +40,17 @@ def main() -> None:
         sys.exit(1)
 
     if health:  # only after a clean load
-        print("ok")  # confirm that we loaded successfully, which means we're healthy
+        # A clean Settings load proves the .env parses — it does NOT prove she can
+        # work. This check reported "(healthy)" on five containers through the
+        # ~13.5h store outage of 2026-07-30/31, so it now also asks the NAS whether
+        # it is actually there. See factory.store_reachable for why this probes a
+        # fresh connection while the HTTP /health probes the live server's pool.
+        from aerys_v2.factory import store_reachable
+
+        if not store_reachable(settings.database_url):
+            print("unhealthy: checkpoint store unreachable")
+            sys.exit(1)
+        print("ok")
         sys.exit(0)  # exit with success
 
     if "--ask" in sys.argv:  # one-shot turn: aerys-v2 --ask "hello" — the first REAL call path
@@ -143,6 +153,7 @@ def main() -> None:
             speak_fn_for,
             tier_models_for,
             face_pusher_for,
+            health_probe_for,
             turn_recorder_for,
         )
         from aerys_v2.service import ask
@@ -240,6 +251,9 @@ def main() -> None:
                 # retrieves HIS memories (identity user_id = owner persons.id)
                 owner_person_id=settings.owner_person_id,
                 gaps_fn=gaps_fn,
+                # /health probes the SAME pool the turns use, so a dead store
+                # can no longer hide behind a hardcoded 200 (the 7/30-31 outage).
+                health_probe=health_probe_for(cp),
             )
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;

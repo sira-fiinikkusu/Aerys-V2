@@ -9,12 +9,58 @@ def fake_ask(text, identity, thread_id):
     return f"echo:{text}|{identity['display_name']}|{thread_id}"
 
 
-def client(token: str | None = "sekrit", gaps_fn=None) -> TestClient:
-    return TestClient(build_app(fake_ask, token, gaps_fn=gaps_fn))
+def client(token: str | None = "sekrit", gaps_fn=None, health_probe=None) -> TestClient:
+    return TestClient(build_app(fake_ask, token, gaps_fn=gaps_fn, health_probe=health_probe))
 
 
 def test_health_needs_no_auth():
     assert client().get("/health").json() == {"status": "ok"}
+
+
+# --- /health tells the truth about the store (the 7/30-31 outage) ------------
+# The endpoint used to return a hardcoded 200 and reported healthy through a
+# ~13.5 hour outage. These pin that it can now actually fail.
+
+
+def test_health_ok_when_probe_passes():
+    r = client(health_probe=lambda: None).get("/health")
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+
+
+def test_health_503_when_store_unreachable():
+    def dead():
+        raise RuntimeError("connection is closed")
+
+    r = client(health_probe=dead).get("/health")
+    assert r.status_code == 503
+    assert r.json()["status"] == "degraded"
+
+
+def test_health_503_body_never_leaks_the_dsn():
+    """/health is UNAUTHENTICATED and tunnel-reachable; psycopg errors carry the
+    password. The body must stay generic no matter what the probe raised."""
+    secret = "postgresql://dbuser:hunter2@db.example:5432/aerys"
+
+    def dead():
+        raise RuntimeError(f"could not connect: {secret}")
+
+    r = client(health_probe=dead).get("/health")
+    assert r.status_code == 503
+    assert "hunter2" not in r.text
+    assert secret not in r.text
+    assert r.json() == {"status": "degraded", "detail": "checkpoint store unreachable"}
+
+
+def test_health_probe_failure_does_not_take_down_other_routes():
+    """A dead store must not turn the whole app into 500s — the auth gate still
+    answers on its own terms."""
+    def dead():
+        raise RuntimeError("nope")
+
+    c = client(health_probe=dead)
+    assert c.get("/health").status_code == 503
+    assert c.post("/ask", json={"text": "hi"}).status_code == 401
 
 
 def test_ask_requires_token():
