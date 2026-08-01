@@ -223,3 +223,57 @@ def test_router_instructions_name_the_new_action_families():
     assert "email" in low
     assert "logging a gap" in low
     assert "log_gap" in low
+
+
+# --- shopping/availability routes to action (the 2026-08-01 mimosa miss) -----
+# Chris asked "Is there a canned version that I can get from Publix or something
+# like that that is basically a strawberry mimosa?" It routed to chat, which has
+# no tools, and she answered with invented brand names — then walked them back,
+# then invented more. Retail stock is a live fact wearing small-talk clothes.
+
+def test_shopping_shapes_hit_search_heuristic():
+    from aerys_v2.router import plausibly_wants_web_search
+
+    # the verbatim turn that missed (v2_turns #302)
+    assert plausibly_wants_web_search(
+        "Is there a canned version that I can get from Publix or something "
+        "like that that is basically a strawberry mimosa or something "
+        "comparable to that?"
+    )
+    assert plausibly_wants_web_search("where can i buy a decent chef's knife")
+    assert plausibly_wants_web_search("do they sell oat milk at the store")
+    assert plausibly_wants_web_search("how much does a switch 2 cost")
+    assert plausibly_wants_web_search("what brands of canned mojito are there")
+    assert plausibly_wants_web_search("is that place open today")
+
+
+def test_shopping_routes_to_action_on_the_degraded_path():
+    assert fallback_decision(
+        "Is there a canned version that I can get from Publix that is "
+        "basically a strawberry mimosa?"
+    ).route == "action"
+    assert fallback_decision("where can i buy a good cast iron pan").route == "action"
+
+
+def test_recipes_and_opinions_stay_on_chat():
+    """The aggressive widening must not swallow timeless knowledge. Chris took
+    the latency tradeoff knowingly, but 'how is a mojito made' is still hers —
+    the line is the PRESENT world, not the topic being food or drink."""
+    from aerys_v2.router import plausibly_wants_web_search
+
+    assert not plausibly_wants_web_search("how do you make a strawberry mojito?")
+    assert not plausibly_wants_web_search("what's the difference between a mimosa and a bellini?")
+    assert not plausibly_wants_web_search("do you think cats love us?")
+    assert not plausibly_wants_web_search("what's your favorite cocktail")
+
+
+def test_router_prompt_teaches_shopping_is_action():
+    """Prompt-level regression guard, same shape as the web-lookup one: the
+    router's vocabulary IS the tool's wiring — a tool the router won't route to
+    does not exist, however well-armed the action graph is."""
+    from aerys_v2.router import _ROUTER_INSTRUCTIONS
+
+    lowered = _ROUTER_INSTRUCTIONS.lower()
+    assert "shopping and availability" in lowered
+    assert "stocks" in lowered or "sells" in lowered
+    assert "publix" in lowered  # the concrete example carries the rule

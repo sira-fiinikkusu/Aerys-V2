@@ -119,6 +119,21 @@ _SEARCH_MARKERS = (
     "find out", "what's the latest", "whats the latest", "latest news",
     "in the news", "current price", "stock price", "exchange rate",
     "weather", "forecast", "who won", "score of", "right now online",
+    # Shopping/availability (2026-08-01). These sound like small talk and carry
+    # none of the lookup verbs above, which is exactly how "is there a canned
+    # strawberry mimosa I can get at Publix?" routed to chat and got answered
+    # with invented brand names. Retail stock is a live fact, not general
+    # knowledge — naming a product she cannot verify is the same class of
+    # failure as guessing a device's state.
+    # Substrings, NOT whole phrases — word order is the trap. The turn that
+    # missed said "that I can get from Publix", so a "can i get" marker never
+    # fired, and "at publix" missed "from Publix". Match the smallest fragment
+    # that still implies retail.
+    "can get", "buy", "do they sell", "do they carry", "in stock", "carry any",
+    "publix", "walmart", "costco", "target", "kroger", "aldi", "trader joe",
+    "the store", "grocery", "liquor store", "brands", "brand of",
+    "how much does", "how much is", "what does it cost", "price of", "cost of",
+    "menu", "open today", "near me", "where can",
 )
 
 # Email / gap-logging shapes for the degraded path — the 2026-07-11 additions.
@@ -210,6 +225,13 @@ decide which path handles it:
   You cannot know today's world without a web search, and only the action path
   carries the search tool. "What's the weather this weekend?", "search for the
   latest on the merger", "look up who won last night" are ALL "action".
+  SHOPPING AND AVAILABILITY are "action" too, and they are the easy ones to
+  miss because they sound like small talk: what a store sells or stocks, which
+  brands or products exist, what something costs, restaurant menus or hours,
+  where to buy something. "Is there a canned strawberry mimosa I can get at
+  Publix?" is "action" — naming real products you cannot verify is the same
+  failure as guessing a device's state. Whenever the reply would name a
+  specific brand, product, price, or storefront, choose "action".
   EMAIL is "action" too: anything about your inbox or mail — did something
   arrive, search/read/summarize an email, draft or send one. "Did the
   confirmation email come in?", "read me that email from the county",

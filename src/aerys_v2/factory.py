@@ -1513,14 +1513,20 @@ def build_graph(
             "file or image — and this includes short follow-ups like 'yes, go "
             "ahead', 'try it now', or 'what about tomorrow?' whose meaning earlier "
             "turns make clear: do NOT answer from guesswork and do NOT say you "
-            f"can't. Instead begin your reply with the exact token {HANDOFF_MARKER} "
+            "can't. This ALSO covers any answer that would name specific real-world "
+            "products, brands, prices, what a shop stocks or carries, menus, hours, "
+            "or availability: that is CURRENT information, not timeless knowledge — "
+            "you cannot know what a store has on its shelves today, and a plausible "
+            "brand name is the same failure as a fabricated device state. "
+            f"Instead begin your reply with the exact token {HANDOFF_MARKER} "
             "followed by one short natural line in your voice about getting it "
             f'done, e.g. "{HANDOFF_MARKER} Let me actually flip that for you." '
             "The system then hands this turn to your tool-equipped side, "
             "which does the real work; your line covers the meantime. Never use "
             f"{HANDOFF_MARKER} for what this mode CAN do — conversation, memory, "
-            "opinions, timeless general knowledge — and never anywhere but the "
-            "very start of a reply."
+            "opinions, and general knowledge that does NOT depend on the present "
+            "world: how a mojito is made is yours, which canned mojitos a store "
+            "carries is not — and never anywhere but the very start of a reply."
         )
         if context_fn is not None:
             # Claims follow facts: this sentence exists ONLY when retrieval is
