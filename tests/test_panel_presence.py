@@ -8,6 +8,7 @@ sleeps her; wake fires the emote sequence; HA unreadable = no transition
 import httpx
 
 from aerys_v2.panel_presence import (
+    SLEEP_DEBOUNCE_TICKS,
     IDLE_STATE,
     SLEEP_DOZE_STATE,
     WAKE_EMOTE_STATE,
@@ -61,7 +62,8 @@ def watcher(world, **kwargs):
 def test_vacant_room_with_lights_out_puts_her_to_sleep():
     world = FakeWorld({OCC: "off", L1: "off", L2: "off"})
     w = watcher(world)
-    w.tick()
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()
     assert w.asleep is True
     assert world.panel_calls == [
         ("/state", {"state": SLEEP_DOZE_STATE}),   # she dozes off first
@@ -103,7 +105,8 @@ def test_asleep_stays_asleep_while_room_stays_empty():
     world = FakeWorld({OCC: "off", L1: "off", L2: "off"})
     w = watcher(world)
     w.asleep = True
-    w.tick()
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()
     assert w.asleep is True
     assert world.panel_calls == []
 
@@ -131,7 +134,8 @@ def test_dead_panel_never_raises():
             return httpx.Client(transport=httpx.MockTransport(handler))
 
     w = watcher(DeadPanelWorld({OCC: "off", L1: "off", L2: "off"}))
-    w.tick()  # no raise = fail-open held; state machine still advanced
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()  # no raise = fail-open held; state machine still advanced
     assert w.asleep is True
 
 
@@ -355,3 +359,45 @@ def test_dead_desk_line_does_not_take_the_watcher_down():
     w = watcher(world, notify_fn=broken_notify)
     for _ in range(DAYTIME_UNKNOWABLE_STRIKES + 2):
         w.tick()  # no raise = fail-open held
+
+
+# --- hysteresis: the Nanoleaf-test yo-yo (8/02) -------------------------------
+# Chris manually killed the office lights while staying at his desk; the
+# occupancy sensor drops him during stillness, so she cycled sleep/wake three
+# times in six minutes and it read as a reboot loop. Movie mode's assumption
+# (occupancy holds while present) gets hysteresis instead of trust.
+
+
+def test_one_occupancy_flicker_does_not_sleep_her():
+    world = FakeWorld({OCC: "off", L1: "off", L2: "off"})
+    w = watcher(world)
+    w.tick()                     # one flicker
+    assert w.asleep is False
+    world.states[OCC] = "on"     # owner seen again — debounce restarts
+    w.tick()
+    world.states[OCC] = "off"
+    for _ in range(SLEEP_DEBOUNCE_TICKS - 1):
+        w.tick()
+    assert w.asleep is False     # still one short of the debounce
+    w.tick()
+    assert w.asleep is True      # sustained absence finally sleeps her
+
+
+def test_fresh_wake_holds_five_minutes_against_a_flapping_sensor():
+    import time as _time
+
+    world = FakeWorld({OCC: "on", L1: "off", L2: "off"})
+    w = watcher(world)
+    w.asleep = True
+    w.tick()                     # wake
+    assert w.asleep is False
+    world.states[OCC] = "off"    # sensor immediately drops him again
+    for _ in range(SLEEP_DEBOUNCE_TICKS + 2):
+        w.tick()
+    assert w.asleep is False     # dwell holds her awake
+
+    # ...but once the dwell has genuinely elapsed, sustained absence sleeps her
+    w._last_wake_monotonic = _time.monotonic() - 301.0
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()
+    assert w.asleep is True

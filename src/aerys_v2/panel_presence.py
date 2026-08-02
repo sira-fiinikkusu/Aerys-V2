@@ -52,6 +52,17 @@ DAYTIME_UNKNOWABLE_STRIKES = 9
 #: logged "health unknowable — trusting the wake" into a log nobody reads,
 #: and the trust was misplaced both times.
 WAKE_UNKNOWABLE_STRIKES = 2
+#: Hysteresis (8/02, the Nanoleaf-test yo-yo). The movie-mode design — manual
+#: lights-off with someone present keeps her awake — assumes occupancy holds
+#: "on" while the owner is in the room. The office sensor drops him during
+#: desk-stillness, so with the lights manually off she cycled sleep/wake three
+#: times in six minutes and it read as a reboot loop from the chair. Occupancy
+#: must be off for 3 consecutive ticks (~60s) before she MAY sleep, and a wake
+#: buys 5 minutes of guaranteed-awake — one sensor flicker no longer closes
+#: her eyes, and a flapping sensor cannot yo-yo her. Semantics unchanged:
+#: what sleep/wake MEAN is untouched, only how twitchy they are.
+SLEEP_DEBOUNCE_TICKS = 3
+WAKE_DWELL_S = 300.0
 
 
 class PanelPresenceWatcher:
@@ -106,6 +117,9 @@ class PanelPresenceWatcher:
         self._daytime_unknowable = 0
         self._wake_unknowable = 0
         self._escalated = False
+        # Hysteresis state (the Nanoleaf-test yo-yo, 8/02)
+        self._occ_off_ticks = 0
+        self._last_wake_monotonic: float | None = None
 
     # -- HA reads (fail-open: unknown never causes a transition) ----------
     def _entity_state(self, entity_id: str) -> str:
@@ -304,6 +318,8 @@ class PanelPresenceWatcher:
         self._sleep(self._emote_s)
         self._push_state(IDLE_STATE)
         self.asleep = False
+        self._last_wake_monotonic = time.monotonic()
+        self._occ_off_ticks = 0
         self._verify_wake()
 
     def tick(self) -> None:
@@ -315,7 +331,18 @@ class PanelPresenceWatcher:
             return
         self._check_daytime_wedge()
         if occupied != "off":
-            return  # occupied, or HA unreadable — never sleep on uncertainty
+            # occupied, or HA unreadable — never sleep on uncertainty, and any
+            # sighting of the owner restarts the debounce from zero.
+            self._occ_off_ticks = 0
+            return
+        self._occ_off_ticks += 1
+        if self._occ_off_ticks < SLEEP_DEBOUNCE_TICKS:
+            return  # one flicker is not an empty room
+        if (
+            self._last_wake_monotonic is not None
+            and time.monotonic() - self._last_wake_monotonic < WAKE_DWELL_S
+        ):
+            return  # she JUST woke — a flapping sensor doesn't get to yo-yo her
         lights = [self._entity_state(e) for e in self._lights]
         if lights and all(s == "off" for s in lights):
             # occupancy off AND lights out = the vacancy automation has fired;
