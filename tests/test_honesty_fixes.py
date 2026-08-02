@@ -150,6 +150,28 @@ def test_correction_text_keeps_the_bounce_internal():
     assert "search_web" in lowered
 
 
+def test_correction_has_a_no_action_branch():
+    """The disclosure clause is load-bearing but was over-firing on messages that
+    requested nothing: "morning check — you good?" came back as "No tool call
+    needed here — that was just a status check..." (v2_turns #310, 2026-08-02).
+
+    That IS the confession the correction's own last line forbids — the prompt
+    said both "state plainly you performed no action" and "never mention it",
+    and she resolved the contradiction by narrating. The fix is an explicit
+    branch, so pin that the branch exists and that both sides survive.
+    """
+    lowered = ACTION_NO_TOOL_CORRECTION.lower()
+    # the honest-disclosure side is still there (it stops fabricated device state)
+    assert "did not perform" in lowered
+    # ...but is now conditioned on the request actually asking for something
+    assert "asked you to do or check something" in lowered
+    # ...and the no-action side is named rather than left to inference
+    assert "asked for no action" in lowered
+    assert "nothing to disclose" in lowered
+    # the exact phrasing she produced is called out as forbidden
+    assert "no tool needed here" in lowered
+
+
 def test_nonvoice_zero_tool_action_that_calls_a_tool_on_retry_is_clean():
     # The correction WORKS: pass 1 hallucinates "done"; pass 2 (after the corrective)
     # actually calls the tool. The turn emits the honest outcome and carries NO marker.

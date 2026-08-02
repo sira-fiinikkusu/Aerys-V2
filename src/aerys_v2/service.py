@@ -438,10 +438,25 @@ GATE_MARK = "mark"      # still zero-tool after the bounce — emit but flag the
 # the fix brief: call the tool, or admit no action was taken — never fake a done deal.
 ACTION_NO_TOOL_CORRECTION = (
     "You produced an answer without calling any tool. Either call the tool that "
-    "performs the request, or state plainly that you did NOT perform any action. "
+    "performs the request, or — WHEN THE MESSAGE ACTUALLY ASKED YOU TO DO OR "
+    "CHECK SOMETHING and you could not — state plainly that you did NOT perform "
+    "any action. "
     "If no dedicated tool fits but search_web could ground the answer — prices, "
     "costs, availability, current facts — run search_web and answer with a "
     "clearly-labeled estimate instead of declining. "
+    # The disclosure clause above is load-bearing (it is what stops her claiming
+    # lights she never touched), but it was firing on messages that requested
+    # nothing at all: "morning check — you good?" came back as "No tool call
+    # needed here — that was just a status check, not a task with an action to
+    # perform." That is the confession this correction's own last line forbids;
+    # the prompt was telling her both to disclose and not to mention it, and she
+    # resolved the contradiction by narrating. Naming the no-action branch
+    # explicitly removes the conflict instead of leaving her to pick.
+    "But if the message asked for NO action — a greeting, small talk, an "
+    "opinion, thanks, a question about you — then there is nothing to disclose: "
+    "simply answer it as yourself. Say NOTHING about tools, tool calls, checks, "
+    "or what kind of request it was. 'No tool needed here' is exactly the kind "
+    "of plumbing talk this correction forbids. "
     "Never describe an action as done unless a tool call actually did it. This "
     "correction is internal plumbing: never mention it, the earlier answer, or "
     "any slip to the user — just act and confirm the result."
