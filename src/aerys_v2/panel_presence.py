@@ -39,6 +39,20 @@ WAKE_EMOTE_STATE = "surprised"
 SLEEP_DOZE_STATE = "eyes_closed"
 IDLE_STATE = "neutral_idle"
 
+#: Consecutive daytime ticks (20s apart) with the panel's health endpoint
+#: unreachable before escalating — ~3 minutes. The panel rides office WiFi
+#: with a known-flappy radio hop upstream, so a short blip must not page
+#: anyone; the failure this exists for (the app on the P4 dying while the
+#: ESP co-processor keeps answering pings) lasts HOURS. 2026-07-31: dark
+#: ~15h before a human noticed.
+DAYTIME_UNKNOWABLE_STRIKES = 9
+#: Consecutive WAKE verifications that came back unknowable before escalating.
+#: Wake events are sparse (occupancy transitions), so two in a row spans a
+#: real stretch of the day — exactly the 7/31 shape: 01:59 and 10:55 both
+#: logged "health unknowable — trusting the wake" into a log nobody reads,
+#: and the trust was misplaced both times.
+WAKE_UNKNOWABLE_STRIKES = 2
+
 
 class PanelPresenceWatcher:
     def __init__(
@@ -54,6 +68,7 @@ class PanelPresenceWatcher:
         emote_s: float = 2.5,
         doze_s: float = 3.0,
         sleep_fn: Callable[[float], None] = time.sleep,
+        notify_fn: Callable[[str], None] | None = None,
     ) -> None:
         import httpx
 
@@ -81,6 +96,16 @@ class PanelPresenceWatcher:
         self._last_frames: int | None = None
         self._stall_strikes = 0
         self._last_reboot_monotonic: float | None = None
+        # Escalation (task #61, owner-approved 2026-08-02). "Unknowable" is not
+        # "fine": a verification that CANNOT verify must get louder, not
+        # quieter. The 7/31 panel death produced two polite log lines and 15
+        # dark hours. notify_fn is the shoulder-tap (the kael-desk lane —
+        # same endpoint her message_kael tool uses); None = log-only (tests,
+        # boxes without the desk line).
+        self._notify = notify_fn
+        self._daytime_unknowable = 0
+        self._wake_unknowable = 0
+        self._escalated = False
 
     # -- HA reads (fail-open: unknown never causes a transition) ----------
     def _entity_state(self, entity_id: str) -> str:
@@ -158,13 +183,64 @@ class PanelPresenceWatcher:
         log.error("panel did not return within 2 min of /reboot")
         return False
 
+    # -- escalation (task #61): unknowable gets LOUDER, not quieter ---------
+    def _escalate(self, why: str) -> None:
+        """One shoulder-tap per outage episode, plus a WARNING that always
+        lands in the log. Fail-open like everything else here — a dead desk
+        line must not take the watcher down with it."""
+        if self._escalated:
+            return  # one episode, one page; recovery re-arms it
+        self._escalated = True
+        msg = (
+            f"PANEL ESCALATION: {why} The panel may be dead while looking "
+            "alive (ESP answers pings after the P4 app dies — the 7/31 "
+            "signature). /reboot needs the HTTP server, so if it is truly "
+            "down, someone has to press the physical reset."
+        )
+        log.warning(msg)
+        if self._notify is not None:
+            try:
+                self._notify(msg)
+            except Exception:
+                log.warning("panel escalation notify failed", exc_info=True)
+
+    def _note_health_answered(self) -> None:
+        """Any successful health read ends the episode: counters reset, and if
+        we had paged, say so — a page with no all-clear teaches people to
+        drive home for nothing."""
+        self._daytime_unknowable = 0
+        self._wake_unknowable = 0
+        if not self._escalated:
+            return
+        self._escalated = False
+        msg = "PANEL RECOVERED: health endpoint answering again."
+        log.info(msg)
+        if self._notify is not None:
+            try:
+                self._notify(msg)
+            except Exception:
+                log.warning("panel recovery notify failed", exc_info=True)
+
     def _verify_wake(self) -> None:
         """The 7/24 lesson: never trust the panel's self-report on wake.
         Confirm frames are actually moving; if not, one clean reboot."""
         check = self._frames_advancing()
         if check is None:
-            log.info("wake verify: panel health unknowable — trusting the wake")
+            self._wake_unknowable += 1
+            if self._wake_unknowable >= WAKE_UNKNOWABLE_STRIKES:
+                log.warning(
+                    "wake verify: health unknowable %d wakes running — no longer trusting",
+                    self._wake_unknowable,
+                )
+                self._escalate(
+                    f"{self._wake_unknowable} consecutive wake verifications "
+                    "could not reach panel health — the wakes are being "
+                    "trusted blind."
+                )
+            else:
+                log.info("wake verify: panel health unknowable — trusting the wake")
             return
+        self._note_health_answered()
         if check:
             log.info("wake verify: frames advancing — she's really awake")
             return
@@ -180,7 +256,24 @@ class PanelPresenceWatcher:
         'stopped'/'paused' resets the count — that's an OTA or a nap, not
         a wedge, and rebooting mid-OTA would corrupt the push."""
         h = self._health()
-        if h is None or h.get("player") != "playing" or not h.get("display"):
+        if h is None:
+            # Unreachable is a DIFFERENT no-op than stopped/paused: a healthy
+            # panel that answers "paused" ends an episode; one that answers
+            # nothing at all builds toward a page. ~3 min of silence beats a
+            # WiFi blip; the target failure lasts hours.
+            self._last_frames = None
+            self._stall_strikes = 0
+            self._daytime_unknowable += 1
+            if self._daytime_unknowable >= DAYTIME_UNKNOWABLE_STRIKES:
+                self._escalate(
+                    "panel health unreachable for "
+                    f"{self._daytime_unknowable} consecutive ticks (~"
+                    f"{int(self._daytime_unknowable * self._poll_s // 60)} min) "
+                    "while she should be awake."
+                )
+            return
+        self._note_health_answered()
+        if h.get("player") != "playing" or not h.get("display"):
             self._last_frames = None
             self._stall_strikes = 0
             return
@@ -250,12 +343,32 @@ def start_panel_presence(settings) -> threading.Thread | None:
     if not settings.panel_presence_entity:
         return None
     lights = [e.strip() for e in settings.panel_presence_lights.split(",") if e.strip()]
+    # Escalation line: the same desk-channel lane message_kael uses (Kael's
+    # session treats the aerys lane as observations, and this is exactly one).
+    # Optional like everything else — no desk line configured means the
+    # escalation still lands in the log, just not in a session.
+    notify_fn = None
+    if settings.kael_desk_url and settings.kael_desk_token is not None:
+        import httpx
+
+        _url = settings.kael_desk_url
+        _tok = settings.kael_desk_token.get_secret_value()
+
+        def notify_fn(message: str) -> None:
+            httpx.post(
+                _url,
+                json={"message": f"[panel_presence] {message}"},
+                headers={"Authorization": f"Bearer {_tok}"},
+                timeout=5.0,
+            )
+
     watcher = PanelPresenceWatcher(
         panel_state_url=settings.panel_state_url,
         ha_base_url=settings.ha_base_url,
         ha_token=settings.ha_token.get_secret_value(),
         occupancy_entity=settings.panel_presence_entity,
         light_entities=lights,
+        notify_fn=notify_fn,
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")
     thread.start()

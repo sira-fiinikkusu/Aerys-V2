@@ -232,3 +232,126 @@ def test_arming_requires_all_three_halves():
     assert start_panel_presence(S()) is None
     S.panel_state_url = "http://panel:8300/state"
     assert start_panel_presence(S()) is None  # still no token/entity
+
+
+# --- escalation: unknowable gets louder, not quieter (task #61) --------------
+# 7/31: the panel died in the evening; wake verification ran twice, said
+# "health unknowable — trusting the wake" into a log nobody reads, and she sat
+# dark ~15 hours until a human pressed reset. These pin the fix: silence past
+# a threshold pages the desk line once, recovery says so once, and a dead desk
+# line can't take the watcher down.
+
+
+class ToggleWorld(HealthWorld):
+    """HealthWorld whose /health can be taken down and brought back."""
+
+    def __init__(self, states=None, **kw):
+        super().__init__(states, **kw)
+        self.health_up = True
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health" and not self.health_up:
+            return httpx.Response(404)
+        return super().handle(request)
+
+
+def notes():
+    sent: list[str] = []
+    return sent, sent.append
+
+
+def test_daytime_silence_pages_once_after_the_threshold():
+    from aerys_v2.panel_presence import DAYTIME_UNKNOWABLE_STRIKES
+
+    sent, notify = notes()
+    world = ToggleWorld({OCC: "on"})
+    world.health_up = False
+    w = watcher(world, notify_fn=notify)
+
+    for _ in range(DAYTIME_UNKNOWABLE_STRIKES - 1):
+        w.tick()
+    assert sent == []  # patient through a WiFi blip's worth of silence
+
+    w.tick()  # threshold
+    assert len(sent) == 1 and "PANEL ESCALATION" in sent[0]
+
+    for _ in range(5):
+        w.tick()  # continued silence must not jackhammer
+    assert len(sent) == 1
+
+
+def test_recovery_sends_the_all_clear_and_rearms():
+    from aerys_v2.panel_presence import DAYTIME_UNKNOWABLE_STRIKES
+
+    sent, notify = notes()
+    world = ToggleWorld({OCC: "on"})
+    world.health_up = False
+    w = watcher(world, notify_fn=notify)
+    for _ in range(DAYTIME_UNKNOWABLE_STRIKES):
+        w.tick()
+    assert len(sent) == 1
+
+    world.health_up = True
+    w.tick()
+    assert len(sent) == 2 and "PANEL RECOVERED" in sent[1]
+
+    # a SECOND outage pages again — recovery re-armed the episode
+    world.health_up = False
+    for _ in range(DAYTIME_UNKNOWABLE_STRIKES):
+        w.tick()
+    assert len(sent) == 3 and "PANEL ESCALATION" in sent[2]
+
+
+def test_two_unknowable_wake_verifies_stop_trusting():
+    from aerys_v2.panel_presence import WAKE_UNKNOWABLE_STRIKES
+
+    sent, notify = notes()
+    world = FakeWorld({OCC: "on"})  # no /health surface at all
+    w = watcher(world, notify_fn=notify)
+
+    for i in range(WAKE_UNKNOWABLE_STRIKES):
+        w.asleep = True  # simulate the next morning's wake event
+        w.tick()
+        if i < WAKE_UNKNOWABLE_STRIKES - 1:
+            assert sent == []  # first unknowable wake is still trusted
+    assert len(sent) == 1 and "wake verifications" in sent[0]
+
+
+def test_healthy_panel_never_pages():
+    sent, notify = notes()
+    world = HealthWorld({OCC: "on"})
+    w = watcher(world, notify_fn=notify)
+    for _ in range(30):
+        w.tick()
+    assert sent == []
+
+
+def test_stopped_player_is_a_healthy_answer_not_silence():
+    """Paused/stopped (a nap, an OTA) is the panel ANSWERING — it must end an
+    episode-in-progress, not extend it."""
+    from aerys_v2.panel_presence import DAYTIME_UNKNOWABLE_STRIKES
+
+    sent, notify = notes()
+    world = ToggleWorld({OCC: "on"}, player="stopped")
+    world.health_up = False
+    w = watcher(world, notify_fn=notify)
+    for _ in range(DAYTIME_UNKNOWABLE_STRIKES - 1):
+        w.tick()
+    world.health_up = True  # answers again — as "stopped"
+    w.tick()
+    world.health_up = False
+    w.tick()
+    assert sent == []  # counter was reset by the stopped-but-alive answer
+
+
+def test_dead_desk_line_does_not_take_the_watcher_down():
+    from aerys_v2.panel_presence import DAYTIME_UNKNOWABLE_STRIKES
+
+    def broken_notify(_msg):
+        raise RuntimeError("desk line offline")
+
+    world = ToggleWorld({OCC: "on"})
+    world.health_up = False
+    w = watcher(world, notify_fn=broken_notify)
+    for _ in range(DAYTIME_UNKNOWABLE_STRIKES + 2):
+        w.tick()  # no raise = fail-open held
