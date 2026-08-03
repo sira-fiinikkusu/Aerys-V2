@@ -17,12 +17,26 @@ class Settings(BaseSettings):
     # SecretStr masks the value in logs/reprs (prints ****, not the key)
     # "api" = metered ChatAnthropic (needs anthropic_api_key). "oauth" = the Claude
     # Agent SDK on the Max subscription — zero API tokens for daily conversation.
+    # "local" = an OpenAI-compatible server (Ollama/llama.cpp) at local_model_base_url;
+    # every tier collapses onto it — local mode exists for staging twins and for
+    # answering when the internet is gone, not for rationing spend.
     # The api key stays REQUIRED either way: evals/CI/fallback run on it.
     model_backend: str = "api"
     anthropic_api_key: SecretStr
     model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
+
+    # Local model door (owner-gated by design: the alignment layer is the soul file,
+    # not a vendor). base_url points at an OpenAI-compatible /v1; the placeholder
+    # api key satisfies clients that require one.
+    local_model_base_url: str = "http://127.0.0.1:11434/v1"
+    local_model_name: str = "hermes3:8b"
+    # Set (e.g. to local_model_base_url) to arm metered->local failover: a chat
+    # turn whose metered call dies falls back to the local model instead of dying,
+    # logs a WARNING, and stamps 'local_model_fallback' into v2_turns.degraded.
+    # None = off (the pre-8/03 behavior, byte-for-byte).
+    local_fallback_url: str | None = None
 
     # None = Discord transport OFF (the spike only arms when a token is present).
     # One gateway client covers guild AND DMs — the katerlol two-adapter IPC race

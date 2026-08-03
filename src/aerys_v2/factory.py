@@ -7,6 +7,7 @@ canvas; each node function is a Code node that receives state instead of $json.
 """
 
 import logging
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
@@ -375,24 +377,102 @@ def load_soul(path: Path) -> str:
         return FALLBACK_SOUL
 
 
+# Set by LocalFailoverModel the moment a metered call dies and the local model
+# answers instead; read + reset by the service per turn so the receipt (v2_turns
+# .degraded) and the dashboard both show the lifeboat was used. ContextVar =
+# async-task-scoped, so concurrent turns cannot smear each other's flag.
+LOCAL_FALLBACK_FIRED: ContextVar[bool] = ContextVar("local_fallback_fired", default=False)
+
+
+def local_model_for(
+    settings: Settings, *, timeout_s: float = 60.0, base_url: str | None = None
+) -> BaseChatModel:
+    """The local OpenAI-compatible door (Ollama/llama.cpp serving e.g. Hermes-3).
+
+    Owner-gate by design (2026-08-03): the alignment layer for the local model is
+    the soul file and the owner, not a vendor. The placeholder api key satisfies
+    clients that insist on one; Ollama ignores it.
+    """
+    from langchain_openai import ChatOpenAI
+
+    return ChatOpenAI(
+        model=settings.local_model_name,
+        base_url=base_url or settings.local_model_base_url,
+        api_key="local",
+        max_tokens=4096,
+        timeout=timeout_s,
+        max_retries=1,
+    )
+
+
+class LocalFailoverModel(BaseChatModel):
+    """A metered primary with a local lifeboat (owner call 2026-08-03: automatic
+    failover is fine PROVIDED the logs reflect it).
+
+    On any primary exception: one WARNING with the failure class, the
+    LOCAL_FALLBACK_FIRED contextvar flips (service stamps 'local_model_fallback'
+    into v2_turns.degraded), and the local model answers. Composition goes through
+    .invoke on both wrapped models so retries, callbacks, and Phoenix tracing all
+    behave exactly as if the wrapped model had been called directly.
+    """
+
+    primary: BaseChatModel
+    lifeboat: BaseChatModel
+
+    @property
+    def _llm_type(self) -> str:
+        return "local-failover"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        try:
+            msg = self.primary.invoke(messages, stop=stop)
+        except Exception as e:  # noqa: BLE001 — ANY primary death means the lifeboat rows
+            log.warning(
+                "local_model_fallback: metered call failed (%s) — answering on the local model",
+                type(e).__name__,
+            )
+            LOCAL_FALLBACK_FIRED.set(True)
+            msg = self.lifeboat.invoke(messages, stop=stop)
+        return ChatResult(generations=[ChatGeneration(message=msg)])
+
+
 def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel:
     """One place that knows how to turn Settings into a chat model.
 
     The request `timeout` is a safety rail (cross-review #13): a hung provider call
     must fail the turn, never hang the caller. max_tokens caps the spend per reply.
     """
+    if settings.model_backend == "local":
+        # Staging twins and offline-her: every call is the local model, no meter.
+        return local_model_for(settings, timeout_s=timeout_s)
     if settings.model_backend == "oauth":
         # Subscription-auth backend (the June credit-pool decision, landed) — the
         # graph gets "a chat model" and can't tell which wallet it bills.
         from aerys_v2.oauth_model import ClaudeOAuthChatModel
 
-        return ClaudeOAuthChatModel(model=settings.model)
-    return ChatAnthropic(
-        model=settings.model,
-        api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
-        max_tokens=4096,
-        timeout=timeout_s,
-        max_retries=2,
+        return _maybe_failover(settings, ClaudeOAuthChatModel(model=settings.model), timeout_s)
+    return _maybe_failover(
+        settings,
+        ChatAnthropic(
+            model=settings.model,
+            api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
+            max_tokens=4096,
+            timeout=timeout_s,
+            max_retries=2,
+        ),
+        timeout_s,
+    )
+
+
+def _maybe_failover(
+    settings: Settings, primary: BaseChatModel, timeout_s: float
+) -> BaseChatModel:
+    """Wrap a metered model with the local lifeboat iff local_fallback_url is set."""
+    if settings.local_fallback_url is None:
+        return primary
+    return LocalFailoverModel(
+        primary=primary,
+        lifeboat=local_model_for(settings, timeout_s=timeout_s, base_url=settings.local_fallback_url),
     )
 
 
@@ -411,13 +491,24 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
     honoring model_backend exactly as before tiers existed.
     """
 
+    if settings.model_backend == "local":
+        # Local mode collapses ALL tiers onto the one local model: this mode
+        # exists for staging twins and internet-is-gone presence, and rationing
+        # (fast=pennies / deep=capped) only makes sense on a meter.
+        local = local_model_for(settings, timeout_s=timeout_s)
+        return {"fast": local, "standard": local, "deep": local}
+
     def api_model(name: str) -> BaseChatModel:
-        return ChatAnthropic(
-            model=name,
-            api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
-            max_tokens=4096,
-            timeout=timeout_s,
-            max_retries=2,
+        return _maybe_failover(
+            settings,
+            ChatAnthropic(
+                model=name,
+                api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
+                max_tokens=4096,
+                timeout=timeout_s,
+                max_retries=2,
+            ),
+            timeout_s,
         )
 
     return {

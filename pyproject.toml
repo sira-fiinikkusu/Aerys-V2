@@ -14,6 +14,7 @@ dependencies = [
     "discord-py>=2.4",
     "fastapi>=0.115",
     "langchain-anthropic>=1.4.6",
+    "langchain-openai>=1.4.1",
     "langgraph>=1.2.6",
     "langgraph-checkpoint-postgres>=2.0",
     "openinference-instrumentation-langchain>=0.1.67",

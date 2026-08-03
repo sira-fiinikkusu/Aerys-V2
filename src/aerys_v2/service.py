@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage
 
+from aerys_v2.factory import LOCAL_FALLBACK_FIRED
 from aerys_v2.router import (
     DEFAULT_TIER,
     FALLBACK_ACK,
@@ -898,6 +899,7 @@ def _chat_turn(
     Gemini polisher is now prompt-side emotion tags), so what the model said IS
     what the channel emits.
     """
+    LOCAL_FALLBACK_FIRED.set(False)  # per-turn flag; stamped into degraded below
     try:
         result = graph.invoke(
             {"messages": [_human_turn(text, human_privacy, human_id)]}, config
@@ -917,7 +919,12 @@ def _chat_turn(
             classifier_intent=classifier_intent,
             tier=tier,
             tier_override_source=tier_override_source,
-            base_degraded=extra_degraded,
+            base_degraded=[
+                *(extra_degraded or []),
+                # Primary died, lifeboat fired, and the turn STILL raised — the row
+                # must show both facts (owner condition 8/03: logs reflect fallback).
+                *(["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else []),
+            ] or None,
             emitted_reply=honest,
         )
         if honest is not None:
@@ -933,6 +940,10 @@ def _chat_turn(
         f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)" if timed_out else None
     )
     degraded = list(extra_degraded or [])
+    if LOCAL_FALLBACK_FIRED.get():
+        # The metered model died mid-turn and the local lifeboat answered
+        # (owner-approved automatic failover, 2026-08-03 — condition: visible).
+        degraded.append("local_model_fallback")
     if handoff:
         degraded.append(CHAT_HANDOFF_MARKER)
     if timed_out:
