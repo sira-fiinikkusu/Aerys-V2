@@ -384,9 +384,7 @@ def load_soul(path: Path) -> str:
 LOCAL_FALLBACK_FIRED: ContextVar[bool] = ContextVar("local_fallback_fired", default=False)
 
 
-def local_model_for(
-    settings: Settings, *, timeout_s: float = 60.0, base_url: str | None = None
-) -> BaseChatModel:
+def local_model_for(settings: Settings, *, base_url: str | None = None) -> BaseChatModel:
     """The local OpenAI-compatible door (Ollama/llama.cpp serving e.g. Hermes-3).
 
     Owner-gate by design (2026-08-03): the alignment layer for the local model is
@@ -400,7 +398,7 @@ def local_model_for(
         base_url=base_url or settings.local_model_base_url,
         api_key="local",
         max_tokens=4096,
-        timeout=timeout_s,
+        timeout=settings.local_model_timeout_s,  # local clock, not the metered 60s
         max_retries=1,
     )
 
@@ -444,7 +442,7 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
     """
     if settings.model_backend == "local":
         # Staging twins and offline-her: every call is the local model, no meter.
-        return local_model_for(settings, timeout_s=timeout_s)
+        return local_model_for(settings)
     if settings.model_backend == "oauth":
         # Subscription-auth backend (the June credit-pool decision, landed) — the
         # graph gets "a chat model" and can't tell which wallet it bills.
@@ -472,7 +470,7 @@ def _maybe_failover(
         return primary
     return LocalFailoverModel(
         primary=primary,
-        lifeboat=local_model_for(settings, timeout_s=timeout_s, base_url=settings.local_fallback_url),
+        lifeboat=local_model_for(settings, base_url=settings.local_fallback_url),
     )
 
 
@@ -495,7 +493,7 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
         # Local mode collapses ALL tiers onto the one local model: this mode
         # exists for staging twins and internet-is-gone presence, and rationing
         # (fast=pennies / deep=capped) only makes sense on a meter.
-        local = local_model_for(settings, timeout_s=timeout_s)
+        local = local_model_for(settings)
         return {"fast": local, "standard": local, "deep": local}
 
     def api_model(name: str) -> BaseChatModel:

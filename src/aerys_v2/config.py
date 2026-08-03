@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # api key satisfies clients that require one.
     local_model_base_url: str = "http://127.0.0.1:11434/v1"
     local_model_name: str = "hermes3:8b"
+    # CPU inference is slow by nature — a 7B writing a long reply can blow well
+    # past the metered world's 60s assumption, and an aborted+retried generation
+    # doubles the wait. The local door gets its own clock.
+    local_model_timeout_s: float = 180.0
     # Set (e.g. to local_model_base_url) to arm metered->local failover: a chat
     # turn whose metered call dies falls back to the local model instead of dying,
     # logs a WARNING, and stamps 'local_model_fallback' into v2_turns.degraded.
