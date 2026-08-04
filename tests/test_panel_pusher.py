@@ -53,6 +53,14 @@ def test_mood_of_reads_the_first_recognized_tag():
     assert mood_of("[sighs] fine.") == "grumpy"
     assert mood_of("[gasps] no way!") == "surprised"
     assert mood_of("[lovingly] you did great") == "affection"
+    # 8/04 sprite drop: laughter and dry delivery earned their own faces.
+    assert mood_of("[laughs] okay that was good") == "laughing"
+    assert mood_of("[giggling] stop it") == "laughing"
+    assert mood_of("[deadpan] amazing.") == "unimpressed"
+    assert mood_of("[flatly] sure it is") == "unimpressed"
+    # words that STAYED in their original moods
+    assert mood_of("[warmly] Morning!") == "happy"
+    assert mood_of("[annoyed] again?") == "grumpy"
 
 
 def test_mood_of_defaults_neutral_and_hearts_read_affection():

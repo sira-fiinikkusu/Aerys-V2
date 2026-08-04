@@ -39,6 +39,10 @@ _IDLE = {
     "grumpy": "grumpy_idle",
     "surprised": "surprised",
     "affection": "heart_emote",
+    # 8/04 sprite drop (Veo batch): dedicated faces for moods that used to
+    # borrow a neighbor's — laughter wore "happy", deadpan wore "grumpy".
+    "laughing": "laughing",
+    "unimpressed": "unimpressed_dead",
 }
 _SPEAKING = {
     "neutral": "neutral_speaking",
@@ -47,6 +51,9 @@ _SPEAKING = {
     "grumpy": "neutral_speaking",
     "surprised": "surprised",
     "affection": "heart_emote",
+    # A laugh keeps laughing while she talks; deadpan delivery IS the joke.
+    "laughing": "laughing",
+    "unimpressed": "unimpressed_dead",
 }
 WORKING_STATE = "working"
 
@@ -57,14 +64,17 @@ _TAG_MOODS = {
     # colorful one — the polisher leads with the dominant emotion.
     "neutral": ("softly", "calmly", "gently", "thoughtfully", "quietly", "evenly"),
     "happy": (
-        "warmly", "happily", "excited", "excitedly", "cheerfully", "laughs",
-        "laughing", "giggles", "giggling", "delighted", "brightly", "chuckles",
+        "warmly", "happily", "excited", "excitedly", "cheerfully",
+        "delighted", "brightly",
     ),
+    # Split from happy 8/04: these words now have their own face.
+    "laughing": ("laughs", "laughing", "giggles", "giggling", "chuckles"),
     "playful": ("playfully", "teasing", "teasingly", "mischievously", "smirks", "slyly"),
     "grumpy": (
-        "annoyed", "frustrated", "sarcastically", "grumbles", "sighs",
-        "deadpan", "flatly", "exasperated",
+        "annoyed", "frustrated", "grumbles", "sighs", "exasperated",
     ),
+    # Split from grumpy 8/04: dry delivery gets the disappointment ladder.
+    "unimpressed": ("deadpan", "flatly", "sarcastically", "dryly", "unimpressed"),
     "surprised": ("surprised", "gasps", "shocked", "amazed", "astonished"),
     "affection": ("lovingly", "affectionately", "tenderly", "adoringly"),
 }
