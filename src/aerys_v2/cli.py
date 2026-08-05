@@ -156,6 +156,7 @@ def main() -> None:
             health_probe_for,
             turn_recorder_for,
         )
+        from aerys_v2.kael_line import family_notes_fn_for, kael_note_for
         from aerys_v2.service import ask
         from aerys_v2.transports.http_api import build_app
 
@@ -200,6 +201,9 @@ def main() -> None:
                 context_fn=context_fn_for(settings),
                 tier_models=tier_models,
                 room_context_fn=room_context,
+                # Family splice (task #66): owner threads see Kael's
+                # family_visible notes; fn enforces the owner gate itself.
+                family_notes_fn=family_notes_fn_for(settings),
             )
             # TOOLS block (Option C): arms when HA_TOKEN (home) and/or
             # EMBEDDINGS_API_KEY (media) is set (the api key the router/tool
@@ -254,6 +258,9 @@ def main() -> None:
                 # /health probes the SAME pool the turns use, so a dead store
                 # can no longer hide behind a hardcoded 200 (the 7/30-31 outage).
                 health_probe=health_probe_for(cp),
+                # The Kael line's return direction (task #66): his replies land
+                # in the thread she pinged from, receipted in v2_kael_notes.
+                kael_note_fn=kael_note_for(graph, settings),
             )
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;

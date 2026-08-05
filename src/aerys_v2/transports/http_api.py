@@ -45,8 +45,26 @@ class AskReply(BaseModel):
     thread_id: str
 
 
+class KaelNoteRequest(BaseModel):
+    """POST /kael-note — Kael's reply into the thread she pinged him from.
+
+    thread_id comes from the message_kael payload's return address (task #66).
+    family_visible defaults False by owner design: "tests do poison memory" —
+    only deliberately-flagged notes become shared family context.
+    """
+
+    thread_id: str
+    text: str
+    family_visible: bool = False
+
+
+class KaelNoteReply(BaseModel):
+    ok: bool
+    message_id: str
+
+
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
-              gaps_fn=None, health_probe=None) -> FastAPI:
+              gaps_fn=None, health_probe=None, kael_note_fn=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -216,6 +234,22 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             thread_id = body.thread_id
         reply = ask_fn(body.text, identity, thread_id)
         return AskReply(reply=reply, thread_id=thread_id)
+
+    @app.post("/kael-note", response_model=KaelNoteReply)
+    def kael_note_route(
+        body: KaelNoteRequest, _: None = Depends(require_token)
+    ) -> KaelNoteReply:
+        # The return direction of her message_kael line (task #66). Same Bearer
+        # as every owner-infrastructure caller; unarmed (DB-less dev, no graph)
+        # = honest 503, never a silent drop.
+        if kael_note_fn is None:
+            raise HTTPException(status_code=503, detail="kael line not armed")
+        if not body.thread_id.strip() or not body.text.strip():
+            raise HTTPException(status_code=422, detail="thread_id and text required")
+        msg_id = kael_note_fn(
+            body.thread_id.strip(), body.text.strip(), body.family_visible
+        )
+        return KaelNoteReply(ok=True, message_id=msg_id)
 
     @app.get("/gaps")
     def gaps_route(_: None = Depends(require_token)) -> dict:

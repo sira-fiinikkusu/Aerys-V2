@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 
 import httpx
+from langchain_core.runnables import RunnableConfig
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ def build_message_kael_tool(url: str, token: str, client: httpx.Client | None = 
     http = client or httpx.Client(timeout=5.0)
 
     @tool
-    def message_kael(message: str) -> str:
+    def message_kael(message: str, config: RunnableConfig) -> str:
         """Send Kael (the owner's coding agent, your collaborator) a direct
         real-time message — it lands in his live session immediately.
 
@@ -84,10 +85,20 @@ def build_message_kael_tool(url: str, token: str, client: httpx.Client | None = 
                 "what Kael needs to know."
             )
         clean = clean[:MESSAGE_LIMIT]
+        # The return address (task #66): carry the ORIGIN thread so Kael's reply
+        # can land where she asked from, instead of shouting into an adjacent
+        # thread she'll never see. config is runtime-injected by LangChain —
+        # invisible to the model, always the real thread.
+        thread_id = str(
+            ((config or {}).get("configurable") or {}).get("thread_id") or ""
+        )
+        payload: dict = {"message": clean}
+        if thread_id:
+            payload["thread_id"] = thread_id
         try:
             resp = http.post(
                 url,
-                json={"message": clean},
+                json=payload,
                 headers={"Authorization": f"Bearer {token}"},
             )
         except httpx.HTTPError:
