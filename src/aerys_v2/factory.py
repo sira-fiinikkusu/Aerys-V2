@@ -1103,6 +1103,7 @@ def build_action_graph(
     tools: list,
     context_fn: ContextFn | None = None,
     overlay: str = ACTION_OVERLAY,
+    family_notes_fn=None,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1171,8 +1172,18 @@ def build_action_graph(
         # "what time is it" web-searched on the tool path and punted to the lock screen.
         thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         where_when = _where_when_line(thread, identity)
+        # Family splice on the ACTION mind too (owner nit, 2026-08-05): voice and
+        # glasses turns ALWAYS run this graph, and those are exactly the surfaces
+        # where the owner most tells her to reach Kael — chat-only would put the
+        # feature where it's least needed. Same owner-gated fail-open fn.
+        family = ""
+        if family_notes_fn is not None:
+            try:
+                family = family_notes_fn(identity) or ""
+            except Exception:
+                log.warning("action family_notes_fn raised; continuing without", exc_info=True)
         system = SystemMessage(
-            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}"
+            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}"
         )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
@@ -1421,12 +1432,18 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         return None
     from aerys_v2.router import router_for
 
+    from aerys_v2.kael_line import family_notes_fn_for
+
     action_graph = build_action_graph(
         build_api_tool_model(settings, tools),
         soul,
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
         overlay=action_overlay_for(settings),
+        # Owner nit 8/05: voice/glasses ALWAYS run this graph — the family
+        # splice must ride it or it misses the surfaces that matter most.
+        # The fn owner-gates itself; the guest graph below stays unwired.
+        family_notes_fn=family_notes_fn_for(settings),
     )
     return router_for(settings, soul), action_graph
 

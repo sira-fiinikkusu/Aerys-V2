@@ -161,3 +161,51 @@ def test_family_splice_returns_empty_for_non_owner(monkeypatch):
     # A guest identity never reaches the database at all.
     assert fn({"user_id": "guest-uuid"}) == ""
     assert fn({}) == ""
+
+
+# ─────────────────────────────────── action graph carries the splice (owner nit 8/05)
+
+
+def test_action_graph_splices_family_notes_for_owner():
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from aerys_v2.factory import build_action_graph
+
+    seen = {}
+
+    class CaptureModel:
+        def invoke(self, messages):
+            seen["system"] = messages[0].content
+            return AIMessage(content="done")
+
+    g = build_action_graph(
+        CaptureModel(), "SOUL", tools=[],
+        family_notes_fn=lambda identity: "\n\n[Family-visible notes]\n- note one",
+    )
+    g.invoke(
+        {"messages": [HumanMessage(content="turn on the lights")]},
+        {"configurable": {"thread_id": "t", "identity": {"user_id": "owner-uuid",
+                                                          "privacy_context": "private"}}},
+    )
+    assert "[Family-visible notes]" in seen["system"]
+    assert "note one" in seen["system"]
+
+
+def test_action_graph_without_family_fn_is_unchanged():
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from aerys_v2.factory import build_action_graph
+
+    seen = {}
+
+    class CaptureModel:
+        def invoke(self, messages):
+            seen["system"] = messages[0].content
+            return AIMessage(content="done")
+
+    g = build_action_graph(CaptureModel(), "SOUL", tools=[])
+    g.invoke(
+        {"messages": [HumanMessage(content="hi")]},
+        {"configurable": {"thread_id": "t"}},
+    )
+    assert "Family-visible" not in seen["system"]
