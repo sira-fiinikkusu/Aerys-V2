@@ -145,7 +145,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Greetings and smalltalk: "hey", "what's up", "how are you"
 
 ## Return format:
-[{"key_label":"category.attribute","value_text":"the fact itself, naturally phrased","context":"why/how this came up in conversation (1 sentence, optional for stable facts)","event_date":"when this happened if mentioned (e.g. 'Feb 28', 'last week', null if not stated)","privacy_level":"public|private","asserted_by":"self|third_party","confidence":0.0}]
+[{"key_label":"category.attribute","value_text":"the fact itself, naturally phrased","context":"why/how this came up in conversation (1 sentence, optional for stable facts)","event_date":"when this happened, as an ABSOLUTE date computed from the conversation date (e.g. 'Feb 28' -- never 'last week' or 'tomorrow'; null if not stated)","privacy_level":"public|private","asserted_by":"self|third_party","confidence":0.0}]
 
 ## key_label rules:
 - Generic prefixes ONLY: basic, user, work, vehicle, interest, relationship, preference, event
@@ -157,6 +157,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - BAD: "Dodge Ram"  GOOD: "Interested in a Dodge Ram truck"
 - BAD: "Rotonda West"  GOOD: "Lives in Rotonda West, Florida"
 - For interests, include what makes it notable: "Collects retro games, especially SNES titles"
+- ABSOLUTIZE TIME: convert every relative time word using the "Conversation date" line at the top of the transcript. BAD: "surgery tomorrow"  GOOD: "surgery on Aug 6". BAD: "started new job last week"  GOOD: "started new job around Jul 30". The words tomorrow/yesterday/tonight/next week must NEVER appear in value_text -- they freeze at extraction time and rot.
 
 ## context rules:
 - 1 sentence max, captures the conversational moment
@@ -534,8 +535,22 @@ def group_by_person(rows: list[dict], *, batch_size: int = BATCH_SIZE) -> list[d
 
 
 def build_transcript(messages: list[dict]) -> str:
-    """The transcript half of "Build Extraction Request": `[Speaker]: text` lines."""
-    return "\n".join(f"[{m.get('speaker_name') or 'Unknown'}]: {m['content']}" for m in messages)
+    """The transcript half of "Build Extraction Request": `[Speaker]: text` lines.
+
+    2026-08-06 (owner-approved tense fix): a "Conversation date" header leads the
+    transcript when timestamps are available, so the extractor can ABSOLUTIZE
+    relative time ("surgery tomorrow" -> the real date). Without it, frozen
+    relative words rot in storage — she told the owner his Monday appointment
+    was "tomorrow" on Wednesday, faithfully quoting a dead word.
+    """
+    lines = [f"[{m.get('speaker_name') or 'Unknown'}]: {m['content']}" for m in messages]
+    stamp = next(
+        (m["created_at"] for m in reversed(messages) if m.get("created_at")), None
+    )
+    if stamp is not None:
+        local = stamp.astimezone(USER_TZ)
+        lines.insert(0, f"Conversation date: {local.strftime('%A')}, {local.strftime('%b')} {local.day}, {local.year}")
+    return "\n".join(lines)
 
 
 def batch_date(latest_created_at: datetime) -> str:

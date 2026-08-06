@@ -874,3 +874,37 @@ def test_a_successful_pass_resets_the_stall_streak(caplog):
         wm._check_stalled({"inserted_total": 4, "sources": {"v2_turns": {"rows": 50}}})
         wm._check_stalled(stalled)
     assert not caplog.records, "the streak restarts after a pass that stored something"
+
+
+# ─────────────────── tense fix (owner-approved 8/05, built 8/06): time absolutizing
+
+
+def test_transcript_leads_with_conversation_date():
+    from datetime import datetime, timezone
+
+    from aerys_v2.workers.extraction import build_transcript
+
+    msgs = [
+        {"speaker_name": "Chris", "content": "surgery tomorrow",
+         "created_at": datetime(2026, 8, 5, 23, 50, tzinfo=timezone.utc)},
+    ]
+    out = build_transcript(msgs)
+    # 23:50 UTC = 19:50 EDT Aug 5 — the header renders the OWNER's calendar day.
+    assert out.splitlines()[0] == "Conversation date: Wednesday, Aug 5, 2026"
+    assert out.splitlines()[1] == "[Chris]: surgery tomorrow"
+
+
+def test_transcript_without_timestamps_has_no_date_header():
+    from aerys_v2.workers.extraction import build_transcript
+
+    out = build_transcript([{"speaker_name": "A", "content": "hi"}])
+    assert out == "[A]: hi"
+
+
+def test_extraction_prompt_forbids_frozen_relative_time():
+    from aerys_v2.workers.extraction import EXTRACTION_SYSTEM_PROMPT as p
+
+    assert "ABSOLUTIZE TIME" in p
+    assert "surgery on Aug 6" in p            # the canonical example
+    assert "ABSOLUTE date computed from the conversation date" in p
+    assert "'last week', null if not stated" not in p  # old permissive example gone
