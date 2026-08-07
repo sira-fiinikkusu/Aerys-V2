@@ -52,6 +52,7 @@ Contracts every tool here obeys (same as tools/home_control.py, tools/web_search
 import email
 import email.policy
 import logging
+import time
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from typing import Any, Callable
@@ -76,6 +77,12 @@ TRUNCATION_NOTE = "\n\n[truncated — the message continues beyond 4000 characte
 # Per-line header trims for the compact search listing.
 FROM_TRUNCATE_AT = 60
 SUBJECT_TRUNCATE_AT = 100
+
+# One fresh-session retry for READ-ONLY mailbox ops after a short backoff —
+# the home_control._get_with_retry pattern, ported (gap #28, 2026-08-07: a
+# single transient IMAP hiccup cost a whole model round-trip to recover).
+# Sends stay single-shot on purpose: a retried send could double-deliver.
+TRANSIENT_RETRY_BACKOFF_S = 0.6
 
 # The refusal send_email returns when confirmed isn't true — a fixed sentence so
 # tests (and the model) see one stable contract, not paraphrase drift.
@@ -223,6 +230,37 @@ def build_email_tools(
                 raise RuntimeError(f"IMAP search returned {typ}")
         return (data[0] or b"").split()
 
+    def _read_with_retry(op_name: str, op: Callable[[Any], str]) -> str:
+        """Run a read-only mailbox op; ONE fresh-session retry on any failure.
+
+        Reads (readonly SELECT + BODY.PEEK) are side-effect-free, so a second
+        attempt can never double-do anything — while a transient IMAP blip
+        (TLS handshake flake, dropped session, Gmail momentarily grumpy) heals
+        invisibly instead of surfacing as a failed tool call the model has to
+        notice and retry itself. Hard failures still come back as the same
+        honest strings as before, just after two attempts instead of one.
+        """
+        for final in (False, True):
+            try:
+                imap = imap_factory()
+            except Exception as e:
+                if final:
+                    return (
+                        f"email {op_name} failed: the mailbox is unreachable "
+                        f"right now ({e})."
+                    )
+                time.sleep(TRANSIENT_RETRY_BACKOFF_S)
+                continue
+            try:
+                return op(imap)
+            except Exception as e:
+                if final:
+                    return f"email {op_name} failed: {e}."
+                time.sleep(TRANSIENT_RETRY_BACKOFF_S)
+            finally:
+                _close_quietly(imap, ("logout", "close"))
+        raise AssertionError("unreachable")  # pragma: no cover
+
     @tool
     def search_email(query: str, limit: int = SEARCH_LIMIT_DEFAULT) -> str:
         """Search the owner's OWN Gmail inbox for messages.
@@ -251,11 +289,7 @@ def build_email_tools(
             count = SEARCH_LIMIT_DEFAULT
         count = max(1, min(count, SEARCH_LIMIT_MAX))
 
-        try:
-            imap = imap_factory()
-        except Exception as e:
-            return f"email search failed: the mailbox is unreachable right now ({e})."
-        try:
+        def _search(imap: Any) -> str:
             imap.select("INBOX", readonly=True)
             uids = _uid_search(imap, q)
             if not uids:
@@ -280,10 +314,8 @@ def build_email_tools(
                     f" | {_trim(_decode_hdr(msg.get('Subject')), SUBJECT_TRUNCATE_AT) or '(no subject)'}"
                 )
             return "\n".join(lines)
-        except Exception as e:
-            return f"email search failed: {e}."
-        finally:
-            _close_quietly(imap, ("logout", "close"))
+
+        return _read_with_retry("search", _search)
 
     @tool
     def read_email(uid: str) -> str:
@@ -308,11 +340,7 @@ def build_email_tools(
                 f"'{uid_s}' is not a message uid — uids are plain numbers from "
                 "search_email's results."
             )
-        try:
-            imap = imap_factory()
-        except Exception as e:
-            return f"email read failed: the mailbox is unreachable right now ({e})."
-        try:
+        def _read(imap: Any) -> str:
             imap.select("INBOX", readonly=True)
             typ, data = imap.uid("FETCH", uid_s, "(BODY.PEEK[])")
             raw = _fetch_payload(data) if typ == "OK" else None
@@ -342,10 +370,8 @@ def build_email_tools(
                 if len(body) > BODY_TRUNCATE_AT:
                     body = body[:BODY_TRUNCATE_AT] + TRUNCATION_NOTE
             return "\n".join(header_lines) + "\n\n" + body
-        except Exception as e:
-            return f"email read failed: {e}."
-        finally:
-            _close_quietly(imap, ("logout", "close"))
+
+        return _read_with_retry("read", _read)
 
     @tool
     def draft_email(to: str, subject: str, body: str) -> str:

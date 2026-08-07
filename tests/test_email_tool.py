@@ -187,13 +187,83 @@ def test_search_blank_query_never_opens_imap():
     assert imap_f.calls == 0
 
 
-def test_search_dead_mailbox_is_honest_string_not_exception():
+def test_search_dead_mailbox_is_honest_string_not_exception(monkeypatch):
+    monkeypatch.setattr("aerys_v2.tools.email_tool.TRANSIENT_RETRY_BACKOFF_S", 0)
     imap_f = CountingFactory(raise_on_call=True)
     search, *_ = build_email_tools(
         imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF
     )
     out = search.invoke({"query": "q"})
     assert out.startswith("email search failed:") and "unreachable" in out
+    assert imap_f.calls == 2  # one fresh-session retry, then the honest string
+
+
+# ---- transient retry (gap #28) ----------------------------------------------------
+
+
+class FlakyOnceFactory:
+    """Raises on the FIRST open, hands out the fake on the second — the
+    transient-IMAP-blip shape that motivated the retry (gap #28)."""
+
+    def __init__(self, obj):
+        self.obj = obj
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if self.calls == 1:
+            raise Exception("[Errno 104] Connection reset by peer")
+        return self.obj
+
+
+def test_search_retries_once_through_a_transient_connect_failure(monkeypatch):
+    monkeypatch.setattr("aerys_v2.tools.email_tool.TRANSIENT_RETRY_BACKOFF_S", 0)
+    imap_f = FlakyOnceFactory(FakeIMAP(uids=b"3"))
+    search, *_ = build_email_tools(
+        imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF
+    )
+    out = search.invoke({"query": "delta"})
+    assert not out.startswith("email search failed")
+    assert "3 |" in out
+    assert imap_f.calls == 2
+
+
+def test_read_retries_once_when_the_session_dies_mid_op(monkeypatch):
+    monkeypatch.setattr("aerys_v2.tools.email_tool.TRANSIENT_RETRY_BACKOFF_S", 0)
+
+    class DiesOnceIMAP(FakeIMAP):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.selects = 0
+
+        def select(self, *a, **kw):
+            self.selects += 1
+            if self.selects == 1:
+                raise Exception("EOF occurred in violation of protocol")
+            return super().select(*a, **kw)
+
+    imap = DiesOnceIMAP()
+    _, read, *_rest = build_email_tools(
+        imap_factory=CountingFactory(imap),
+        smtp_factory=CountingFactory(FakeSMTP()),
+        self_address=SELF,
+    )
+    out = read.invoke({"uid": "7"})
+    assert not out.startswith("email read failed")
+    assert "Subject:" in out
+    assert imap.selects == 2
+
+
+def test_search_success_and_no_match_never_retry():
+    for uids in (b"3", b""):
+        imap_f = CountingFactory(FakeIMAP(uids=uids))
+        search, *_ = build_email_tools(
+            imap_factory=imap_f,
+            smtp_factory=CountingFactory(FakeSMTP()),
+            self_address=SELF,
+        )
+        search.invoke({"query": "q"})
+        assert imap_f.calls == 1  # both are answers, not failures
 
 
 # ---- read_email -------------------------------------------------------------------
