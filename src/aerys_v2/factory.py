@@ -1301,6 +1301,21 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
                 )
             )
 
+        if settings.ha_calendar_entities:
+            # CALENDAR (gap #27, Aerys's own pitch, owner-blessed 2026-08-07):
+            # read-only schedule lookups over HA's calendar API. Allowlisted
+            # entities only — see the config knob's comment for why discovery
+            # is deliberately off the table.
+            from aerys_v2.tools.calendar_events import build_calendar_tool, calendar_set
+
+            tools.append(
+                build_calendar_tool(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    entities=calendar_set(settings.ha_calendar_entities),
+                )
+            )
+
         if settings.ha_music_config_entry:
             # MUSIC (07-01 Play Music reborn, owner ask post-n8n-retirement):
             # same HA door; its player map doubles as the speaker allowlist, and

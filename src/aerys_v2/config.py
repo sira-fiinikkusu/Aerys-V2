@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and
     # disarm-surface gates (see tools/alarm.py), this knob only turns it on.
     ha_alarm_entity: str = ""
+    # csv of calendar entities the calendar_events tool may read (gap #27,
+    # owner-blessed 2026-08-07). Empty = the tool doesn't exist. An explicit
+    # ALLOWLIST on purpose, never auto-discovery: the hub aggregates calendars
+    # other integrations sync — including other people's shared calendars —
+    # and reading those into replies would leak schedules the owner never
+    # asked her to know. e.g. "calendar.personal,calendar.home".
+    ha_calendar_entities: str = ""
     # Optional generic `timer.*` helper entity for the timer tool's NO-DEVICE
     # fallback (text/DM/CLI turns carry no originating satellite, so there is no
     # native LED-wheel timer to start). None = no fallback: the tool honestly says
