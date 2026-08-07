@@ -1283,6 +1283,24 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
             )
         )
 
+        if settings.ha_alarm_entity:
+            # ALARM (owner-commissioned 2026-08-07): same HA door, but its own
+            # gates — owner-only identity + the disarm-surface rule live in the
+            # tool (tools/alarm.py), and receipts go to v2_outbox as
+            # 'alarm_control'. Deliberately outside the canary allowlist: the
+            # canary gates convenience writes; the alarm has bespoke rules.
+            from aerys_v2.tools.alarm import build_alarm_tool
+
+            tools.append(
+                build_alarm_tool(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    entity_id=settings.ha_alarm_entity,
+                    owner_person_id=settings.owner_person_id,
+                    conn_factory=conn_factory,
+                )
+            )
+
         if settings.ha_music_config_entry:
             # MUSIC (07-01 Play Music reborn, owner ask post-n8n-retirement):
             # same HA door; its player map doubles as the speaker allowlist, and

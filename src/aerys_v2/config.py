@@ -129,6 +129,11 @@ class Settings(BaseSettings):
     # e.g. "light.office_lamp,switch.desk_fan". Empty = every write refused —
     # the tool exists but is read-only, which is a valid canary stage zero.
     ha_canary_entities: str = ""
+    # The house alarm panel entity (e.g. "alarm_control_panel.panel"). Empty =
+    # the control_alarm tool doesn't exist — same arming pattern as ha_token.
+    # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and
+    # disarm-surface gates (see tools/alarm.py), this knob only turns it on.
+    ha_alarm_entity: str = ""
     # Optional generic `timer.*` helper entity for the timer tool's NO-DEVICE
     # fallback (text/DM/CLI turns carry no originating satellite, so there is no
     # native LED-wheel timer to start). None = no fallback: the tool honestly says
