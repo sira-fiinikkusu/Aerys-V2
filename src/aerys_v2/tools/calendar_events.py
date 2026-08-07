@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -111,8 +112,12 @@ def build_calendar_tool(
         span = max(1, min(span, DAYS_MAX))
 
         now = datetime.now().astimezone()
-        start = now.isoformat()
-        end = (now + timedelta(days=span)).isoformat()
+        # urlencode is load-bearing: a UTC box renders isoformat() with +00:00,
+        # and a RAW '+' in a query string decodes as a SPACE → HA 400s the
+        # window (found live on first deploy — the container clock is UTC).
+        window = urlencode(
+            {"start": now.isoformat(), "end": (now + timedelta(days=span)).isoformat()}
+        )
 
         events: list[tuple[Any, str, str]] = []  # (sort_key, day_key, line)
         unreachable: list[str] = []
@@ -120,7 +125,7 @@ def build_calendar_tool(
             try:
                 r = _get_with_retry(
                     http,
-                    f"{base}/api/calendars/{entity}?start={start}&end={end}",
+                    f"{base}/api/calendars/{entity}?{window}",
                     headers,
                 )
                 r.raise_for_status()

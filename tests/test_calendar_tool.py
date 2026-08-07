@@ -72,6 +72,24 @@ def test_only_allowlisted_calendars_are_fetched():
     assert sorted(set(seen)) == sorted({PERSONAL, HOME})
 
 
+def test_window_query_is_url_encoded_no_raw_plus():
+    """A UTC box renders isoformat() offsets as +00:00; an unencoded '+'
+    decodes as a space and HA 400s the window (found live on first deploy)."""
+    queries = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(str(request.url.query, "ascii"))
+        return httpx.Response(200, json=[])
+
+    tool = build_calendar_tool(
+        base_url="http://ha.test", token="tok", entities=(PERSONAL,),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    tool.invoke({"days": 7})
+    assert queries and "start=" in queries[0] and "end=" in queries[0]
+    assert "+" not in queries[0]  # any offset '+' must be %2B
+
+
 def test_events_merge_across_calendars_in_time_order_with_day_headers():
     tool, _ = make_tool(
         {
