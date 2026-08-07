@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and
     # disarm-surface gates (see tools/alarm.py), this knob only turns it on.
     ha_alarm_entity: str = ""
+    # The input_text helper the sticky_note tool writes (the household e-ink
+    # note slot, e.g. "input_text.sticky_note_from_aerys"). Empty = the tool
+    # doesn't exist. Owner-commissioned 2026-08-07, the night Sticky One woke.
+    ha_sticky_note_entity: str = ""
     # csv of calendar entities the calendar_events tool may read (gap #27,
     # owner-blessed 2026-08-07). Empty = the tool doesn't exist. An explicit
     # ALLOWLIST on purpose, never auto-discovery: the hub aggregates calendars

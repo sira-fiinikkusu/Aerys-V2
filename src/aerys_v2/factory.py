@@ -1301,6 +1301,20 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
                 )
             )
 
+        if settings.ha_sticky_note_entity:
+            # STICKY NOTE (owner ask 2026-08-07, "something Aerys shaped
+            # tonight"): her words onto the household e-ink displays via an
+            # input_text slot. Same HA door; one slot, newest note wins.
+            from aerys_v2.tools.sticky_note import build_sticky_note_tool
+
+            tools.append(
+                build_sticky_note_tool(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    entity_id=settings.ha_sticky_note_entity,
+                )
+            )
+
         if settings.ha_calendar_entities:
             # CALENDAR (gap #27, Aerys's own pitch, owner-blessed 2026-08-07):
             # read-only schedule lookups over HA's calendar API. Allowlisted
