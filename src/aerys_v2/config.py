@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     # note slot, e.g. "input_text.sticky_note_from_aerys"). Empty = the tool
     # doesn't exist. Owner-commissioned 2026-08-07, the night Sticky One woke.
     ha_sticky_note_entity: str = ""
+    # name=entity csv of the household to-do lists the manage_list tool may
+    # touch (e.g. "shopping=todo.shopping_list,tasks=todo.tasks"). Empty = the
+    # tool doesn't exist. A closed map on purpose (owner requirement
+    # 2026-08-08: she must be CONSISTENT about lists) — the tool refuses names
+    # outside it, so items can't scatter into invented lists.
+    ha_todo_lists: str = ""
     # csv of calendar entities the calendar_events tool may read (gap #27,
     # owner-blessed 2026-08-07). Empty = the tool doesn't exist. An explicit
     # ALLOWLIST on purpose, never auto-discovery: the hub aggregates calendars

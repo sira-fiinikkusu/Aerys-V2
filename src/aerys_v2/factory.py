@@ -1315,6 +1315,21 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
                 )
             )
 
+        if settings.ha_todo_lists:
+            # TO-DO LISTS (owner ask 2026-08-08): the household's real lists —
+            # HA-native todo entities, so phones see them at the store and the
+            # e-ink displays render them. Closed name→entity map = her
+            # consistency contract; see the config knob's comment.
+            from aerys_v2.tools.todo_lists import build_todo_tool, lists_map
+
+            tools.append(
+                build_todo_tool(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    lists=lists_map(settings.ha_todo_lists),
+                )
+            )
+
         if settings.ha_calendar_entities:
             # CALENDAR (gap #27, Aerys's own pitch, owner-blessed 2026-08-07):
             # read-only schedule lookups over HA's calendar API. Allowlisted
