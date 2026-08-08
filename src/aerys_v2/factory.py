@@ -337,6 +337,7 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     base = settings.ha_base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
     satellite_map = satellite_map_from(settings.ha_satellite_map)
+    display_map = satellite_map_from(settings.ha_display_followups)
 
     def route(text: str, device_id: str | None) -> None:
         if device_id and device_id in satellite_map:
@@ -347,6 +348,19 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                 headers=headers,
                 json={"entity_id": satellite_map[device_id], "message": text,
                       "preannounce": False},
+                timeout=15.0,
+            )
+        elif device_id and device_id in display_map:
+            # Speakerless display (e-ink Sticky) -> WRITE the follow-up to its
+            # screen via the device's ESPHome user action. The ack already
+            # rode the voice pipeline; this is the final reply landing as ink
+            # (owner ask 2026-08-08). Harmless no-op if the device is asleep —
+            # the exchange that prompted it kept it awake.
+            domain, _, service = display_map[device_id].partition(".")
+            r = httpx.post(
+                f"{base}/api/services/{domain}/{service}",
+                headers=headers,
+                json={"message": text},
                 timeout=15.0,
             )
         else:

@@ -223,6 +223,14 @@ class Settings(BaseSettings):
     # single-satellite behavior) — never a silent drop. Same CSV convention as
     # ha_canary_entities.
     ha_satellite_map: str = ""
+    # csv of "device_id=domain.service" pairs for SPEAKERLESS voice devices
+    # (e-ink displays): a follow-up for a mapped device is WRITTEN to its
+    # screen via that HA service (an ESPHome user action, e.g.
+    # "esphome.reterminal_sticky_show_followup") instead of spoken or fired
+    # as a phone event. Checked after the satellite map, before the phone
+    # fallback. Owner ask 2026-08-08: the Sticky rendered her ack but her
+    # final reply only reached speaking surfaces.
+    ha_display_followups: str = ""
 
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
     # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =

@@ -396,6 +396,45 @@ def test_voice_followup_router_owns_delivery_and_carries_device_id():
     assert speak_calls == []  # speak_fn bypassed entirely when the router is present
 
 
+def test_followup_router_three_branch_delivery(monkeypatch):
+    """The factory router's real branches: mapped satellite -> announce, mapped
+    DISPLAY (speakerless e-ink, owner ask 8/08) -> its ESPHome show-followup
+    service, everything else -> the phone's aerys_followup event."""
+    import httpx
+
+    from aerys_v2.config import Settings
+    from aerys_v2.factory import followup_router_for
+
+    calls = []
+
+    class FakeResp:
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append((url, json))
+        return FakeResp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    s = Settings(
+        _env_file=None,
+        anthropic_api_key="sk-test",
+        ha_token="tok",
+        ha_satellite_map="satdev=assist_satellite.office_sat",
+        ha_display_followups="stickydev=esphome.reterminal_sticky_show_followup",
+    )
+    route = followup_router_for(s)
+    route("spoken", "satdev")
+    route("inked", "stickydev")
+    route("evented", None)
+    assert "assist_satellite/announce" in calls[0][0]
+    assert calls[0][1]["message"] == "spoken"
+    assert calls[1][0].endswith("/api/services/esphome/reterminal_sticky_show_followup")
+    assert calls[1][1] == {"message": "inked"}
+    assert calls[2][0].endswith("/api/events/aerys_followup")
+    assert calls[2][1] == {"text": "evented"}
+
+
 def test_voice_followup_router_failure_never_blocks_history():
     # A router raising (HA event post failed) is swallowed like speak_fn failures —
     # the durable history write still lands.
