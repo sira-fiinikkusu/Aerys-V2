@@ -34,7 +34,7 @@ from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
 
-WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle"})
+WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle", "set_brightness"})
 
 # The ONLY string prefix a successful write returns — service.py's silent-success
 # rule keys on it (a fast turn whose every tool note starts with this = the device
@@ -176,17 +176,24 @@ def build_home_control_tool(
             log.warning("outbox UPDATE failed for row %s", outbox_id, exc_info=True)
 
     @tool
-    def home_control(operation: str, entity_id: str) -> str:
+    def home_control(operation: str, entity_id: str, brightness_pct: int | None = None) -> str:
         """Control or inspect the smart home via Home Assistant.
 
         CALL THIS TOOL whenever the user asks to turn something on or off,
-        toggle a device, or asks whether a light/switch is currently on.
+        toggle a device, dim/brighten a light, or asks whether a light/switch
+        is currently on.
 
-        operation: one of "get_state", "turn_on", "turn_off", "toggle".
+        operation: one of "get_state", "turn_on", "turn_off", "toggle",
+        "set_brightness".
         entity_id: the full Home Assistant entity id, e.g. "light.office_lamp"
         or "switch.desk_fan". This must be EXACT — if you do not already know
         the exact entity id, call the search_entities tool FIRST to find it;
         never guess an entity id.
+        brightness_pct: 1-100, lights only. Required for "set_brightness";
+        optional with "turn_on" (turn on at that level in one call). For a
+        RELATIVE ask ("dim it by half", "a bit brighter"): call get_state
+        first — it returns the light's current brightness_pct — do the math,
+        then set_brightness with the result. For "off"/0%, use turn_off.
 
         get_state works on any entity. Writes only work on lights and switches
         on the beta allowlist — if the tool refuses, tell the user honestly;
@@ -204,20 +211,24 @@ def build_home_control_tool(
                 r.raise_for_status()
                 data = r.json()
                 attrs = data.get("attributes") or {}
-                return json.dumps(
-                    {
-                        "entity_id": entity,
-                        "state": data.get("state"),
-                        "friendly_name": attrs.get("friendly_name"),
-                    }
-                )
+                out = {
+                    "entity_id": entity,
+                    "state": data.get("state"),
+                    "friendly_name": attrs.get("friendly_name"),
+                }
+                # Lights report brightness 0-255; the model (and Chris) think
+                # in percent — translate here so relative dimming math ("down
+                # by half") never has to know about the 255 scale.
+                if attrs.get("brightness") is not None:
+                    out["brightness_pct"] = round(attrs["brightness"] / 255 * 100)
+                return json.dumps(out)
             except httpx.HTTPError as e:
                 return f"Home Assistant is unreachable right now ({e})."
 
         if op not in WRITE_OPS:
             return (
                 f"Unknown operation '{operation}'. "
-                "Valid operations: get_state, turn_on, turn_off, toggle."
+                "Valid operations: get_state, turn_on, turn_off, toggle, set_brightness."
             )
 
         # ---- writes: domain gate, then canary gate --------------------------
@@ -236,16 +247,42 @@ def build_home_control_tool(
                 f"I can read its state, but the only entities I may control are: {allowed}."
             )
 
+        # ---- brightness: validate BEFORE any outbox row exists ---------------
+        # set_brightness is sugar over HA's light/turn_on + brightness_pct —
+        # there is no set_brightness service. Both ops share the same checks.
+        service = op
+        body: dict[str, Any] = {"entity_id": entity}
+        if op == "set_brightness" or (op == "turn_on" and brightness_pct is not None):
+            if domain != "light":
+                return (
+                    f"Refused: brightness only applies to lights — {entity} "
+                    f"is a {domain}. Use turn_on/turn_off for it."
+                )
+            if op == "set_brightness" and brightness_pct is None:
+                return (
+                    "set_brightness needs brightness_pct (1-100). For a relative "
+                    "change, call get_state first to read the current level."
+                )
+            if brightness_pct is not None and not 1 <= brightness_pct <= 100:
+                return (
+                    f"Refused: brightness_pct must be 1-100 (got {brightness_pct}). "
+                    "For 0% / off, use turn_off instead."
+                )
+            service = "turn_on"
+            body["brightness_pct"] = brightness_pct
+
         # ---- the audited write: intent -> HA -> receipt ----------------------
         payload = {"operation": op, "entity_id": entity, "domain": domain}
+        if brightness_pct is not None:
+            payload["brightness_pct"] = brightness_pct
         outbox_id = _outbox_open(payload)
         try:
             # HA REST: POST /api/services/<domain>/<service> — the same endpoint
             # the V1 HTTP Request node hit, minus the workflow around it.
             r = http.post(
-                f"{base}/api/services/{domain}/{op}",
+                f"{base}/api/services/{domain}/{service}",
                 headers=headers,
-                json={"entity_id": entity},
+                json=body,
             )
             r.raise_for_status()
         except httpx.HTTPError as e:
@@ -260,7 +297,8 @@ def build_home_control_tool(
         _outbox_close(
             outbox_id, "succeeded", receipt={"status_code": r.status_code, "changed": changed}
         )
-        return f"{WRITE_OK_PREFIX} {op} sent to {entity} (HA responded {r.status_code})."
+        did = f"{op} {brightness_pct}%" if brightness_pct is not None else op
+        return f"{WRITE_OK_PREFIX} {did} sent to {entity} (HA responded {r.status_code})."
 
     return home_control
 

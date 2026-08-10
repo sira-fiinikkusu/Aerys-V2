@@ -26,17 +26,27 @@ class FakeHA:
 
     def __init__(self, fail_services: bool = False, states: list | None = None):
         self.requests: list[tuple[str, str]] = []  # (method, path)
+        self.service_bodies: list[dict] = []  # JSON body of every service POST
         self.fail_services = fail_services
         self.states = states or []  # the GET /api/states listing (search tests)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append((request.method, request.url.path))
+        if request.url.path.startswith("/api/services/"):
+            self.service_bodies.append(json.loads(request.content or b"{}"))
         if request.url.path == "/api/states":
             return httpx.Response(200, json=self.states)
         if request.url.path.startswith("/api/states/"):
             entity = request.url.path.rsplit("/", 1)[-1]
             if entity == "light.ghost":
                 return httpx.Response(404)
+            if entity == "light.dimmer":
+                # a dimmable light mid-range: brightness is HA's 0-255 scale
+                return httpx.Response(
+                    200,
+                    json={"state": "on", "attributes": {
+                        "friendly_name": "Dimmer", "brightness": 128}},
+                )
             return httpx.Response(
                 200,
                 json={"state": "off", "attributes": {"friendly_name": "Desk Lamp"}},
@@ -377,3 +387,75 @@ def test_get_state_retries_once_on_transient_transport_error_then_succeeds():
     assert calls["n"] == 2
     assert "unreachable" not in out
     assert "on" in out
+
+
+# ---- brightness: set_brightness + turn_on at a level (gap: "down by 50%") ------
+
+def test_set_brightness_rides_turn_on_with_pct():
+    ha = FakeHA()
+    out = make_tool(ha).invoke(
+        {"operation": "set_brightness", "entity_id": "light.desk", "brightness_pct": 40})
+    assert out.startswith("Done: set_brightness 40% sent to light.desk")
+    # sugar over HA's light/turn_on — there is no set_brightness service
+    assert ("POST", "/api/services/light/turn_on") in ha.requests
+    assert ha.service_bodies == [{"entity_id": "light.desk", "brightness_pct": 40}]
+
+
+def test_turn_on_accepts_optional_brightness():
+    ha = FakeHA()
+    out = make_tool(ha).invoke(
+        {"operation": "turn_on", "entity_id": "light.desk", "brightness_pct": 25})
+    assert out.startswith("Done: turn_on 25% sent to light.desk")
+    assert ha.service_bodies == [{"entity_id": "light.desk", "brightness_pct": 25}]
+
+
+def test_plain_turn_on_body_has_no_brightness_key():
+    ha = FakeHA()
+    make_tool(ha).invoke({"operation": "turn_on", "entity_id": "light.desk"})
+    assert ha.service_bodies == [{"entity_id": "light.desk"}]
+
+
+def test_set_brightness_without_pct_is_honest():
+    ha = FakeHA()
+    out = make_tool(ha).invoke(
+        {"operation": "set_brightness", "entity_id": "light.desk"})
+    assert "needs brightness_pct" in out
+    assert ha.requests == []  # refused before any HTTP
+
+
+def test_brightness_out_of_range_refused_with_turn_off_hint():
+    ha = FakeHA()
+    out = make_tool(ha).invoke(
+        {"operation": "set_brightness", "entity_id": "light.desk", "brightness_pct": 0})
+    assert "must be 1-100" in out and "turn_off" in out
+    assert ha.requests == []
+
+
+def test_brightness_on_a_switch_refused():
+    ha = FakeHA()
+    out = make_tool(ha, canary="switch.fan").invoke(
+        {"operation": "set_brightness", "entity_id": "switch.fan", "brightness_pct": 50})
+    assert "only applies to lights" in out
+    assert ha.requests == []
+
+
+def test_get_state_translates_brightness_to_pct():
+    ha = FakeHA()
+    out = make_tool(ha).invoke({"operation": "get_state", "entity_id": "light.dimmer"})
+    data = json.loads(out)
+    assert data["brightness_pct"] == 50  # 128/255 rounds to 50 — the relative-math input
+
+
+def test_get_state_omits_brightness_when_absent():
+    ha = FakeHA()
+    out = make_tool(ha).invoke({"operation": "get_state", "entity_id": "light.desk"})
+    assert "brightness_pct" not in json.loads(out)
+
+
+def test_brightness_recorded_in_outbox_intent():
+    ha, db = FakeHA(), FakeDB()
+    make_tool(ha, db).invoke(
+        {"operation": "set_brightness", "entity_id": "light.desk", "brightness_pct": 70})
+    (sql, params), = db.inserts()
+    payload = json.loads(params[0]) if isinstance(params[0], str) else params[0]
+    assert payload["brightness_pct"] == 70 and payload["operation"] == "set_brightness"
