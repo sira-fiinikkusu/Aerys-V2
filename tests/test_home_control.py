@@ -24,10 +24,12 @@ from aerys_v2.tools.home_control import (
 class FakeHA:
     """Records every request; scripted to behave like HA Green's REST API."""
 
-    def __init__(self, fail_services: bool = False, states: list | None = None):
+    def __init__(self, fail_services: bool = False, states: list | None = None,
+                 empty_changed: bool = False):
         self.requests: list[tuple[str, str]] = []  # (method, path)
         self.service_bodies: list[dict] = []  # JSON body of every service POST
         self.fail_services = fail_services
+        self.empty_changed = empty_changed  # HA 200 but nothing changed (Tuya drop)
         self.states = states or []  # the GET /api/states listing (search tests)
 
     def handler(self, request: httpx.Request) -> httpx.Response:
@@ -54,6 +56,8 @@ class FakeHA:
         if self.fail_services:
             return httpx.Response(503, text="ha melted")
         # service calls return the list of changed states — the receipt evidence
+        if self.empty_changed:
+            return httpx.Response(200, json=[])
         return httpx.Response(200, json=[{"entity_id": "light.desk", "state": "on"}])
 
     def client(self) -> httpx.Client:
@@ -459,3 +463,14 @@ def test_brightness_recorded_in_outbox_intent():
     (sql, params), = db.inserts()
     payload = json.loads(params[0]) if isinstance(params[0], str) else params[0]
     assert payload["brightness_pct"] == 70 and payload["operation"] == "set_brightness"
+
+
+def test_empty_changed_list_is_a_caveat_not_a_done():
+    # HA 200 + changed [] = the Tuya silent-drop (she told Chris "on at 30%"
+    # while the light stayed dark, 2026-08-10). Must NOT earn the Done: prefix
+    # (which triggers silent-success) — the model is told to verify instead.
+    ha = FakeHA(empty_changed=True)
+    out = make_tool(ha).invoke(
+        {"operation": "set_brightness", "entity_id": "light.desk", "brightness_pct": 30})
+    assert not out.startswith("Done:")
+    assert "NO state change" in out and "get_state" in out

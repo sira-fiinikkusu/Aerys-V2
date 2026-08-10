@@ -298,6 +298,23 @@ def build_home_control_tool(
             outbox_id, "succeeded", receipt={"status_code": r.status_code, "changed": changed}
         )
         did = f"{op} {brightness_pct}%" if brightness_pct is not None else op
+        # HA's service response lists the states the call actually changed. An
+        # EMPTY list on a 200 means HA accepted the command but no entity
+        # reports a new state — with cloud integrations (Tuya) that regularly
+        # means the device silently ignored it. Observed live 2026-08-10: she
+        # told Chris "on at 30%" while the light stayed dark. A confident
+        # "Done" here would be a lie the model faithfully repeats — so say
+        # what we actually know instead. (No-op writes — turning on a light
+        # that's already at that exact state — also land here; the caveat is
+        # still the honest reading: nothing changed.)
+        if changed == []:
+            return (
+                f"Sent {did} to {entity} and Home Assistant accepted it (200), "
+                "but reported NO state change — the device may not have applied "
+                "it (cloud lights sometimes drop commands) or it was already in "
+                "that state. Verify with get_state before telling the user it "
+                "definitely happened."
+            )
         return f"{WRITE_OK_PREFIX} {did} sent to {entity} (HA responded {r.status_code})."
 
     return home_control
