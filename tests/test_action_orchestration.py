@@ -36,8 +36,15 @@ def fake_model(*replies) -> GenericFakeChatModel:
 
 
 def ha_client() -> httpx.Client:
+    # Service calls answer with a non-empty changed-list: real HA reports the
+    # states a call changed, and an EMPTY list now (rightly) earns a verify-
+    # first caveat instead of "Done:" — these tests exercise the happy path.
     return httpx.Client(
-        transport=httpx.MockTransport(lambda req: httpx.Response(200, json=[]))
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(
+                200, json=[{"entity_id": "light.desk", "state": "on"}]
+            )
+        )
     )
 
 
