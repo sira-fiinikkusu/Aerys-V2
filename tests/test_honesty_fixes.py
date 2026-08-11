@@ -311,3 +311,91 @@ def test_non_limit_chat_failure_still_raises_unchanged():
     row = rec.wait(1)[0]
     assert row["emitted_reply"] is None                  # nothing emitted — it raised
     assert "turn_failed" in json.loads(row["degraded"])
+
+
+# ── FIX 3: the self-perception (audio-claim) gate — gap #33, approved 8/10 ──────
+
+from aerys_v2.service import (  # noqa: E402  (grouped with their fix)
+    AUDIO_CLAIM_CORRECTION,
+    AUDIO_CLAIM_MARKER,
+    audio_perception_claim,
+)
+
+
+def chat_router(_text: str) -> RouteDecision:
+    return RouteDecision(route="chat", ack="")
+
+
+THE_INCIDENT = "I'm hearing you on the speaker now, yeah. Voice is live."
+
+
+def test_audio_claim_detector_positive_table():
+    for text in (
+        THE_INCIDENT,
+        "I can hear the audio playing in the office.",
+        "I heard the announcement go out just fine.",
+        "I'm listening to the music with you right now.",
+        "Yes — I just heard the chime from the satellite.",
+    ):
+        assert audio_perception_claim(text), text
+
+
+def test_audio_claim_detector_negative_table():
+    # Warmth and idiom survive: empathy phrasing, future intent, third parties,
+    # and SIGHT (she reads state through tools — sight is legitimately hers).
+    for text in (
+        "I hear you, that's rough.",
+        "I hear you — that sounds hard, honestly.",
+        "Sounds good, I'll get that queued up.",
+        "I'll listen for the chime and let you know what you report back.",
+        "Chris said he could hear the audio fine.",
+        "I can see the panel is unavailable in HA.",
+        "The announce was accepted (200) — tell me if it actually reached you.",
+        "Let's see — the speaker shows idle in Home Assistant.",
+    ):
+        assert not audio_perception_claim(text), text
+
+
+def test_audio_claim_bounces_once_and_emits_the_honest_retry():
+    rec = Recorder()
+    honest = "The announce came back 200 — I can't hear the room, did it reach you?"
+    graph = build_graph(fake_model(THE_INCIDENT, honest), soul="s")
+    out = ask(graph, "did the voice fix take?", identity=CHRIS,
+              thread_id="t-audio-bounce", router=chat_router, record_turn=rec)
+    assert out == honest
+    row = rec.wait(1)[0]
+    # raw keeps the original claim — the operator dash's gate diff shows the save
+    assert row["raw_reply"] == THE_INCIDENT
+    assert row["emitted_reply"] == honest
+    assert not row["degraded"] or AUDIO_CLAIM_MARKER not in json.loads(row["degraded"])
+
+
+def test_audio_claim_surviving_the_bounce_is_emitted_with_the_marker():
+    rec = Recorder()
+    stubborn = "I definitely heard the audio play on the speaker."
+    graph = build_graph(fake_model(THE_INCIDENT, stubborn), soul="s")
+    out = ask(graph, "did the voice fix take?", identity=CHRIS,
+              thread_id="t-audio-mark", router=chat_router, record_turn=rec)
+    assert out == stubborn  # visibility, not censorship
+    row = rec.wait(1)[0]
+    assert AUDIO_CLAIM_MARKER in json.loads(row["degraded"])
+
+
+def test_audio_claim_history_surgery_leaves_no_plumbing_behind():
+    graph = build_graph(fake_model(THE_INCIDENT, "Honest answer, no ears."), soul="s")
+    ask(graph, "did the voice fix take?", identity=CHRIS,
+        thread_id="t-audio-surgery", router=chat_router)
+    msgs = graph.get_state(
+        {"configurable": {"thread_id": "t-audio-surgery", "identity": CHRIS}}
+    ).values["messages"]
+    joined = " || ".join(str(getattr(m, "content", "")) for m in msgs)
+    assert AUDIO_CLAIM_CORRECTION[:40] not in joined   # plumbing never persists
+    assert THE_INCIDENT not in joined                  # the fabricated claim is gone
+    assert joined.count("Honest answer, no ears.") == 1
+
+
+def test_audio_claim_correction_never_reaches_the_user():
+    # Same internal-plumbing contract as FIX 1's correction.
+    assert "internal plumbing" in AUDIO_CLAIM_CORRECTION
+    for phrase in ("never mention it",):
+        assert phrase in AUDIO_CLAIM_CORRECTION

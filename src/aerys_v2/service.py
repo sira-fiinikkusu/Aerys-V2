@@ -473,6 +473,61 @@ NO_TOOL_ACTION_MARKER = "no_tool_action"
 CLAIM_GATE_MARKER = "claim_gate_escalated"
 
 
+# ── FIX 3: the self-perception gate (gap #33, owner-approved 2026-08-10) ────────
+# Production incident 2026-08-10: mid voice-outage, Kael told her the satellite fix
+# was applied and she replied "I'm hearing you on the speaker now, yeah. Voice is
+# live." — a first-person sensory confirmation she is not equipped to make (no
+# audio input path exists), and the TTS was in fact still broken. The action gate
+# can't catch this: it keys on tool emptiness, and no tool grants hearing at all.
+#
+# v1 is deliberately AUDIO-ONLY. Hearing is unambiguous — she has no ears, so a
+# claim of having heard something is always fabricated. "I can see..." is NOT
+# gated: she legitimately sees state through tools (HA reads, camera snapshots),
+# and gating sight would fire on honest sentences constantly. The empathy idiom
+# ("I hear you, that's rough") survives because the pattern requires an audio-
+# output noun within the same clause — bare "I hear you" never matches.
+_AUDIO_PERCEPTION_RE = re.compile(
+    # "I" + optional auxiliaries/adverbs (ENUMERATED — "I'll"/"I told her about
+    # hearing" must not match; intent and reported speech are not claims) +
+    # a hearing verb + an audio-output noun inside the same clause.
+    r"\bI(?:'m|'ve| am| have| can| could| just| definitely| clearly| really"
+    r"| actually| totally| still| now| did)*\s*"
+    r"(?:hear(?:ing|d)?|listen(?:ed|ing)?(?:\s+to)?)\b"
+    r"[^.!?\n]{0,60}?"
+    r"\b(?:speakers?|audio|sound|voice|music|announce(?:ment)?s?|chime|tts|playback)\b",
+    re.IGNORECASE,
+)
+
+#: Degraded marker for a reply that still claimed hearing after the bounce —
+#: emitted (visibility over censorship, same philosophy as GATE_MARK) but
+#: countable by the miner and diffable on the operator dash.
+AUDIO_CLAIM_MARKER = "unverifiable_audio_claim"
+
+# Appended as the caller's next turn when the gate bounces. Same contract as
+# ACTION_NO_TOOL_CORRECTION: internal plumbing, never mentioned to the user.
+AUDIO_CLAIM_CORRECTION = (
+    "You just claimed to HEAR something — you have no audio input. You cannot "
+    "hear the room, the speakers, or your own voice; a claim of having heard "
+    "audio is fabricated even when the underlying fact happens to be true. "
+    "Answer again honestly: state what tools or receipts actually confirmed "
+    "(a command accepted, a service answering) and, when it matters whether "
+    "sound really played, ask the human what reached their ears instead of "
+    "asserting it. Do not stop being warm — just never wear senses you don't "
+    "have. This correction is internal plumbing: never mention it, the earlier "
+    "answer, or any slip — simply give your honest answer."
+)
+
+
+def audio_perception_claim(text: str) -> bool:
+    """True when the reply asserts first-person HEARING of audio output.
+
+    Pure and deliberately narrow (see the FIX 3 block comment): perception verb
+    and an audio-output noun must share one clause. False positives cost her
+    voice its warmth; false negatives cost one marker — tuned toward the first.
+    """
+    return bool(_AUDIO_PERCEPTION_RE.search(text or ""))
+
+
 def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) -> str:
     """Pure verdict for the action-honesty gate: emit | retry | mark.
 
@@ -934,6 +989,57 @@ def _chat_turn(
     handoff = HANDOFF_MARKER in raw
     reply = _strip_handoff(raw) if handoff else raw
 
+    # FIX 3 (gap #33): a chat reply that claims to have HEARD audio gets one
+    # bounce with the correction — the same one-extra-call trade as the action
+    # gate. raw keeps the ORIGINAL claim so the operator dash's gate diff shows
+    # exactly what she was going to say; a persistent claim is emitted with the
+    # marker (visibility, not censorship). Handoff lines skip the gate — they
+    # are one-sentence escalations, and the action path audits its own reply.
+    #
+    # History surgery: the chat graph CHECKPOINTS, so a naive bounce would leave
+    # the correction text (internal plumbing) and the fabricated claim in the
+    # durable thread for every later turn to read. After the bounce, the claiming
+    # AI message is replaced in-place (add_messages replaces by id) with the
+    # corrected reply, and the correction + its duplicate answer are removed.
+    # Degrade-safe: if surgery fails, the messy history is logged and kept — a
+    # readable-but-cluttered thread beats a dead turn.
+    audio_gate_marker = False
+    if not handoff and audio_perception_claim(reply):
+        log.info("self-perception gate: audio claim in chat reply — bouncing once")
+        claim_id = _last_ai_message_id(graph, config.get("configurable") or {})
+        retry = graph.invoke(
+            {"messages": [HumanMessage(content=AUDIO_CLAIM_CORRECTION)]}, config
+        )
+        reply = _reply_text(retry["messages"][-1])
+        result = retry
+        if audio_perception_claim(reply):
+            log.warning(
+                "self-perception gate: audio claim SURVIVED the bounce — "
+                "emitting with %s", AUDIO_CLAIM_MARKER,
+            )
+            audio_gate_marker = True
+        try:
+            from langchain_core.messages import RemoveMessage
+
+            tail = retry["messages"][-2:]
+            removals = [
+                RemoveMessage(id=m.id) for m in tail if getattr(m, "id", None)
+            ]
+            surgery: list = list(removals)
+            if claim_id is not None:
+                surgery.append(AIMessage(content=reply, id=claim_id))
+            if surgery:
+                graph.update_state(
+                    {"configurable": config.get("configurable") or {}},
+                    {"messages": surgery},
+                    as_node="chat",
+                )
+        except Exception:
+            log.warning(
+                "self-perception gate: history surgery failed — correction "
+                "text remains in thread history", exc_info=True,
+            )
+
     elapsed = time.monotonic() - started
     timed_out = elapsed > rails.wall_clock_s
     timeout_msg = (
@@ -946,6 +1052,8 @@ def _chat_turn(
         degraded.append("local_model_fallback")
     if handoff:
         degraded.append(CHAT_HANDOFF_MARKER)
+    if audio_gate_marker:
+        degraded.append(AUDIO_CLAIM_MARKER)
     if timed_out:
         degraded.append("wall_clock_exceeded")
 
