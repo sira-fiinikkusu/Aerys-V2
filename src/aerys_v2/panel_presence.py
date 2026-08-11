@@ -344,7 +344,19 @@ class PanelPresenceWatcher:
         ):
             return  # she JUST woke — a flapping sensor doesn't get to yo-yo her
         lights = [self._entity_state(e) for e in self._lights]
-        if lights and all(s == "off" for s in lights):
+        # "Lights out" = no light KNOWN-ON and at least one KNOWN-OFF. The
+        # original all-off test kept her awake all night the first time a
+        # bulb was physically unplugged (office light 2, 2026-08-10): an
+        # unavailable entity is never "off", so a light that does not exist
+        # pinned her eyelids open. An unplugged light cannot be on — it must
+        # not block sleep. The known-off requirement preserves the fail-open
+        # doctrine: HA down = every read "unknown" = no transition, exactly
+        # as before.
+        if (
+            lights
+            and not any(s == "on" for s in lights)
+            and any(s == "off" for s in lights)
+        ):
             # occupancy off AND lights out = the vacancy automation has fired;
             # manual lights-off with someone present keeps occupancy on.
             self._fall_asleep()

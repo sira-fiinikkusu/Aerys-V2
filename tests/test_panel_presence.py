@@ -401,3 +401,34 @@ def test_fresh_wake_holds_five_minutes_against_a_flapping_sensor():
     for _ in range(SLEEP_DEBOUNCE_TICKS):
         w.tick()
     assert w.asleep is True
+
+
+def test_unplugged_light_cannot_hold_her_awake():
+    # The 2026-08-10 regression: office light 2 physically unplugged reads
+    # "unavailable" forever — never "off" — and the all-off test kept her up
+    # all night. A light that does not exist cannot be on; sleep proceeds on
+    # the lights we can actually see.
+    world = FakeWorld({OCC: "off", L1: "off", L2: "unavailable"})
+    w = watcher(world)
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()
+    assert w.asleep is True
+
+
+def test_all_lights_unknowable_blocks_sleep():
+    # Fail-open doctrine intact: HA down = every light reads unknown = no
+    # KNOWN-off light exists = no transition. She holds her current state
+    # rather than acting on a world she cannot see.
+    world = FakeWorld({OCC: "off", L1: "unknown", L2: "unavailable"})
+    w = watcher(world)
+    for _ in range(SLEEP_DEBOUNCE_TICKS + 2):
+        w.tick()
+    assert w.asleep is False
+
+
+def test_unavailable_light_plus_a_lit_one_still_means_awake():
+    world = FakeWorld({OCC: "off", L1: "on", L2: "unavailable"})
+    w = watcher(world)
+    for _ in range(SLEEP_DEBOUNCE_TICKS + 1):
+        w.tick()
+    assert w.asleep is False
