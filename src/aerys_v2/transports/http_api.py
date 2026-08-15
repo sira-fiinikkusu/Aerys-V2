@@ -64,7 +64,8 @@ class KaelNoteReply(BaseModel):
 
 
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
-              gaps_fn=None, health_probe=None, kael_note_fn=None) -> FastAPI:
+              gaps_fn=None, health_probe=None, kael_note_fn=None,
+              a2a_memory_fn=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -233,6 +234,12 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         else:
             thread_id = body.thread_id
         reply = ask_fn(body.text, identity, thread_id)
+        # Gap #37: an exchange on Kael's line becomes a durable memory, so the
+        # her on any OTHER thread can know it happened. Fires on the FINAL
+        # thread_id — a voice turn was already remapped off kael:* above, so
+        # voice never lands here. The writer gates + fails open internally.
+        if a2a_memory_fn is not None:
+            a2a_memory_fn(thread_id, body.text, reply)
         return AskReply(reply=reply, thread_id=thread_id)
 
     @app.post("/kael-note", response_model=KaelNoteReply)

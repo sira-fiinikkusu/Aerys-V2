@@ -158,6 +158,7 @@ def main() -> None:
         )
         from aerys_v2.kael_line import family_notes_fn_for, kael_note_for
         from aerys_v2.service import ask
+        from aerys_v2.services.a2a_memory import a2a_memory_writer_for
         from aerys_v2.transports.http_api import build_app
 
         # [01-05 PHOENIX] one line, degrade-safe: no-op unless OTLP_ENDPOINT set; any failure logs and serves anyway
@@ -261,6 +262,9 @@ def main() -> None:
                 # The Kael line's return direction (task #66): his replies land
                 # in the thread she pinged from, receipted in v2_kael_notes.
                 kael_note_fn=kael_note_for(graph, settings),
+                # Gap #37: kael:* exchanges leave a durable memory (family
+                # memory door 1 — the only door approved to build solo).
+                a2a_memory_fn=a2a_memory_writer_for(settings),
             )
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;
