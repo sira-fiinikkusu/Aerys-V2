@@ -377,6 +377,60 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     return route
 
 
+def display_push_for(
+    settings: Settings, *, delay_s: float = 4.0
+) -> Callable[[str, str | None], None] | None:
+    """Full-text ink push for speakerless displays (gap #48).
+
+    Upstream ESPHome (voice_assistant.cpp) resizes pipeline event text to 497
+    chars + '...' whenever it exceeds 500 — so the ink copy of a voice banter
+    reply is guillotined no matter what the brain emits. This closure re-sends
+    the FULL reply through the device's uncapped ESPHome user action (the same
+    door the v15 display follow-ups use), after a short delay so it lands
+    AFTER the capped tts_start write and wins the ink. Only display-mapped
+    devices are touched — satellites already spoke the reply and want no echo.
+    None unless a token and at least one display mapping exist (dev/CI).
+    """
+    if settings.ha_token is None:
+        return None
+    display_map = satellite_map_from(settings.ha_display_followups)
+    if not display_map:
+        return None
+    import threading
+    import time as _time
+
+    import httpx
+
+    base = settings.ha_base_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
+
+    def push(text: str, device_id: str | None) -> None:
+        svc = display_map.get(device_id or "")
+        if not svc or not text:
+            return
+        domain, _, service = svc.partition(".")
+
+        def _run() -> None:
+            try:
+                if delay_s:
+                    _time.sleep(delay_s)
+                httpx.post(
+                    f"{base}/api/services/{domain}/{service}",
+                    headers=headers,
+                    json={"message": text},
+                    timeout=15.0,
+                ).raise_for_status()
+            except Exception:  # spoken reply already delivered — never raise
+                log.warning(
+                    "display full-text push failed (spoken reply unaffected)",
+                    exc_info=True,
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    return push
+
+
 def load_soul(path: Path) -> str:
     """Read the persona prompt from disk, with a safe fallback.
 

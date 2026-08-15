@@ -229,6 +229,10 @@ def main() -> None:
             # phone -> aerys_followup event (the Myo app speaks it). Owns delivery
             # over speak_fn/satellite_for when armed (ha_token set).
             followup_router = followup_router_for(settings)
+            # Gap #48: full-text ink push around upstream ESPHome's 500-byte
+            # voice-event cap (function-level import — only --serve voices).
+            from aerys_v2.factory import display_push_for
+            display_push = display_push_for(settings)
             satellite_for = (
                 (lambda device_id: resolve_announce_entity(
                     device_id, satellite_map, settings.ha_announce_entity))
@@ -244,6 +248,7 @@ def main() -> None:
                     router=router, action_graph=action_graph, guest_action_graph=guest_action_graph,
                     speak_fn=speak_fn, satellite_for=satellite_for,
                     followup_router=followup_router,
+                    display_push=display_push,
                     followup_skip_s=settings.voice_followup_skip_s,
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,

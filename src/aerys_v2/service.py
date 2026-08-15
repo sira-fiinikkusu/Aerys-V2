@@ -730,6 +730,7 @@ def ask(
     speak_fn: Callable[[str, str], None] | None = None,
     satellite_for: Callable[[str | None], str] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
+    display_push: Callable[[str, str | None], None] | None = None,
     followup_skip_s: float = 6.0,
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
@@ -867,6 +868,7 @@ def ask(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
                 followup_router=followup_router,
+                display_push=display_push,
                 content_privacy_classifier=content_privacy_classifier,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 face_push=face_push,
@@ -1481,6 +1483,7 @@ def _voice_parallel_start(
     followup_skip_s: float,
     record_turn: Callable[[dict], None] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
+    display_push: Callable[[str, str | None], None] | None = None,
     content_privacy_classifier: Callable[[str], str] | None = None,
     human_privacy: str = PRIVATE,
     human_id: str | None = None,
@@ -1723,6 +1726,18 @@ def _voice_parallel_start(
         graph, config, human_id, text, reply,
         content_privacy_classifier, human_privacy,
     )
+    # Gap #48: the pipeline event that mirrors this reply onto an e-ink
+    # display is capped at 500 bytes by upstream firmware — push the FULL
+    # text through the uncapped display door (closure delays so it lands
+    # after the capped write and wins the ink; non-display devices no-op).
+    if display_push is not None:
+        try:
+            display_push(
+                reply, real_configurable.get("identity", {}).get("device_id")
+            )
+        except Exception:
+            log.warning("display push failed (spoken reply unaffected)",
+                        exc_info=True)
     # The pipeline TTS speaks this return value; the pusher's estimate settles
     # her back to the reply's mood-idle when the words run out.
     _face(face_push, "speaking", reply)
