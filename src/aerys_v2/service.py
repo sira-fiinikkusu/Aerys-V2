@@ -528,6 +528,52 @@ def audio_perception_claim(text: str) -> bool:
     return bool(_AUDIO_PERCEPTION_RE.search(text or ""))
 
 
+_RECORD_CLAIM_RE = re.compile(
+    # Three shapes of a COMPLETED record-write claim (gap #47, receipts
+    # 8/14): the bare "Logged:" prefix (the incident verbatim); first-person
+    # completed logged/filed/recorded (login idioms excluded — "logged in/
+    # into/onto" is not a record claim); and "<verb> that/this/it as a gap".
+    # Intent ("let me log", "I'll log") deliberately does NOT match — intent
+    # is honest; only the claimed completion is a fabrication here.
+    r"(?:(?:^|\n)\s*Logged\s*[:\u2014\u2013-])"
+    r"|(?:\bI(?:'ve| have| just| already)?\s+"
+    r"(?:logged(?!\s+in\b|\s+into\b|\s+on(?:to)?\b)|filed|recorded)\b)"
+    r"|(?:\b(?:logged|filed|recorded)\s+(?:that|this|it)\s+as\s+a\s+"
+    r"(?:gap|capability|request|issue)\b)",
+    re.IGNORECASE,
+)
+
+#: Degraded marker for a record-write claim that survived the bounce —
+#: emitted (visibility over censorship) but countable by the miner.
+RECORD_CLAIM_MARKER = "unverifiable_record_claim"
+
+# Same internal-plumbing contract as the audio correction. Honesty-only v1:
+# no re-route instruction — a bounce retry cannot ride the handoff escalation
+# (that flag was computed from the original reply), so the honest recovery is
+# owning the limitation and steering the human to a path that can write.
+RECORD_CLAIM_CORRECTION = (
+    "You just claimed to have logged or recorded something — this "
+    "conversational path has no record-keeping tool, so nothing was written "
+    "anywhere. A 'Logged:' that wrote nothing is a fabrication even when "
+    "well-intentioned. Answer again honestly: acknowledge the request "
+    "matters, say plainly that you couldn't write it to the board from "
+    "here, and either offer to carry it in conversation or ask them to "
+    "raise it again in a fresh message so it reaches the path that can "
+    "actually record it. Do not stop being warm. This correction is "
+    "internal plumbing: never mention it, the earlier answer, or any slip "
+    "— simply give your honest answer."
+)
+
+
+def record_action_claim(text: str) -> bool:
+    """True when the reply claims a COMPLETED log/file/record write.
+
+    Same tuning philosophy as the audio detector: narrow beats eager. Login
+    idioms, stated intent, third-party reports, and reading logs all pass.
+    """
+    return bool(_RECORD_CLAIM_RE.search(text or ""))
+
+
 def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) -> str:
     """Pure verdict for the action-honesty gate: emit | retry | mark.
 
@@ -1040,6 +1086,56 @@ def _chat_turn(
                 "text remains in thread history", exc_info=True,
             )
 
+    # Gap #47: same shape for claimed record-writes ("Logged:" with no tool).
+    # One bounce per turn across BOTH gates: if the audio gate already spent
+    # it (its claim_id local exists), a record claim in the retry is marked
+    # without another model call — two bounces would double latency for the
+    # rarest possible overlap.
+    record_gate_marker = False
+    audio_bounced = "claim_id" in locals()
+    if not handoff and record_action_claim(reply):
+        if audio_bounced:
+            log.warning(
+                "record-claim gate: claim present after the audio bounce — "
+                "emitting with %s", RECORD_CLAIM_MARKER,
+            )
+            record_gate_marker = True
+        else:
+            log.info("record-claim gate: 'Logged:' claim in chat reply — bouncing once")
+            claim_id = _last_ai_message_id(graph, config.get("configurable") or {})
+            retry = graph.invoke(
+                {"messages": [HumanMessage(content=RECORD_CLAIM_CORRECTION)]}, config
+            )
+            reply = _reply_text(retry["messages"][-1])
+            result = retry
+            if record_action_claim(reply):
+                log.warning(
+                    "record-claim gate: claim SURVIVED the bounce — "
+                    "emitting with %s", RECORD_CLAIM_MARKER,
+                )
+                record_gate_marker = True
+            try:
+                from langchain_core.messages import RemoveMessage
+
+                tail = retry["messages"][-2:]
+                removals = [
+                    RemoveMessage(id=m.id) for m in tail if getattr(m, "id", None)
+                ]
+                surgery: list = list(removals)
+                if claim_id is not None:
+                    surgery.append(AIMessage(content=reply, id=claim_id))
+                if surgery:
+                    graph.update_state(
+                        {"configurable": config.get("configurable") or {}},
+                        {"messages": surgery},
+                        as_node="chat",
+                    )
+            except Exception:
+                log.warning(
+                    "record-claim gate: history surgery failed — correction "
+                    "text remains in thread history", exc_info=True,
+                )
+
     elapsed = time.monotonic() - started
     timed_out = elapsed > rails.wall_clock_s
     timeout_msg = (
@@ -1054,6 +1150,8 @@ def _chat_turn(
         degraded.append(CHAT_HANDOFF_MARKER)
     if audio_gate_marker:
         degraded.append(AUDIO_CLAIM_MARKER)
+    if record_gate_marker:
+        degraded.append(RECORD_CLAIM_MARKER)
     if timed_out:
         degraded.append("wall_clock_exceeded")
 
