@@ -77,7 +77,10 @@ def a2a_memory_writer_for(
     injectable for offline tests; synchronous=True runs the write inline so
     tests assert without racing a daemon thread.
     """
-    database_url = settings.database_url
+    # The memories table lives in the PROD aerys database, not the v2 spine —
+    # the same split the retrieval seam and live extraction honor. Caught live
+    # on first deploy: database_url pointed at v2, "relation does not exist".
+    database_url = settings.memories_database_url
     owner = settings.owner_person_id
     key = settings.embeddings_api_key
     if not (database_url and owner and key):

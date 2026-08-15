@@ -23,8 +23,10 @@ class _Secret:
 
 
 def settings_with(db="postgresql://x/y", owner="0" * 32, key="k") -> SimpleNamespace:
+    # memories_database_url, NOT database_url: the memories table lives in the
+    # prod aerys DB, not the v2 spine (first-deploy lesson, 2026-08-15).
     return SimpleNamespace(
-        database_url=db,
+        memories_database_url=db,
         owner_person_id=owner,
         embeddings_api_key=_Secret(key) if key else None,
     )
@@ -59,7 +61,7 @@ def writer_with(log: list, *, embed=None, **kw):
 # --- arming ------------------------------------------------------------------
 
 
-def test_unarmed_without_db_owner_or_embed_key():
+def test_unarmed_without_memories_db_owner_or_embed_key():
     assert a2a_memory_writer_for(settings_with(db=None)) is None
     assert a2a_memory_writer_for(settings_with(owner=None)) is None
     assert a2a_memory_writer_for(settings_with(key=None)) is None
