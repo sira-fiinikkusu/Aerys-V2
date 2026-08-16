@@ -235,6 +235,8 @@ class Settings(BaseSettings):
     # (the Stickies): turns from them carry a speaker-may-not-be-the-owner
     # prompt block. The Bearer still authenticates the DEVICE as owner infra —
     # this only corrects the social assumption. Empty = feature off.
+    # Entries are "device_id" or "device_id=Label" — a label lets her name
+    # WHICH surface is speaking (Sticky One/Two/Three).
     ha_shared_surface_ids: str = ""
 
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:

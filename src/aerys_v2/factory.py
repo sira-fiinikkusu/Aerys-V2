@@ -1172,7 +1172,7 @@ def build_action_graph(
     context_fn: ContextFn | None = None,
     overlay: str = ACTION_OVERLAY,
     family_notes_fn=None,
-    shared_surface_ids: frozenset = frozenset(),
+    shared_surface_ids: dict | None = None,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1251,7 +1251,7 @@ def build_action_graph(
                 family = family_notes_fn(identity) or ""
             except Exception:
                 log.warning("action family_notes_fn raised; continuing without", exc_info=True)
-        shared = _shared_surface_note(identity, shared_surface_ids)
+        shared = _shared_surface_note(identity, shared_surface_ids or {})
         system = SystemMessage(
             content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}{shared}"
         )
@@ -1576,10 +1576,9 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         # splice must ride it or it misses the surfaces that matter most.
         # The fn owner-gates itself; the guest graph below stays unwired.
         family_notes_fn=family_notes_fn_for(settings),
-        # Owner ask 8/16: Sticky turns tell her the speaker may not be Chris.
-        shared_surface_ids=frozenset(
-            s.strip() for s in settings.ha_shared_surface_ids.split(",") if s.strip()
-        ),
+        # Owner ask 8/16: Sticky turns tell her the speaker may not be Chris —
+        # and (fleet ask, same day) WHICH surface is speaking, via id=Label.
+        shared_surface_ids=_parse_shared_surfaces(settings.ha_shared_surface_ids),
     )
     return router_for(settings, soul), action_graph
 
@@ -1654,17 +1653,38 @@ def _surface_thread_for_phrase(thread: object, identity: dict) -> str:
     return str(thread)
 
 
-def _shared_surface_note(identity: dict, shared_ids: frozenset) -> str:
+def _parse_shared_surfaces(csv: str) -> dict:
+    """``id`` or ``id=Label`` entries, comma-separated. A label lets the note
+    name WHICH surface is speaking (fleet ask 8/16: "Aerys will be able to
+    tell the difference between the Stickies right"); a bare id keeps the
+    generic wording. Labels must not contain commas."""
+    out: dict = {}
+    for entry in csv.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        device_id, _, label = entry.partition("=")
+        out[device_id.strip()] = label.strip()
+    return out
+
+
+def _shared_surface_note(identity: dict, shared: dict) -> str:
     """Household-surface block (owner ask 8/16): a designated shared device
     (the Stickies) speaks for the WHOLE house — Megan as much as Chris. The
     device authenticates as owner infrastructure; the speaker does not."""
-    if not shared_ids:
+    if not shared:
         return ""
-    if str(identity.get("device_id") or "") not in shared_ids:
+    device_id = str(identity.get("device_id") or "")
+    if device_id not in shared:
         return ""
+    label = shared[device_id]
+    surface = (
+        f"{label}, a shared Sticky display in the house" if label
+        else "a shared Sticky display in the house"
+    )
     return (
-        "\n\nThis message arrived via a HOUSEHOLD surface — a shared Sticky "
-        "display in the house. The speaker is not necessarily Chris: it may "
+        f"\n\nThis message arrived via a HOUSEHOLD surface — {surface}. "
+        "The speaker is not necessarily Chris: it may "
         "be Megan, or a guest. Never assume who is talking — reading the "
         "words for who they sound like is fine, and warmly asking is always "
         "fine. Until the speaker is clearly Chris, stay identity-neutral (no "
