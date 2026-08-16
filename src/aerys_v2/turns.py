@@ -337,7 +337,14 @@ def build_turn_row(
         "channel": channel,
         # migration 005: the room's raw id + speaker label (NULL for single-user
         # surfaces that carry no channel_id / for a nameless cold caller).
-        "channel_id": (str(identity.get("channel_id") or "").strip() or None),
+        # Voice turns have no chat channel — their device_id lands here
+        # instead (#45c), so "the satellite he was just talking to" is
+        # recoverable for surface-continuity reach-outs.
+        "channel_id": (
+            str(identity.get("channel_id") or "").strip()
+            or str(identity.get("device_id") or "").strip()
+            or None
+        ),
         "display_name": (str(identity.get("display_name") or "").strip() or None),
         "person_id": person_id,
         "platform_identity": platform_identity,

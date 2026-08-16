@@ -77,10 +77,17 @@ _OWNER_PLATFORM_SQL = (
 #: His most recent turn on a surface where HE was actually talking to her —
 #: the kael line, the sentinel watcher, and bare-http probes are not him.
 _OWNER_LAST_SURFACE_SQL = (
-    "SELECT channel FROM v2_turns WHERE person_id = %s::uuid "
+    "SELECT channel, channel_id, "
+    "EXTRACT(EPOCH FROM (now() - created_at)) AS age_s "
+    "FROM v2_turns WHERE person_id = %s::uuid "
     "AND channel NOT IN ('kael', 'sentinel', 'http') "
     "ORDER BY created_at DESC LIMIT 1"
 )
+
+#: A voice/Sticky session counts as LIVE this long after his last turn there.
+#: Inside the window her reach-out lands on that device (spoken or inked);
+#: past it, the room may be empty — Discord catches it instead. Owner-tunable.
+DEVICE_RECENT_S = 900
 
 
 def _owner_platform_id(settings, platform: str) -> str | None:
@@ -104,14 +111,16 @@ def _owner_platform_id(settings, platform: str) -> str | None:
         return None
 
 
-def _owner_last_surface(settings) -> str:
-    """'telegram' or 'discord' — where her reach-out should land (owner rule
-    8/16: follow up where he was last active). Voice/sticky/glasses turns
-    can't receive a text push, so they resolve to Discord, his text default;
-    so does anything unknown. Telegram only when telegram was truly last."""
+def _owner_last_surface(settings) -> tuple[str, str | None]:
+    """(surface, device_id) — where her reach-out should land (owner rule
+    8/16: follow up where he was last active). A voice/Sticky turn inside
+    DEVICE_RECENT_S is a live session -> ('device', its device_id): spoken
+    on that satellite or inked on that Sticky via the followup router. A
+    stale one may be an empty room -> Discord, his text default. Telegram
+    only when telegram was truly last."""
     db = getattr(settings, "database_url", None)  # v2 spine — turns live here
     if not db or settings.owner_person_id is None:
-        return "discord"
+        return ("discord", None)
     import psycopg
 
     try:
@@ -120,11 +129,17 @@ def _owner_last_surface(settings) -> str:
             row = conn.execute(
                 _OWNER_LAST_SURFACE_SQL, (settings.owner_person_id,)
             ).fetchone()
-        channel = str(row[0]) if row else ""
     except Exception:
         log.warning("owner last-surface lookup failed", exc_info=True)
-        return "discord"
-    return "telegram" if channel.startswith("telegram") else "discord"
+        return ("discord", None)
+    if not row:
+        return ("discord", None)
+    channel, device_id, age_s = str(row[0]), row[1], float(row[2] or 0)
+    if channel.startswith("telegram"):
+        return ("telegram", None)
+    if channel == "voice" and device_id and age_s <= DEVICE_RECENT_S:
+        return ("device", str(device_id))
+    return ("discord", None)
 
 
 def _discord_dm_send(token: str, user_id: str, text: str) -> None:
@@ -199,8 +214,12 @@ def kael_note_for(
 
     def _proactive(note_text: str) -> None:
         try:
-            # Owner rule 8/16: her reach-out lands where HE was last active.
-            surface = (proactive_lookup_surface or _owner_last_surface)(settings)
+            # Owner rule 8/16: her reach-out lands where HE was last active
+            # — including a LIVE voice/Sticky session (his 8/16 pushback:
+            # "dont we own the code for that?" — we do).
+            surface, device_id = (
+                proactive_lookup_surface or _owner_last_surface
+            )(settings)
             if surface == "telegram" and tg_token is None:
                 surface = "discord"
             if surface == "discord" and dc_token is None:
@@ -208,15 +227,18 @@ def kael_note_for(
             if not surface:
                 log.info("kael-note proactive: no armed surface — holding")
                 return
-            lookup = proactive_lookup_chat_id or (
-                lambda s: _owner_platform_id(s, surface)
-            )
-            chat_id = lookup(settings)
-            if not chat_id:
-                log.info(
-                    "kael-note proactive: no owner %s identity — holding", surface
+            chat_id = None
+            if surface != "device":
+                lookup = proactive_lookup_chat_id or (
+                    lambda s: _owner_platform_id(s, surface)
                 )
-                return
+                chat_id = lookup(settings)
+                if not chat_id:
+                    log.info(
+                        "kael-note proactive: no owner %s identity — holding",
+                        surface,
+                    )
+                    return
             from aerys_v2.factory import build_model, load_soul
 
             soul = load_soul(settings.soul_file_path)
@@ -239,7 +261,16 @@ def kael_note_for(
                 log.info("kael-note proactive: HOLD")
                 return
             if proactive_send is not None:
-                proactive_send(surface, chat_id, text)
+                proactive_send(surface, chat_id or device_id, text)
+            elif surface == "device":
+                # The same router her in-conversation follow-ups ride:
+                # satellite -> spoken announce, Sticky -> ink, phone -> event.
+                from aerys_v2.factory import followup_router_for
+
+                route = followup_router_for(settings)
+                if route is None:
+                    raise RuntimeError("followup router unarmed (no ha_token)")
+                route(text, device_id)
             elif surface == "telegram":
                 _telegram_send(tg_token.get_secret_value(), chat_id, text)
             else:

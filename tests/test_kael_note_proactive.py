@@ -65,7 +65,7 @@ def note_fn(graph, model, sends, *, owner=OWNER, token="tg-token", surface="tele
         proactive_model=model,
         proactive_send=lambda sfc, cid, t: sends.append((sfc, cid, t)),
         proactive_lookup_chat_id=lambda s: "7113937380",
-        proactive_lookup_surface=lambda s: surface,
+        proactive_lookup_surface=lambda s: (surface, None),
         proactive_sync=True,
     )
 
@@ -156,11 +156,32 @@ def test_telegram_last_falls_to_discord_when_telegram_unarmed():
         proactive_model=SpeakModel("news"),
         proactive_send=lambda sfc, cid, t: sends.append(sfc),
         proactive_lookup_chat_id=lambda s: "604",
-        proactive_lookup_surface=lambda s: "telegram",
+        proactive_lookup_surface=lambda s: ("telegram", None),
         proactive_sync=True,
     )
     note(f"person:{OWNER}", "route me", True)
     assert sends == ["discord"]
+
+
+def test_live_device_session_routes_to_the_followup_router():
+    """His 8/16 pushback: voice and Sticky are OUR surfaces. A live session
+    (device turn inside the recency window) reaches him THERE — the send
+    seam sees surface='device' with the device id, no chat-id lookup."""
+    graph, sends = FakeGraph(), []
+    note = kael_note_for(
+        graph, settings_with(),
+        proactive_model=SpeakModel("spoken in the room"),
+        proactive_send=lambda sfc, target, t: sends.append((sfc, target, t)),
+        proactive_lookup_chat_id=lambda s: (_ for _ in ()).throw(
+            AssertionError("device routing must not look up a chat id")
+        ),
+        proactive_lookup_surface=lambda s: ("device", "office-satellite-dev"),
+        proactive_sync=True,
+    )
+    note(f"person:{OWNER}", "live-session news", True)
+    assert sends == [("device", "office-satellite-dev", "spoken in the room")]
+    # she remembers saying it, same as any other surface
+    assert len(graph.updates) == 2
 
 
 def test_model_failure_is_swallowed_and_note_survives():
