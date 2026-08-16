@@ -151,7 +151,14 @@ def kael_note_for(
                     content=f"Kael's family-visible note, just landed: {note_text}"
                 ),
             ])
-            text = str(getattr(reply, "content", "") or "").strip()
+            # Anthropic replies arrive as content BLOCKS (thinking + text),
+            # not a bare string — str() of that list is a repr, and the first
+            # live fire sent exactly that repr to the owner's Telegram while
+            # her actual verdict (HOLD) sat inside it. Extract like service.py
+            # does, never str().
+            from aerys_v2.service import _reply_text
+
+            text = _reply_text(reply).strip()
             if not text or _HOLD_RE.match(text):
                 log.info("kael-note proactive: HOLD")
                 return

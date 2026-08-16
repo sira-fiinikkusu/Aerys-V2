@@ -43,7 +43,7 @@ class FakeGraph:
 
 
 class SpeakModel:
-    def __init__(self, reply: str) -> None:
+    def __init__(self, reply) -> None:
         self.reply = reply
         self.prompts: list = []
 
@@ -109,6 +109,28 @@ def test_unarmed_without_token_still_delivers_the_note():
     msg_id = note(f"person:{OWNER}", "note body", True)
     assert msg_id.startswith("kael-note-")
     assert len(graph.updates) == 1 and sends == []
+
+
+def test_block_content_replies_are_parsed_not_repred():
+    """The first live fire: her verdict was HOLD, but the reply came as
+    Anthropic content BLOCKS and str() sent the whole repr to Telegram.
+    Block-shaped HOLD must hold; block-shaped speech must send only the text."""
+    graph, sends = FakeGraph(), []
+    blocks_hold = [
+        {"signature": "EtYHCok...", "thinking": "", "type": "thinking"},
+        {"text": "HOLD", "type": "text"},
+    ]
+    note = note_fn(graph, SpeakModel(blocks_hold), sends)
+    note(f"person:{OWNER}", "plumbing news", True)
+    assert sends == [] and len(graph.updates) == 1
+
+    blocks_speak = [
+        {"signature": "x", "thinking": "", "type": "thinking"},
+        {"text": "Chris — good news from Kael.", "type": "text"},
+    ]
+    note = note_fn(graph, SpeakModel(blocks_speak), sends)
+    note(f"person:{OWNER}", "real news", True)
+    assert sends == [("7113937380", "Chris — good news from Kael.")]
 
 
 def test_model_failure_is_swallowed_and_note_survives():
