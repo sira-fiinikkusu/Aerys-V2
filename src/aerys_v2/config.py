@@ -231,6 +231,11 @@ class Settings(BaseSettings):
     # fallback. Owner ask 2026-08-08: the Sticky rendered her ack but her
     # final reply only reached speaking surfaces.
     ha_display_followups: str = ""
+    # csv of ConversationInput.device_ids that are SHARED HOUSEHOLD surfaces
+    # (the Stickies): turns from them carry a speaker-may-not-be-the-owner
+    # prompt block. The Bearer still authenticates the DEVICE as owner infra —
+    # this only corrects the social assumption. Empty = feature off.
+    ha_shared_surface_ids: str = ""
 
     # Embeddings seam — mirrors the n8n "Generate Embedding" HTTP Request node:
     # OpenAI-compatible /embeddings via OpenRouter (memory.EMBED_MODEL =

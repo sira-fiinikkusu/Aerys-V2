@@ -1172,6 +1172,7 @@ def build_action_graph(
     context_fn: ContextFn | None = None,
     overlay: str = ACTION_OVERLAY,
     family_notes_fn=None,
+    shared_surface_ids: frozenset = frozenset(),
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1250,8 +1251,9 @@ def build_action_graph(
                 family = family_notes_fn(identity) or ""
             except Exception:
                 log.warning("action family_notes_fn raised; continuing without", exc_info=True)
+        shared = _shared_surface_note(identity, shared_surface_ids)
         system = SystemMessage(
-            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}"
+            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}{shared}"
         )
         reply = api_model_with_tools.invoke([system, *state["messages"]])
         return {"messages": [reply]}
@@ -1574,6 +1576,10 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
         # splice must ride it or it misses the surfaces that matter most.
         # The fn owner-gates itself; the guest graph below stays unwired.
         family_notes_fn=family_notes_fn_for(settings),
+        # Owner ask 8/16: Sticky turns tell her the speaker may not be Chris.
+        shared_surface_ids=frozenset(
+            s.strip() for s in settings.ha_shared_surface_ids.split(",") if s.strip()
+        ),
     )
     return router_for(settings, soul), action_graph
 
@@ -1646,6 +1652,27 @@ def _surface_thread_for_phrase(thread: object, identity: dict) -> str:
     if platform == "telegram":
         return f"telegram:dm:{cid}" if kind == "dm" else f"telegram:group:{cid}"
     return str(thread)
+
+
+def _shared_surface_note(identity: dict, shared_ids: frozenset) -> str:
+    """Household-surface block (owner ask 8/16): a designated shared device
+    (the Stickies) speaks for the WHOLE house — Megan as much as Chris. The
+    device authenticates as owner infrastructure; the speaker does not."""
+    if not shared_ids:
+        return ""
+    if str(identity.get("device_id") or "") not in shared_ids:
+        return ""
+    return (
+        "\n\nThis message arrived via a HOUSEHOLD surface — a shared Sticky "
+        "display in the house. The speaker is not necessarily Chris: it may "
+        "be Megan, or a guest. Never assume who is talking — reading the "
+        "words for who they sound like is fine, and warmly asking is always "
+        "fine. Until the speaker is clearly Chris, stay identity-neutral (no "
+        "names, no pet names) and keep his personal or private specifics — "
+        "his schedule, messages, work, family business — off this speaker. "
+        "House things are for everyone here: lights, lists, weather, timers, "
+        "the board, and a friendly answer."
+    )
 
 
 def _where_when_line(thread: object, identity: dict) -> str:
