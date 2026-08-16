@@ -24,12 +24,13 @@ class _Secret:
         return self._value
 
 
-def settings_with(owner=OWNER, token="tg-token"):
+def settings_with(owner=OWNER, token="tg-token", dc_token="dc-token"):
     return SimpleNamespace(
         database_url=None,               # note receipts off — not under test
         memories_database_url=None,      # chat id comes from the injected lookup
         owner_person_id=owner,
         telegram_bot_token=_Secret(token) if token else None,
+        discord_bot_token=_Secret(dc_token) if dc_token else None,
         soul_file_path=__import__("pathlib").Path("/nonexistent/soul.md"),
     )
 
@@ -57,13 +58,14 @@ class BoomModel:
         raise RuntimeError("model down")
 
 
-def note_fn(graph, model, sends, *, owner=OWNER, token="tg-token"):
+def note_fn(graph, model, sends, *, owner=OWNER, token="tg-token", surface="telegram"):
     return kael_note_for(
         graph,
         settings_with(owner=owner, token=token),
         proactive_model=model,
-        proactive_send=lambda cid, t: sends.append((cid, t)),
+        proactive_send=lambda sfc, cid, t: sends.append((sfc, cid, t)),
         proactive_lookup_chat_id=lambda s: "7113937380",
+        proactive_lookup_surface=lambda s: surface,
         proactive_sync=True,
     )
 
@@ -73,12 +75,12 @@ def test_speak_sends_telegram_and_lands_in_history():
     model = SpeakModel("Chris — Kael says the demo notes landed. Proud of you.")
     note = note_fn(graph, model, sends)
     note(f"person:{OWNER}", "demo went great, tell him", True)
-    assert sends == [("7113937380", "Chris — Kael says the demo notes landed. Proud of you.")]
+    assert sends == [("telegram", "7113937380", "Chris — Kael says the demo notes landed. Proud of you.")]
     # two history writes: the injected note, then HER message (she remembers)
     assert len(graph.updates) == 2
     thread, msgs = graph.updates[1]
     assert thread == f"person:{OWNER}"
-    assert msgs[0].content == sends[0][1]
+    assert msgs[0].content == sends[0][2]
     # the deciding prompt rode her soul, with the tone guard in it
     system = model.prompts[0][0].content
     assert PROACTIVE_DECIDE_PROMPT in system and "help, never hover" in system
@@ -105,7 +107,12 @@ def test_private_notes_and_foreign_threads_never_consult_the_model():
 
 def test_unarmed_without_token_still_delivers_the_note():
     graph, sends = FakeGraph(), []
-    note = note_fn(graph, SpeakModel("hi"), sends, token=None)
+    note = kael_note_for(
+        graph, settings_with(token=None, dc_token=None),
+        proactive_model=SpeakModel("hi"),
+        proactive_send=lambda sfc, cid, t: sends.append(sfc),
+        proactive_sync=True,
+    )
     msg_id = note(f"person:{OWNER}", "note body", True)
     assert msg_id.startswith("kael-note-")
     assert len(graph.updates) == 1 and sends == []
@@ -130,7 +137,30 @@ def test_block_content_replies_are_parsed_not_repred():
     ]
     note = note_fn(graph, SpeakModel(blocks_speak), sends)
     note(f"person:{OWNER}", "real news", True)
-    assert sends == [("7113937380", "Chris — good news from Kael.")]
+    assert sends == [("telegram", "7113937380", "Chris — good news from Kael.")]
+
+
+def test_surface_routing_follows_his_last_active(monkeypatch):
+    """Owner rule 8/16: discord-last (and voice/sticky/anything-not-telegram)
+    lands on Discord; telegram only when telegram was truly last."""
+    graph, sends = FakeGraph(), []
+    note = note_fn(graph, SpeakModel("news for you"), sends, surface="discord")
+    note(f"person:{OWNER}", "route me", True)
+    assert sends[-1][0] == "discord"
+
+
+def test_telegram_last_falls_to_discord_when_telegram_unarmed():
+    graph, sends = FakeGraph(), []
+    note = kael_note_for(
+        graph, settings_with(token=None),
+        proactive_model=SpeakModel("news"),
+        proactive_send=lambda sfc, cid, t: sends.append(sfc),
+        proactive_lookup_chat_id=lambda s: "604",
+        proactive_lookup_surface=lambda s: "telegram",
+        proactive_sync=True,
+    )
+    note(f"person:{OWNER}", "route me", True)
+    assert sends == ["discord"]
 
 
 def test_model_failure_is_swallowed_and_note_survives():

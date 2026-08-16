@@ -69,16 +69,24 @@ PROACTIVE_DECIDE_PROMPT = (
 
 _HOLD_RE = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
 
-_OWNER_TG_SQL = (
+_OWNER_PLATFORM_SQL = (
     "SELECT platform_user_id FROM platform_identities "
-    "WHERE person_id = %s::uuid AND platform = 'telegram' LIMIT 1"
+    "WHERE person_id = %s::uuid AND platform = %s LIMIT 1"
+)
+
+#: His most recent turn on a surface where HE was actually talking to her —
+#: the kael line, the sentinel watcher, and bare-http probes are not him.
+_OWNER_LAST_SURFACE_SQL = (
+    "SELECT channel FROM v2_turns WHERE person_id = %s::uuid "
+    "AND channel NOT IN ('kael', 'sentinel', 'http') "
+    "ORDER BY created_at DESC LIMIT 1"
 )
 
 
-def _owner_telegram_chat_id(settings) -> str | None:
-    """The owner's Telegram DM chat id (== his Telegram user id), resolved
-    from prod platform_identities. memories_database_url, NOT database_url —
-    identity is prod data (the 8/15 wrong-database lesson, learned once)."""
+def _owner_platform_id(settings, platform: str) -> str | None:
+    """The owner's platform user id, resolved from prod platform_identities.
+    memories_database_url, NOT database_url — identity is prod data (the
+    8/15 wrong-database lesson, learned once)."""
     db = getattr(settings, "memories_database_url", None)
     if not db or settings.owner_person_id is None:
         return None
@@ -87,11 +95,64 @@ def _owner_telegram_chat_id(settings) -> str | None:
     try:
         with psycopg.connect(db, connect_timeout=5) as conn:
             conn.read_only = True
-            row = conn.execute(_OWNER_TG_SQL, (settings.owner_person_id,)).fetchone()
+            row = conn.execute(
+                _OWNER_PLATFORM_SQL, (settings.owner_person_id, platform)
+            ).fetchone()
         return str(row[0]) if row else None
     except Exception:
-        log.warning("owner telegram identity lookup failed", exc_info=True)
+        log.warning("owner %s identity lookup failed", platform, exc_info=True)
         return None
+
+
+def _owner_last_surface(settings) -> str:
+    """'telegram' or 'discord' — where her reach-out should land (owner rule
+    8/16: follow up where he was last active). Voice/sticky/glasses turns
+    can't receive a text push, so they resolve to Discord, his text default;
+    so does anything unknown. Telegram only when telegram was truly last."""
+    db = getattr(settings, "database_url", None)  # v2 spine — turns live here
+    if not db or settings.owner_person_id is None:
+        return "discord"
+    import psycopg
+
+    try:
+        with psycopg.connect(db, connect_timeout=5) as conn:
+            conn.read_only = True
+            row = conn.execute(
+                _OWNER_LAST_SURFACE_SQL, (settings.owner_person_id,)
+            ).fetchone()
+        channel = str(row[0]) if row else ""
+    except Exception:
+        log.warning("owner last-surface lookup failed", exc_info=True)
+        return "discord"
+    return "telegram" if channel.startswith("telegram") else "discord"
+
+
+def _discord_dm_send(token: str, user_id: str, text: str) -> None:
+    """A DM from HER OWN Discord account (the soak bot). The explicit
+    DiscordBot User-Agent is load-bearing — default urllib UA gets 403."""
+    import json
+    import urllib.request
+
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "DiscordBot (aerys-kael-line, 1.0)",
+    }
+    req = urllib.request.Request(
+        "https://discord.com/api/v10/users/@me/channels",
+        data=json.dumps({"recipient_id": user_id}).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        channel_id = json.load(r)["id"]
+    req = urllib.request.Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        data=json.dumps({"content": text[:1990]}).encode(),
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        if r.status >= 300:
+            raise RuntimeError(f"discord dm status {r.status}")
 
 
 def _telegram_send(token: str, chat_id: str, text: str) -> None:
@@ -114,6 +175,7 @@ def kael_note_for(
     proactive_model=None,
     proactive_send=None,
     proactive_lookup_chat_id=None,
+    proactive_lookup_surface=None,
     proactive_sync: bool = False,
 ) -> Callable[[str, str, bool], str]:
     """Build the note-injector the /kael-note door calls.
@@ -133,13 +195,27 @@ def kael_note_for(
     owner = settings.owner_person_id
     owner_thread = f"person:{owner}" if owner else None
     tg_token = getattr(settings, "telegram_bot_token", None)
+    dc_token = getattr(settings, "discord_bot_token", None)
 
     def _proactive(note_text: str) -> None:
         try:
-            lookup = proactive_lookup_chat_id or _owner_telegram_chat_id
+            # Owner rule 8/16: her reach-out lands where HE was last active.
+            surface = (proactive_lookup_surface or _owner_last_surface)(settings)
+            if surface == "telegram" and tg_token is None:
+                surface = "discord"
+            if surface == "discord" and dc_token is None:
+                surface = "telegram" if tg_token is not None else ""
+            if not surface:
+                log.info("kael-note proactive: no armed surface — holding")
+                return
+            lookup = proactive_lookup_chat_id or (
+                lambda s: _owner_platform_id(s, surface)
+            )
             chat_id = lookup(settings)
             if not chat_id:
-                log.info("kael-note proactive: no owner telegram identity — holding")
+                log.info(
+                    "kael-note proactive: no owner %s identity — holding", surface
+                )
                 return
             from aerys_v2.factory import build_model, load_soul
 
@@ -162,10 +238,12 @@ def kael_note_for(
             if not text or _HOLD_RE.match(text):
                 log.info("kael-note proactive: HOLD")
                 return
-            send = proactive_send or (
-                lambda cid, t: _telegram_send(tg_token.get_secret_value(), cid, t)
-            )
-            send(chat_id, text)
+            if proactive_send is not None:
+                proactive_send(surface, chat_id, text)
+            elif surface == "telegram":
+                _telegram_send(tg_token.get_secret_value(), chat_id, text)
+            else:
+                _discord_dm_send(dc_token.get_secret_value(), chat_id, text)
             # She said it — so the thread must remember she said it (the same
             # continuity rule the voice paths follow: a message the next turn's
             # model can't see is a hole in her).
@@ -180,7 +258,9 @@ def kael_note_for(
                 exc_info=True,
             )
 
-    proactive_armed = owner_thread is not None and tg_token is not None
+    proactive_armed = owner_thread is not None and (
+        tg_token is not None or dc_token is not None
+    )
 
     def _record(thread_id: str, text: str, family_visible: bool) -> None:
         if not database_url:
