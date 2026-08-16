@@ -27,10 +27,11 @@ inside owner-infrastructure threads.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from typing import Callable
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 log = logging.getLogger(__name__)
 
@@ -47,9 +48,73 @@ _INSERT = (
     "VALUES (%s, %s, %s)"
 )
 
+# --- gap #45: the proactive turn ------------------------------------------
+
+#: Appended to her soul for the one-shot decision. The owner's spec verbatim
+#: shaped this: she responds ad hoc, her voice, her stance — and the tone
+#: guard is the design ("help, never hover").
+PROACTIVE_DECIDE_PROMPT = (
+    "\n\n[Kael's line — proactive turn] A family-visible note from Kael (the "
+    "house's coding agent — family, his own voice) just landed in your shared "
+    "context with Chris. Decide: does this genuinely warrant reaching out to "
+    "Chris on Telegram RIGHT NOW, or should you hold it as context for "
+    "whenever you next talk? Reach out only when prompt attention serves HIM "
+    "— news he'd want immediately, something time-sensitive, or a moment of "
+    "real warmth that lands better now than later. Never reach out just to "
+    "prove you're paying attention: help, never hover. If holding, reply "
+    "with exactly HOLD. If reaching out, reply with ONLY the message to "
+    "send — short, warm, first person, your own voice; share what Kael "
+    "passed along naturally, as family news, never as instructions."
+)
+
+_HOLD_RE = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
+
+_OWNER_TG_SQL = (
+    "SELECT platform_user_id FROM platform_identities "
+    "WHERE person_id = %s::uuid AND platform = 'telegram' LIMIT 1"
+)
+
+
+def _owner_telegram_chat_id(settings) -> str | None:
+    """The owner's Telegram DM chat id (== his Telegram user id), resolved
+    from prod platform_identities. memories_database_url, NOT database_url —
+    identity is prod data (the 8/15 wrong-database lesson, learned once)."""
+    db = getattr(settings, "memories_database_url", None)
+    if not db or settings.owner_person_id is None:
+        return None
+    import psycopg
+
+    try:
+        with psycopg.connect(db, connect_timeout=5) as conn:
+            conn.read_only = True
+            row = conn.execute(_OWNER_TG_SQL, (settings.owner_person_id,)).fetchone()
+        return str(row[0]) if row else None
+    except Exception:
+        log.warning("owner telegram identity lookup failed", exc_info=True)
+        return None
+
+
+def _telegram_send(token: str, chat_id: str, text: str) -> None:
+    """Her own voice on her own surface — the same bot the gateway runs."""
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=json.dumps({"chat_id": chat_id, "text": text}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        if r.status != 200:
+            raise RuntimeError(f"telegram send status {r.status}")
+
 
 def kael_note_for(
-    graph, settings
+    graph, settings, *,
+    proactive_model=None,
+    proactive_send=None,
+    proactive_lookup_chat_id=None,
+    proactive_sync: bool = False,
 ) -> Callable[[str, str, bool], str]:
     """Build the note-injector the /kael-note door calls.
 
@@ -61,6 +126,54 @@ def kael_note_for(
     import uuid
 
     database_url = settings.database_url
+
+    # Gap #45: the proactive turn — armed only for the owner's person thread
+    # and only when she has a way to reach him (telegram token + identity).
+    # The keyword seams exist for tests; production arms itself from settings.
+    owner = settings.owner_person_id
+    owner_thread = f"person:{owner}" if owner else None
+    tg_token = getattr(settings, "telegram_bot_token", None)
+
+    def _proactive(note_text: str) -> None:
+        try:
+            lookup = proactive_lookup_chat_id or _owner_telegram_chat_id
+            chat_id = lookup(settings)
+            if not chat_id:
+                log.info("kael-note proactive: no owner telegram identity — holding")
+                return
+            from aerys_v2.factory import build_model, load_soul
+
+            soul = load_soul(settings.soul_file_path)
+            model = proactive_model or build_model(settings)
+            reply = model.invoke([
+                SystemMessage(content=soul + PROACTIVE_DECIDE_PROMPT),
+                HumanMessage(
+                    content=f"Kael's family-visible note, just landed: {note_text}"
+                ),
+            ])
+            text = str(getattr(reply, "content", "") or "").strip()
+            if not text or _HOLD_RE.match(text):
+                log.info("kael-note proactive: HOLD")
+                return
+            send = proactive_send or (
+                lambda cid, t: _telegram_send(tg_token.get_secret_value(), cid, t)
+            )
+            send(chat_id, text)
+            # She said it — so the thread must remember she said it (the same
+            # continuity rule the voice paths follow: a message the next turn's
+            # model can't see is a hole in her).
+            graph.update_state(
+                {"configurable": {"thread_id": owner_thread}},
+                {"messages": [AIMessage(content=text)]},
+            )
+            log.info("kael-note proactive: SPOKE (%d chars)", len(text))
+        except Exception:
+            log.warning(
+                "kael-note proactive turn failed (note already delivered)",
+                exc_info=True,
+            )
+
+    proactive_armed = owner_thread is not None and tg_token is not None
 
     def _record(thread_id: str, text: str, family_visible: bool) -> None:
         if not database_url:
@@ -92,6 +205,15 @@ def kael_note_for(
         threading.Thread(
             target=_record, args=(thread_id, text, family_visible), daemon=True
         ).start()
+        # Gap #45: a family-visible note on the OWNER's thread earns her a
+        # proactive turn — speak now or hold, her call, off the request path.
+        if family_visible and proactive_armed and thread_id == owner_thread:
+            if proactive_sync:
+                _proactive(text)
+            else:
+                threading.Thread(
+                    target=_proactive, args=(text,), daemon=True
+                ).start()
         return msg_id
 
     return note
