@@ -249,9 +249,14 @@ def test_caption_of_sanitizes_for_the_panel_font():
     assert caption_of("[warmly] It's 88° out — “nice” \U0001f60a today") == (
         "It's 88 out - \"nice\" today"
     )
-    long = "word " * 100
-    capped = caption_of(long)
-    assert len(capped) <= 220 and capped.endswith("...")
+    # polish8: the cap is a sanity belt (1600) — the panel credits-scrolls
+    # long captions now, so a 100-word reply passes through UNCUT...
+    long = ("word " * 100).strip()
+    assert caption_of(long) == long
+    # ...and only a pathological ramble still gets the belt.
+    ramble = "word " * 500
+    capped = caption_of(ramble)
+    assert len(capped) <= 1600 and capped.endswith("...")
 
 
 def test_speaking_carries_caption_and_the_idle_flip_clears_it(monkeypatch):

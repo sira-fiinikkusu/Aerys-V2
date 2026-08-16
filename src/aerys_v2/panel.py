@@ -115,9 +115,11 @@ def speaking_estimate_s(text: str) -> float:
 
 # The panel's LVGL Montserrat font covers printable ASCII — emojis and exotic
 # glyphs render as gaps. Curly punctuation gets flattened, everything else
-# non-ASCII drops. Length-capped: the strip shows a beat of what she's saying,
-# not the whole essay (LONG_DOT on the panel is the belt for anything longer).
-_CAPTION_CHARS = 220
+# non-ASCII drops. Length cap raised 220 -> 1600 for polish8 (8/15): the strip
+# credits-scrolls long text at reading pace now — the panel is the owner's
+# office conversation surface, not a glance band. The cap that remains is a
+# sanity belt against pathological rambles, not a display rule.
+_CAPTION_CHARS = 1600
 _CAPTION_FLATTEN = str.maketrans(
     {"‘": "'", "’": "'", "“": '"', "”": '"',
      "—": "-", "–": "-", "…": "..."}
