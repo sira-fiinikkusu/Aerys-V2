@@ -206,6 +206,21 @@ class Settings(BaseSettings):
     panel_presence_entity: str | None = None
     panel_presence_lights: str = ""
 
+    # ---- STORM WATCH (owner ask 2026-08-17) -----------------------------------
+    # Gulf-coast hurricane season, tiered so awareness beats the prep crowds:
+    # NHC outlook bands days ahead, new named storms, and official NWS
+    # watches/warnings for the exact home point. "lat,lon" — empty = no
+    # watcher, zero cost (the standard arming pattern). The point stays in
+    # the environment: it is a street address in disguise.
+    storm_watch_latlon: str = ""
+    # csv of EXACT NWS event names to alarm on; empty = the built-in set
+    # (Hurricane/Tropical Storm/Storm Surge/Tornado families + a couple of
+    # exact warnings — see storm_watch.py).
+    storm_alert_events: str = ""
+    # HA notify service for the phone leg (e.g. "mobile_app_<device>");
+    # empty = Discord DM only.
+    storm_notify_service: str = ""
+
     # ---- SPOKEN FOLLOW-UP (voice actions) ------------------------------------
     # Owner rule (2026-07-03): if a device action completes within this many
     # seconds of the ack going out, the spoken follow-up is SKIPPED — the light

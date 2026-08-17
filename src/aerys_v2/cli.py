@@ -279,6 +279,13 @@ def main() -> None:
             if start_panel_presence(settings) is not None:
                 log.info("panel presence watcher armed | entity=%s",
                          settings.panel_presence_entity)
+            # Hurricane-season eyes (owner ask 8/17): outlook bands days
+            # ahead + official alerts for the home point. Same one-daemon,
+            # --serve-only doctrine as the presence watcher.
+            from aerys_v2.storm_watch import start_storm_watch
+
+            if start_storm_watch(settings) is not None:
+                log.info("storm watch armed | alerts=10m outlook=6h")
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
