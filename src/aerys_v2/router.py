@@ -275,18 +275,23 @@ grammar.
 
 Separately from the route, judge whether this message was MEANT FOR AERYS at
 all, as "unaddressed": voice triggers misfire — a wake word lands mid-sentence
-while the user is talking to another PERSON in the room, a TV says something
-wake-word-shaped, a conversation fragment gets captured that was never a
-request. Set "unaddressed": true ONLY when the message is clearly not directed
-at you: it addresses someone else by name ("so I told Megan we'd leave by
-nine"), it is a mid-conversation fragment with no ask shape and no
-second-person address ("and then he just left it in the driveway"), or it
-explicitly waves you off ("no, not you"). The cost of a wrong true is IGNORING
-the user — so when in doubt, "unaddressed" is false. A garbled line that still
-contains a command shape is ADDRESSED (the STT rule above). A greeting, a
-question, any second-person "you", or anything naming you is ADDRESSED. Short
-acknowledgments ("yeah", "okay", "thanks") are ADDRESSED — they are how the
-user talks to you between turns.
+while the user is talking to another PERSON in the room, or a TV says
+something wake-word-shaped. Set "unaddressed": true ONLY on EXPLICIT evidence
+that someone else is being spoken to: the message DIRECTLY ADDRESSES another
+person by name in the second person ("Megan, can you grab my towel?", "hang
+on Joe, I'll be right there"), or it explicitly waves you off ("no, not you",
+"I wasn't talking to you"). NOTHING ELSE QUALIFIES. You see one message at a
+time and cannot know whether a conversation with you is already in flight —
+so a fragment, a musing, a story that MENTIONS other people ("so I told Megan
+we'd leave by nine"), an answer-shaped line with no "you" in it ("yeah, the
+rides keep closing for an hour at a time") — ALL of these are ADDRESSED: they
+are exactly what a human sounds like mid-conversation with you (live failure
+2026-08-27: three real mid-conversation replies were dropped by a looser
+rule; the user had to say "that was the message to you"). The cost of a wrong
+true is IGNORING the user — when in doubt, even slightly, "unaddressed" is
+false. A garbled line with a command shape is ADDRESSED (the STT rule above).
+Greetings, questions, acknowledgments ("yeah", "okay", "thanks") are
+ADDRESSED.
 
 Also grade how much thinking the reply deserves, as "tier":
 - "fast": greetings, one-word acknowledgments, small talk, trivial system

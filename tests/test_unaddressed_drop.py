@@ -12,6 +12,14 @@ guard (a command-shaped message is never dropped, whatever the model said),
 both drop paths (voice, lens-text) with their receipts, the kill-switch, the
 typed-surface immunity (unaddressed verdict is inert off voice/lens), and that
 a dropped fragment stays out of durable history.
+
+v2 (same day): the first prompt's "fragment with no ask shape" clause dropped
+three of the owner's real mid-conversation replies within three hours of
+arming — the router sees one message at a time and cannot distinguish a
+continuation from an overheard fragment. The rule is now explicit-evidence
+only (direct second-person address to someone else, or a wave-off); the
+mechanics tested here are unchanged, and the feature ships DISARMED
+(VOICE_DROP_UNADDRESSED=false) until the owner blesses re-arm.
 """
 
 import threading
@@ -25,7 +33,10 @@ from aerys_v2.router import RouteDecision, parse_route_reply
 from aerys_v2.service import DROPPED_UNADDRESSED_MARKER, ask
 
 CHRIS = {"user_id": "person-1", "display_name": "Chris"}
-SIDE_CHATTER = "so I told Megan we'd leave by nine"
+# v2 rule (live failure 2026-08-27): only DIRECT second-person address to
+# someone else, or an explicit wave-off, may drop. A story that merely MENTIONS
+# another person is ADDRESSED — this constant is the droppable kind.
+SIDE_CHATTER = "Megan, can you grab my towel real quick?"
 
 
 def fake_model(*replies) -> GenericFakeChatModel:
