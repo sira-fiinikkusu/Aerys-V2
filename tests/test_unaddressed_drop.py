@@ -122,6 +122,7 @@ def voice_ask(router, *, drop: bool, recorder=None, model_reply="hi there"):
         action_graph=action_graph,
         record_turn=recorder,
         drop_unaddressed=drop,
+        activity_registry={},  # fresh cold thread — no cross-test bleed
     ), graph
 
 
@@ -167,6 +168,7 @@ def lens_ask(identity, *, drop: bool, recorder=None):
         action_graph=action_graph,
         record_turn=recorder,
         drop_unaddressed=drop,
+        activity_registry={},  # fresh cold thread — no cross-test bleed
     )
 
 
@@ -184,3 +186,52 @@ def test_typed_surfaces_are_immune_even_when_the_router_says_unaddressed():
     # definition — the verdict is inert metadata and the turn runs normally.
     reply = lens_ask(dict(CHRIS), drop=True)
     assert reply != ""
+
+
+# ---- v3: conversation-in-flight window (owner design, same day) ----
+
+
+def test_in_flight_conversation_suppresses_the_drop():
+    # A real turn just happened on this thread — the gate must stand down even
+    # when the router says unaddressed ("her silence gate should be aware I'm
+    # already talking to her within the last couple minutes" — owner, 8/27).
+    registry: dict[str, float] = {}
+    graph = build_graph(fake_model("hey!", "hi again"), "SOUL")
+    action_graph = build_action_graph(
+        fake_model("first reply", "second reply"), "SOUL", tools=[]
+    )
+
+    def ask_once(router):
+        return ask(
+            graph,
+            "yeah, the rides keep closing for an hour at a time",
+            identity={**CHRIS, "voice": True},
+            thread_id="person:person-1",
+            router=router,
+            action_graph=action_graph,
+            drop_unaddressed=True,
+            activity_registry=registry,
+        )
+
+    first = ask_once(chat_router)          # opens the conversation window
+    assert first != ""
+    second = ask_once(unaddressed_router)  # verdict says drop; window says no
+    assert second != ""
+
+
+def test_cold_capture_still_drops_and_expired_window_reopens_the_gate():
+    registry = {"person:person-1": time.monotonic() - 9999.0}  # long-expired
+    graph = build_graph(fake_model("unused"), "SOUL")
+    action_graph = build_action_graph(fake_model("unused"), "SOUL", tools=[])
+    reply = ask(
+        graph,
+        SIDE_CHATTER,
+        identity={**CHRIS, "voice": True},
+        thread_id="person:person-1",
+        router=unaddressed_router,
+        action_graph=action_graph,
+        drop_unaddressed=True,
+        drop_conversation_window_s=180.0,
+        activity_registry=registry,
+    )
+    assert reply == ""

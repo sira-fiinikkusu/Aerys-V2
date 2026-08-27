@@ -233,6 +233,13 @@ class Settings(BaseSettings):
     # VOICE_DROP_UNADDRESSED=false to disarm instantly — the router keeps
     # judging (receipts continue), the drop just stops happening.
     voice_drop_unaddressed: bool = True
+    # Conversation-in-flight window for the drop gate (owner design, 2026-08-27
+    # after the v1 over-drop: "her silence gate should be aware I'm already
+    # talking to her within the last couple minutes"). A completed turn on the
+    # same thread within this many seconds means a conversation is live and the
+    # gate stands down — only COLD captures (the actual false-wake case) get
+    # judged. Seconds.
+    voice_drop_conversation_window_s: float = 180.0
     # The assist satellite entity that speaks follow-ups (e.g.
     # "assist_satellite.home_assistant_voice_..._assist_satellite").
     # None = no spoken follow-ups (history-only) — same arming pattern as every

@@ -479,6 +479,21 @@ CLAIM_GATE_MARKER = "claim_gate_escalated"
 # miner like the handoff pair.
 DROPPED_UNADDRESSED_MARKER = "dropped_unaddressed"
 
+# Conversation-in-flight registry for the drop gate (owner design 2026-08-27):
+# thread_id -> monotonic time of the last turn that produced a real reply.
+# Process-local ON PURPOSE — every drop-eligible surface (voice, lens) flows
+# through the single --serve process, and losing it on redeploy only means the
+# gate treats the next capture as cold, which is the conservative direction.
+# Injectable in ask() so tests get isolation instead of cross-test bleed.
+_THREAD_ACTIVITY: dict[str, float] = {}
+
+
+def _conversation_in_flight(
+    registry: dict[str, float], thread_id: str, window_s: float
+) -> bool:
+    last = registry.get(thread_id)
+    return last is not None and (time.monotonic() - last) <= window_s
+
 
 # ── FIX 3: the self-perception gate (gap #33, owner-approved 2026-08-10) ────────
 # Production incident 2026-08-10: mid voice-outage, Kael told her the satellite fix
@@ -745,6 +760,8 @@ def ask(
     content_privacy_classifier: Callable[[str], str] | None = None,
     face_push: Callable[[str, str], None] | None = None,
     drop_unaddressed: bool = False,
+    drop_conversation_window_s: float = 180.0,
+    activity_registry: dict[str, float] | None = None,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -872,7 +889,7 @@ def ask(
             # thing said by voice must be gated out of public exactly like a DM — the
             # fail-closed 'private' ingest tag (below) does the gating, and the async
             # judge relaxes general voice content so it still carries into public rooms.
-            return _voice_parallel_start(
+            voice_reply = _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
                 followup_router=followup_router,
@@ -881,12 +898,28 @@ def ask(
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 face_push=face_push,
                 drop_unaddressed=drop_unaddressed,
+                drop_conversation_window_s=drop_conversation_window_s,
+                activity_registry=activity_registry,
             )
+            if voice_reply:
+                registry = (
+                    _THREAD_ACTIVITY if activity_registry is None else activity_registry
+                )
+                registry[thread_id] = time.monotonic()
+            return voice_reply
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
         # (sequential) and only the chosen path spends model tokens.
         decision = router(text)
-        if drop_unaddressed and decision.unaddressed and is_lens_surface(identity):
+        registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
+        if (
+            drop_unaddressed
+            and decision.unaddressed
+            and is_lens_surface(identity)
+            and not _conversation_in_flight(
+                registry, thread_id, drop_conversation_window_s
+            )
+        ):
             # False-wake grace on the LENS path (glasses turns arrive voice=False
             # — the G2 has no speaker — but their capture is still a mic that
             # misfires). Typed surfaces never reach this: no lens, no drop.
@@ -917,6 +950,7 @@ def ask(
                 content_privacy_classifier, origin_privacy,
             )
             _face(face_push, "idle", reply)
+            registry[thread_id] = time.monotonic()
             return reply
 
         # Chat route on a TEXT thread: the router's tier picks the model. This
@@ -993,6 +1027,7 @@ def ask(
             content_privacy_classifier, origin_privacy,
         )
         _face(face_push, "idle", reply)
+        registry[thread_id] = time.monotonic()
         return reply
 
 
@@ -1514,6 +1549,8 @@ def _voice_parallel_start(
     human_id: str | None = None,
     face_push: Callable[[str, str], None] | None = None,
     drop_unaddressed: bool = False,
+    drop_conversation_window_s: float = 180.0,
+    activity_registry: dict[str, float] | None = None,
 ) -> str:
     """Voice hot path — VOICE-ALWAYS-ACTION (owner's simplification, 2026-07-25).
 
@@ -1652,7 +1689,15 @@ def _voice_parallel_start(
         return ack
 
     decision = router(text)
-    if drop_unaddressed and decision.unaddressed:
+    registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
+    thread_key = str(real_configurable.get("thread_id", ""))
+    if (
+        drop_unaddressed
+        and decision.unaddressed
+        and not _conversation_in_flight(
+            registry, thread_key, drop_conversation_window_s
+        )
+    ):
         # False-wake grace (owner ask 2026-08-27): the router judged this
         # capture was never directed at Aerys — a wake-word misfire during a
         # human conversation. Drop it Alexa-style: nothing spoken, nothing run,
