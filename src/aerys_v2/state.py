@@ -55,6 +55,14 @@ class Identity(TypedDict, total=False):
     # names 'voice' in the thread_id. Per-call only (rides config, never checkpointed),
     # so the SAME person thread is a voice turn or a text turn purely by this flag.
     voice: bool
+    # Which PHYSICAL SURFACE renders this turn, when the transport knows and it
+    # changes how she should write. Today's only value: 'lens' (the G2 glasses
+    # text display, set by the g2-bridge on /ask) — a tiny screen where her reply
+    # is READ, not spoken, and anything past ~350 chars gets machine-summarized
+    # by the bridge (another model paraphrasing her; owner and Kael agreed
+    # 2026-08-26 that her own words should reach the lens instead). Per-call
+    # only, like voice — rides config, never checkpointed.
+    surface: str
 
 
 UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}
@@ -62,6 +70,22 @@ UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}
 # The Identity key the explicit voice flag lives under — one constant so the writer
 # (the voice transport) and every reader (is_voice_turn) can never drift on spelling.
 VOICE_KEY = "voice"
+
+# The Identity key the rendering-surface hint lives under, and the one surface
+# value with behavior attached — same writer/reader-can-never-drift rationale.
+SURFACE_KEY = "surface"
+LENS_SURFACE = "lens"
+
+
+def is_lens_surface(identity: Identity | dict | None) -> bool:
+    """Is this turn rendered on the glasses lens? Single source of truth.
+
+    Set by the g2-bridge (surface='lens' on /ask). Deliberately independent of
+    is_voice_turn: a lens turn IS usually a voice turn (spoken in via STT), but
+    the lens styling is about where the reply is READ, and the voice flag is
+    about how the words came in — the two compose, they don't imply each other.
+    """
+    return (identity or {}).get(SURFACE_KEY) == LENS_SURFACE
 
 
 def identity_from_config(config: RunnableConfig | None) -> Identity:

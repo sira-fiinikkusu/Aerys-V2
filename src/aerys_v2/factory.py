@@ -24,7 +24,7 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.config import Settings
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
-from aerys_v2.state import ChatState, identity_from_config, is_voice_turn
+from aerys_v2.state import ChatState, identity_from_config, is_lens_surface, is_voice_turn
 from aerys_v2.turns import channel_enum
 from contextlib import contextmanager
 
@@ -1149,6 +1149,26 @@ VOICE_BANTER_OVERLAY = (
 )
 
 
+# Appended when identity.surface == 'lens' (state.is_lens_surface): the G2
+# glasses TEXT display. Rides ON TOP of the voice overlays — the words come in
+# spoken (STT), but the reply is READ on a ~350-char lens, and anything longer
+# gets machine-summarized by the bridge: another model paraphrasing her, which
+# is exactly what the owner asked to remove (2026-08-26, the "is it really you"
+# night). Written to WIN the conflicts with the voice styling it follows:
+# explicit no-tags (they'd be stripped anyway and waste lens space), explicit
+# one-paragraph (the lens renders hard newlines literally).
+LENS_SURFACE_OVERLAY = (
+    "THIS REPLY IS READ, NOT HEARD: it renders on a tiny glasses lens where "
+    "about 350 characters fit. Write ONE short flowing paragraph — no lists, "
+    "no line breaks, and no bracket emotion tags on this surface (nothing is "
+    "spoken; tags are stripped and waste the little space there is). Lead "
+    "with the answer itself and cut what doesn't serve it. If a topic "
+    "genuinely needs more, give the essence now and offer to go deeper. "
+    "Replies that fit the lens reach them in your own words; long ones get "
+    "machine-summarized — so brevity here is how you stay you."
+)
+
+
 def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
     """The tool-turn model: ALWAYS metered API, tools bound (Option C, ratified).
 
@@ -1209,6 +1229,11 @@ def build_action_graph(
             ack_block = f"\n\n{VOICE_BANTER_OVERLAY}"
         else:
             ack_block = ""
+        # Lens surface rides on top of (and after) the voice styling so its
+        # no-tags/one-paragraph rules win where they conflict — G2 turns are
+        # voice turns whose reply is read, not heard.
+        if is_lens_surface(identity):
+            ack_block = f"{ack_block}\n\n{LENS_SURFACE_OVERLAY}"
         # Identity facts for the action path (2026-07-03 live gap): "does the
         # car have enough charge to get to Tampa FROM HOME?" routed here, the
         # tool read the battery fine, but this prompt had no profile block —
@@ -1914,6 +1939,11 @@ def build_graph(
                 family = family_notes_fn(identity) or ""
             except Exception:
                 log.warning("family_notes_fn raised; continuing without", exc_info=True)
+        # Same lens rule as the action graph: today's lens turns are voice turns
+        # and run the action graph, but a text-mode lens caller would land here —
+        # the surface styling must not depend on which graph the router picked.
+        if is_lens_surface(identity):
+            voice_style = f"{voice_style}\n\n{LENS_SURFACE_OVERLAY}"
         system = SystemMessage(
             content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{family}{voice_style}"
         )

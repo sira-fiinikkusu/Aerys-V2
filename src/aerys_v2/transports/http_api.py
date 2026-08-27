@@ -38,6 +38,11 @@ class AskRequest(BaseModel):
     # the old behavior (thread_id flows through verbatim, no voice-ness). This replaces
     # the old 'name a voice:* thread_id' convention now that voice is person-keyed.
     voice: bool = False
+    # Rendering-surface hint (state.SURFACE_KEY). The g2-bridge sends 'lens' so
+    # she writes lens-native (~350 chars, one paragraph) and the bridge's display
+    # summarizer stays a fallback instead of a paraphrase layer (owner ask
+    # 2026-08-26). Absent/None = no surface styling, byte-for-byte old behavior.
+    surface: str | None = None
 
 
 class AskReply(BaseModel):
@@ -220,6 +225,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # byte-for-byte as before for every non-satellite caller (curl, tests).
         if body.device_id:
             identity["device_id"] = body.device_id
+        # Same carry-only-when-sent contract as device_id: every non-lens caller's
+        # identity dict stays byte-for-byte unchanged.
+        if body.surface:
+            identity["surface"] = body.surface
         # Voice is armed by the EXPLICIT body.voice flag OR a legacy voice thread name.
         # The HA aerys_conversation component predates the tie-in and still posts
         # thread_id="voice:beta" with NO voice flag — so a "voice"-prefixed thread is
