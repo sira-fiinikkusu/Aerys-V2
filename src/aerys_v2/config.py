@@ -227,6 +227,12 @@ class Settings(BaseSettings):
     # changing IS the feedback. Slow actions and FAILURES are always spoken.
     # The follow-up lands in thread history either way (silent record).
     voice_followup_skip_s: float = 6.0
+    # False-wake grace (owner ask 2026-08-27): when the router judges a
+    # voice/lens capture was never directed at Aerys, drop it silently instead
+    # of answering into someone else's conversation. Kill-switch: set
+    # VOICE_DROP_UNADDRESSED=false to disarm instantly — the router keeps
+    # judging (receipts continue), the drop just stops happening.
+    voice_drop_unaddressed: bool = True
     # The assist satellite entity that speaks follow-ups (e.g.
     # "assist_satellite.home_assistant_voice_..._assist_satellite").
     # None = no spoken follow-ups (history-only) — same arming pattern as every

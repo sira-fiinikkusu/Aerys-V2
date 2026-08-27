@@ -273,6 +273,21 @@ against the tide."). A message that CONTAINS a command shape — "play <title>",
 the sentence as a whole reads oddly or poetically. Judge the fragment, not the
 grammar.
 
+Separately from the route, judge whether this message was MEANT FOR AERYS at
+all, as "unaddressed": voice triggers misfire — a wake word lands mid-sentence
+while the user is talking to another PERSON in the room, a TV says something
+wake-word-shaped, a conversation fragment gets captured that was never a
+request. Set "unaddressed": true ONLY when the message is clearly not directed
+at you: it addresses someone else by name ("so I told Megan we'd leave by
+nine"), it is a mid-conversation fragment with no ask shape and no
+second-person address ("and then he just left it in the driveway"), or it
+explicitly waves you off ("no, not you"). The cost of a wrong true is IGNORING
+the user — so when in doubt, "unaddressed" is false. A garbled line that still
+contains a command shape is ADDRESSED (the STT rule above). A greeting, a
+question, any second-person "you", or anything naming you is ADDRESSED. Short
+acknowledgments ("yeah", "okay", "thanks") are ADDRESSED — they are how the
+user talks to you between turns.
+
 Also grade how much thinking the reply deserves, as "tier":
 - "fast": greetings, one-word acknowledgments, small talk, trivial system
   questions — anything a small model answers perfectly.
@@ -284,7 +299,7 @@ Also grade how much thinking the reply deserves, as "tier":
   requests that earn it.
 
 Reply with ONLY a JSON object — no prose, no code fences:
-{"route": "chat" or "action", "ack": "<acknowledgment>", "tier": "fast" or "standard" or "deep"}
+{"route": "chat" or "action", "ack": "<acknowledgment>", "tier": "fast" or "standard" or "deep", "unaddressed": true or false}
 
 The ack is what Aerys says OUT LOUD immediately, before the action completes.
 Write it fresh for THIS message, in Aerys's voice, referencing what was actually
@@ -307,6 +322,11 @@ class RouteDecision:
     route: str  # "chat" | "action"
     ack: str
     tier: str = DEFAULT_TIER  # "fast" | "standard" | "deep" — a hint, pre-normalized
+    # The false-wake verdict (owner ask 2026-08-27, Alexa-style): the router
+    # believes this voice capture was never directed at Aerys. Consumed ONLY on
+    # voice/lens turns (typed text is intentional by definition) and ONLY when
+    # the drop feature is armed — everywhere else it is inert metadata.
+    unaddressed: bool = False
 
 
 def plausibly_commands_device(text: str) -> bool:
@@ -427,7 +447,17 @@ def parse_route_reply(raw: str, user_text: str) -> RouteDecision:
             ack = FALLBACK_ACK
         # tier is a hint (see module docstring): normalize, never reject — a
         # garbage tier must not throw away a perfectly good route decision.
-        return RouteDecision(route=route, ack=ack, tier=normalize_tier(data.get("tier")))
+        unaddressed = data.get("unaddressed") is True
+        if unaddressed and plausibly_asks_for_action(user_text):
+            # Structural guard, not a prompt promise: a command-shaped message
+            # is NEVER dropped, whatever the model judged — eating a real
+            # "turn off the lights" is the one failure this feature must not
+            # have. The markers are the same union the degraded path trusts.
+            unaddressed = False
+        return RouteDecision(
+            route=route, ack=ack, tier=normalize_tier(data.get("tier")),
+            unaddressed=unaddressed,
+        )
     except Exception:
         log.warning("router reply unparseable: %.200r — using heuristic", raw)
         return fallback_decision(user_text)

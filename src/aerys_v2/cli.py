@@ -255,6 +255,7 @@ def main() -> None:
                     record_turn=record_turn,
                     content_privacy_classifier=content_privacy,
                     face_push=face_push,
+                    drop_unaddressed=settings.voice_drop_unaddressed,
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris

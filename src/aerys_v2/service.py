@@ -55,7 +55,7 @@ from aerys_v2.services.content_privacy import (
     PUBLIC,
     redact_private_history,
 )
-from aerys_v2.state import Identity, is_voice_turn
+from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import build_turn_row, current_trace_id, extract_tool_calls
 
 log = logging.getLogger(__name__)
@@ -472,6 +472,13 @@ NO_TOOL_ACTION_MARKER = "no_tool_action"
 # chat_handoff, which is the model raising its own hand).
 CLAIM_GATE_MARKER = "claim_gate_escalated"
 
+# False-wake grace (owner ask 2026-08-27): the router judged this voice/lens
+# capture was never directed at Aerys and the turn was dropped — no reply, no
+# action, but ALWAYS this receipt (never silent-silent; the marker is how drop
+# judgment gets audited and tuned). By-design telemetry, skipped by the gaps
+# miner like the handoff pair.
+DROPPED_UNADDRESSED_MARKER = "dropped_unaddressed"
+
 
 # ── FIX 3: the self-perception gate (gap #33, owner-approved 2026-08-10) ────────
 # Production incident 2026-08-10: mid voice-outage, Kael told her the satellite fix
@@ -737,6 +744,7 @@ def ask(
     record_turn: Callable[[dict], None] | None = None,
     content_privacy_classifier: Callable[[str], str] | None = None,
     face_push: Callable[[str, str], None] | None = None,
+    drop_unaddressed: bool = False,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -872,11 +880,28 @@ def ask(
                 content_privacy_classifier=content_privacy_classifier,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 face_push=face_push,
+                drop_unaddressed=drop_unaddressed,
             )
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
         # (sequential) and only the chosen path spends model tokens.
         decision = router(text)
+        if drop_unaddressed and decision.unaddressed and is_lens_surface(identity):
+            # False-wake grace on the LENS path (glasses turns arrive voice=False
+            # — the G2 has no speaker — but their capture is still a mic that
+            # misfires). Typed surfaces never reach this: no lens, no drop.
+            log.info(
+                "route decision | thread=%s DROPPED (unaddressed voice capture)",
+                thread_id,
+            )
+            _fire_turn_record(
+                record_turn, config, text,
+                int((time.monotonic() - started) * 1000),
+                classifier_intent="unaddressed",
+                raw_reply="", emitted_reply="",
+                extra_degraded=[DROPPED_UNADDRESSED_MARKER],
+            )
+            return ""
         if decision.route == "action":
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
@@ -1488,6 +1513,7 @@ def _voice_parallel_start(
     human_privacy: str = PRIVATE,
     human_id: str | None = None,
     face_push: Callable[[str, str], None] | None = None,
+    drop_unaddressed: bool = False,
 ) -> str:
     """Voice hot path — VOICE-ALWAYS-ACTION (owner's simplification, 2026-07-25).
 
@@ -1626,6 +1652,25 @@ def _voice_parallel_start(
         return ack
 
     decision = router(text)
+    if drop_unaddressed and decision.unaddressed:
+        # False-wake grace (owner ask 2026-08-27): the router judged this
+        # capture was never directed at Aerys — a wake-word misfire during a
+        # human conversation. Drop it Alexa-style: nothing spoken, nothing run,
+        # and the human turn is NOT written into the thread history (a stray
+        # fragment must not pollute her memory of the conversation) — but the
+        # receipt row ALWAYS lands, so drop judgment is auditable and tunable.
+        log.info(
+            "voice route decision | thread=%s DROPPED (unaddressed capture)",
+            real_configurable.get("thread_id"),
+        )
+        _fire_turn_record(
+            record_turn, config, text,
+            int((time.monotonic() - started) * 1000),
+            classifier_intent="unaddressed",
+            raw_reply="", emitted_reply="",
+            extra_degraded=[DROPPED_UNADDRESSED_MARKER],
+        )
+        return ""
     if decision.route == "action":
         log.info(
             "voice route decision | thread=%s route=action",

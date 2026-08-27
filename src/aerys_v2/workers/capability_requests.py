@@ -71,7 +71,7 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # recovers it are the escalation feature WORKING; mining them as gaps put
 # false positives at the top of the owner's board (gaps #8/#9, 2026-07-21).
 # They stay in v2_turns for misroute-rate auditing — they just aren't gaps.
-BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat"})
+BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed"})
 
 # required_tier is DERIVED from origin_class, never set independently — the fakeable
 # 'complaint' path always lands on the stricter gate. Kept as a table so the mapping
