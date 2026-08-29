@@ -154,6 +154,7 @@ class StormWatcher:
         fetch_text: Callable[[str], str] = _fetch_text,
         sleep_fn: Callable[[float], None] = time.sleep,
         tick_s: float = 60.0,
+        store: "StormSeenStore | None" = None,
     ) -> None:
         self._point = point
         self._deliver = deliver
@@ -167,10 +168,17 @@ class StormWatcher:
         # A csv override is an EXACT allowlist; empty keeps the built-ins.
         self._families = () if exact_override else DEFAULT_EVENT_FAMILIES
         self._exact = exact_override or DEFAULT_EVENT_EXACT
-        # In-memory state only (a redeploy at worst repeats one nudge).
-        self._seen_alerts: set[str] = set()
-        self._seen_storms: set[str] = set()
-        self._outlook_high_water = 0
+        # Seen-state, durable when a store is wired (migration 009): the
+        # original in-memory-only design ("a redeploy at worst repeats one
+        # nudge") was written for rare deploys — the 2026-08-27 six-deploy
+        # day re-announced Dolly on every boot. The store is fail-open in
+        # BOTH directions: load failure = start empty (today's behavior),
+        # write failure = logged and ignored (a nudge repeat, never a crash).
+        self._store = store
+        loaded = store.load() if store is not None else None
+        self._seen_alerts: set[str] = set(loaded["alerts"]) if loaded else set()
+        self._seen_storms: set[str] = set(loaded["storms"]) if loaded else set()
+        self._outlook_high_water = int(loaded["outlook_hw"]) if loaded else 0
         # Countdowns start at 0 so both polls run once immediately at startup.
         self._alert_countdown = 0
         self._outlook_countdown = 0
@@ -207,6 +215,8 @@ class StormWatcher:
         # Every current id is now either old news or just delivered; dropping
         # expired ids keeps the set from growing across a whole season.
         self._seen_alerts = current
+        if self._store is not None:
+            self._store.replace_alerts(current)
 
     # -- tier ①: outlook bands + new named storms (fail-open) --------------
     def poll_outlook(self) -> None:
@@ -235,12 +245,16 @@ class StormWatcher:
         pct, sentence = max(areas, key=lambda a: a[0])
         if pct < OUTLOOK_RESET_BELOW:
             # Basin calmed down — re-arm so the next brewing system alerts.
+            if self._outlook_high_water != 0 and self._store is not None:
+                self._store.set_outlook_high_water(0)
             self._outlook_high_water = 0
             return
         band = band_of(pct)
         if band <= self._outlook_high_water:
             return
         self._outlook_high_water = band
+        if self._store is not None:
+            self._store.set_outlook_high_water(band)
         log.info("tropical outlook crossed the %d%% band (max %d%%)", band, pct)
         self._deliver(
             "🌀 Tropical outlook",
@@ -257,6 +271,8 @@ class StormWatcher:
             if not sid or not atlantic or sid in self._seen_storms:
                 continue
             self._seen_storms.add(sid)
+            if self._store is not None:
+                self._store.add_storm(sid)
             name = storm.get("name") or sid
             classification = storm.get("classification") or ""
             intensity = storm.get("intensity") or ""
@@ -340,6 +356,76 @@ def _deliver_for(settings) -> Callable[[str, str, str], None]:
     return compose_legs(discord_leg, phone_leg)
 
 
+class StormSeenStore:
+    """Durable seen-state over v2_storm_seen (migration 009). Every method is
+    fail-open: storms are rare and a repeated nudge is annoying, but a watcher
+    that dies because the NAS blinked is the outage class this codebase keeps
+    paying down. A fresh connection per call — the checkpointer-pool lesson:
+    long-lived connections are how outages outlive their cause."""
+
+    def __init__(self, database_url: str) -> None:
+        self._url = database_url.replace("postgresql+psycopg://", "postgresql://")
+
+    def _exec(self, sql: str, params: tuple = ()) -> list | None:
+        import psycopg
+
+        with psycopg.connect(self._url, connect_timeout=5) as conn:
+            cur = conn.execute(sql, params)
+            rows = cur.fetchall() if cur.description else None
+            conn.commit()
+            return rows
+
+    def load(self) -> dict | None:
+        try:
+            rows = self._exec("SELECT kind, key, value FROM v2_storm_seen") or []
+            state = {"alerts": set(), "storms": set(), "outlook_hw": 0}
+            for kind, key, value in rows:
+                if kind == "alert":
+                    state["alerts"].add(key)
+                elif kind == "storm":
+                    state["storms"].add(key)
+                elif kind == "outlook_hw":
+                    state["outlook_hw"] = int(value or 0)
+            return state
+        except Exception:
+            log.warning("storm seen-state load failed — starting empty", exc_info=True)
+            return None
+
+    def add_storm(self, sid: str) -> None:
+        try:
+            self._exec(
+                "INSERT INTO v2_storm_seen (kind, key) VALUES ('storm', %s)"
+                " ON CONFLICT DO NOTHING",
+                (sid,),
+            )
+        except Exception:
+            log.warning("storm seen-state write failed (harmless)", exc_info=True)
+
+    def replace_alerts(self, current: set[str]) -> None:
+        try:
+            self._exec("DELETE FROM v2_storm_seen WHERE kind = 'alert'")
+            for alert_id in current:
+                self._exec(
+                    "INSERT INTO v2_storm_seen (kind, key) VALUES ('alert', %s)"
+                    " ON CONFLICT DO NOTHING",
+                    (alert_id,),
+                )
+        except Exception:
+            log.warning("alert seen-state write failed (harmless)", exc_info=True)
+
+    def set_outlook_high_water(self, band: int) -> None:
+        try:
+            self._exec(
+                "INSERT INTO v2_storm_seen (kind, key, value)"
+                " VALUES ('outlook_hw', 'high_water', %s)"
+                " ON CONFLICT (kind, key) DO UPDATE SET value = EXCLUDED.value,"
+                " seen_at = now()",
+                (str(band),),
+            )
+        except Exception:
+            log.warning("outlook seen-state write failed (harmless)", exc_info=True)
+
+
 def start_storm_watch(settings) -> threading.Thread | None:
     """Arm-and-forget: None unless a home point is configured — the standard
     optional-seam pattern. The point stays in the environment: it is a street
@@ -347,10 +433,14 @@ def start_storm_watch(settings) -> threading.Thread | None:
     point = (settings.storm_watch_latlon or "").strip()
     if not point:
         return None
+    store = None
+    if settings.database_url:
+        store = StormSeenStore(settings.database_url)
     watcher = StormWatcher(
         point=point,
         deliver=_deliver_for(settings),
         event_csv=settings.storm_alert_events,
+        store=store,
     )
     thread = threading.Thread(
         target=watcher.run_forever, daemon=True, name="storm-watch"

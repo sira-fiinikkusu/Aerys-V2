@@ -248,3 +248,75 @@ def test_delivery_legs_never_couple():
     deliver2 = compose_legs(good_leg, bad_leg)
     deliver2("t2", "m", "i")
     assert landed == ["t", "t2"]
+
+
+# ---- durable seen-state (migration 009; the 8/27 six-deploy Dolly spam) ----
+
+
+class FakeStore:
+    def __init__(self, preloaded=None):
+        self.state = preloaded or {"alerts": set(), "storms": set(), "outlook_hw": 0}
+        self.storm_adds: list[str] = []
+
+    def load(self):
+        return {
+            "alerts": set(self.state["alerts"]),
+            "storms": set(self.state["storms"]),
+            "outlook_hw": self.state["outlook_hw"],
+        }
+
+    def add_storm(self, sid):
+        self.storm_adds.append(sid)
+        self.state["storms"].add(sid)
+
+    def replace_alerts(self, current):
+        self.state["alerts"] = set(current)
+
+    def set_outlook_high_water(self, band):
+        self.state["outlook_hw"] = band
+
+
+def _watcher_with_store(store, delivered):
+    return StormWatcher(
+        point="26.9,-82.3",
+        deliver=lambda t, m, i: delivered.append(t),
+        event_csv="",
+        fetch_json=lambda url: {"activeStorms": [
+            {"id": "al052026", "binNumber": "AT5", "name": "Dolly",
+             "classification": "TS", "intensity": "45"},
+        ]},
+        fetch_text=lambda url: "",
+        store=store,
+    )
+
+
+def test_new_storm_is_recorded_in_the_store():
+    store, delivered = FakeStore(), []
+    w = _watcher_with_store(store, delivered)
+    w.poll_outlook()
+    assert delivered  # announced once
+    assert store.storm_adds == ["al052026"]
+
+
+def test_restart_with_store_does_not_reannounce():
+    # The 8/27 failure, pinned: same storm, fresh watcher (a "redeploy"),
+    # but the store remembers — zero deliveries the second time around.
+    store, delivered = FakeStore(), []
+    _watcher_with_store(store, delivered).poll_outlook()
+    assert len(delivered) == 1
+    delivered2: list[str] = []
+    _watcher_with_store(store, delivered2).poll_outlook()
+    assert delivered2 == []
+
+
+def test_no_store_keeps_todays_behavior():
+    delivered: list[str] = []
+    w = StormWatcher(
+        point="26.9,-82.3",
+        deliver=lambda t, m, i: delivered.append(t),
+        event_csv="",
+        fetch_json=lambda url: {"activeStorms": []},
+        fetch_text=lambda url: "",
+    )
+    w.poll_outlook()
+    assert delivered == []
