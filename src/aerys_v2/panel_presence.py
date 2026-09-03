@@ -83,6 +83,7 @@ class PanelPresenceWatcher:
         ha_token: str,
         occupancy_entity: str,
         light_entities: list[str],
+        wake_entities: list[str] | None = None,
         client=None,
         poll_s: float = 20.0,
         emote_s: float = 2.5,
@@ -103,6 +104,11 @@ class PanelPresenceWatcher:
         self._headers = {"Authorization": f"Bearer {ha_token}"}
         self._occupancy = occupancy_entity
         self._lights = light_entities
+        # Wake gate (owner ask 2026-09-03, mirroring the office lights): the
+        # occupancy group is PIR-OR-mmWave and the mmWave trips on the AC, so
+        # a wake additionally needs one of THESE (the PIRs) to read "on". The
+        # group alone still HOLDS her awake. Empty list = legacy behaviour.
+        self._wake = list(wake_entities or [])
         self._client = client or httpx.Client(timeout=5.0)
         self._poll_s = poll_s
         self._emote_s = emote_s
@@ -331,6 +337,19 @@ class PanelPresenceWatcher:
             self._last_frames = None
             self._reboot_panel_and_recover()
 
+    def _wake_gate_open(self) -> bool:
+        """Legacy (no wake entities): occupancy alone wakes her. Otherwise a
+        PIR must actually see him — the mmWave half of the group is not a
+        wake source (the 9/03 AC-cycle finding). Unknown/unavailable PIRs are
+        never "on", so a dead PIR fails safe to asleep, exactly like the
+        lights automation it mirrors."""
+        if not self._wake:
+            return True
+        if any(self._entity_state(e) == "on" for e in self._wake):
+            return True
+        log.debug("occupancy on but no wake entity is — holding her asleep (mmWave-only sighting)")
+        return False
+
     # -- transitions -------------------------------------------------------
     def _fall_asleep(self) -> None:
         log.info("office empty + lights out — panel going to sleep")
@@ -354,7 +373,7 @@ class PanelPresenceWatcher:
         """One poll cycle — separated from the loop so tests drive it directly."""
         occupied = self._entity_state(self._occupancy)
         if self.asleep:
-            if occupied == "on":
+            if occupied == "on" and self._wake_gate_open():
                 self._wake_up()
             return
         self._check_daytime_wedge()
@@ -391,8 +410,8 @@ class PanelPresenceWatcher:
 
     def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
         log.info(
-            "panel presence watcher up | occupancy=%s lights=%s poll=%.0fs",
-            self._occupancy, ",".join(self._lights), self._poll_s,
+            "panel presence watcher up | occupancy=%s wake=%s lights=%s poll=%.0fs",
+            self._occupancy, ",".join(self._wake) or "(occupancy alone)", ",".join(self._lights), self._poll_s,
         )
         while True:
             try:
@@ -410,6 +429,7 @@ def start_panel_presence(settings) -> threading.Thread | None:
     if not settings.panel_presence_entity:
         return None
     lights = [e.strip() for e in settings.panel_presence_lights.split(",") if e.strip()]
+    wake = [e.strip() for e in settings.panel_wake_entities.split(",") if e.strip()]
     # Escalation line: the same desk-channel lane message_kael uses (Kael's
     # session treats the aerys lane as observations, and this is exactly one).
     # Optional like everything else — no desk line configured means the
@@ -435,6 +455,7 @@ def start_panel_presence(settings) -> threading.Thread | None:
         ha_token=settings.ha_token.get_secret_value(),
         occupancy_entity=settings.panel_presence_entity,
         light_entities=lights,
+        wake_entities=wake,
         notify_fn=notify_fn,
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")

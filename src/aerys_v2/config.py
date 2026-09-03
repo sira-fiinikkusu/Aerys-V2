@@ -205,6 +205,13 @@ class Settings(BaseSettings):
     # watcher — same arming pattern as every optional half.
     panel_presence_entity: str | None = None
     panel_presence_lights: str = ""
+    # Owner ask 2026-09-03: wake like the LIGHTS do. The occupancy group above
+    # is PIR-OR-mmWave, and the mmWave half trips on the HVAC kicking on — 13-19
+    # phantom wakes a night with the office door shut. The lights only wake on a
+    # PIR edge and let the group HOLD them; the panel now does the same: any of
+    # these entities reading "on" (with occupancy on) is required to WAKE her,
+    # while the group alone may keep her awake. Empty = legacy wake-on-occupancy.
+    panel_wake_entities: str = ""
 
     # ---- STORM WATCH (owner ask 2026-08-17) -----------------------------------
     # Gulf-coast hurricane season, tiered so awareness beats the prep crowds:

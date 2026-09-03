@@ -478,3 +478,56 @@ def test_wake_verify_still_unknowable_when_boot_never_answers():
     assert w._wake_unknowable == 1            # counted toward the strikes
     # bounded: it gave up after the window, not forever
     assert world.health_reads <= int(WAKE_HEALTH_WAIT_S / WAKE_HEALTH_POLL_S) + 2
+
+
+# ---- wake gate (owner ask 2026-09-03): wake like the lights do --------------
+P1 = "binary_sensor.office_motion_occupancy"
+P2 = "binary_sensor.office_motion_2_occupancy"
+
+
+def test_mmwave_only_occupancy_does_not_wake_her():
+    # The AC kicks on at 3 AM, the mmWave half of the group flips ON, the PIRs
+    # see nothing. 13-19 phantom wakes a night before this gate existed.
+    world = FakeWorld({OCC: "on", P1: "off", P2: "off"})
+    w = watcher(world, wake_entities=[P1, P2])
+    w.asleep = True
+    w.tick()
+    assert w.asleep is True
+    assert world.panel_calls == []  # no display-on, no emote, nothing
+
+
+def test_a_pir_sighting_with_occupancy_wakes_her():
+    world = FakeWorld({OCC: "on", P1: "on", P2: "off"})
+    w = watcher(world, wake_entities=[P1, P2])
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False
+    assert world.panel_calls[0] == ("/display", {"on": True})
+
+
+def test_mmwave_alone_still_holds_her_awake():
+    # He's sitting still at the desk: PIRs quiet, mmWave holds the group ON.
+    # The group must keep her awake even though it could not have woken her.
+    world = FakeWorld({OCC: "on", P1: "off", P2: "off", L1: "off", L2: "off"})
+    w = watcher(world, wake_entities=[P1, P2])
+    for _ in range(SLEEP_DEBOUNCE_TICKS + 2):
+        w.tick()
+    assert w.asleep is False
+
+
+def test_dead_pir_fails_safe_to_asleep():
+    # A PIR that HA can't read is never "on" — an unplugged sensor must not
+    # become a phantom wake source (same fail-open doctrine as the lights).
+    world = FakeWorld({OCC: "on"})  # P1/P2 absent -> 404 -> unknown
+    w = watcher(world, wake_entities=[P1, P2])
+    w.asleep = True
+    w.tick()
+    assert w.asleep is True
+
+
+def test_no_wake_entities_keeps_legacy_wake_on_occupancy():
+    world = FakeWorld({OCC: "on"})
+    w = watcher(world)  # no wake_entities -> occupancy alone wakes (pre-9/03)
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False
