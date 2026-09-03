@@ -52,6 +52,15 @@ DAYTIME_UNKNOWABLE_STRIKES = 9
 #: logged "health unknowable — trusting the wake" into a log nobody reads,
 #: and the trust was misplaced both times.
 WAKE_UNKNOWABLE_STRIKES = 2
+#: A real wake is a BOOT: the P4 app comes up in ~30s and only then does
+#: /health answer. The verify used to sample at ~2s and ~5s after the wake
+#: pushes, so every genuine boot read "unknowable" and only a no-op wake (she
+#: was already up) ever verified — 54 unknowable vs 17 verified in the week of
+#: 2026-08-27, and the 2026-09-03 slow boot went straight to escalation. Wait
+#: for the first reachable health sample before judging frames; a boot that
+#: exceeds this window is still unknowable (and still escalates).
+WAKE_HEALTH_WAIT_S = 150.0
+WAKE_HEALTH_POLL_S = 10.0
 #: Hysteresis (8/02, the Nanoleaf-test yo-yo). The movie-mode design — manual
 #: lights-off with someone present keeps her awake — assumes occupancy holds
 #: "on" while the owner is in the room. The office sensor drops him during
@@ -235,10 +244,29 @@ class PanelPresenceWatcher:
             except Exception:
                 log.warning("panel recovery notify failed", exc_info=True)
 
+    def _wait_for_health(self) -> dict | None:
+        """Block (via the injected sleep) until /health answers or the wake
+        window lapses. A wake is a boot; asking at t+2s is asking a board that
+        hasn't started its HTTP server yet. Returns the first reachable
+        sample, or None if the window lapses (= genuinely unknowable)."""
+        deadline = WAKE_HEALTH_WAIT_S
+        waited = 0.0
+        while True:
+            h = self._health()
+            if h is not None:
+                if waited:
+                    log.info("wake verify: panel health answered after ~%.0fs", waited)
+                return h
+            if waited >= deadline:
+                return None
+            self._sleep(WAKE_HEALTH_POLL_S)
+            waited += WAKE_HEALTH_POLL_S
+
     def _verify_wake(self) -> None:
         """The 7/24 lesson: never trust the panel's self-report on wake.
-        Confirm frames are actually moving; if not, one clean reboot."""
-        check = self._frames_advancing()
+        Confirm frames are actually moving; if not, one clean reboot.
+        (9/03: wait for her HTTP to come up first — a boot needs ~30s.)"""
+        check = None if self._wait_for_health() is None else self._frames_advancing()
         if check is None:
             self._wake_unknowable += 1
             if self._wake_unknowable >= WAKE_UNKNOWABLE_STRIKES:

@@ -432,3 +432,49 @@ def test_unavailable_light_plus_a_lit_one_still_means_awake():
     for _ in range(SLEEP_DEBOUNCE_TICKS + 1):
         w.tick()
     assert w.asleep is False
+
+
+class BootsLateWorld(HealthWorld):
+    """A REAL wake is a boot: /health is dead for the first few reads (the P4
+    app hasn't started its HTTP server), then comes up healthy and advancing.
+    Before 2026-09-03 the verify sampled at ~2s/5s and called every genuine
+    boot 'unknowable' — 54 unknowable vs 17 verified in one week."""
+
+    def __init__(self, states=None, *, dead_reads=3, **kw):
+        super().__init__(states, **kw)
+        self.dead_reads = dead_reads
+        self.health_reads = 0
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            self.health_reads += 1
+            if self.health_reads <= self.dead_reads:
+                return httpx.Response(503)  # booting: nothing listening yet
+        return super().handle(request)
+
+
+def test_wake_verify_waits_for_a_booting_panel_then_verifies():
+    sent, notify = notes()
+    world = BootsLateWorld({OCC: "on"}, dead_reads=3)
+    w = watcher(world, notify_fn=notify)
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False
+    assert world.reboots == 0                 # a booting panel is not a wedged panel
+    assert sent == []                         # and it must not page
+    assert w._wake_unknowable == 0            # it VERIFIED, not "trusted blind"
+    assert world.health_reads > world.dead_reads  # it actually waited her out
+
+
+def test_wake_verify_still_unknowable_when_boot_never_answers():
+    from aerys_v2.panel_presence import WAKE_HEALTH_POLL_S, WAKE_HEALTH_WAIT_S
+
+    world = BootsLateWorld({OCC: "on"}, dead_reads=10_000)  # never comes up
+    w = watcher(world)
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False                  # the wake itself is still trusted
+    assert world.reboots == 0                 # /reboot can't help a dead HTTP
+    assert w._wake_unknowable == 1            # counted toward the strikes
+    # bounded: it gave up after the window, not forever
+    assert world.health_reads <= int(WAKE_HEALTH_WAIT_S / WAKE_HEALTH_POLL_S) + 2
