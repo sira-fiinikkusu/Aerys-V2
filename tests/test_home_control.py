@@ -12,6 +12,8 @@ import uuid
 
 import httpx
 
+import aerys_v2.tools.home_control as _hc
+_hc._VERIFY_DELAYS_S = (0.0, 0.0)
 from aerys_v2.tools.home_control import (
     build_home_control_tool,
     build_search_entities_tool,

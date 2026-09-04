@@ -77,6 +77,12 @@ DEAD_STATES = frozenset({"unavailable", "unknown"})
 # is never retried (that's a genuine answer, not a blip). Reads only: writes
 # keep their single-shot + outbox path so a retry can never double-fire a toggle.
 _READ_RETRY_BACKOFF_S = 0.6
+# Read-back after a write HA reported no state change for: these lights (Tuya-class
+# cloud devices) update their HA state a beat AFTER the service call returns —
+# observed 9/04: the same lights answered "Done" for two bulbs and an empty
+# changed-list for the other two in one command. So the read-back waits, and
+# retries once, before calling a command dropped. Only the no-change path pays.
+_VERIFY_DELAYS_S = (0.8, 1.5)
 
 
 def _get_with_retry(http: httpx.Client, url: str, headers: dict) -> httpx.Response:
@@ -301,20 +307,30 @@ def build_home_control_tool(
 
         A verification that can FAIL: it reads the device, it does not trust the
         command. toggle has no knowable target state, so it can never verify."""
-        already: list[str] = []
-        dropped: list[str] = []
-        for e in entities:
-            st = _read_state(e) if op != "toggle" else None
+        if op == "toggle":
+            return [], list(entities)
+
+        def matches(e: str) -> bool:
+            st = _read_state(e)
             if not isinstance(st, dict):
-                dropped.append(e)
-                continue
+                return False
             want_on = op != "turn_off"
-            is_on = st.get("state") == "on"
-            ok = is_on == want_on
+            ok = (st.get("state") == "on") == want_on
             if ok and want_on and pct is not None:
                 ok = abs(int(st.get("brightness_pct") or 0) - pct) <= 2
-            (already if ok else dropped).append(e)
-        return already, dropped
+            return ok
+
+        already: list[str] = []
+        pending = list(entities)
+        for delay in _VERIFY_DELAYS_S:
+            if not pending:
+                break
+            time.sleep(delay)
+            still = []
+            for e in pending:
+                (already if matches(e) else still).append(e)
+            pending = still
+        return already, pending
 
     @tool
     def home_control(operation: str, entity_id: str, brightness_pct: int | None = None) -> str:

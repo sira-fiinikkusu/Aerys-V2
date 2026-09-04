@@ -552,10 +552,11 @@ def test_voice_action_now_sees_history_but_keeps_never_ask_guard():
     # 2026-09-04 action routes seed prior human turns only — her earlier replies,
     # including the "did you mean on or off?" question, are where stale beliefs live)
     seen = [m.content for m in stub.inputs[0]]
-    assert seen[-1] == "turn off office light 1"
+    assert len(seen) == 1 and seen[0].endswith("turn off office light 1")
     humans = [m.content for m in ping_pong if isinstance(m, HumanMessage)]
-    assert seen[:-1] == humans[-3:]
-    assert "Quick check — did you mean on or off?" not in seen
+    for h in humans[-3:]:
+        assert f"- {h}" in seen[0]
+    assert "Quick check — did you mean on or off?" not in seen[0]
     # ...and the never-ask guard still rides config (the ACTUAL garble protection)
     assert stub.configs[0]["configurable"]["spoken_ack"] == "[warmly] Getting that light for you"
 
@@ -586,8 +587,10 @@ def test_nonvoice_action_seeds_prior_history_private_dm():
     # the action graph SAW turn 1's REQUEST + the current command — referent restored.
     # (Since 2026-09-04 her prior REPLY does not ride: assistant turns are where stale
     # beliefs live; the specialist is seeded with prior requests only.)
-    assert [m.content for m in stub.inputs[0]] == [
-        "turn off the office lights", "turn them back on"]
+    seen = [m.content for m in stub.inputs[0]]
+    assert len(seen) == 1 and "- turn off the office lights" in seen[0]
+    assert "Both office lights are off." not in seen[0]
+    assert seen[0].endswith("turn them back on")
     # and the thread stays coherent: prior(2) + this human + this outcome
     msgs = graph.get_state({"configurable": {"thread_id": "t-cont"}}).values["messages"]
     assert [m.content for m in msgs] == [
@@ -621,7 +624,8 @@ def test_nonvoice_action_public_room_redacts_private_priors():
         router=action_router, action_graph=stub)
     seen = [m.content for m in stub.inputs[0]]
     assert "my resting HR was 48 last night" not in seen  # private DM content stays gated
-    assert seen == ["turn off the office lights", "turn them back on"]
+    assert len(seen) == 1 and "- turn off the office lights" in seen[0]
+    assert seen[0].endswith("turn them back on")
 
 
 def test_nonvoice_action_media_followup_sees_prior_image_turn():
@@ -641,12 +645,13 @@ def test_nonvoice_action_media_followup_sees_prior_image_turn():
         identity={**CHRIS, "privacy_context": "private"}, thread_id="t-img",
         router=action_router, action_graph=stub)
     seen = [m.content for m in stub.inputs[0]]
-    assert seen[0] == url  # the signed CDN URL from turn 1 is intact in the seed
+    assert len(seen) == 1
+    assert url in seen[0]  # the signed CDN URL from turn 1 is intact in the seed
     # Since 2026-09-04 her prior description does NOT ride (assistant turns are where
     # stale beliefs live): the specialist re-runs analyze_image on the URL it can see,
     # so the answer is tool-grounded rather than memory-grounded.
-    assert not any("silver-haired kitsune" in str(s) for s in seen)
-    assert seen[-1] == "does it look like hsin from wuthering waves?"
+    assert "silver-haired kitsune" not in seen[0]
+    assert seen[0].endswith("does it look like hsin from wuthering waves?")
 
 
 class RecordingToolModel:

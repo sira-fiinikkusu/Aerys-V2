@@ -15,12 +15,15 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from aerys_v2.factory import SPECIALIST_CHARTER, ToolModelPair, build_action_graph
 from aerys_v2.service import ACTION_SEED_TRUNCATE_AT, _action_history_seed
 from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY
+import aerys_v2.tools.home_control as hc
 from aerys_v2.tools.home_control import (
     NOOP_OK_PREFIX,
     WRITE_OK_PREFIX,
     build_home_control_tool,
     canary_set,
 )
+
+hc._VERIFY_DELAYS_S = (0.0, 0.0)  # the read-back grace is real time; tests don't wait
 
 # ---- ToolModelPair: conversation free, specialist forced-then-free, fast pair ----
 
@@ -149,7 +152,7 @@ class StubGraph:
         return S()
 
 
-def test_seed_keeps_last_three_prior_requests_and_no_assistant_turns():
+def test_seed_folds_last_three_prior_requests_into_one_message():
     prior = []
     for i in range(1, 6):
         prior.append(HumanMessage(content=f"request {i}", additional_kwargs={CONTENT_PRIVACY_KEY: "public"}))
@@ -157,17 +160,26 @@ def test_seed_keeps_last_three_prior_requests_and_no_assistant_turns():
     seeded = _action_history_seed(
         StubGraph(prior), {"thread_id": "t", "identity": {"privacy_context": "private"}}, "turn them back on", specialist=True
     )
-    assert [m.content for m in seeded] == ["request 3", "request 4", "request 5", "turn them back on"]
-    assert all(m.type == "human" for m in seeded)
+    assert len(seeded) == 1 and seeded[0].type == "human"
+    body = seeded[0].content
+    assert "ALREADY HANDLED" in body and "Do NOT redo" in body
+    assert "- request 3\n- request 4\n- request 5" in body
+    assert "request 2" not in body and "I can't do" not in body
+    assert body.endswith("The request to carry out now:\nturn them back on")
 
 
-def test_seed_truncates_long_prior_requests_and_keeps_tags():
+def test_seed_with_no_priors_is_just_the_request():
+    seeded = _action_history_seed(StubGraph([]), {"identity": {"privacy_context": "private"}}, "dim the sunroom", specialist=True)
+    assert [m.content for m in seeded] == ["dim the sunroom"]
+
+
+def test_seed_truncates_long_prior_requests_and_keeps_current_tags():
     long = "x" * (ACTION_SEED_TRUNCATE_AT + 50)
     prior = [HumanMessage(content=long, additional_kwargs={CONTENT_PRIVACY_KEY: "public"}), AIMessage(content="ok")]
     seeded = _action_history_seed(StubGraph(prior), {"identity": {"privacy_context": "private"}}, "now", specialist=True)
-    assert len(seeded[0].content) == ACTION_SEED_TRUNCATE_AT + 1  # + ellipsis
-    assert seeded[0].additional_kwargs[CONTENT_PRIVACY_KEY] == "public"
-    assert seeded[-1].content == "now"
+    assert ("x" * ACTION_SEED_TRUNCATE_AT + "…") in seeded[0].content
+    assert ("x" * (ACTION_SEED_TRUNCATE_AT + 1)) not in seeded[0].content
+    assert seeded[0].content.endswith("\nnow")
 
 
 def test_seed_public_room_still_drops_private_prior_requests():
@@ -178,7 +190,9 @@ def test_seed_public_room_still_drops_private_prior_requests():
         AIMessage(content="off"),
     ]
     seeded = _action_history_seed(StubGraph(prior), {"identity": {"privacy_context": "public"}}, "turn them back on", specialist=True)
-    assert [m.content for m in seeded] == ["turn off the office lights", "turn them back on"]
+    body = seeded[0].content
+    assert "my resting HR" not in body and "- turn off the office lights" in body
+    assert body.endswith("turn them back on")
 
 
 def test_seed_without_specialist_keeps_the_full_exchange():
@@ -197,8 +211,9 @@ def test_seed_escalated_turn_uses_the_checkpointed_current_request():
     seeded = _action_history_seed(
         StubGraph(prior), {"identity": {"privacy_context": "private"}}, "dim the sunroom by half", escalated=True, specialist=True
     )
-    assert [m.content for m in seeded] == ["earlier ask", "dim the sunroom by half"]
-    assert seeded[-1] is prior[2]  # the SAME checkpointed message, not a copy
+    assert len(seeded) == 1
+    assert "- earlier ask" in seeded[0].content and seeded[0].content.endswith("dim the sunroom by half")
+    assert "<<handoff>>" not in seeded[0].content and "sure" not in seeded[0].content
 
 
 # ---- home_control: room targeting, one call, read-back verification -----------------
@@ -351,6 +366,24 @@ def test_already_there_is_verified_by_reading_the_device_back():
     assert out.startswith(NOOP_OK_PREFIX) and "already on at 50%" in out
     gets = [r for r in ha.requests if r[0] == "GET"]
     assert len(gets) == 4  # one read-back per unverified target — the check can fail
+
+
+def test_late_reporting_light_is_caught_by_the_second_read():
+    # First read-back still shows the old state (cloud light lagging), the retry
+    # shows it applied -> "already there", not a false "not applied".
+    class Lagging(FakeHA):
+        def __init__(self):
+            super().__init__(states={"light.sunroom_light_1": ("off", None)}, changed_ids=[])
+            self.reads = 0
+        def handler(self, req):
+            if req.url.path.startswith("/api/states/"):
+                self.reads += 1
+                if self.reads >= 2:
+                    self.states["light.sunroom_light_1"] = ("on", 50)
+            return super().handler(req)
+    ha = Lagging()
+    out = ha.tool().invoke({"operation": "set_brightness", "entity_id": "light.sunroom_light_1", "brightness_pct": 50})
+    assert out.startswith(NOOP_OK_PREFIX) and ha.reads == 2
 
 
 def test_dropped_command_is_reported_not_claimed():

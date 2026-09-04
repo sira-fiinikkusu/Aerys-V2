@@ -1312,23 +1312,56 @@ def _action_history_seed(
     # specialist=False (voice banter: conversation riding the tool graph) keeps the
     # full prior exchange — her replies ARE the context there.
     current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
+    private_room = identity.get("privacy_context") == PRIVATE
     if not specialist:
         seeded = list(prior) if current_checkpointed else [*prior, HumanMessage(content=text)]
+        # Mirror the chat node's fail-closed gate: redact unless the room is
+        # EXPLICITLY private. A public/unknown context drops private-tagged priors;
+        # a private DM/voice context passes the owner's full history through.
+        return seeded if private_room else redact_private_history(seeded)
+    humans = [m for m in prior if getattr(m, "type", "") == "human"]
+    if current_checkpointed:
+        current = prior[-1]          # already checkpointed by the chat invoke
+        humans = humans[:-1]
     else:
-        humans = [m for m in prior if getattr(m, "type", "") == "human"]
-        if current_checkpointed:
-            current = prior[-1]          # already checkpointed by the chat invoke
-            humans = humans[:-1]
-        else:
-            current = HumanMessage(content=text)
-        window = humans[-ACTION_SEED_HUMAN_TURNS:] if ACTION_SEED_HUMAN_TURNS > 0 else []
-        seeded = [*(_trim_human_turn(m) for m in window), current]
-    # Mirror the chat node's fail-closed gate: redact unless the room is EXPLICITLY
-    # private. A public/unknown context drops private-tagged priors; a private DM/voice
-    # context passes the owner's full history through untouched.
-    if identity.get("privacy_context") != PRIVATE:
-        seeded = redact_private_history(seeded)
-    return seeded
+        current = HumanMessage(content=text)
+    window = humans[-ACTION_SEED_HUMAN_TURNS:] if ACTION_SEED_HUMAN_TURNS > 0 else []
+    # Same room gate on the window, BEFORE folding (the gate works on message lists
+    # and always keeps the last human, so the current turn rides along as the tail).
+    kept = [*window, current] if private_room else redact_private_history([*window, current])
+    priors = [_trim_human_turn(m) for m in kept[:-1]]
+    # ★ FOLD, don't stack (9/04 bench): seeded as separate human messages with no
+    # replies between them, three prior requests read as a BATCH of pending
+    # commands — the specialist re-ran "20%", "brighter", "off" before the real
+    # one. One message, the priors quoted as already-handled context, the
+    # request last: nothing in the prompt looks like an unanswered instruction.
+    if not priors:
+        return [current]
+    note = "\n".join(f"- {_message_text(m)}" for m in priors)
+    folded = (
+        "Earlier requests in this conversation — ALREADY HANDLED, shown only so "
+        "you can resolve references like 'them' or 'that one'. Do NOT redo any of "
+        f"them:\n{note}\n\nThe request to carry out now:\n{_message_text(current)}"
+    )
+    return [HumanMessage(
+        content=folded, id=getattr(current, "id", None),
+        additional_kwargs=dict(getattr(current, "additional_kwargs", {}) or {}),
+    )]
+
+
+def _message_text(m: HumanMessage) -> str:
+    """Plain text of a human turn (multimodal content lists collapse to their text
+    parts + a note that an attachment was present)."""
+    c = m.content
+    if isinstance(c, str):
+        return c
+    parts = []
+    for part in c or []:
+        if isinstance(part, dict) and part.get("type") == "text":
+            parts.append(str(part.get("text", "")))
+        elif isinstance(part, dict):
+            parts.append(f"[{part.get('type', 'attachment')}]")
+    return " ".join(parts) or str(c)
 
 
 def _action_turn(
