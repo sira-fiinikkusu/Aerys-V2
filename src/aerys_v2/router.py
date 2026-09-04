@@ -296,6 +296,9 @@ Also grade how much thinking the reply deserves, as "tier":
   questions — anything a small model answers perfectly. Simple device commands
   and single readings are "fast" too: turn something on/off, dim or brighten,
   a timer, one temperature or one state check ("is the office light on").
+  NOT fast: anything that compares or aggregates across several devices or
+  rooms ("which room is warmest", "how much are we using vs producing"), or
+  needs a judgment call about what the readings mean — that is "standard".
 - "standard": everyday conversation, questions, code help, creative writing —
   the default. When unsure, say "standard".
 - "deep": genuine research or heavy analysis — multi-step reasoning the user
