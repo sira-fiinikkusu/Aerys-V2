@@ -738,8 +738,16 @@ def rate_limit_reply(error_text: str, *, now: datetime | None = None) -> str | N
 
 def _honest_reply_for_failure(exc: BaseException) -> str | None:
     """The emittable, in-voice reply for a turn whose model invoke RAISED — or None to
-    keep the historical re-raise-into-silence for every other failure class. Today the
-    only converted class is the oauth/session rate-limit cap (FIX 2)."""
+    keep the historical re-raise-into-silence for every other failure class.
+    Converted classes: the oauth/session rate-limit cap (FIX 2), and — since 9/04 —
+    the recursion rail: a tool loop that hit the wall (every Jolteon entity was
+    unavailable and the specialist kept re-reading) surfaced as an HTTP 500 with NO
+    reply. The rail is doing its job; the caller still deserves a sentence."""
+    if type(exc).__name__ == "GraphRecursionError":
+        return (
+            "I went in circles on that one and stopped myself — the reading never "
+            "came together. Ask me again in a moment, or tell me which device to look at."
+        )
     return rate_limit_reply(str(exc) or type(exc).__name__)
 
 

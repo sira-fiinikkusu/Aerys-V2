@@ -64,7 +64,7 @@ ConnFactory = Callable[[], Any]
 
 # search_entities knobs: enough matches to disambiguate, few enough to not
 # blow the tool-message budget; long states (weather blobs) get elided.
-SEARCH_LIMIT = 15
+SEARCH_LIMIT = 30  # 9/04: 15 cut the garage off a "temperature" search (8 rooms x temp+humidity + Stickies)
 STATE_TRUNCATE_AT = 60
 # HA's "nothing home" states — noise in a discovery listing, filtered unless
 # they're literally all we found (then honesty beats tidiness: show them).
@@ -281,6 +281,8 @@ def build_home_control_tool(
                 "state": data.get("state"),
                 "friendly_name": attrs.get("friendly_name"),
             }
+            if str(data.get("state")) in DEAD_STATES:
+                out["note"] = "not reporting to Home Assistant right now — do not retry; tell the user"
             # Lights report brightness 0-255; the model (and Chris) think in
             # percent — translate here so relative dimming math ("down by
             # half") never has to know about the 255 scale.
@@ -545,7 +547,7 @@ def build_search_entities_tool(
 
         query: one or more words to match, e.g. "jolteon battery" or
         "office lamp". Matches entity ids and friendly names,
-        case-insensitive. Returns up to 15 matches, one per line:
+        case-insensitive. Returns up to 30 matches, one per line:
         "entity_id | friendly_name | state" (units included when known).
         Then call home_control get_state with the exact entity_id you picked,
         or answer directly from the state shown here.
@@ -577,6 +579,14 @@ def build_search_entities_tool(
         # Rank: most query terms matched first, then entity_id for stability.
         scored.sort(key=lambda s: (-s[0], s[1]))
         live = [s for s in scored if str(s[3].get("state")) not in DEAD_STATES]
+        if scored and not live:
+            # 9/04: showing the dead matches sent a small model into a read/search
+            # loop until the recursion rail. Say what it means, in the tool's voice.
+            return (
+                f"All {len(scored)} entities matching '{query}' are unavailable/unknown "
+                "— that integration is NOT reporting to Home Assistant right now. Do "
+                "not search or read again; tell the user it is not reporting."
+            )
         picked = (live or scored)[:SEARCH_LIMIT]
 
         lines = []

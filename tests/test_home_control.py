@@ -298,24 +298,40 @@ def test_search_ranking_more_matched_terms_first():
 
 def test_search_filters_unavailable_unless_nothing_else_matches():
     tool, _ = make_search([
-        ha_state("sensor.jolteon_battery", "unavailable", friendly="Jolteon Battery"),
-        ha_state("sensor.jolteon_range", "180", friendly="Jolteon Range", unit="mi"),
-        ha_state("sensor.lonely_ghost", "unknown", friendly="Lonely Ghost"),
+        ha_state("sensor.car_a", "unavailable", friendly="Car A"),
+        ha_state("sensor.car_b", "42", friendly="Car B", unit="%"),
     ])
-    # a live match exists -> the unavailable sibling is filtered out
+    out = tool.invoke({"query": "car"})
+    assert "sensor.car_b" in out and "sensor.car_a" not in out  # dead one filtered
+    # ALL dead: not a listing but a verdict the model can relay (9/04: listing them
+    # sent a small model into a read/search loop until the recursion rail)
+    tool, _ = make_search([
+        ha_state("sensor.jolteon_ev_battery_level", "unavailable", friendly="Jolteon EV Battery Level"),
+        ha_state("sensor.jolteon_ev_range", "unavailable", friendly="Jolteon EV Range"),
+    ])
     out = tool.invoke({"query": "jolteon"})
-    assert out == "sensor.jolteon_range | Jolteon Range | 180 mi"
-    # ONLY dead matches -> show them anyway (honesty beats tidiness)
-    out = tool.invoke({"query": "ghost"})
-    assert out == "sensor.lonely_ghost | Lonely Ghost | unknown"
+    assert out.startswith("All 2 entities matching 'jolteon' are unavailable")
+    assert "Do not search or read again" in out
 
 
-def test_search_caps_at_15_matches():
+def test_get_state_on_unavailable_entity_says_not_reporting():
+    class Dead(FakeHA):
+        def handler(self, req):
+            if req.url.path == "/api/states/sensor.jolteon_ev_battery_level":
+                return httpx.Response(200, json={"state": "unavailable", "attributes": {"friendly_name": "Jolteon EV Battery Level"}})
+            return super().handler(req)
+    out = json.loads(make_tool(Dead()).invoke({"operation": "get_state", "entity_id": "sensor.jolteon_ev_battery_level"}))
+    assert out["state"] == "unavailable" and "do not retry" in out["note"]
+
+
+def test_search_caps_at_30_matches():
+    # 9/04: 15 cut the garage off a "temperature" search (8 rooms x temp+humidity
+    # + Stickies) and she named the wrong warmest room.
     tool, _ = make_search(
-        [ha_state(f"light.room_{i:02d}", "on", friendly=f"Room {i:02d}") for i in range(30)]
+        [ha_state(f"light.room_{i:02d}", "on", friendly=f"Room {i:02d}") for i in range(45)]
     )
     lines = tool.invoke({"query": "room"}).splitlines()
-    assert len(lines) == 15
+    assert len(lines) == 30
 
 
 def test_search_truncates_long_states():

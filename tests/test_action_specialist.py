@@ -436,3 +436,15 @@ def test_no_action_is_registered_only_when_something_real_is_armed():
     armed = Settings(_env_file=None, anthropic_api_key="k", ha_token="t")
     names = [getattr(t, "name", "") for t in action_tools_for(armed)]
     assert "home_control" in names and names[-1] == "no_action"
+
+
+# ---- the recursion rail speaks instead of raising a 500 ---------------------------
+
+from langgraph.errors import GraphRecursionError  # noqa: E402
+from aerys_v2.service import _honest_reply_for_failure  # noqa: E402
+
+
+def test_recursion_rail_becomes_an_honest_line():
+    line = _honest_reply_for_failure(GraphRecursionError("Recursion limit of 10 reached"))
+    assert line and "went in circles" in line
+    assert _honest_reply_for_failure(RuntimeError("boom")) is None  # other classes unchanged
