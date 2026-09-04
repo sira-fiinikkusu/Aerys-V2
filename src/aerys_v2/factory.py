@@ -974,10 +974,15 @@ def content_privacy_fn_for(settings: Settings) -> ContentPrivacyFn | None:
 # half of the honest-refusal contract in tools/home_control.py.
 ACTION_OVERLAY = (
     "You are handling a smart-home request. Use the home_control tool to act; "
-    "never claim a device changed state unless the tool's reply said so. If you "
-    "do not know the exact entity_id — e.g. the user names a device colloquially, "
-    "like a car name or a room — ALWAYS call search_entities first to find it; "
-    "never guess an entity_id. Read-only questions are yours too: when the "
+    "never claim a device changed state unless the tool's reply said so. To "
+    "CONTROL lights or switches, give home_control the room or device NAME the "
+    "user used (\"sunroom lights\", \"office\") — it resolves every match and "
+    "controls them in ONE call; do not search first and do not loop over lights "
+    "one by one. To READ something you cannot control — a car, a sensor, a "
+    "phone, the weather station — call search_entities first to find the exact "
+    "entity_id, then read it; never invent an entity_id. If a device reports "
+    "'unavailable' or 'unknown', say that it is not reporting right now — never "
+    "substitute a remembered or guessed value. Read-only questions are yours too: when the "
     "answer depends on current device or sensor state, read it with the tools, "
     "then COMBINE that reading with your own general knowledge and reasoning to "
     "give a real answer — e.g. read the car's charge, then do the range math "
@@ -1124,7 +1129,7 @@ VOICE_ACK_OVERLAY = (
     "sometimes garbles a word (e.g. 'one' heard as 'on'); if the wording looks "
     "slightly off or self-contradictory, execute the reading consistent with "
     "that spoken acknowledgment. Only if the command is truly unexecutable or "
-    "unsafe, skip the tool and state the problem in one plain sentence."
+    "unsafe, call no_action with the problem stated in one plain sentence."
 )
 
 
@@ -1169,6 +1174,60 @@ LENS_SURFACE_OVERLAY = (
 )
 
 
+SPECIALIST_CHARTER = (
+    "You are the tool specialist acting for Aerys, the household assistant — her "
+    "hands, not her conversational voice. You get ONE job per turn: the user's "
+    "request. Do it with the tools, or read what it asks with the tools, then "
+    "report. The tools are the ONLY authority on what can be done and what state "
+    "things are in — nothing you assume, remember, or were told earlier overrides "
+    "a tool result. Never say you cannot do something unless a tool refused it on "
+    "this turn; relay refusals exactly (what, why). If the request needs no tool — "
+    "it is a question you must ask back, or it is outside your tools — call "
+    "no_action with the sentence you will say; never fake a result. Prior "
+    "requests, if shown, exist only to resolve references like 'them' or 'that "
+    "one'. Reply length follows the job: a device confirmation or a reading is one "
+    "or two plain sentences; a summary, a search answer, or a document read takes "
+    "the length it needs. Write the reply as Aerys would say it: first person, "
+    "she/her, warm and direct, no preamble, no apology, no mention of tools or "
+    "routing."
+)
+
+
+class ToolModelPair:
+    """The action graph's models behind one .invoke() seam, chosen per call:
+
+    - conversation (voice banter, specialist=False): `conversational` — the daily
+      driver, free to answer without a tool. Never the specialist's model (Gemini
+      review 9/04: sharing one binding had moved her voice persona to Haiku).
+    - specialist, tier "fast": the fast pair; any other tier: the standard pair.
+    - within the specialist: the FIRST pass is FORCED to call a tool
+      (tool_choice="any") — the router already decided this turn needs one, and
+      letting the model decline on pass one is how a stale belief turned a 2-call
+      job into 28s. Later passes are free so the loop can end. First pass = no
+      assistant/tool message in the prompt yet.
+    """
+
+    def __init__(
+        self, conversational: object, auto: object, forced: object,
+        fast_auto: object | None = None, fast_forced: object | None = None,
+    ):
+        self._conv = conversational
+        self._auto, self._forced = auto, forced
+        self._fast_auto = fast_auto or auto
+        self._fast_forced = fast_forced or forced
+
+    @staticmethod
+    def is_first_pass(messages: list) -> bool:
+        return not any(getattr(m, "type", "") in ("ai", "tool") for m in messages)
+
+    def invoke(self, messages: list, *, specialist: bool = False, fast: bool = False, **kwargs):
+        if not specialist:
+            return self._conv.invoke(messages, **kwargs)
+        auto, forced = (self._fast_auto, self._fast_forced) if fast else (self._auto, self._forced)
+        model = forced if self.is_first_pass(messages) else auto
+        return model.invoke(messages, **kwargs)
+
+
 def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
     """The tool-turn model: ALWAYS metered API, tools bound (Option C, ratified).
 
@@ -1176,13 +1235,31 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
     drive a LangChain tool loop — so action turns bill the API key regardless of
     model_backend. Voice device commands are short turns; the spend is pennies.
     """
-    return ChatAnthropic(
-        model=settings.model,
-        api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
-        max_tokens=1024,   # action confirmations are one sentence, not essays
-        timeout=timeout_s,
-        max_retries=2,
-    ).bind_tools(tools)
+    def chat(model_name: str) -> ChatAnthropic:
+        return ChatAnthropic(
+            model=model_name,
+            api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
+            max_tokens=1024,   # action confirmations are one sentence, not essays
+            timeout=timeout_s,
+            max_retries=2,
+        )
+
+    def pair(model_name: str) -> tuple[object, object]:
+        base = chat(model_name)
+        auto = base.bind_tools(tools)
+        forced = base.bind_tools(tools, tool_choice="any") if settings.action_force_tool else auto
+        return auto, forced
+
+    conversational = chat(settings.model).bind_tools(tools)
+    if not tools:
+        return conversational
+    if settings.action_model:
+        # Pinned: every specialist turn on ONE model (benching / owner's call).
+        auto, forced = pair(settings.action_model)
+        return ToolModelPair(conversational, auto, forced)
+    std_auto, std_forced = pair(settings.model)
+    fast_auto, fast_forced = pair(settings.tier_fast_model)
+    return ToolModelPair(conversational, std_auto, std_forced, fast_auto, fast_forced)
 
 
 def build_action_graph(
@@ -1193,6 +1270,7 @@ def build_action_graph(
     overlay: str = ACTION_OVERLAY,
     family_notes_fn=None,
     shared_surface_ids: dict | None = None,
+    charter: str = SPECIALIST_CHARTER,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1212,6 +1290,15 @@ def build_action_graph(
     def act(state: ChatState, config: RunnableConfig) -> dict:
         # Same identity rule as the chat node: from per-call config, never state.
         identity = identity_from_config(config)
+        # SPECIALIST MODE (2026-09-04) rides `configurable` like spoken_ack: set by
+        # service.py on ACTION routes only. On: the charter replaces the soul and
+        # the first pass must call a tool. Off (voice banter — every voice turn
+        # runs this graph, conversation included): the soul, free model, exactly
+        # as before. One compiled graph, two shapes, chosen per call.
+        configurable = config.get("configurable") or {}
+        specialist = bool(configurable.get("specialist"))
+        fast = configurable.get("tier") == "fast"  # the router's grade rides in
+        persona = charter if specialist else soul
         caller_line = (
             f"The current caller is {_safe_display_name(identity.get('display_name', 'Unknown Caller'))}."
         )
@@ -1278,9 +1365,13 @@ def build_action_graph(
                 log.warning("action family_notes_fn raised; continuing without", exc_info=True)
         shared = _shared_surface_note(identity, shared_surface_ids or {})
         system = SystemMessage(
-            content=f"{soul}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}{shared}"
+            content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{family}{shared}"
         )
-        reply = api_model_with_tools.invoke([system, *state["messages"]])
+        prompt = [system, *state["messages"]]
+        if isinstance(api_model_with_tools, ToolModelPair):
+            reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
+        else:
+            reply = api_model_with_tools.invoke(prompt)
         return {"messages": [reply]}
 
     def after_act(state: ChatState) -> str:
@@ -1317,6 +1408,16 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
 
     Empty list = nothing armed = the caller keeps ask() chat-only.
     """
+    tools = _action_tools_armed(settings, guest=guest)
+    if tools:
+        # The forced first pass's honest exit (see tools/no_action.py). Appended
+        # only when something real is armed, so an empty box stays chat-only.
+        from aerys_v2.tools.no_action import build_no_action_tool
+        tools.append(build_no_action_tool())
+    return tools
+
+
+def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
     tools: list = []
 
     if not guest and settings.ha_token is not None:
@@ -1593,7 +1694,7 @@ def action_stack_for(settings: Settings, soul: str) -> tuple | None:
 
     action_graph = build_action_graph(
         build_api_tool_model(settings, tools),
-        soul,
+        soul,  # used by voice banter turns; action routes swap in the charter per call
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
         overlay=action_overlay_for(settings),

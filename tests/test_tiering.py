@@ -324,20 +324,20 @@ def tool_names(tools: list) -> set:
 
 def test_media_half_arms_from_embeddings_key_alone():
     tools = action_tools_for(settings_with(embeddings_api_key="or-key"))
-    assert tool_names(tools) == {"analyze_image", "read_document", "youtube_summary"}
+    assert tool_names(tools) == {"no_action", "analyze_image", "read_document", "youtube_summary"}
 
 
 def test_home_half_arms_from_ha_token_alone():
     tools = action_tools_for(settings_with(ha_token="ha-token"))
     # the timer tool rides the same HA door as home_control/search_entities
-    assert tool_names(tools) == {"home_control", "search_entities", "timer", "get_weather", "get_weather"}
+    assert tool_names(tools) == {"no_action", "home_control", "search_entities", "timer", "get_weather", "get_weather"}
 
 
 def test_both_halves_arm_together():
     tools = action_tools_for(
         settings_with(ha_token="ha-token", embeddings_api_key="or-key")
     )
-    assert tool_names(tools) == {
+    assert tool_names(tools) == {"no_action", 
         "home_control", "search_entities", "timer", "get_weather",
         "analyze_image", "read_document", "youtube_summary",
     }
@@ -375,7 +375,7 @@ def test_overlay_only_mentions_armed_tools():
 
 def test_search_half_arms_from_tavily_key_alone():
     tools = action_tools_for(settings_with(tavily_api_key="tvly-key"))
-    assert tool_names(tools) == {"search_web"}
+    assert tool_names(tools) == {"no_action", "search_web"}
 
 
 def test_search_absent_when_tavily_key_is_none():
@@ -393,7 +393,7 @@ def test_all_three_halves_arm_together():
             ha_token="ha-token", embeddings_api_key="or-key", tavily_api_key="tvly-key"
         )
     )
-    assert tool_names(tools) == {
+    assert tool_names(tools) == {"no_action", 
         "home_control", "search_entities", "timer", "get_weather",
         "analyze_image", "read_document", "youtube_summary",
         "search_web",

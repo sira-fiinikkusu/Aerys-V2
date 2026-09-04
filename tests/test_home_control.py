@@ -468,9 +468,12 @@ def test_brightness_recorded_in_outbox_intent():
 def test_empty_changed_list_is_a_caveat_not_a_done():
     # HA 200 + changed [] = the Tuya silent-drop (she told Chris "on at 30%"
     # while the light stayed dark, 2026-08-10). Must NOT earn the Done: prefix
-    # (which triggers silent-success) — the model is told to verify instead.
+    # (which triggers silent-success). Since 2026-09-04 the tool reads the device
+    # back ITSELF (FakeHA says light.desk is off) and reports the drop — no
+    # "go verify" round-trip handed to the model.
     ha = FakeHA(empty_changed=True)
     out = make_tool(ha).invoke(
         {"operation": "set_brightness", "entity_id": "light.desk", "brightness_pct": 30})
     assert not out.startswith("Done:")
-    assert "NO state change" in out and "get_state" in out
+    assert "NO state change" in out and "not have applied" in out
+    assert ("GET", "/api/states/light.desk") in ha.requests  # the read-back happened

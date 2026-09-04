@@ -613,6 +613,10 @@ def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) 
 
     tool_calls is the structured list from turns.extract_tool_calls (one entry per
     EXECUTED ToolMessage); only its emptiness matters here.
+
+    Since 2026-09-04 the specialist's first pass is FORCED to call a tool (with
+    no_action as the honest exit), so a zero-tool first pass is only reachable with
+    ACTION_FORCE_TOOL=false; the retry path stays as the belt under that knob.
     """
     if route != "action":
         return GATE_EMIT
@@ -944,6 +948,7 @@ def ask(
                 action_graph, graph, text, config, add_human=True,
                 record_turn=record_turn, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
+                tier=normalize_tier(decision.tier),
             )
             _reclassify_if_needed(
                 graph, config, turn_msg_id, text, reply,
@@ -1021,6 +1026,7 @@ def ask(
                 replace_message_id=_last_ai_message_id(graph, config["configurable"]),
                 escalated=True,
                 extra_degraded=[CLAIM_GATE_MARKER] if claim_escalation else None,
+                tier=normalize_tier(decision.tier),
             )
         _reclassify_if_needed(
             graph, config, turn_msg_id, text, reply,
@@ -1237,8 +1243,24 @@ def _chat_turn(
     return reply, handoff
 
 
+ACTION_SEED_HUMAN_TURNS = 3      # prior requests kept for referent resolution
+ACTION_SEED_TRUNCATE_AT = 300    # chars per kept prior request
+
+
+def _trim_human_turn(m: HumanMessage) -> HumanMessage:
+    """A prior request, shortened for the specialist; tags and id preserved."""
+    content = m.content
+    if isinstance(content, str) and len(content) > ACTION_SEED_TRUNCATE_AT:
+        content = content[:ACTION_SEED_TRUNCATE_AT] + "…"
+    return HumanMessage(
+        content=content, id=getattr(m, "id", None),
+        additional_kwargs=dict(getattr(m, "additional_kwargs", {}) or {}),
+    )
+
+
 def _action_history_seed(
-    graph: object, configurable: dict, text: str, *, escalated: bool = False
+    graph: object, configurable: dict, text: str, *, escalated: bool = False,
+    specialist: bool = False,
 ) -> list:
     """Seed the checkpointer-less action graph with the thread's PRIOR turns.
 
@@ -1278,10 +1300,29 @@ def _action_history_seed(
         # a note about handing off) — the human turn is then already the tail,
         # so appending another copy would duplicate it.
         prior = prior[:-1]
-    if escalated and prior and getattr(prior[-1], "type", "") == "human":
-        seeded = list(prior)
+    # ── SPECIALIST SEED (2026-09-04): prior HUMAN turns only ──────────────────
+    # The 7/05 continuity fix seeded the WHOLE prior exchange. Traced 9/04: her own
+    # earlier line "I can't set a specific brightness" rode into the next command
+    # and the model repeated the belief instead of calling the tool (28s, 5 round
+    # trips). Referents live in what the USER said ("turn off the office lights"
+    # -> "turn them back on"); stale beliefs live in what SHE said. So the
+    # specialist sees the last few prior requests, truncated, and never a prior
+    # assistant or tool message. Privacy tags travel with each kept turn so the
+    # room gate below still applies.
+    # specialist=False (voice banter: conversation riding the tool graph) keeps the
+    # full prior exchange — her replies ARE the context there.
+    current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
+    if not specialist:
+        seeded = list(prior) if current_checkpointed else [*prior, HumanMessage(content=text)]
     else:
-        seeded = [*prior, HumanMessage(content=text)]
+        humans = [m for m in prior if getattr(m, "type", "") == "human"]
+        if current_checkpointed:
+            current = prior[-1]          # already checkpointed by the chat invoke
+            humans = humans[:-1]
+        else:
+            current = HumanMessage(content=text)
+        window = humans[-ACTION_SEED_HUMAN_TURNS:] if ACTION_SEED_HUMAN_TURNS > 0 else []
+        seeded = [*(_trim_human_turn(m) for m in window), current]
     # Mirror the chat node's fail-closed gate: redact unless the room is EXPLICITLY
     # private. A public/unknown context drops private-tagged priors; a private DM/voice
     # context passes the owner's full history through untouched.
@@ -1304,6 +1345,7 @@ def _action_turn(
     replace_message_id: str | None = None,
     escalated: bool = False,
     extra_degraded: list[str] | None = None,
+    tier: str = "standard",
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -1333,8 +1375,10 @@ def _action_turn(
         # runs no tool after the correction.
         result, gate_degraded = _run_action_gated(
             action_graph,
-            _action_history_seed(graph, config["configurable"], text, escalated=escalated),
-            config,
+            _action_history_seed(
+                graph, config["configurable"], text, escalated=escalated, specialist=True
+            ),
+            {**config, "configurable": {**config["configurable"], "specialist": True, "tier": tier}},
         )
     except Exception as e:
         # Rail trip / tool-loop blowup on the sequential action path: record the
@@ -1602,7 +1646,10 @@ def _voice_parallel_start(
         # factory.py for the prompt-side half of this contract.
         action_config = {
             **config,
-            "configurable": {**config["configurable"], "spoken_ack": ack},
+            "configurable": {
+                **config["configurable"], "spoken_ack": ack, "specialist": True,
+                "tier": normalize_tier(decision.tier),
+            },
         }
 
         # Seed BEFORE the human turn lands (the seed appends the current human
@@ -1612,7 +1659,9 @@ def _voice_parallel_start(
         # which is semantically true: the action DID finish later. (Residual:
         # a late AI result can still land after a newer turn's pair — the full
         # placeholder-replace fix is deliberately out of tonight's scope.)
-        seeded_messages = _action_history_seed(graph, real_configurable, text)
+        seeded_messages = _action_history_seed(
+            graph, real_configurable, text, specialist=True
+        )
         graph.update_state(
             {"configurable": real_configurable},
             {"messages": [_human_turn(text, human_privacy, human_id)]},

@@ -25,6 +25,7 @@ Three safety layers, outermost first:
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Callable
@@ -40,6 +41,18 @@ WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle", "set_brightness"})
 # rule keys on it (a fast turn whose every tool note starts with this = the device
 # visibly changed = skip the spoken follow-up). Change it here and nowhere else.
 WRITE_OK_PREFIX = "Done:"
+# A write HA accepted where a read-back shows the device was ALREADY in the
+# requested state. Deliberately NOT WRITE_OK_PREFIX: nothing visibly changed, so
+# the spoken follow-up should say so ("it was already off") instead of staying
+# silent. (2026-09-04: replaces the old "NO state change — verify" note that
+# cost the model a whole extra round-trip to read the state itself.)
+NOOP_OK_PREFIX = "OK (already there):"
+# Words that carry no target information in a room/device name.
+_NAME_STOPWORDS = frozenset({"the", "all", "of", "in", "my", "every", "please"})
+# Words that name a KIND of thing, not WHICH thing. A name made only of these
+# ("the lights", "switches") would match every controllable entity — a
+# house-wide write from an under-specified request. It becomes a question.
+_GENERIC_TERMS = frozenset({"light", "lights", "lamp", "lamps", "switch", "switches", "plug", "plugs"})
 # v1 scope: only domains where a misfire is an annoyance, not a hazard.
 # (No locks, no covers, no climate — those arrive with confirmation semantics.)
 WRITABLE_DOMAINS = frozenset({"light", "switch"})
@@ -79,6 +92,14 @@ def _get_with_retry(http: httpx.Client, url: str, headers: dict) -> httpx.Respon
     except httpx.TransportError:
         time.sleep(_READ_RETRY_BACKOFF_S)
         return http.get(url, headers=headers)  # final attempt; may raise → caught upstream
+
+
+def _room_of(entity_id: str) -> str:
+    """Best-effort place label from an entity id: the object-id words before the
+    first generic term / trailing number. light.sunroom_light_1 -> "sunroom"."""
+    obj = entity_id.split(".", 1)[-1]
+    words = [w for w in obj.split("_") if w and not w.isdigit() and w not in _GENERIC_TERMS]
+    return " ".join(words)
 
 
 def canary_set(csv: str) -> frozenset[str]:
@@ -175,6 +196,126 @@ def build_home_control_tool(
         except Exception:
             log.warning("outbox UPDATE failed for row %s", outbox_id, exc_info=True)
 
+    def _resolve_targets(raw: str, op: str) -> tuple[list[str], str | None]:
+        """WHAT the call is about: exact id, comma list of ids, or a room/device
+        NAME matched against the controllable set. Returns (targets, problem).
+
+        Why (2026-09-04 trace): "dim the sunroom lights by half" cost five model
+        round-trips because the tool took ONE exact id per call — the model
+        guessed ids, hit the allowlist refusal, then wrote four lights one by one.
+        A name resolves here, against the allowlist, into ONE call."""
+        raw = raw.strip()
+        if "," in raw:
+            ids = [e.strip() for e in raw.split(",") if e.strip()]
+            bad = [e for e in ids if "." not in e]
+            if bad:
+                return [], (
+                    f"'{', '.join(bad)}' aren't entity ids — a list must be exact ids "
+                    "like light.a, light.b (or give ONE room/device name instead)."
+                )
+            return ids, None
+        if "." in raw:
+            return [raw], None
+        terms = [
+            w for w in re.split(r"[\s_\-]+", raw.lower()) if w and w not in _NAME_STOPWORDS
+        ]
+        if not terms:
+            return [], "home_control needs an entity id or a room/device name."
+        if all(w in _GENERIC_TERMS for w in terms):
+            rooms = sorted({_room_of(e) for e in canary_entities} - {""})
+            return [], (
+                f"Which ones? '{raw}' names a kind of device, not a place. Ask the user "
+                f"ONE short question naming the choices: {', '.join(rooms) or 'none configured'}."
+            )
+
+        # WHOLE-TOKEN matching (Codex review 9/04): "office" must not reach
+        # light.office_closet_1 by substring. Tokens of the object id; a term
+        # matches a token exactly (plural-stripped), and "sun room" also matches
+        # "sunroom" via the joined non-generic terms.
+        joined = "".join(w for w in terms if w not in _GENERIC_TERMS)
+
+        def hit(eid: str) -> bool:
+            toks = set(re.split(r"[._\-\s]+", eid.lower()))
+            return all(w in toks or w.rstrip("s") in toks for w in terms) or (
+                bool(joined) and joined in toks
+                and all(w in toks or w.rstrip("s") in toks for w in terms if w in _GENERIC_TERMS)
+            )
+
+        matches = sorted(e for e in canary_entities if hit(e))
+        if matches:
+            log.info("home_control resolved %r -> %s", raw, matches)
+            return matches, None
+        allowed = ", ".join(sorted(canary_entities)) or "(none configured)"
+        if op == "get_state":
+            return [], (
+                f"No controllable entity matches '{raw}'. To read other devices "
+                "(cars, sensors, phones) call search_entities with that name to get "
+                f"the exact id, then get_state with it. Entities I can control: {allowed}."
+            )
+        return [], (
+            f"Refused: nothing I may control matches '{raw}'. "
+            f"The entities I may control are: {allowed}."
+        )
+
+    def _read_state(entity: str) -> dict | str:
+        """GET one entity's state: a dict, or an honest error STRING."""
+        try:
+            r = _get_with_retry(http, f"{base}/api/states/{entity}", headers)
+            if r.status_code == 404:
+                return f"Home Assistant has no entity named {entity}."
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, dict):
+                # Never raise inside a ToolNode (kills the turn): an odd body is an
+                # honest string, and a read-back caller treats it as "unverified".
+                return f"Home Assistant returned an unexpected reply for {entity}."
+            attrs = data.get("attributes") or {}
+            out = {
+                "entity_id": entity,
+                "state": data.get("state"),
+                "friendly_name": attrs.get("friendly_name"),
+            }
+            # Lights report brightness 0-255; the model (and Chris) think in
+            # percent — translate here so relative dimming math ("down by
+            # half") never has to know about the 255 scale.
+            if attrs.get("brightness") is not None:
+                out["brightness_pct"] = round(attrs["brightness"] / 255 * 100)
+            return out
+        except httpx.HTTPError as e:
+            return f"Home Assistant is unreachable right now ({e})."
+        except (ValueError, TypeError) as e:
+            # Malformed JSON / odd attribute types: honest string, never a raise.
+            return f"Home Assistant returned an unreadable reply for {entity} ({e})."
+
+    def _desired_phrase(op: str, pct: int | None) -> str:
+        if op == "turn_off":
+            return "off"
+        if pct is not None:
+            return f"on at {pct}%"
+        return "on"
+
+    def _verify_after_write(
+        entities: list[str], op: str, pct: int | None
+    ) -> tuple[list[str], list[str]]:
+        """Read back entities HA reported no new state for: (already_there, not_applied).
+
+        A verification that can FAIL: it reads the device, it does not trust the
+        command. toggle has no knowable target state, so it can never verify."""
+        already: list[str] = []
+        dropped: list[str] = []
+        for e in entities:
+            st = _read_state(e) if op != "toggle" else None
+            if not isinstance(st, dict):
+                dropped.append(e)
+                continue
+            want_on = op != "turn_off"
+            is_on = st.get("state") == "on"
+            ok = is_on == want_on
+            if ok and want_on and pct is not None:
+                ok = abs(int(st.get("brightness_pct") or 0) - pct) <= 2
+            (already if ok else dropped).append(e)
+        return already, dropped
+
     @tool
     def home_control(operation: str, entity_id: str, brightness_pct: int | None = None) -> str:
         """Control or inspect the smart home via Home Assistant.
@@ -185,45 +326,42 @@ def build_home_control_tool(
 
         operation: one of "get_state", "turn_on", "turn_off", "toggle",
         "set_brightness".
-        entity_id: the full Home Assistant entity id, e.g. "light.office_lamp"
-        or "switch.desk_fan". This must be EXACT — if you do not already know
-        the exact entity id, call the search_entities tool FIRST to find it;
-        never guess an entity id.
-        brightness_pct: 1-100, lights only. Required for "set_brightness";
-        optional with "turn_on" (turn on at that level in one call). For a
-        RELATIVE ask ("dim it by half", "a bit brighter"): call get_state
-        first — it returns the light's current brightness_pct — do the math,
-        then set_brightness with the result. For "off"/0%, use turn_off.
+        entity_id: WHAT to control — any ONE of:
+          - an exact entity id ("light.office_lamp", "switch.desk_fan");
+          - a comma-separated list of exact ids (one call controls them all);
+          - a ROOM or DEVICE NAME ("sunroom lights", "office", "sun room"):
+            resolved against the controllable entities, and EVERY match is
+            controlled in this ONE call. Use this for "the sunroom lights"
+            style requests — do NOT call search_entities and do NOT loop
+            over lights one by one.
+          To READ something you can't control (a car, a sensor, a phone), call
+          search_entities first to get the exact id, then get_state with it.
+          Never invent an id.
+        brightness_pct: 1-100, lights only. For an ABSOLUTE target ("half",
+        "50%", "to 20 percent") call set_brightness with the number DIRECTLY —
+        no get_state first. Only a RELATIVE ask ("a bit dimmer", "a little
+        brighter", "down by half from where it is") needs get_state first: it
+        returns the current brightness_pct; do the math, then set_brightness.
+        For "off"/0%, use turn_off.
 
         get_state works on any entity. Writes only work on lights and switches
-        on the beta allowlist — if the tool refuses, tell the user honestly;
-        NEVER claim a device changed state unless this tool said so.
+        on the beta allowlist — if the tool refuses, tell the user honestly and
+        exactly why; NEVER claim a device changed state unless this tool said
+        so. A reply starting "OK (already there)" means the device was already
+        in the requested state — say that plainly.
         """
         op = operation.strip().lower()
-        entity = entity_id.strip()
+        targets, problem = _resolve_targets(entity_id, op)
+        if problem:
+            return problem
+        label = ", ".join(targets)
 
         # ---- reads: unrestricted (looking can't break anything) -------------
         if op == "get_state":
-            try:
-                r = _get_with_retry(http, f"{base}/api/states/{entity}", headers)
-                if r.status_code == 404:
-                    return f"Home Assistant has no entity named {entity}."
-                r.raise_for_status()
-                data = r.json()
-                attrs = data.get("attributes") or {}
-                out = {
-                    "entity_id": entity,
-                    "state": data.get("state"),
-                    "friendly_name": attrs.get("friendly_name"),
-                }
-                # Lights report brightness 0-255; the model (and Chris) think
-                # in percent — translate here so relative dimming math ("down
-                # by half") never has to know about the 255 scale.
-                if attrs.get("brightness") is not None:
-                    out["brightness_pct"] = round(attrs["brightness"] / 255 * 100)
-                return json.dumps(out)
-            except httpx.HTTPError as e:
-                return f"Home Assistant is unreachable right now ({e})."
+            results = [_read_state(e) for e in targets]
+            if len(results) == 1:
+                return results[0] if isinstance(results[0], str) else json.dumps(results[0])
+            return json.dumps(results)
 
         if op not in WRITE_OPS:
             return (
@@ -231,33 +369,30 @@ def build_home_control_tool(
                 "Valid operations: get_state, turn_on, turn_off, toggle, set_brightness."
             )
 
-        # ---- writes: domain gate, then canary gate --------------------------
-        domain = entity.split(".", 1)[0]
-        if domain not in WRITABLE_DOMAINS:
+        # ---- writes: domain gate, then canary gate — over EVERY target -------
+        domains = {e.split(".", 1)[0] for e in targets}
+        bad = sorted(d for d in domains if d not in WRITABLE_DOMAINS)
+        if bad:
             return (
-                f"Refused: writes to '{domain}' entities aren't enabled yet — "
+                f"Refused: writes to '{bad[0]}' entities aren't enabled yet — "
                 "only lights and switches can be controlled in this beta."
             )
-        if entity not in canary_entities:
+        not_allowed = [e for e in targets if e not in canary_entities]
+        if not_allowed:
             # Honest refusal STRING back to the model — never an exception, and
             # never a lie. The model relays this so the caller learns the truth.
             allowed = ", ".join(sorted(canary_entities)) or "(none configured)"
+            verb = "is" if len(not_allowed) == 1 else "are"
             return (
-                f"Refused: {entity} is not on the beta write allowlist. "
-                f"I can read its state, but the only entities I may control are: {allowed}."
+                f"Refused: {', '.join(not_allowed)} {verb} not on the beta write allowlist. "
+                f"I can read state, but the only entities I may control are: {allowed}."
             )
 
         # ---- brightness: validate BEFORE any outbox row exists ---------------
         # set_brightness is sugar over HA's light/turn_on + brightness_pct —
         # there is no set_brightness service. Both ops share the same checks.
-        service = op
-        body: dict[str, Any] = {"entity_id": entity}
-        if op == "set_brightness" or (op == "turn_on" and brightness_pct is not None):
-            if domain != "light":
-                return (
-                    f"Refused: brightness only applies to lights — {entity} "
-                    f"is a {domain}. Use turn_on/turn_off for it."
-                )
+        wants_pct = op == "set_brightness" or (op == "turn_on" and brightness_pct is not None)
+        if wants_pct:
             if op == "set_brightness" and brightness_pct is None:
                 return (
                     "set_brightness needs brightness_pct (1-100). For a relative "
@@ -268,54 +403,96 @@ def build_home_control_tool(
                     f"Refused: brightness_pct must be 1-100 (got {brightness_pct}). "
                     "For 0% / off, use turn_off instead."
                 )
-            service = "turn_on"
-            body["brightness_pct"] = brightness_pct
-
-        # ---- the audited write: intent -> HA -> receipt ----------------------
-        payload = {"operation": op, "entity_id": entity, "domain": domain}
-        if brightness_pct is not None:
-            payload["brightness_pct"] = brightness_pct
-        outbox_id = _outbox_open(payload)
-        try:
-            # HA REST: POST /api/services/<domain>/<service> — the same endpoint
-            # the V1 HTTP Request node hit, minus the workflow around it.
-            r = http.post(
-                f"{base}/api/services/{domain}/{service}",
-                headers=headers,
-                json=body,
-            )
-            r.raise_for_status()
-        except httpx.HTTPError as e:
-            _outbox_close(outbox_id, "failed", error=str(e))
-            return f"The {op} on {entity} FAILED — Home Assistant said: {e}."
-        # Receipt with evidence, not a bare ok (hands-contract rule 4): HA
-        # returns the list of states the call changed — that's the proof.
-        try:
-            changed = r.json()
-        except ValueError:
-            changed = None
-        _outbox_close(
-            outbox_id, "succeeded", receipt={"status_code": r.status_code, "changed": changed}
-        )
+            if "light" not in domains:
+                return (
+                    f"Refused: brightness only applies to lights — {label} "
+                    f"{'is a' if len(targets) == 1 else 'are'} {'/'.join(sorted(domains))}. "
+                    "Use turn_on/turn_off for it."
+                )
+        # A name can span lights AND switches ("living room"). One HA call per
+        # domain (Gemini review 9/04: a refusal here was a dead end — the model
+        # can only address them by that same name). Brightness applies to the
+        # lights; switches in the same name are left alone and SAID so.
+        groups = {d: [e for e in targets if e.split(".", 1)[0] == d] for d in sorted(domains)}
+        skipped: list[str] = []
+        if wants_pct:
+            skipped = [e for d, es in groups.items() if d != "light" for e in es]
+            groups = {"light": groups["light"]}
         did = f"{op} {brightness_pct}%" if brightness_pct is not None else op
-        # HA's service response lists the states the call actually changed. An
-        # EMPTY list on a 200 means HA accepted the command but no entity
-        # reports a new state — with cloud integrations (Tuya) that regularly
-        # means the device silently ignored it. Observed live 2026-08-10: she
-        # told Chris "on at 30%" while the light stayed dark. A confident
-        # "Done" here would be a lie the model faithfully repeats — so say
-        # what we actually know instead. (No-op writes — turning on a light
-        # that's already at that exact state — also land here; the caveat is
-        # still the honest reading: nothing changed.)
-        if changed == []:
-            return (
-                f"Sent {did} to {entity} and Home Assistant accepted it (200), "
-                "but reported NO state change — the device may not have applied "
-                "it (cloud lights sometimes drop commands) or it was already in "
-                "that state. Verify with get_state before telling the user it "
-                "definitely happened."
+        done: list[str] = []
+        already: list[str] = []
+        dropped: list[str] = []
+        for domain, group in groups.items():
+            service = "turn_on" if wants_pct else op
+            entity_field: Any = group if len(group) > 1 else group[0]
+            body: dict[str, Any] = {"entity_id": entity_field}
+            if wants_pct:
+                body["brightness_pct"] = brightness_pct
+            # ---- the audited write: intent -> HA -> receipt ------------------
+            payload = {"operation": op, "entity_id": entity_field, "domain": domain}
+            if brightness_pct is not None:
+                payload["brightness_pct"] = brightness_pct
+            outbox_id = _outbox_open(payload)
+            try:
+                # HA REST: POST /api/services/<domain>/<service> — the same
+                # endpoint the V1 HTTP Request node hit, minus the workflow
+                # around it. ONE call per domain: HA takes an entity_id list.
+                r = http.post(
+                    f"{base}/api/services/{domain}/{service}",
+                    headers=headers,
+                    json=body,
+                )
+                r.raise_for_status()
+            except httpx.HTTPError as e:
+                _outbox_close(outbox_id, "failed", error=str(e))
+                return f"The {op} on {', '.join(group)} FAILED — Home Assistant said: {e}."
+            # Receipt with evidence, not a bare ok (hands-contract rule 4): HA
+            # returns the list of states the call changed — that's the proof.
+            try:
+                changed = r.json()
+            except ValueError:
+                changed = None
+            changed_ids = (
+                {c.get("entity_id") for c in changed if isinstance(c, dict)}
+                if isinstance(changed, list) else set()
             )
-        return f"{WRITE_OK_PREFIX} {did} sent to {entity} (HA responded {r.status_code})."
+            unverified = [e for e in group if e not in changed_ids]
+            done += [e for e in group if e in changed_ids]
+            # HA accepted the command (200) but reported no new state for some
+            # target. Two honest readings: it was ALREADY in that state, or the
+            # device dropped the command (observed live 2026-08-10 with a Tuya
+            # light: "on at 30%" while it stayed dark). Instead of handing the
+            # model a "go verify" note (a whole extra round-trip), READ THE
+            # DEVICE BACK here and say which it was.
+            g_already, g_dropped = (
+                _verify_after_write(unverified, op, brightness_pct) if unverified else ([], [])
+            )
+            already += g_already
+            dropped += g_dropped
+            _outbox_close(
+                outbox_id, "succeeded",
+                receipt={
+                    "status_code": r.status_code, "changed": changed,
+                    "already_there": g_already, "not_applied": g_dropped,
+                },
+            )
+        note = f" ({', '.join(skipped)} can't take a brightness — left as is.)" if skipped else ""
+        if dropped:
+            return (
+                f"Sent {did} to {label}; Home Assistant accepted it (200) but "
+                f"{', '.join(dropped)} reported NO state change and a read-back does not "
+                "show the requested state — the device may not have applied it (cloud "
+                "lights sometimes drop commands). Do not tell the user it definitely "
+                f"happened.{note}"
+            )
+        if not done:
+            verb = "was" if len(already) == 1 else "were"
+            return (
+                f"{NOOP_OK_PREFIX} {', '.join(already)} {verb} already "
+                f"{_desired_phrase(op, brightness_pct)} — nothing to change.{note}"
+            )
+        extra = f" {', '.join(already)} already {_desired_phrase(op, brightness_pct)}." if already else ""
+        return f"{WRITE_OK_PREFIX} {did} sent to {', '.join(done)} (HA responded 200).{extra}{note}"
 
     return home_control
 
@@ -343,9 +520,11 @@ def build_search_entities_tool(
     def search_entities(query: str) -> str:
         """Find Home Assistant entity ids by name. READ-ONLY — never changes anything.
 
-        ALWAYS call this BEFORE home_control's get_state when you lack the
-        exact entity id — i.e. whenever the user names a device colloquially:
-        a car name ("jolteon"), a room ("the office light"), a person's phone,
+        Call this BEFORE home_control's get_state when you lack the exact
+        entity id of something you are READING (to CONTROL lights/switches,
+        give home_control the room or device name directly — no search) —
+        i.e. whenever the user names a device colloquially:
+        a car name ("jolteon"), a sensor ("office temperature"), a person's phone,
         a nickname. NEVER guess an entity id — guesses 404; searching works.
 
         query: one or more words to match, e.g. "jolteon battery" or

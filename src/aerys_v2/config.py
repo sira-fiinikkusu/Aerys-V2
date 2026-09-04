@@ -24,6 +24,23 @@ class Settings(BaseSettings):
     model_backend: str = "api"
     anthropic_api_key: SecretStr
     model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
+    # ---- ACTION SPECIALIST (2026-09-04) --------------------------------------
+    # The tool subgraph is a stateless SPECIALIST: it gets the request (plus a
+    # few prior requests for reference resolution), the tools, and a short
+    # charter — not the chat history and not the soul. Its model is its own
+    # knob because the job is mechanical (resolve target -> call tool -> report):
+    # a 28s sunroom dim traced to five Sonnet round-trips carrying a false
+    # "I can't set brightness" belief from chat history.
+    # "" (default) = the SUPERVISOR decides: an action turn the router graded
+    # "fast" (device commands, single readings) runs on tier_fast_model; any
+    # other action turn (summaries, searches, email) runs on `model`. Set
+    # ACTION_MODEL to pin ONE model for every specialist turn (benching).
+    # Voice conversation riding this graph is never affected: it stays on `model`.
+    action_model: str = ""
+    # First act pass is bound with tool_choice="any" (the model MUST call a tool
+    # on a turn the router already decided needs one); later passes are free so
+    # the loop can end. Env ACTION_FORCE_TOOL=false to bench without it.
+    action_force_tool: bool = True
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
 

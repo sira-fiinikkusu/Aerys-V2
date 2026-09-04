@@ -75,6 +75,10 @@ the truth ("the only entities I may control are: …") instead of pretending.
 
 Every write that reaches HA is write-ahead audited: INSERT the intent into `v2_outbox`
 as `'executing'` → call HA → UPDATE with receipt (HA's changed-states list = evidence,
+not a bare ok). Since 2026-09-04 `payload.entity_id` is a LIST when one call targeted
+several entities (a room name resolved to four lights) — one row per HA call, one call
+per domain — and the receipt carries `already_there` / `not_applied` from the read-back.
+Any future query over `payload->>'entity_id'` must handle both shapes. (Receipt = evidence,
 not a bare ok) or failure. Two separate short connections on purpose — a crash mid-call
 leaves exactly the `'executing'` row the sweeper contract expects, never a silent
 mystery write. Audit trouble never costs the turn, but it logs loudly: an unaudited

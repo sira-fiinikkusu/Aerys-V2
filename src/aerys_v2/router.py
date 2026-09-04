@@ -293,7 +293,9 @@ ADDRESSED. Short acknowledgments ("yeah", "okay", "thanks") are ADDRESSED.
 
 Also grade how much thinking the reply deserves, as "tier":
 - "fast": greetings, one-word acknowledgments, small talk, trivial system
-  questions — anything a small model answers perfectly.
+  questions — anything a small model answers perfectly. Simple device commands
+  and single readings are "fast" too: turn something on/off, dim or brighten,
+  a timer, one temperature or one state check ("is the office light on").
 - "standard": everyday conversation, questions, code help, creative writing —
   the default. When unsure, say "standard".
 - "deep": genuine research or heavy analysis — multi-step reasoning the user
