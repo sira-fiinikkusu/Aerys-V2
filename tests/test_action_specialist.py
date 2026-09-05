@@ -291,6 +291,16 @@ def test_generic_only_name_becomes_a_question_never_a_house_wide_write():
         assert ha.requests == []                      # nothing written
 
 
+def test_generic_only_name_suggests_plural_stripped_readable_places():
+    ha = FakeHA()
+    out = ha.tool(canary="light.kitchens_main,light.living_rooms_lights_2").invoke(
+        {"operation": "turn_off", "entity_id": "the lights"}
+    )
+    assert out.startswith("Which ones?")
+    assert out.endswith("choices: kitchen main, living room.")
+    assert ha.requests == []
+
+
 def test_unknown_room_is_an_honest_refusal_and_ha_untouched():
     ha = FakeHA()
     out = ha.tool().invoke({"operation": "turn_on", "entity_id": "garage"})

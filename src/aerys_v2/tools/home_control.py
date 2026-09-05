@@ -105,7 +105,7 @@ def _room_of(entity_id: str) -> str:
     first generic term / trailing number. light.sunroom_light_1 -> "sunroom"."""
     obj = entity_id.split(".", 1)[-1]
     words = [w for w in obj.split("_") if w and not w.isdigit() and w not in _GENERIC_TERMS]
-    return " ".join(words)
+    return " ".join(w.rstrip("s") for w in words)
 
 
 def canary_set(csv: str) -> frozenset[str]:
