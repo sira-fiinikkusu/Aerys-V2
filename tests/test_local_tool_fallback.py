@@ -129,6 +129,13 @@ def test_outage_invokes_each_lifeboat_with_hardening_and_no_force(
     assert cloud_calls[0][0][0].content == system.content
     local_prompt, kwargs = local_calls[0]
     assert local_prompt[0].content == system.content + LOCAL_ACTION_HARDENING
+    name_rule = (
+        '(0b) For home_control, entity_id is the room or device NAME exactly as the '
+        'user said it ("guest room lights", "office"); never write or guess an '
+        'entity id like light.xxx unless a tool result in THIS conversation showed '
+        'that exact id. '
+    )
+    assert "call the tool, then report its result. " + name_rule + "(1)" in local_prompt[0].content
     assert local_prompt[0].content.endswith("/no_think")
     assert local_prompt[0].id == "s"
     assert local_prompt[1:] == prompt[1:]

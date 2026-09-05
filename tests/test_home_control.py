@@ -8,9 +8,11 @@ marker when n8n still holds the ha_write lease.
 """
 
 import json
+import logging
 import uuid
 
 import httpx
+import pytest
 
 import aerys_v2.tools.home_control as _hc
 _hc._VERIFY_DELAYS_S = (0.0, 0.0)
@@ -163,12 +165,22 @@ def test_canary_write_succeeds():
     assert ("POST", "/api/services/light/turn_on") in ha.requests
 
 
-def test_non_canary_write_refused_and_ha_never_called():
+@pytest.mark.parametrize("entity_id,refused", [
+    ("light.bedroom", ["light.bedroom"]),
+    ("light.desk,light.bedroom,switch.guest", ["light.bedroom", "switch.guest"]),
+])
+def test_non_canary_write_refused_and_ha_never_called(caplog, entity_id, refused):
     ha = FakeHA()
-    out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.bedroom"})
+    db = FakeDB()
+    with caplog.at_level(logging.INFO, logger=_hc.__name__):
+        out = make_tool(ha, db).invoke({"operation": "turn_off", "entity_id": entity_id})
     assert out.startswith("Refused:")
     assert "light.desk" in out          # the honest part: says what IS allowed
     assert ha.requests == []            # refusal happens before any HTTP
+    assert db.executed == []
+    assert [(r.levelno, r.getMessage()) for r in caplog.records if r.name == _hc.__name__] == [
+        (logging.INFO, f"home_control refused {refused}: not on the beta write allowlist"),
+    ]
 
 
 def test_non_light_switch_domain_refused():

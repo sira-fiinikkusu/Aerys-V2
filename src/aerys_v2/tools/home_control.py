@@ -400,6 +400,7 @@ def build_home_control_tool(
             )
         not_allowed = [e for e in targets if e not in canary_entities]
         if not_allowed:
+            log.info("home_control refused %s: not on the beta write allowlist", not_allowed)
             # Honest refusal STRING back to the model — never an exception, and
             # never a lie. The model relays this so the caller learns the truth.
             allowed = ", ".join(sorted(canary_entities)) or "(none configured)"
