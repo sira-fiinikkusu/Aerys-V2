@@ -41,7 +41,7 @@ from zoneinfo import ZoneInfo
 from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessage, HumanMessage
 
-from aerys_v2.factory import LOCAL_FALLBACK_FIRED
+from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
 from aerys_v2.router import (
     DEFAULT_TIER,
     FALLBACK_ACK,
@@ -626,6 +626,13 @@ def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) 
     return GATE_MARK if already_retried else GATE_RETRY
 
 
+def _invoke_action_graph(action_graph: object, messages: list, config: dict) -> dict:
+    # Bring the tool-node receipt back across LangGraph's copied context, even
+    # if the local model fails too. The caller resets the flag once per turn.
+    with track_local_tool_fallback():
+        return action_graph.invoke({"messages": messages}, config)
+
+
 def _run_action_gated(
     action_graph: object, seeded_messages: list, config: dict
 ) -> tuple[dict, list[str]]:
@@ -638,7 +645,7 @@ def _run_action_gated(
 
     One extra model call on the rare zero-tool action turn is the accepted cost of
     never again emitting a fabricated "done" (fix brief, 2026-07-12)."""
-    result = action_graph.invoke({"messages": seeded_messages}, config)
+    result = _invoke_action_graph(action_graph, seeded_messages, config)
     verdict = action_honesty_gate(
         "action", extract_tool_calls(result["messages"]), already_retried=False
     )
@@ -646,7 +653,7 @@ def _run_action_gated(
         return result, []
     log.info("action-honesty gate: zero tool calls — bouncing once with a correction")
     retry_messages = [*result["messages"], HumanMessage(content=ACTION_NO_TOOL_CORRECTION)]
-    result = action_graph.invoke({"messages": retry_messages}, config)
+    result = _invoke_action_graph(action_graph, retry_messages, config)
     verdict = action_honesty_gate(
         "action", extract_tool_calls(result["messages"]), already_retried=True
     )
@@ -1079,9 +1086,10 @@ def _chat_turn(
     """
     LOCAL_FALLBACK_FIRED.set(False)  # per-turn flag; stamped into degraded below
     try:
-        result = graph.invoke(
-            {"messages": [_human_turn(text, human_privacy, human_id)]}, config
-        )
+        with track_local_tool_fallback():
+            result = graph.invoke(
+                {"messages": [_human_turn(text, human_privacy, human_id)]}, config
+            )
     except Exception as e:
         # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
         # for forensics and the capability loop — record it BEFORE re-raising so the
@@ -1130,9 +1138,10 @@ def _chat_turn(
     if not handoff and audio_perception_claim(reply):
         log.info("self-perception gate: audio claim in chat reply — bouncing once")
         claim_id = _last_ai_message_id(graph, config.get("configurable") or {})
-        retry = graph.invoke(
-            {"messages": [HumanMessage(content=AUDIO_CLAIM_CORRECTION)]}, config
-        )
+        with track_local_tool_fallback():
+            retry = graph.invoke(
+                {"messages": [HumanMessage(content=AUDIO_CLAIM_CORRECTION)]}, config
+            )
         reply = _reply_text(retry["messages"][-1])
         result = retry
         if audio_perception_claim(reply):
@@ -1180,9 +1189,10 @@ def _chat_turn(
         else:
             log.info("record-claim gate: 'Logged:' claim in chat reply — bouncing once")
             claim_id = _last_ai_message_id(graph, config.get("configurable") or {})
-            retry = graph.invoke(
-                {"messages": [HumanMessage(content=RECORD_CLAIM_CORRECTION)]}, config
-            )
+            with track_local_tool_fallback():
+                retry = graph.invoke(
+                    {"messages": [HumanMessage(content=RECORD_CLAIM_CORRECTION)]}, config
+                )
             reply = _reply_text(retry["messages"][-1])
             result = retry
             if record_action_claim(reply):
@@ -1408,6 +1418,7 @@ def _action_turn(
     — the AIMessage tool_calls + ToolMessages — so tool_calls/degraded are mined
     from the real tool loop, not the two-line human/ai summary written to history.
     """
+    LOCAL_FALLBACK_FIRED.set(False)
     try:
         # Seed the action graph with the thread's prior turns (gated for the room) so a
         # follow-up command can resolve a reference to an earlier turn — the action graph
@@ -1433,6 +1444,7 @@ def _action_turn(
             record_turn, config, text, started, e, classifier_intent="action",
             base_degraded=(
                 ([ESCALATED_MARKER] if escalated else []) + list(extra_degraded or [])
+                + (["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else [])
             ) or None,
             emitted_reply=honest,
         )
@@ -1459,6 +1471,8 @@ def _action_turn(
     )
 
     degraded = list(gate_degraded or [])
+    if LOCAL_FALLBACK_FIRED.get():
+        degraded.append("local_model_fallback")
     if escalated:
         degraded.append(ESCALATED_MARKER)
     degraded.extend(extra_degraded or [])
@@ -1712,6 +1726,7 @@ def _voice_parallel_start(
         )
 
         def _complete_action() -> None:
+            LOCAL_FALLBACK_FIRED.set(False)
             failed = False
             result_messages: list = []
             gate_degraded: list[str] = []
@@ -1764,6 +1779,8 @@ def _voice_parallel_start(
             # long ago). emitted_reply is the ACK the caller actually heard;
             # raw_reply is the action's real outcome.
             degraded = ["action_failed"] if failed else list(gate_degraded or [])
+            if LOCAL_FALLBACK_FIRED.get():
+                degraded.append("local_model_fallback")
             if escalated:
                 degraded.append(ESCALATED_MARKER)
             _fire_turn_record(
@@ -1822,12 +1839,12 @@ def _voice_parallel_start(
     )
     _face(face_push, "working")
     gate_degraded: list[str] = []
+    LOCAL_FALLBACK_FIRED.set(False)
     try:
         # NO spoken_ack in config: that's the signal (factory.act) to style the
         # reply for voice banter instead of arming the ack-consistency overlay.
-        result = action_graph.invoke(
-            {"messages": _action_history_seed(graph, real_configurable, text)},
-            config,
+        result = _invoke_action_graph(
+            action_graph, _action_history_seed(graph, real_configurable, text), config,
         )
         result_messages = result["messages"]
         reply = _strip_handoff(_reply_text(result_messages[-1])) or VOICE_EMPTY_REPLY
@@ -1840,7 +1857,7 @@ def _voice_parallel_start(
             retry_messages = [
                 *result_messages, HumanMessage(content=ACTION_NO_TOOL_CORRECTION),
             ]
-            result = action_graph.invoke({"messages": retry_messages}, config)
+            result = _invoke_action_graph(action_graph, retry_messages, config)
             result_messages = result["messages"]
             reply = _strip_handoff(_reply_text(result_messages[-1])) or VOICE_EMPTY_REPLY
             if not extract_tool_calls(result_messages) and claims_effect_done(reply):
@@ -1856,6 +1873,7 @@ def _voice_parallel_start(
         _record_turn_failure(
             record_turn, config, text, started, e,
             classifier_intent="chat", tier=DEFAULT_TIER,
+            base_degraded=["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else None,
             emitted_reply=honest,
         )
         if honest is None:
@@ -1888,6 +1906,8 @@ def _voice_parallel_start(
     )
     # Voice banter stays recorded as intent=chat (the router's honest verdict);
     # the graph it ran on is an implementation detail the audit needn't rename.
+    if LOCAL_FALLBACK_FIRED.get():
+        gate_degraded.append("local_model_fallback")
     _fire_turn_record(
         record_turn, config, text, int(elapsed * 1000),
         classifier_intent="chat",

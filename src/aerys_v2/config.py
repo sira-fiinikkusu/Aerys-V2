@@ -53,8 +53,11 @@ class Settings(BaseSettings):
     # past the metered world's 60s assumption, and an aborted+retried generation
     # doubles the wait. The local door gets its own clock.
     local_model_timeout_s: float = 180.0
+    # Dedicated tool-lane lifeboat: voice can keep Hermes while house control
+    # uses a model that emits structured tool calls. None = local_model_name.
+    local_tool_model_name: str | None = None
     # Set (e.g. to local_model_base_url) to arm metered->local failover: a chat
-    # turn whose metered call dies falls back to the local model instead of dying,
+    # failure or tool-lane connection/5xx failure falls back locally instead of dying,
     # logs a WARNING, and stamps 'local_model_fallback' into v2_turns.degraded.
     # None = off (the pre-8/03 behavior, byte-for-byte).
     local_fallback_url: str | None = None

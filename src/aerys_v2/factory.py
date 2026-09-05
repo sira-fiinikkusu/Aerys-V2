@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+import anthropic
+import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
@@ -445,11 +447,28 @@ def load_soul(path: Path) -> str:
         return FALLBACK_SOUL
 
 
-# Set by LocalFailoverModel the moment a metered call dies and the local model
-# answers instead; read + reset by the service per turn so the receipt (v2_turns
+# Set by the chat/tool lifeboats the moment a metered call dies and the local model
+# is attempted; read + reset by the service per turn so the receipt (v2_turns
 # .degraded) and the dashboard both show the lifeboat was used. ContextVar =
 # async-task-scoped, so concurrent turns cannot smear each other's flag.
 LOCAL_FALLBACK_FIRED: ContextVar[bool] = ContextVar("local_fallback_fired", default=False)
+
+# LangGraph runs nodes in copied contexts. Share a per-invocation receipt so a
+# chat/tool fallback (including one whose lifeboat also fails) reaches the service.
+_LOCAL_TOOL_FALLBACK: ContextVar[list[bool] | None] = ContextVar("local_tool_fallback", default=None)
+
+
+@contextmanager
+def track_local_tool_fallback():
+    """Carry chat/tool fallback use from copied node contexts to the turn's caller."""
+    fired: list[bool] = []
+    token = _LOCAL_TOOL_FALLBACK.set(fired)
+    try:
+        yield
+    finally:
+        _LOCAL_TOOL_FALLBACK.reset(token)
+        if fired:
+            LOCAL_FALLBACK_FIRED.set(True)
 
 
 def local_model_for(settings: Settings, *, base_url: str | None = None) -> BaseChatModel:
@@ -498,6 +517,9 @@ class LocalFailoverModel(BaseChatModel):
                 type(e).__name__,
             )
             LOCAL_FALLBACK_FIRED.set(True)
+            receipt = _LOCAL_TOOL_FALLBACK.get()
+            if receipt is not None:
+                receipt.append(True)
             msg = self.lifeboat.invoke(messages, stop=stop)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
@@ -1197,6 +1219,71 @@ SPECIALIST_CHARTER = (
 )
 
 
+# Mechanical honesty rules proven by the local tool-model shadow. Added only
+# after a cloud connection/server failure, at the END of the local system prompt.
+LOCAL_ACTION_HARDENING = (
+    " HARD RULES, checked before every reply: (0) FIRST, ACT: if a tool can do "
+    "what was asked, CALL IT NOW — home_control turns lights and switches on and "
+    "off, and reads any state. Never refuse or defer work a tool can do; never "
+    "announce that you WILL do it — call the tool, then report its result. "
+    "(1) You may state that a device changed ONLY if a tool result message in "
+    "THIS conversation literally shows that change. No tool result = it did not "
+    "happen = say plainly: I could not do that. (2) ONLY when no available tool "
+    "matches the request (thermostat, AC, ovens, blinds, anything unlisted) "
+    "reply: I do not have a tool for that, so I have not done it — and offer to "
+    "log a capability gap. (3) Never invent tool output, entity states, or "
+    "success confirmations. (4) One short speakable sentence. /no_think"
+)
+
+
+class LocalToolFailoverModel:
+    """A bound Anthropic primary with a connection/server-failure tool lifeboat.
+
+    Keep the bindings intact and invoke them directly, as LocalFailoverModel
+    does. Client status errors and programming errors retain their meaning.
+    """
+
+    def __init__(self, primary: object, lifeboat: object):
+        self.primary, self.lifeboat = primary, lifeboat
+
+    def invoke(self, messages: list, config: object = None, **kwargs):
+        # Same positional shape as a LangChain Runnable (Gemini re-review 9/05).
+        if config is not None:
+            kwargs["config"] = config
+        try:
+            return self.primary.invoke(messages, **kwargs)
+        except (
+            anthropic.APIConnectionError, anthropic.APITimeoutError,
+            anthropic.APIStatusError,
+            httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+        ) as e:
+            if isinstance(e, anthropic.APIStatusError) and (
+                isinstance(e, anthropic.RateLimitError) or e.status_code < 500
+            ):
+                raise
+            log.warning(
+                "local_model_fallback: tool call failed (%s) — answering on the local tool model",
+                type(e).__name__,
+            )
+            LOCAL_FALLBACK_FIRED.set(True)
+            receipt = _LOCAL_TOOL_FALLBACK.get()
+            if receipt is not None:
+                receipt.append(True)
+            prompt = list(messages)
+            for i in range(len(prompt) - 1, -1, -1):
+                if isinstance(prompt[i], SystemMessage):
+                    content = prompt[i].content
+                    hardened = (
+                        content + LOCAL_ACTION_HARDENING if isinstance(content, str)
+                        else [*content, {"type": "text", "text": LOCAL_ACTION_HARDENING}]
+                    )
+                    prompt[i] = prompt[i].model_copy(update={"content": hardened})
+                    break
+            else:
+                prompt.insert(0, SystemMessage(content=LOCAL_ACTION_HARDENING))
+            return self.lifeboat.invoke(prompt, **kwargs)
+
+
 class ToolModelPair:
     """The action graph's models behind one .invoke() seam, chosen per call:
 
@@ -1233,12 +1320,31 @@ class ToolModelPair:
 
 
 def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
-    """The tool-turn model: ALWAYS metered API, tools bound (Option C, ratified).
+    """The tool-turn model: metered API primary, tools bound (Option C, ratified).
 
     Deliberately NOT build_model(): the oauth/SDK backend is chat-only — it can't
     drive a LangChain tool loop — so action turns bill the API key regardless of
     model_backend. Voice device commands are short turns; the spend is pennies.
+    local_fallback_url arms a local tool lifeboat for connection failures and 5xx.
     """
+    lifeboat = None
+    if settings.local_fallback_url is not None:
+        from langchain_openai import ChatOpenAI
+
+        lifeboat = ChatOpenAI(
+            model=settings.local_tool_model_name or settings.local_model_name,
+            base_url=settings.local_fallback_url,
+            api_key="local",
+            max_tokens=1024,
+            timeout=settings.local_model_timeout_s,
+            max_retries=1,
+        ).bind_tools(tools)  # No forced tool_choice: Ollama's shim may ignore it.
+
+    def with_lifeboat(primary: object) -> object:
+        if lifeboat is None:
+            return primary
+        return LocalToolFailoverModel(primary, lifeboat)
+
     def chat(model_name: str) -> ChatAnthropic:
         return ChatAnthropic(
             model=model_name,
@@ -1250,11 +1356,14 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
 
     def pair(model_name: str) -> tuple[object, object]:
         base = chat(model_name)
-        auto = base.bind_tools(tools)
-        forced = base.bind_tools(tools, tool_choice="any") if settings.action_force_tool else auto
+        auto = with_lifeboat(base.bind_tools(tools))
+        forced = (
+            with_lifeboat(base.bind_tools(tools, tool_choice="any"))
+            if settings.action_force_tool else auto
+        )
         return auto, forced
 
-    conversational = chat(settings.model).bind_tools(tools)
+    conversational = with_lifeboat(chat(settings.model).bind_tools(tools))
     if not tools:
         return conversational
     if settings.action_model:
