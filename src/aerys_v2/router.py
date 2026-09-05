@@ -501,9 +501,10 @@ def router_for(settings, soul: str) -> Callable[[str], RouteDecision]:
     purpose: it races chat generation on the voice path, so a slow router
     erases its own reason to exist.
     """
-    from langchain_anthropic import ChatAnthropic
+    from aerys_v2.anthropic_model import build_metered_model
 
-    model = ChatAnthropic(
+    model = build_metered_model(
+        settings,
         model=ROUTER_MODEL,
         api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
         temperature=0,

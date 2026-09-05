@@ -24,6 +24,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from aerys_v2.anthropic_model import build_metered_model
 from aerys_v2.config import Settings
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config, is_lens_surface, is_voice_turn
@@ -541,7 +542,8 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
         return _maybe_failover(settings, ClaudeOAuthChatModel(model=settings.model), timeout_s)
     return _maybe_failover(
         settings,
-        ChatAnthropic(
+        build_metered_model(
+            settings,
             model=settings.model,
             api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
             max_tokens=4096,
@@ -589,7 +591,8 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
     def api_model(name: str) -> BaseChatModel:
         return _maybe_failover(
             settings,
-            ChatAnthropic(
+            build_metered_model(
+                settings,
                 model=name,
                 api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
                 max_tokens=4096,
@@ -950,7 +953,8 @@ def content_privacy_fn_for(settings: Settings) -> ContentPrivacyFn | None:
 
     from aerys_v2.services.content_privacy import classify_content_privacy
 
-    judge = ChatAnthropic(
+    judge = build_metered_model(
+        settings,
         model=settings.tier_fast_model,
         api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
         max_tokens=4,          # one word: "public" or "private"
@@ -1350,7 +1354,8 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
         return LocalToolFailoverModel(primary, lifeboat)
 
     def chat(model_name: str) -> ChatAnthropic:
-        return ChatAnthropic(
+        return build_metered_model(
+            settings,
             model=model_name,
             api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
             max_tokens=1024,   # action confirmations are one sentence, not essays

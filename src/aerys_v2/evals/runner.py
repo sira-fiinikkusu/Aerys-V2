@@ -239,10 +239,11 @@ class Judge:
         max_tokens 500; we keep temp 0 and the token cap, but take the model id
         from Settings so the judge follows the same config as the brain.
         """
-        from langchain_anthropic import ChatAnthropic
+        from aerys_v2.anthropic_model import build_metered_model
 
         return cls(
-            ChatAnthropic(
+            build_metered_model(
+                settings,
                 model=settings.model,
                 api_key=settings.anthropic_api_key,
                 temperature=0,  # deterministic-ish judging — same as the n8n node
