@@ -241,10 +241,13 @@ def build_home_control_tool(
         joined = "".join(w for w in terms if w not in _GENERIC_TERMS)
 
         def hit(eid: str) -> bool:
-            toks = set(re.split(r"[._\-\s]+", eid.lower()))
-            return all(w in toks or w.rstrip("s") in toks for w in terms) or (
-                bool(joined) and joined in toks
-                and all(w in toks or w.rstrip("s") in toks for w in terms if w in _GENERIC_TERMS)
+            # Plural-insensitive on BOTH sides (Gemini review 9/05): "fan" must
+            # reach switch.fans and "lights" must reach light.sunroom_light_1.
+            toks = {tok.rstrip("s") for tok in re.split(r"[._\-\s]+", eid.lower())}
+            ok = lambda w: w.rstrip("s") in toks  # noqa: E731
+            return all(ok(w) for w in terms) or (
+                bool(joined) and joined.rstrip("s") in toks
+                and all(ok(w) for w in terms if w in _GENERIC_TERMS)
             )
 
         matches = sorted(e for e in canary_entities if hit(e))
@@ -450,6 +453,10 @@ def build_home_control_tool(
             payload = {"operation": op, "entity_id": entity_field, "domain": domain}
             if brightness_pct is not None:
                 payload["brightness_pct"] = brightness_pct
+            if skipped:
+                # The resolved intent included these; they were left alone on
+                # purpose (no brightness on a switch). Audit the whole intent.
+                payload["skipped"] = skipped
             outbox_id = _outbox_open(payload)
             try:
                 # HA REST: POST /api/services/<domain>/<service> — the same

@@ -162,7 +162,7 @@ def test_seed_folds_last_three_prior_requests_into_one_message():
     )
     assert len(seeded) == 1 and seeded[0].type == "human"
     body = seeded[0].content
-    assert "ALREADY HANDLED" in body and "Do NOT redo" in body
+    assert "ALREADY HANDLED" in body and "unless the request below explicitly asks to repeat" in body
     assert "- request 3\n- request 4\n- request 5" in body
     assert "request 2" not in body and "I can't do" not in body
     assert body.endswith("The request to carry out now:\nturn them back on")
@@ -448,3 +448,41 @@ def test_recursion_rail_becomes_an_honest_line():
     line = _honest_reply_for_failure(GraphRecursionError("Recursion limit of 10 reached"))
     assert line and "went in circles" in line
     assert _honest_reply_for_failure(RuntimeError("boom")) is None  # other classes unchanged
+
+
+def test_plural_matching_is_symmetric():
+    canary = "switch.fans,light.glass_cabinet"
+    ha = FakeHA()
+    ha.tool(canary=canary).invoke({"operation": "turn_on", "entity_id": "fan"})
+    assert ha.bodies[0]["entity_id"] == "switch.fans"
+    ha = FakeHA()
+    ha.tool(canary=canary).invoke({"operation": "turn_on", "entity_id": "glass cabinet"})
+    assert ha.bodies[0]["entity_id"] == "light.glass_cabinet"
+
+
+def test_skipped_switches_are_audited_in_the_outbox_payload():
+    class Rec:
+        def __init__(self): self.payloads = []
+        def factory(self):
+            rec = self
+            class Cur:
+                def __enter__(s): return s
+                def __exit__(s, *a): pass
+                def execute(s, sql, params=None):
+                    if "INSERT INTO v2_outbox" in sql:
+                        rec.payloads.append(json.loads(params[0]))
+                def fetchone(s): return ("brain",) if not rec.payloads else (1,)
+            class Conn:
+                def __enter__(s): return s
+                def __exit__(s, *a): pass
+                def cursor(s): return Cur()
+            return Conn()
+    rec = Rec()
+    tool = build_home_control_tool(
+        base_url="http://ha.test:8123", token="t",
+        canary_entities=canary_set(SUNROOM + ",switch.sunroom_fan"),
+        client=httpx.Client(transport=httpx.MockTransport(FakeHA().handler)),
+        conn_factory=rec.factory,
+    )
+    tool.invoke({"operation": "set_brightness", "entity_id": "sunroom", "brightness_pct": 40})
+    assert rec.payloads and rec.payloads[0]["skipped"] == ["switch.sunroom_fan"]

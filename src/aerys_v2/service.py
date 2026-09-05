@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED
@@ -743,7 +744,7 @@ def _honest_reply_for_failure(exc: BaseException) -> str | None:
     the recursion rail: a tool loop that hit the wall (every Jolteon entity was
     unavailable and the specialist kept re-reading) surfaced as an HTTP 500 with NO
     reply. The rail is doing its job; the caller still deserves a sentence."""
-    if type(exc).__name__ == "GraphRecursionError":
+    if isinstance(exc, GraphRecursionError):
         return (
             "I went in circles on that one and stopped myself — the reading never "
             "came together. Ask me again in a moment, or tell me which device to look at."
@@ -1348,8 +1349,9 @@ def _action_history_seed(
     note = "\n".join(f"- {_message_text(m)}" for m in priors)
     folded = (
         "Earlier requests in this conversation — ALREADY HANDLED, shown only so "
-        "you can resolve references like 'them' or 'that one'. Do NOT redo any of "
-        f"them:\n{note}\n\nThe request to carry out now:\n{_message_text(current)}"
+        "you can resolve references like 'them' or 'that one'. Do not carry any of "
+        "them out again unless the request below explicitly asks to repeat one:"
+        f"\n{note}\n\nThe request to carry out now:\n{_message_text(current)}"
     )
     return [HumanMessage(
         content=folded, id=getattr(current, "id", None),
