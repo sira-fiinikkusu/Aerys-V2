@@ -145,6 +145,20 @@ _SEARCH_MARKERS = (
 _EMAIL_MARKERS = (
     "email", "e-mail", "inbox", "mailbox", "your mail",
 )
+# remember shapes — the remember tool (2026-09-06): an ASK to keep something.
+# Recall ("remember when", "do you remember") is deliberately absent: that is chat.
+_REMEMBER_MARKERS = (
+    "remember that", "remember this", "remember to", "keep in mind", "make a note",
+    "note that", "don't forget", "dont forget", "for next time",
+    "for future reference", "so you know", "keep that in mind", "write that down",
+    "remind me",
+)
+# Recall shapes win over keep shapes: "do you remember that time…?" is chat.
+_RECALL_MARKERS = (
+    "remember when", "do you remember", "you remember", "can't remember", "cant remember",
+    "remember that time", "remember how", "remember what", "remember the time",
+)
+
 _GAP_MARKERS = (
     "log a gap", "log that gap", "log the gap", "file a gap", "log a complaint",
     "file a complaint", "file an issue", "log an issue", "record a gap",
@@ -237,6 +251,12 @@ decide which path handles it:
   confirmation email come in?", "read me that email from the county",
   "send them a reply" are ALL "action" — only the action path carries the
   email tools.
+  REMEMBERING is "action" too: when the user asks you to remember, keep,
+  note, or not forget something for later — "remember that…", "keep in
+  mind…", "make a note that…", "don't forget…", "for next time…" — the
+  remember tool that KEEPS it lives only on the action path. Recalling or
+  reminiscing ("remember when…", "do you remember…", "what do you remember
+  about…") is "chat" — nothing to keep, only to recall.
   LOGGING A GAP is "action" too: when the user asks you to log/file/record a
   gap, complaint, issue, limitation, or "note that for the coding agent" —
   the log_gap tool that performs the write lives only on the action path.
@@ -379,6 +399,14 @@ def plausibly_wants_email(text: str) -> bool:
     return any(marker in lowered for marker in _EMAIL_MARKERS)
 
 
+def plausibly_wants_remember(text: str) -> bool:
+    """Degraded-path heuristic: an explicit ask to KEEP something (not to recall it)."""
+    lowered = text.lower()
+    if any(marker in lowered for marker in _RECALL_MARKERS):
+        return False
+    return any(marker in lowered for marker in _REMEMBER_MARKERS)
+
+
 def plausibly_logs_a_gap(text: str) -> bool:
     """Degraded-path heuristic: an explicit ask to log/file a gap or complaint."""
     lowered = text.lower()
@@ -417,6 +445,7 @@ def plausibly_asks_for_action(text: str) -> bool:
         or plausibly_wants_web_search(text)
         or plausibly_wants_email(text)
         or plausibly_logs_a_gap(text)
+        or plausibly_wants_remember(text)
         or plausibly_wants_music(text)
         or plausibly_messages_kael(text)
         or plausibly_sets_a_timer(text)

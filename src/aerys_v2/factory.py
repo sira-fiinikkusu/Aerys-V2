@@ -8,7 +8,7 @@ canvas; each node function is a Code node that receives state instead of $json.
 
 import logging
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -886,6 +886,54 @@ def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
 RoomContextFn = Callable[[str, str], str]
 
 
+def remember_writer_for(settings: Settings):
+    """The house back end of the remember tool: triage_memory over the prod memories DB.
+
+    None when memories or embeddings are off (the tool is then not armed — the
+    overlay parity in action_overlay_for uses the same two gates). One psycopg
+    connection per write, a fresh embedding per write (triage_memory's contract),
+    provenance: source_platform = the surface, channel = the channel id, category
+    carries the mechanical trust verdict the tool computed ('trust:owner' /
+    'trust:assistant') plus 'remember' so the origin is auditable.
+    """
+    if settings.memories_database_url is None or settings.embeddings_api_key is None:
+        return None
+    from aerys_v2.services.context import embedder_from_settings
+
+    embed = embedder_from_settings(settings)
+    if embed is None:
+        return None
+    url = settings.memories_database_url
+
+    def writer(record: dict) -> str:
+        import psycopg
+
+        from aerys_v2.services.memory import embedding_to_pgvector
+        from aerys_v2.workers.extraction import triage_memory
+
+        embedding = embedding_to_pgvector(embed(record["fact"]))
+        with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+            action = triage_memory(
+                conn,
+                person_id=record["person_id"],
+                key_label=record["key_label"],
+                value_text=record["fact"],
+                content=record["fact"],
+                context=None,
+                event_date=None,
+                embedding=embedding,
+                source_platform=record["source_platform"],
+                privacy_level=record["privacy_level"],
+                created_at=datetime.now(timezone.utc).isoformat(),
+                channel=record.get("channel"),
+                category=[f"trust:{record['trust']}", "remember"],
+            )
+            conn.commit()
+        return action
+
+    return writer
+
+
 def room_context_fn_for(settings: Settings) -> RoomContextFn | None:
     """Wire the channel-recent room seam from Settings — None when DB-less.
 
@@ -1119,6 +1167,16 @@ LOG_GAP_OVERLAY = (
     "on your own initiative when you hit a genuine limitation (a missing "
     "tool, something rendering wrong). One-line summary, optional details. "
     "Never claim something was logged unless the tool confirmed it."
+)
+
+REMEMBER_OVERLAY = (
+    "You can KEEP a fact on purpose with the remember tool — it writes to your "
+    "real long-term memory through the same service the extractor uses. CALL IT "
+    "IMMEDIATELY when the owner says anything like 'remember that…', 'keep in "
+    "mind…', 'make a note…', 'don't forget…', 'for next time…' — pass the fact "
+    "in their words — and on your own initiative when something is clearly "
+    "worth keeping. Say it was kept ONLY when the tool replied 'Kept:'; if it "
+    "did not, say so plainly. Recalling what you already know needs no tool."
 )
 
 MESSAGE_KAEL_OVERLAY = (
@@ -1718,6 +1776,16 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
 
         tools.append(build_log_gap_tool(gaps_conn_factory))
 
+    if not guest:
+        # REMEMBER (2026-09-06): she keeps a fact on purpose, through the same
+        # writer the extractor uses. Owner-side only (a guest must not write
+        # into the owner's memory); armed exactly when the writer can be built.
+        remember_writer = remember_writer_for(settings)
+        if remember_writer is not None:
+            from aerys_v2.tools.remember import build_remember_tool
+
+            tools.append(build_remember_tool(remember_writer))
+
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
         # Kael's live coding session via his channel server's aerys lane.
@@ -1792,6 +1860,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(SEARCH_OVERLAY)
     if not guest and settings.database_url is not None:
         parts.append(LOG_GAP_OVERLAY)
+    if not guest and settings.memories_database_url is not None and settings.embeddings_api_key is not None:
+        parts.append(REMEMBER_OVERLAY)
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         parts.append(MESSAGE_KAEL_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:

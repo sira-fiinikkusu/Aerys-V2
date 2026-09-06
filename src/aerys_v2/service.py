@@ -42,6 +42,7 @@ from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
+from aerys_v2.tools.remember import CURRENT_TURN_TEXT
 from aerys_v2.router import (
     DEFAULT_TIER,
     FALLBACK_ACK,
@@ -845,6 +846,9 @@ def ask(
     # message. Both ride down into whichever path builds the main-thread human message.
     origin_privacy = _origin_privacy(identity)
     turn_msg_id = str(uuid.uuid4())
+    # The remember tool grades trust by comparing a kept fact against what the
+    # owner said THIS turn; every ask() sets it, so a stale value never survives.
+    CURRENT_TURN_TEXT.set(text)
 
     # Gate the action stack BEFORE anything else can arm it. A caller outside the
     # allowlist never reaches home_control / search_entities / get_state — closing
