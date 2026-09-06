@@ -956,3 +956,19 @@ def test_turn_sql_dates_portable_rows_by_observation_and_skips_untrusted():
     assert "portable_observed_at:" in V2_TURNS_SQL
     # the DATE the extractor reasons from comes from the marker; the watermark from the column
     assert "::timestamptz" in V2_TURNS_SQL and "t.created_at > %(after)s::timestamptz" in V2_TURNS_SQL
+
+
+
+def test_portable_quarantine_hook_is_optional_and_never_raises():
+    from aerys_v2.workers.extraction import PORTABLE_FALLBACK_CATEGORY, portable_quarantine_hook
+    assert portable_quarantine_hook({}) is None
+    assert portable_quarantine_hook({"EXTRACTION_PORTABLE_HOOK": "no.such.package:fn"}) is None
+    assert portable_quarantine_hook({"EXTRACTION_PORTABLE_HOOK": "garbage"}) is None
+    assert portable_quarantine_hook({"EXTRACTION_PORTABLE_HOOK": "json:dumps"}) is __import__("json").dumps
+    assert PORTABLE_FALLBACK_CATEGORY == ["source:portable", "unquarantined"]
+
+
+def test_no_private_package_import_in_the_public_extractor():
+    import inspect
+    from aerys_v2.workers import extraction
+    assert "aerys_portable" not in inspect.getsource(extraction)

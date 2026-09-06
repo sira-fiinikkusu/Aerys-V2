@@ -78,7 +78,10 @@ Adversarial-review fixes (2026-07-04), all in this file unless noted:
     injection surface.
 """
 
+import importlib
 import json
+import logging
+import os
 import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -87,6 +90,8 @@ from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from ..services.memory import Embedder, embedding_to_pgvector
+
+log = logging.getLogger(__name__)
 
 
 class LlmReply(NamedTuple):
@@ -872,6 +877,30 @@ _TRIAGE_STAT_KEYS = {
 }
 
 
+PORTABLE_HOOK_ENV = "EXTRACTION_PORTABLE_HOOK"  # "package.module:function"
+PORTABLE_FALLBACK_CATEGORY = ["source:portable", "unquarantined"]
+
+
+def portable_quarantine_hook(env: dict | None = None) -> Callable | None:
+    """The optional review-inbox writer for observations mined from a PORTABLE body's turns.
+
+    The brain is public and must not import a private package by name (live
+    2026-09-06: an unconditional import crashed every hourly pass once the first
+    portable turn was admitted). The deployment names the hook in
+    EXTRACTION_PORTABLE_HOOK as "module:function"; unset or unimportable means
+    house parity — direct triage tagged PORTABLE_FALLBACK_CATEGORY — never a crash.
+    """
+    spec = ((env if env is not None else os.environ).get(PORTABLE_HOOK_ENV) or "").strip()
+    if not spec or ":" not in spec:
+        return None
+    module_name, _, func_name = spec.partition(":")
+    try:
+        return getattr(importlib.import_module(module_name), func_name)
+    except Exception:  # noqa: BLE001 — a missing plugin must degrade, not kill extraction
+        log.warning("portable quarantine hook %r unavailable; portable observations use direct triage", spec)
+        return None
+
+
 def run_live_extraction(
     source_conn: Any,
     staging_conn: Any,
@@ -945,6 +974,7 @@ def run_live_extraction(
         rows = [dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows]
         rows = _trim_tie_boundary(rows, batch_limit)
 
+        quarantine_hook = portable_quarantine_hook()
         stats = {
             "rows": len(rows), "groups": 0, "observations": 0,
             "inserted": 0, "updated": 0, "replaced": 0, "skipped": 0,
@@ -978,11 +1008,14 @@ def run_live_extraction(
                 content, event_date = _compose_content(obs, fallback)
                 # embedding computed FRESH every write — never cached/reused,
                 # so an UPDATEd memory's embedding never silently goes stale.
-                if group["source_platform"] == "portable":
-                    from aerys_portable.door.ingest import quarantine_extracted
-                    quarantine_extracted(staging_conn, group, obs, content, event_date)
-                    stats["quarantined"] = stats.get("quarantined", 0) + 1
-                    continue
+                portable = group["source_platform"] == "portable"
+                if portable and quarantine_hook is not None:
+                    try:
+                        quarantine_hook(staging_conn, group, obs, content, event_date)
+                        stats["quarantined"] = stats.get("quarantined", 0) + 1
+                        continue
+                    except Exception:  # noqa: BLE001 — a failing hook degrades to direct triage
+                        log.warning("portable quarantine hook failed; falling back to direct triage", exc_info=True)
                 action = triage_memory(
                     prod_write_conn,
                     person_id=group["person_id"],
@@ -996,6 +1029,7 @@ def run_live_extraction(
                     privacy_level=obs.get("privacy_level") or group["privacy_level"],
                     # original message time, not now() — the h.created_at lesson
                     created_at=group["latest"]["created_at_raw"],
+                    category=list(PORTABLE_FALLBACK_CATEGORY) if portable else None,
                 )
                 stat_key = _TRIAGE_STAT_KEYS[action]
                 stats[stat_key] += 1
