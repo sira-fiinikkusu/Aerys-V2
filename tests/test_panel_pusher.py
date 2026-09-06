@@ -174,7 +174,8 @@ def test_text_chat_turn_pushes_mood_idle():
     graph = build_graph(fake_model("[warmly] hey you!"), soul="s")
     face = FaceLog()
     reply = ask(graph, "morning", identity=CHRIS, thread_id="t-chat", face_push=face)
-    assert reply == "[warmly] hey you!"
+    # The face keeps the tag (it picks the mood from it); the text surface loses it.
+    assert reply == "hey you!"
     assert face.calls == [("idle", "[warmly] hey you!")]
 
 

@@ -1174,7 +1174,9 @@ REMEMBER_OVERLAY = (
     "real long-term memory through the same service the extractor uses. CALL IT "
     "IMMEDIATELY when the owner says anything like 'remember that…', 'keep in "
     "mind…', 'make a note…', 'don't forget…', 'for next time…' — pass the fact "
-    "in their words — and on your own initiative when something is clearly "
+    "in THEIR words (complete an 'it' or 'my' from the line before, but keep "
+    "their phrasing; do not rewrite it into a report about them) — and on your "
+    "own initiative when something is clearly "
     "worth keeping. Say it was kept ONLY when the tool replied 'Kept:'; if it "
     "did not, say so plainly. Recalling what you already know needs no tool."
 )

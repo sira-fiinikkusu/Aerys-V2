@@ -404,6 +404,67 @@ def _strip_handoff(text: str) -> str:
     return text.replace(HANDOFF_MARKER, "").strip()
 
 
+# ElevenLabs v3 audio tags the voice overlay teaches ([warmly], [softly], …). The
+# person thread is SHARED between voice and text surfaces (person-keying), so a
+# text turn sees tagged voice replies in its own history and imitates them
+# (2 of 9 Discord replies in the 30 days to 2026-09-06). Stripped at emit time on
+# every non-voice surface; raw_reply keeps them for audit, history is untouched.
+_EMOTION_TAG_RE = re.compile(
+    r"\[(?:warmly|softly|playfully|thoughtfully|gently|cheerfully|seriously|quietly|calmly|"
+    r"excitedly|sadly|curiously|teasingly|slowly|quickly|happily|tenderly|dryly|wryly|brightly|"
+    r"lightly|fondly|sincerely|laughs?|laughing|sighs?|whispers?|whispering|giggles?|chuckles?|"
+    r"excited|sad|curious|warm|teasing|pause|clears throat|happy|serious|gentle|soft)\]",
+    re.I,
+)  # a closed list on purpose: [July], [reply], [only] are words, not tags
+
+
+def strip_emotion_tags(text: str) -> str:
+    """Drop voice-only emotion tags from text meant for a screen; tidy the spacing."""
+    if "[" not in text:
+        return text
+    cleaned = _EMOTION_TAG_RE.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"(^|\n)[ \t]+", r"\1", cleaned)
+    cleaned = re.sub(r" +([.,!?;:])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def _for_surface(text: str, config: dict) -> str:
+    """Emit-time surface policy: voice keeps its tags, every other surface loses them.
+
+    Applied at ask()'s return, AFTER the face push (panel.py picks the mood from the
+    tag) and after the audit row (raw_reply/emitted_reply keep the tag: what the
+    model said; the strip is presentation at the door, not history).
+    """
+    configurable = (config or {}).get("configurable") or {}
+    if is_voice_turn(configurable.get("identity"), configurable.get("thread_id")):
+        return text
+    return strip_emotion_tags(text)
+
+
+def _remember_window(seed: list, text: str) -> str:
+    """What counts as 'the owner's words' for the remember tool's trust rule.
+
+    The current turn plus the previous human turn: a fact completed from context
+    ("my birthday" in one line, the date in the next) is still the owner's word.
+    Never wider — the window is what makes owner-trust mean something.
+    """
+    humans = [m for m in seed if getattr(m, "type", "") == "human"]
+    previous = humans[-2] if len(humans) >= 2 else None
+    if previous is None:
+        return text
+    return f"{_reply_text(previous)}\n{text}"
+
+
+def _remember_window_for(seed: list, text: str, config: dict) -> str:
+    """Widen only on private surfaces (DM/voice): a person thread is one person's
+    words by construction, and a public room never lends anyone's line to another."""
+    identity = ((config or {}).get("configurable") or {}).get("identity") or {}
+    if identity.get("privacy_context") != "private":
+        return text
+    return _remember_window(seed, text)
+
+
 def _last_ai_message_id(graph: object, configurable: dict) -> str | None:
     """Id of the thread's most recent (just-checkpointed) AI message, or None.
 
@@ -898,7 +959,7 @@ def ask(
                 content_privacy_classifier, origin_privacy,
             )
             _face(face_push, "idle", reply)
-            return reply
+            return _for_surface(reply, config)
 
         if is_voice_turn(identity, thread_id):
             # Voice detection now rides the EXPLICIT identity.voice flag (is_voice_turn),
@@ -976,7 +1037,7 @@ def ask(
             )
             _face(face_push, "idle", reply)
             registry[thread_id] = time.monotonic()
-            return reply
+            return _for_surface(reply, config)
 
         # Chat route on a TEXT thread: the router's tier picks the model. This
         # is where the deep cap bites — the gate is an atomic spend against
@@ -1054,7 +1115,7 @@ def ask(
         )
         _face(face_push, "idle", reply)
         registry[thread_id] = time.monotonic()
-        return reply
+        return _for_surface(reply, config)
 
 
 def _chat_turn(
@@ -1431,11 +1492,13 @@ def _action_turn(
         # gate re-invokes once if the model answered with zero tool calls (a claimed
         # action that touched nothing), and marks the row 'no_tool_action' if it still
         # runs no tool after the correction.
+        seed = _action_history_seed(
+            graph, config["configurable"], text, escalated=escalated, specialist=True
+        )
+        CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
         result, gate_degraded = _run_action_gated(
             action_graph,
-            _action_history_seed(
-                graph, config["configurable"], text, escalated=escalated, specialist=True
-            ),
+            seed,
             {**config, "configurable": {**config["configurable"], "specialist": True, "tier": tier}},
         )
     except Exception as e:

@@ -128,3 +128,33 @@ def test_armed_only_with_memories_and_embeddings_and_never_for_guests():
     assert "remember" in [t.name for t in _action_tools_armed(armed)]
     assert "remember" not in [t.name for t in _action_tools_armed(armed, guest=True)]
     assert REMEMBER_OVERLAY not in action_overlay_for(armed, guest=True)
+
+
+def test_previous_human_turn_completes_the_owner_quote():
+    from langchain_core.messages import AIMessage, HumanMessage
+    from aerys_v2.service import _remember_window
+    seed = [HumanMessage("do you remember when my birthday is?"), AIMessage("I don't have it."),
+            HumanMessage("can you remember its on August 24th, 1987")]
+    window = _remember_window(seed, "can you remember its on August 24th, 1987")
+    assert trust_for("my birthday is on August 24th, 1987", window) == "owner"
+    assert trust_for("Chris was born in the eighties", window) == "assistant"
+    assert _remember_window([HumanMessage("only this")], "only this") == "only this"
+    from aerys_v2.service import _remember_window_for
+    private = {"configurable": {"identity": {"privacy_context": "private"}}}
+    public = {"configurable": {"identity": {"privacy_context": "public"}}}
+    assert "birthday" in _remember_window_for(seed, "the date line", private)
+    assert _remember_window_for(seed, "the date line", public) == "the date line"
+
+
+def test_emotion_tags_are_stripped_for_text_surfaces_only():
+    from aerys_v2.service import _for_surface, strip_emotion_tags
+    tagged = "[thoughtfully] I don't have your birthday on record.\n\n[warmly] When is it?"
+    assert strip_emotion_tags(tagged) == "I don't have your birthday on record.\n\nWhen is it?"
+    assert strip_emotion_tags("[the office] is a room, [laughs] fine") == "[the office] is a room, fine"
+    assert strip_emotion_tags("no brackets here") == "no brackets here"
+    assert strip_emotion_tags("see my [reply] in [July], [only] once") == "see my [reply] in [July], [only] once"
+    assert strip_emotion_tags("Hello [warmly]. Then [softly] , yes") == "Hello. Then, yes"
+    text_cfg = {"configurable": {"thread_id": "person:x", "identity": {"user_id": "u", "platform": "discord"}}}
+    voice_cfg = {"configurable": {"thread_id": "person:x", "identity": {"user_id": "u", "voice": True}}}
+    assert _for_surface(tagged, text_cfg).startswith("I don't")
+    assert _for_surface(tagged, voice_cfg) == tagged
