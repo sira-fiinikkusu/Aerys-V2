@@ -226,15 +226,30 @@ V2_TURNS_SQL = """\
 SELECT
   t.id::text AS id,
   t.person_id,
-  t.input_text AS content,
+  CASE WHEN t.channel = 'portable' THEN
+    '[Portable observation time: ' || COALESCE(
+      (SELECT substring(marker from 22) FROM jsonb_array_elements_text(t.degraded) marker
+       WHERE marker LIKE 'portable_observed_at:%%' LIMIT 1), 'unknown') || '] ' || t.input_text
+    ELSE t.input_text END AS content,
   t.channel AS source_platform,
   CASE WHEN t.channel = 'guild' THEN 'public' ELSE 'private' END AS privacy_level,
-  t.created_at,
+  -- Portable turns are admitted later than they happened (the door bumps
+  -- created_at so the watermark sees them); the DATE the extractor reasons from
+  -- must be the observation time, or "see you tomorrow" lands on the wrong day.
+  CASE WHEN t.channel = 'portable' THEN COALESCE(
+      (SELECT substring(marker from 22)::timestamptz
+         FROM jsonb_array_elements_text(t.degraded) marker
+        WHERE marker LIKE 'portable_observed_at:%%'
+          -- shape-check before the cast: a malformed marker must never crash the loop
+          AND substring(marker from 22) ~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}'
+        LIMIT 1), t.created_at)
+    ELSE t.created_at END AS created_at,
   t.created_at::text AS created_at_raw,
   'Unknown' AS speaker_name,
   t.thread_id AS source_thread
 FROM v2_turns t
 WHERE t.person_id IS NOT NULL
+  AND t.guard_verdict IS DISTINCT FROM 'portable_untrusted'
   AND t.input_text != ''
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC
@@ -401,6 +416,8 @@ def triage_memory(
     source_platform: str,
     privacy_level: str,
     created_at: str,
+    channel: str | None = None,
+    category: list[str] | None = None,
 ) -> str:
     """The "Insert Memory" node's real dedup branch, ported to prod `memories`.
 
@@ -437,10 +454,26 @@ def triage_memory(
         "created_at": created_at,
     }
 
+    def finish(action):
+        # Optional portable provenance is committed in the SAME transaction as
+        # insert/update/replace. Existing callers retain their exact behavior.
+        if channel is not None or category is not None:
+            conn.execute("""
+                UPDATE memories SET source_platform = %(source_platform)s,
+                    channel = %(channel)s,
+                    category = ARRAY(SELECT tag FROM unnest(COALESCE(category, ARRAY[]::text[])) tag
+                                     WHERE tag NOT LIKE 'trust:%%') || %(category)s::text[]
+                WHERE person_id = %(person_id)s::uuid AND key_label = %(key_label)s
+                    AND deleted_at IS NULL
+            """, {"source_platform": source_platform, "channel": channel,
+                  "category": category or [], "person_id": person_id,
+                  "key_label": key_label})
+        return action
+
     existing = conn.execute(TRIAGE_SELECT_SQL, {"person_id": person_id, "key_label": key_label}).fetchone()
     if existing is None:
         conn.execute(TRIAGE_INSERT_SQL, params)
-        return "insert"
+        return finish("insert")
 
     existing_id, existing_content = existing
     if values_similar(_value_text_from_content(existing_content), value_text):
@@ -450,10 +483,26 @@ def triage_memory(
              "event_date": event_date, "embedding": embedding,
              "privacy_level": privacy_level},
         )
-        return "update"
+        return finish("update")
 
     conn.execute(TRIAGE_REPLACE_SQL, {**params, "old_id": existing_id})
-    return "replace"
+    return finish("replace")
+
+
+def soft_delete_memory(conn: Any, *, person_id: str, key_label: str) -> str:
+    """Portable tombstone path; caller holds the extraction lease and mutex.
+
+    Matches the same live (person_id, key_label) identity as triage_memory.
+    Retrying an already deleted key is harmless. Never inserts a blank fact.
+    """
+    if not key_label or not key_label.strip():
+        return "skipped"
+    conn.execute("""
+        UPDATE memories SET deleted_at = now(), updated_at = now()
+        WHERE person_id = %(person_id)s::uuid AND key_label = %(key_label)s
+          AND deleted_at IS NULL
+    """, {"person_id": person_id, "key_label": key_label})
+    return "tombstone"
 
 
 def ensure_lease_holder(staging_conn: Any) -> str:
@@ -508,15 +557,16 @@ def group_by_person(rows: list[dict], *, batch_size: int = BATCH_SIZE) -> list[d
     transcript per LLM call meant every fact landed under every participant.
     Rows with a NULL person_id are dropped, same as v1's guard node.
     """
-    by_person: dict[str, list[dict]] = {}
+    by_person: dict[tuple, list[dict]] = {}
     for row in rows:
         pid = row.get("person_id")
         if not pid:
             continue
-        by_person.setdefault(str(pid), []).append(row)
+        group_key = (str(pid), row.get("source_thread")) if row.get("source_platform") == "portable" else (str(pid), None)
+        by_person.setdefault(group_key, []).append(row)
 
     groups = []
-    for pid, msgs in by_person.items():
+    for (pid, _thread), msgs in by_person.items():
         for i in range(0, len(msgs), batch_size):
             batch = msgs[i : i + batch_size]
             # latest message in the batch: memory created_at + batch-date fallback
@@ -928,6 +978,11 @@ def run_live_extraction(
                 content, event_date = _compose_content(obs, fallback)
                 # embedding computed FRESH every write — never cached/reused,
                 # so an UPDATEd memory's embedding never silently goes stale.
+                if group["source_platform"] == "portable":
+                    from aerys_portable.door.ingest import quarantine_extracted
+                    quarantine_extracted(staging_conn, group, obs, content, event_date)
+                    stats["quarantined"] = stats.get("quarantined", 0) + 1
+                    continue
                 action = triage_memory(
                     prod_write_conn,
                     person_id=group["person_id"],

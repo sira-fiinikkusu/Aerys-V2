@@ -908,3 +908,51 @@ def test_extraction_prompt_forbids_frozen_relative_time():
     assert "surgery on Aug 6" in p            # the canonical example
     assert "ABSOLUTE date computed from the conversation date" in p
     assert "'last week', null if not stated" not in p  # old permissive example gone
+
+
+# ---- portable extension (2026-09-06): provenance on triage, tombstones, dated portable turns ----
+
+from aerys_v2.workers.extraction import soft_delete_memory, V2_TURNS_SQL  # noqa: E402
+
+
+def test_triage_with_channel_and_category_records_provenance_after_insert():
+    conn = FakeConn([("FROM memories", [])])
+    action = triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West",
+        content="basic.location: Lives in Rotonda West", context=None, event_date=None,
+        embedding="[0.1,0.2,0.3]", source_platform="portable", privacy_level="private",
+        created_at="2026-09-06 12:00:00+00", channel="body-1", category=["trust:owner"],
+    )
+    assert action == "insert"
+    updates = [(s, p) for s, p in conn.calls if s.lstrip().upper().startswith("UPDATE")]
+    assert len(updates) == 1, "provenance rides ONE follow-up UPDATE"
+    sql, params = updates[0]
+    assert "source_platform" in sql and "channel" in sql and "category" in sql
+    assert params["channel"] == "body-1" and params["category"] == ["trust:owner"]
+    assert "NOT LIKE 'trust:%%'" in sql  # an older trust tag is replaced, not appended
+
+
+def test_triage_without_channel_is_byte_for_byte_the_old_path():
+    conn = FakeConn([("FROM memories", [])])
+    triage_memory(
+        conn, person_id=CHRIS, key_label="basic.location", value_text="x", content="basic.location: x",
+        context=None, event_date=None, embedding="[0.1]", source_platform="discord",
+        privacy_level="public", created_at="2026-07-03 12:00:00+00",
+    )
+    assert not any(s.lstrip().upper().startswith("UPDATE") for s, _ in conn.calls)
+
+
+def test_soft_delete_memory_tombstones_live_row_only_and_skips_blank_key():
+    conn = FakeConn()
+    assert soft_delete_memory(conn, person_id=CHRIS, key_label="basic.location") == "tombstone"
+    sql, params = conn.calls[-1]
+    assert "deleted_at = now()" in sql and "deleted_at IS NULL" in sql
+    assert params == {"person_id": CHRIS, "key_label": "basic.location"}
+    assert soft_delete_memory(conn, person_id=CHRIS, key_label="  ") == "skipped"
+
+
+def test_turn_sql_dates_portable_rows_by_observation_and_skips_untrusted():
+    assert "guard_verdict IS DISTINCT FROM 'portable_untrusted'" in V2_TURNS_SQL
+    assert "portable_observed_at:" in V2_TURNS_SQL
+    # the DATE the extractor reasons from comes from the marker; the watermark from the column
+    assert "::timestamptz" in V2_TURNS_SQL and "t.created_at > %(after)s::timestamptz" in V2_TURNS_SQL
