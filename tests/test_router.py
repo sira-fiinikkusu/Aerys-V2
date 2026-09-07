@@ -67,7 +67,7 @@ def test_garbage_reply_with_chatty_text_falls_to_chat():
 
 
 def test_invalid_route_value_rejected_strictly():
-    # "maybe" is not on the contract — strict validation, then heuristic
+    # An unknown route degrades through the action-biased heuristic.
     decision = parse_route_reply('{"route": "maybe", "ack": "hm"}', "toggle the desk lamp")
     assert decision.route == "action"
 

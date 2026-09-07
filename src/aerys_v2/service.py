@@ -659,7 +659,9 @@ def record_action_claim(text: str) -> bool:
     return bool(_RECORD_CLAIM_RE.search(text or ""))
 
 
-def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) -> str:
+def action_honesty_gate(
+    route: str, tool_calls: list, *, already_retried: bool, specialists=None
+) -> str:
     """Pure verdict for the action-honesty gate: emit | retry | mark.
 
     - A non-action route is NEVER gated (chat may legitimately answer with no tool) ->
@@ -681,7 +683,7 @@ def action_honesty_gate(route: str, tool_calls: list, *, already_retried: bool) 
     no_action as the honest exit), so a zero-tool first pass is only reachable with
     ACTION_FORCE_TOOL=false; the retry path stays as the belt under that knob.
     """
-    if route != "action":
+    if route not in (specialists if specialists is not None else ("action",)):
         return GATE_EMIT
     if tool_calls:
         return GATE_EMIT
@@ -707,9 +709,11 @@ def _run_action_gated(
 
     One extra model call on the rare zero-tool action turn is the accepted cost of
     never again emitting a fabricated "done" (fix brief, 2026-07-12)."""
+    route = config.get("configurable", {}).get("specialist_route", "action")
+    routes = (route,)
     result = _invoke_action_graph(action_graph, seeded_messages, config)
     verdict = action_honesty_gate(
-        "action", extract_tool_calls(result["messages"]), already_retried=False
+        route, extract_tool_calls(result["messages"]), already_retried=False, specialists=routes
     )
     if verdict != GATE_RETRY:
         return result, []
@@ -717,7 +721,7 @@ def _run_action_gated(
     retry_messages = [*result["messages"], HumanMessage(content=ACTION_NO_TOOL_CORRECTION)]
     result = _invoke_action_graph(action_graph, retry_messages, config)
     verdict = action_honesty_gate(
-        "action", extract_tool_calls(result["messages"]), already_retried=True
+        route, extract_tool_calls(result["messages"]), already_retried=True, specialists=routes
     )
     if verdict == GATE_MARK:
         log.info(
@@ -830,6 +834,7 @@ def ask(
     rails: Rails = Rails(),
     router: Callable[[str], RouteDecision] | None = None,
     action_graph: object | None = None,
+    specialists: dict[str, object] | None = None,
     guest_action_graph: object | None = None,
     speak_fn: Callable[[str, str], None] | None = None,
     satellite_for: Callable[[str | None], str] | None = None,
@@ -911,6 +916,11 @@ def ask(
     # owner said THIS turn; every ask() sets it, so a stale value never survives.
     CURRENT_TURN_TEXT.set(text)
 
+    specialists = dict(specialists or {})
+    if action_graph is not None:
+        specialists["action"] = action_graph
+    action_graph = specialists.get("action")
+
     # Gate the action stack BEFORE anything else can arm it. A caller outside the
     # allowlist never reaches home_control / search_entities / get_state — closing
     # both the unauthorized-actuation and the presence-disclosure (reads) risks.
@@ -920,6 +930,7 @@ def ask(
         # shares is not sensitive. Swap to the media-only graph; if none is armed,
         # fall fully chat-only (router None), exactly the old behavior.
         action_graph = guest_action_graph
+        specialists = {"action": action_graph} if action_graph is not None else {}
         if action_graph is None:
             router = None
 
@@ -930,7 +941,7 @@ def ask(
     }
 
     with _turn_span(str(thread_id), text):
-        if router is None or action_graph is None:
+        if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was
             # forced off it by the allowlist gate above. No router ran, so
             # classifier_intent/tier stay NULL — the row records what actually
@@ -961,7 +972,7 @@ def ask(
             _face(face_push, "idle", reply)
             return _for_surface(reply, config)
 
-        if is_voice_turn(identity, thread_id):
+        if is_voice_turn(identity, thread_id) and action_graph is not None:
             # Voice detection now rides the EXPLICIT identity.voice flag (is_voice_turn),
             # not the thread prefix — because voice folds into the owner's person-keyed
             # thread ('person:{id}') and no longer names 'voice'. Behavior is unchanged:
@@ -1020,13 +1031,15 @@ def ask(
                 extra_degraded=[DROPPED_UNADDRESSED_MARKER],
             )
             return ""
-        if decision.route == "action":
+        selected_graph = specialists.get(decision.route)
+        if selected_graph is not None:
+            config["configurable"]["specialist_route"] = decision.route
             # add_human=True: the chat graph never saw this turn, so BOTH the human
             # message and the action result must land in the thread history.
-            log.info("route decision | thread=%s route=action", thread_id)
+            log.info("route decision | thread=%s route=%s", thread_id, decision.route)
             _face(face_push, "working")
             reply = _action_turn(
-                action_graph, graph, text, config, add_human=True,
+                selected_graph, graph, text, config, add_human=True,
                 record_turn=record_turn, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 tier=normalize_tier(decision.tier),
@@ -1086,6 +1099,13 @@ def ask(
             )
             handoff = True
             claim_escalation = True
+        if handoff and action_graph is None:
+            reply = HANDOFF_UNARMED_REPLY
+            msg_id = _last_ai_message_id(graph, config["configurable"])
+            if msg_id is not None:
+                graph.update_state({"configurable": config["configurable"]},
+                                   {"messages": [AIMessage(content=reply, id=msg_id)]}, as_node="chat")
+            handoff = False
         if handoff:
             # THE RETURN LOOP (owner design, 2026-07-18): the chat model — the only
             # component that saw full history — says this turn needs hands. Re-run

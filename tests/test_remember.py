@@ -27,29 +27,29 @@ def test_trust_is_owner_only_when_the_fact_quotes_the_turn():
     assert trust_for("Le chien s'appelle Émile", "retiens que le chien s'appelle Émile") == "owner"
 
 
-def test_key_label_is_stable_per_fact_and_distinct_across_facts():
-    assert key_label_for("The pool guy comes Tuesdays!") == key_label_for("the pool guy comes tuesdays")
-    assert key_label_for("pool guy Tuesdays") != key_label_for("pool guy Wednesdays")
-    assert key_label_for("x").startswith("remember.")
+def test_key_label_tracks_attribute_across_corrections():
+    from aerys_v2.workers.extraction import LlmReply, key_label_for
+    llm = Mock(return_value=LlmReply('[{"key_label":"event.pool_service","value_text":"Pool service is Tuesday"}]', False))
+    assert key_label_for("Pool service is Tuesday", llm=llm) == key_label_for("Pool service is Wednesday", llm=llm)
 
 
 def test_kept_only_when_the_writer_confirms():
     writer = Mock(return_value="insert")
-    tool = build_remember_tool(writer)
+    tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     CURRENT_TURN_TEXT.set("remember that the pool guy comes on Tuesdays")
     reply = tool.invoke({"fact": "the pool guy comes on Tuesdays"}, config=cfg())
     assert reply.startswith(KEPT_PREFIX)
     record = writer.call_args.args[0]
     assert record["person_id"] == PERSON and record["trust"] == "owner"
     assert record["privacy_level"] == "private" and record["source_platform"] == "discord"
-    assert record["key_label"] == key_label_for("the pool guy comes on Tuesdays")
-    writer.return_value = "skipped"
+    assert record["key_label"] == "event.pool_service"
+    writer.return_value = "duplicate"
     assert tool.invoke({"fact": "the pool guy comes on Tuesdays"}, config=cfg()).startswith(ALREADY_PREFIX)
 
 
 def test_inference_is_assistant_trust_and_public_rooms_stay_public():
     writer = Mock(return_value="update")
-    tool = build_remember_tool(writer)
+    tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     CURRENT_TURN_TEXT.set("the pool is cleaned weekly I think")
     reply = tool.invoke({"fact": "Owner prefers the pool cleaned on Tuesdays"}, config=cfg(privacy="public"))
     assert reply.startswith(KEPT_PREFIX)
@@ -60,13 +60,13 @@ def test_inference_is_assistant_trust_and_public_rooms_stay_public():
 @pytest.mark.parametrize("failure", [Exception("db down"), None])
 def test_failure_and_unknown_actions_never_claim_kept(failure):
     writer = Mock(side_effect=failure) if failure else Mock(return_value="weird")
-    tool = build_remember_tool(writer)
+    tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     assert tool.invoke({"fact": "anything"}, config=cfg()) == NOT_KEPT
 
 
 def test_gates_empty_fact_and_unlinked_caller():
     writer = Mock(return_value="insert")
-    tool = build_remember_tool(writer)
+    tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     assert tool.invoke({"fact": "   "}, config=cfg()) == EMPTY
     assert tool.invoke({"fact": "x"}, config=cfg(user_id="http-caller")) == NOT_LINKED
     assert tool.invoke({"fact": "x"}, config=None) == NOT_LINKED
@@ -75,7 +75,7 @@ def test_gates_empty_fact_and_unlinked_caller():
 
 def test_long_facts_are_truncated_not_refused():
     writer = Mock(return_value="insert")
-    tool = build_remember_tool(writer)
+    tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     reply = tool.invoke({"fact": "word " * 400}, config=cfg())
     assert reply.startswith(KEPT_PREFIX) and len(writer.call_args.args[0]["fact"]) <= mod.FACT_LIMIT
 

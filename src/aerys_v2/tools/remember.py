@@ -25,14 +25,17 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import queue
+import threading
 import logging
 import re
-from typing import Any, Callable
+from typing import Callable
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from aerys_v2.state import identity_from_config
+from aerys_v2.workers.extraction import KEY_LABEL_PATTERN, question_shaped
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +45,7 @@ log = logging.getLogger(__name__)
 CURRENT_TURN_TEXT: contextvars.ContextVar[str] = contextvars.ContextVar("aerys_current_turn_text", default="")
 
 FACT_LIMIT = 500
+KEY_LABEL_TIMEOUT_S = 2.0
 OWNER_QUOTE_RATIO = 0.8  # share of the fact's tokens that must appear in the turn text
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _TOKEN_RE = re.compile(r"\w+")  # Unicode-aware: a Japanese or Arabic quote is still the owner's word
@@ -53,7 +57,7 @@ NOT_KEPT = "I couldn't save that — the memory store didn't confirm the write. 
 NOT_LINKED = "I can only keep memories for a linked person; nothing was kept."
 EMPTY = "Tell me the thing to keep — I got an empty fact."
 
-# writer(record) -> 'insert' | 'update' | 'replace' | 'skipped'; raises on failure.
+# writer(record) -> 'insert' | 'update' | 'replace' | 'duplicate' | 'skipped'.
 # record keys: person_id, fact, key_label, privacy_level, trust, source_platform, channel
 Writer = Callable[[dict], str]
 
@@ -72,12 +76,28 @@ def trust_for(fact: str, turn_text: str) -> str:
 
 
 def key_label_for(fact: str) -> str:
-    """Stable per fact text: re-keeping the same fact is idempotent; different facts never collide."""
+    """The original stable, local fallback key when canonical labeling fails."""
     normalized = " ".join(_TOKEN_RE.findall(fact.casefold()))
     return "remember." + hashlib.sha1(normalized.encode()).hexdigest()[:10]
 
 
-def build_remember_tool(writer: Writer):
+def _bounded_label(labeler, fact):
+    # A daemon worker bounds even a custom labeler that ignores its own timeout.
+    # It can finish labeling later, but only this calling thread can write memory.
+    result = queue.SimpleQueue()
+    def run():
+        try:
+            result.put(labeler(fact))
+        except Exception:
+            result.put(None)
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
+    label = result.get(timeout=KEY_LABEL_TIMEOUT_S)
+    if not isinstance(label, str) or not re.fullmatch(KEY_LABEL_PATTERN, label):
+        raise ValueError("invalid memory key label")
+    return label
+
+
+def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | None = None):
     @tool
     def remember(fact: str, config: RunnableConfig = None) -> str:
         """KEEP a fact for the future, on purpose, in your long-term memory.
@@ -99,10 +119,20 @@ def build_remember_tool(writer: Writer):
         person_id = str(identity.get("user_id") or "")
         if not _UUID_RE.match(person_id):
             return NOT_LINKED
+        if question_shaped(text):
+            log.warning("remember skipped: question-shaped observation")
+            return "Nothing was kept: questions are not facts. State the fact to remember."
+        try:
+            if key_labeler is None:
+                raise ValueError("memory key labeler is not configured")
+            label = _bounded_label(key_labeler, text)
+        except Exception:
+            log.warning("remember: key labeling failed; using stable hash key")
+            label = key_label_for(text)
         record = {
             "person_id": person_id,
             "fact": text,
-            "key_label": key_label_for(text),
+            "key_label": label,
             "privacy_level": "private" if identity.get("privacy_context") == "private" else "public",
             "trust": trust_for(text, CURRENT_TURN_TEXT.get()),
             "source_platform": str(identity.get("platform") or "unknown"),
@@ -113,8 +143,10 @@ def build_remember_tool(writer: Writer):
         except Exception:
             log.warning("remember: writer failed for person %s", person_id, exc_info=True)
             return NOT_KEPT
-        if action == "skipped":
+        if action == "duplicate":
             return f"{ALREADY_PREFIX} {text}"
+        if action == "skipped":
+            return "Nothing was kept: the fact did not pass memory checks. State a specific fact."
         if action in ("insert", "update", "replace"):
             return f"{KEPT_PREFIX} {text}"
         log.warning("remember: writer returned an unknown action %r", action)

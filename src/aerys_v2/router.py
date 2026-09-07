@@ -31,6 +31,7 @@ while the light stays off — the exact V1 hallucinated-tool-call failure mode).
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -347,7 +348,7 @@ class RouteDecision:
     to when Parse Classification saw an unmapped intent.
     """
 
-    route: str  # "chat" | "action"
+    route: str  # Validated against the router's registered routes.
     ack: str
     tier: str = DEFAULT_TIER  # "fast" | "standard" | "deep" — a hint, pre-normalized
     # The false-wake verdict (owner ask 2026-08-27, Alexa-style): the router
@@ -452,23 +453,31 @@ def plausibly_asks_for_action(text: str) -> bool:
     )
 
 
-def fallback_decision(text: str) -> RouteDecision:
+def fallback_decision(
+    text: str, *, extra_predicates: dict[str, Callable[[str], bool]] | None = None
+) -> RouteDecision:
     """What we do when the router's answer is unusable: heuristic, biased to action.
 
     Tier is always DEFAULT_TIER here — the degraded path must never spend the
     rationed deep tier on a guess (fail cheap, same direction as the cap).
     """
+    for name, predicate in (extra_predicates or {}).items():
+        if predicate(text):
+            return RouteDecision(route=name, ack=FALLBACK_ACK)
     if plausibly_asks_for_action(text):
         return RouteDecision(route="action", ack=FALLBACK_ACK)
     return RouteDecision(route="chat", ack="")
 
 
-def parse_route_reply(raw: str, user_text: str) -> RouteDecision:
+def parse_route_reply(
+    raw: str, user_text: str, *, registered_routes=("chat", "action"),
+    extra_predicates: dict[str, Callable[[str], bool]] | None = None,
+) -> RouteDecision:
     """Strict-parse the router JSON; anything off-contract -> heuristic fallback.
 
     Tolerates code fences / stray prose by slicing first '{' to last '}' — models
     at temp 0 still occasionally wrap JSON — but the OBJECT itself is validated
-    strictly: route must be exactly "chat" or "action", nothing coerced.
+    strictly: route must be registered, nothing coerced. Unknown routes use the action-biased heuristic.
     """
     try:
         start, end = raw.find("{"), raw.rfind("}")
@@ -476,10 +485,10 @@ def parse_route_reply(raw: str, user_text: str) -> RouteDecision:
             raise ValueError("no JSON object in router reply")
         data = json.loads(raw[start : end + 1])
         route = data["route"]
-        if route not in ("chat", "action"):
-            raise ValueError(f"bad route {route!r}")
+        if not isinstance(route, str) or route not in registered_routes:
+            raise ValueError("unregistered route")
         ack = str(data.get("ack") or "").strip()
-        if route == "action" and not ack:
+        if route != "chat" and not ack:
             # generated-ack contract broken; degrade the ack, keep the route
             ack = FALLBACK_ACK
         # tier is a hint (see module docstring): normalize, never reject — a
@@ -497,16 +506,32 @@ def parse_route_reply(raw: str, user_text: str) -> RouteDecision:
         )
     except Exception:
         log.warning("router reply unparseable: %.200r — using heuristic", raw)
-        return fallback_decision(user_text)
+        return fallback_decision(user_text, extra_predicates=extra_predicates)
 
 
-def build_router(model: BaseChatModel, soul: str) -> Callable[[str], RouteDecision]:
+def build_router(
+    model: BaseChatModel, soul: str, *, extra_routes: dict[str, str] | None = None,
+    extra_predicates: dict[str, Callable[[str], bool]] | None = None,
+) -> Callable[[str], RouteDecision]:
     """Wrap a chat model into the (text) -> RouteDecision seam service.py consumes.
 
     The soul rides in the system prompt so the generated acks sound like Aerys,
     not like a JSON classifier. Injectable model = offline tests use fakes.
     """
-    system = SystemMessage(content=f"{soul}\n\n{_ROUTER_INSTRUCTIONS}")
+    extra_routes = dict(extra_routes or {})
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]*", name) or name in ("chat", "action")
+           for name in extra_routes):
+        raise ValueError("extra routes must have distinct identifier names")
+    if set(extra_predicates or {}) - extra_routes.keys():
+        raise ValueError("predicates must name registered extra routes")
+    registered_routes = ("chat", "action", *extra_routes)
+    instructions = _ROUTER_INSTRUCTIONS
+    if extra_routes:
+        bullets = "\n".join(f'- "{name}": {description}' for name, description in extra_routes.items())
+        instructions = instructions.replace('- "chat": pure conversation', bullets + '\n- "chat": pure conversation')
+        instructions = instructions.replace('"route": "chat" or "action"',
+                                            '"route": ' + ' or '.join(json.dumps(name) for name in registered_routes))
+    system = SystemMessage(content=f"{soul}\n\n{instructions}")
 
     def route(text: str) -> RouteDecision:
         try:
@@ -514,15 +539,16 @@ def build_router(model: BaseChatModel, soul: str) -> Callable[[str], RouteDecisi
         except Exception:
             # a dead router must never take the turn down — fail to heuristic
             log.warning("router model call failed — using heuristic", exc_info=True)
-            return fallback_decision(text)
+            return fallback_decision(text, extra_predicates=extra_predicates)
         text_attr = getattr(reply, "text", None)
         raw = text_attr if isinstance(text_attr, str) else str(reply.content)
-        return parse_route_reply(raw, text)
+        return parse_route_reply(raw, text, registered_routes=registered_routes,
+                                 extra_predicates=extra_predicates)
 
     return route
 
 
-def router_for(settings, soul: str) -> Callable[[str], RouteDecision]:
+def router_for(settings, soul: str, *, extra_routes=None, extra_predicates=None) -> Callable[[str], RouteDecision]:
     """Build the real Haiku router from Settings (the --serve wiring).
 
     Always the API backend — the router is a metered call regardless of
@@ -541,4 +567,4 @@ def router_for(settings, soul: str) -> Callable[[str], RouteDecision]:
         timeout=10.0,        # slow router = fall back to heuristic, not a stall
         max_retries=1,
     )
-    return build_router(model, soul)
+    return build_router(model, soul, extra_routes=extra_routes, extra_predicates=extra_predicates)

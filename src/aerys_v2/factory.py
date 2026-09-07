@@ -886,6 +886,22 @@ def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
 RoomContextFn = Callable[[str, str], str]
 
 
+def memory_key_labeler_for(settings: Settings):
+    """Both bodies label remember writes with the extractor's shared contract."""
+    from aerys_v2.workers.extraction import LlmReply, key_label_for
+    from langchain_anthropic import ChatAnthropic
+
+    model = ChatAnthropic(model=settings.tier_fast_model,
+        api_key=settings.anthropic_api_key.get_secret_value(),
+        temperature=0, max_tokens=512, timeout=20, max_retries=0)
+
+    def llm(system, user):
+        reply = model.invoke([("system", system), ("human", user)])
+        return LlmReply(str(reply.content), reply.response_metadata.get("stop_reason") == "max_tokens")
+
+    return lambda fact: key_label_for(fact, llm=llm)
+
+
 def remember_writer_for(settings: Settings):
     """The house back end of the remember tool: triage_memory over the prod memories DB.
 
@@ -1453,6 +1469,7 @@ def build_action_graph(
     family_notes_fn=None,
     shared_surface_ids: dict | None = None,
     charter: str = SPECIALIST_CHARTER,
+    checkpointer=None,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1463,7 +1480,7 @@ def build_action_graph(
     act/tools hop is a super-step, so a confused model hits the wall instead of
     incinerating budget (the dormant turn_limit in Rails, now live).
 
-    No checkpointer on purpose — an action turn is a one-shot; the durable
+    By default there is no checkpointer — an action turn is a one-shot; the durable
     record is (a) the outbox row the tool wrote and (b) the final AIMessage
     that service.py appends to the MAIN thread's checkpointer.
     """
@@ -1567,7 +1584,7 @@ def build_action_graph(
     graph.add_edge(START, "act")
     graph.add_conditional_edges("act", after_act, {"tools": "tools", END: END})
     graph.add_edge("tools", "act")
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
@@ -1786,7 +1803,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
         if remember_writer is not None:
             from aerys_v2.tools.remember import build_remember_tool
 
-            tools.append(build_remember_tool(remember_writer))
+            tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings)))
 
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
