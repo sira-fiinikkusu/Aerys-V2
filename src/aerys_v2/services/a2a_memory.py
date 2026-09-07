@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Callable
 
 from aerys_v2.services.memory import embedding_to_pgvector, openrouter_embedder
+from aerys_v2.workers.extraction import test_shaped
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +124,8 @@ def a2a_memory_writer_for(
         if not str(thread_id).startswith("kael:"):
             return
         if not str(kael_text).strip() or not str(reply_text).strip():
+            return
+        if test_shaped(kael_text) or len(str(reply_text).split()) <= 3:
             return
         if synchronous:
             _write_now(thread_id, kael_text, reply_text)

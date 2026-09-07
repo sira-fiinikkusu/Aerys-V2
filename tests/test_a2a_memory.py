@@ -115,7 +115,7 @@ def test_kael_thread_inserts_compact_attributed_memory():
 def test_long_sides_are_clipped():
     log: list = []
     write = writer_with(log)
-    write("kael:checkin", "x" * 2000, "y" * 2000)
+    write("kael:checkin", "x" * 2000, "y " * 2000)
     content = log[0][1]["content"]
     # both sides clipped to ~420 + ellipsis; whole memory stays glanceable
     assert len(content) < 1000
@@ -129,7 +129,7 @@ def test_embed_failure_is_swallowed_and_writes_nothing():
         raise RuntimeError("embeddings endpoint down")
 
     write = writer_with(log, embed=boom)
-    write("kael:checkin", "ask", "reply")  # must not raise
+    write("kael:checkin", "the demo went well", "glad to hear it")  # must not raise
     assert log == []
 
 

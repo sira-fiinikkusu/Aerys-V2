@@ -360,7 +360,7 @@ def test_truncated_on_the_retry_also_holds_the_watermark():
     would-be empty treatment, or a truncated reply sneaks past the guard."""
     existing_wm = "2026-07-03 11:00:00+00"
     prod = FakeConn([("FROM n8n_chat_histories",
-                      [row(CHRIS, "hi", id="a", at=T0, raw="2026-07-03 12:00:00.1+00")])])
+                      [row(CHRIS, "I enjoy ceramics", id="a", at=T0, raw="2026-07-03 12:00:00.1+00")])])
     staging = FakeConn([("last_processed_at", [(existing_wm,)])])
     summary = run_extraction(prod, staging, FakeLlm([PROSE, cut_off("[{")]), fake_embedder)
 

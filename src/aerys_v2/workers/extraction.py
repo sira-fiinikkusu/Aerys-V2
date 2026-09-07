@@ -132,8 +132,7 @@ DEFAULT_LIMIT = 200      # rows per source per run (v1 LIMIT 200)
 LLM_MODEL = "anthropic/claude-haiku-4.5"   # v1's extraction model, via OpenRouter
 USER_TZ = ZoneInfo("America/New_York")     # batch-date fallback renders in owner tz
 
-# Ported VERBATIM from the "Build Extraction Request" Code node — this prompt is
-# the contract being shadow-diffed, so it must not drift from what prod runs.
+# Shared extraction and explicit-fact labeling contract.
 EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts. Return a JSON array only -- no preamble, no explanation.
 
 ## What to EXTRACT (must have lasting value):
@@ -150,6 +149,14 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Timestamps without facts: "it's late", "been a long day"
 - Questions, requests for information, and observations derived only from questions (never infer an answer)
 - Greetings and smalltalk: "hey", "what's up", "how are you"
+
+## Test-only observations (SKIP):
+- Testing, probing, or evaluating the assistant/system or its memory is not a memory about the person.
+- Reject observations whose only content is testing activity, even if phrased as an interest, decision, emotion, technical task, or preference: "Engaged in testing AI memory capabilities", "Conducting UAT with the assistant", "Completed memory testing phase", "Likes to test memory recall with specific items".
+- Operator health pings and remote body session notes about probe turns also belong to this SKIP class.
+- Omit these items, exactly as for question-derived items; return [] if no other facts remain. Do not emit a row describing the test or the decision to skip it.
+- Ordinary health/work facts involving tests are still facts. A work task such as "Running live verification of action graph" alone is test activity; retain only an independently stated person fact (such as their job or communication preference), not the testing summary.
+- An explicit request to remember a fact ("remember that...") is not a test; preserve the requested fact even if it mentions testing.
 
 ## Return format:
 [{"key_label":"category.attribute","value_text":"the fact itself, naturally phrased","context":"why/how this came up in conversation (1 sentence, optional for stable facts)","event_date":"when this happened, as an ABSOLUTE date computed from the conversation date (e.g. 'Feb 28' -- never 'last week' or 'tomorrow'; null if not stated)","privacy_level":"public|private","asserted_by":"self|third_party","confidence":0.0}]
@@ -429,6 +436,75 @@ def question_shaped(text: str | None) -> bool:
     return bool(text and (text.endswith("?") or _QUESTION.search(text)))
 
 
+_EXPLICIT_REMEMBER = re.compile(r"^(?:please\s+)?remember\s+that\b", re.I)
+_TEST_SOURCE = re.compile(
+    # a leading greeting and/or the assistant's name never hides a probe ("hey Aerys, without telling me…")
+    r"^(?:(?:hey|hi|hello|ok|okay|so|alright)[,!]?\s+)?(?:[\w' ]{1,24}?[,!]\s+)?"
+    r"(?:(?:can|could) you confirm (?:that )?you (?:know|remember)\b"
+    r"|do you (?:remember|recall|know) (?:what|my|the)\b"
+    r"|(?:memory|recall) test\b|testing (?:your|the) (?:memory|recall)\b"
+    r"|just (?:reply|say|answer) (?:yes or no|yes|no)\b"
+    r"|without telling me what it is\b|what do you (?:know|remember) about me\b)",
+    re.I,
+)
+_GREETINGS = frozenset("hey hi hello yo ping test".split())
+
+
+def test_shaped(text: str | None) -> bool:
+    """Recognize probe-purpose source turns, never an incidental 'test' word."""
+    text = re.sub(r"^\[Portable observation time: [^\]]+\]\s*", "", (text or "").strip())
+    text = " ".join(text.split())
+    if _EXPLICIT_REMEMBER.match(text):
+        return False
+    words = re.findall(r"\w+", text.casefold())
+    greeting = 0 < len(words) <= 3 and (
+        all(word in _GREETINGS for word in words) or words == ["hello", "world"]
+    )
+    return greeting or bool(_TEST_SOURCE.match(text))
+
+
+_TEST_WORD = re.compile(r"\b(?:test|testing|uat|probe|probing)\b", re.I)
+_TEST_SUBJECT = re.compile(
+    r"\b(?:assistant|system|ai|bot|chatbot|claude|chatgpt|memory|recall|action graph)\b", re.I,
+)
+_ASSISTANT_SUBJECT = re.compile(r"\b(?:assistant|ai|bot|chatbot|claude|chatgpt|action graph)\b", re.I)
+_OTHER_TEST_DOMAIN = re.compile(r"\b(?:blood|medical|clinical|cognitive|hardware|ram)\b", re.I)
+_GRAPH_VERIFICATION = re.compile(r"\b(?:live )?verification of (?:the )?action graph\b", re.I)
+_PERSON_FACT = re.compile(
+    r"^(?:(?:i|he|she|they|the user|user)\s+)?"
+    r"(?:works? as|owns?|lives? in|prefers?|likes?|has|have|is employed|am employed)\b", re.I,
+)
+
+
+def _test_only_observation(key: str | None, value: str) -> bool:
+    """Narrow backstop for model summaries of assistant testing, not all tests.
+
+    Underscores delimit words in labels (e.g. interest.ai_memory_testing).
+    A work label is no exemption for a pure assistant verification summary.
+    An independent person-fact clause may survive; the prompt asks the model
+    to extract that fact alone. Ambiguous prose remains the model's decision.
+    """
+    if (key or "").split(".", 1)[0] not in {
+        "decision", "interest", "emotional", "technical", "preference", "work", "event",
+    }:
+        return False
+    value = value.removeprefix(f"{key}: ")
+    text = f"{(key or '').replace('_', ' ')} {value}"
+    # 'Memory' and 'system' also describe clinical and hardware tests. Those
+    # are not assistant probes unless an assistant is actually the subject.
+    if _OTHER_TEST_DOMAIN.search(value) and not _ASSISTANT_SUBJECT.search(text):
+        return False
+    if not ((_TEST_WORD.search(text) and _TEST_SUBJECT.search(text)) or _GRAPH_VERIFICATION.search(value)):
+        return False
+    clauses = re.split(r"[.;\n]|\s+(?:and|but)\s+", value, flags=re.I)
+    return not any(
+        _PERSON_FACT.match(clause.strip()) and not (
+            _TEST_WORD.search(clause) or _GRAPH_VERIFICATION.search(clause)
+        )
+        for clause in clauses
+    )
+
+
 def canonical_key(key: str | None, value: str) -> str | None:
     # Normalize birth-date aliases, but retain an actual birthday celebration.
     if key in {"event.birthday", "basic.birthday", "basic.date_of_birth", "basic.dob"} and re.search(
@@ -522,6 +598,14 @@ def triage_memory(
 
     if question_shaped(value_text) or question_shaped(context) or question_shaped(source_text):
         log.warning("memory skipped: question-shaped observation")
+        return "skipped"
+    portable_session = "source:portable" in (category or []) and key_label.startswith("session.")
+    if (mined_from_turn or portable_session) and (
+        test_shaped(source_text or (value_text if portable_session else None))
+        or (not _EXPLICIT_REMEMBER.match((source_text or value_text).strip())
+            and _test_only_observation(key_label, content))
+    ):
+        log.warning("memory skipped: test-shaped observation")
         return "skipped"
     key_label = canonical_key(key_label, value_text)
 
@@ -732,6 +816,13 @@ def parse_observations(text: str) -> list[dict] | None:
         if any(question_shaped(obs.get(k)) for k in ("value_text", "source_text", "context")):
             log.warning("memory skipped: question-shaped observation")
             continue
+        source = obs.get("source_text") or obs.get("value_text") or ""
+        if test_shaped(source) or (
+            not _EXPLICIT_REMEMBER.match(source.strip())
+            and _test_only_observation(obs.get("key_label"), obs.get("value_text") or "")
+        ):
+            log.warning("memory skipped: test-shaped observation")
+            continue
         obs["key_label"] = canonical_key(obs.get("key_label"), obs.get("value_text") or "")
         result.append(obs)
     return result
@@ -845,9 +936,10 @@ def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | Non
     counts only the case where the watermark is genuinely stuck and someone
     should look.
     """
-    messages = [m for m in group['messages'] if not question_shaped(m['content'])]
+    messages = [m for m in group['messages']
+                if not question_shaped(m['content']) and not test_shaped(m['content'])]
     if len(messages) != len(group['messages']):
-        log.warning("memory skipped: question-shaped source message")
+        log.warning("memory skipped: question-shaped or test-shaped source message")
     if not messages:
         return [], LlmReply("[]", False)
     prompt = (
