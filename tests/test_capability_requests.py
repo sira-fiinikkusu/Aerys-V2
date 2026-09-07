@@ -184,6 +184,28 @@ def test_by_design_marker_beside_a_real_one_only_drops_itself():
     assert [s.fingerprint for s in sigs] == ["degraded::turn_failed"]
 
 
+def test_portable_provenance_markers_preserve_real_degradation():
+    sigs = classify_turn(turn(degraded=[
+        "portable_observed_at:2026-09-06T20:33:18.894946+00:00",
+        "portable_trust:owner",
+        "portable_untrusted",
+        "recursion_limit",
+    ]))
+    assert len(sigs) == 1
+    assert sigs[0].signal_kind == "degraded"
+    assert sigs[0].fingerprint == "degraded::recursion_limit"
+
+
+@pytest.mark.parametrize("marker", ["ha_portable_x", "Portable_untrusted"])
+def test_portable_provenance_prefix_is_case_sensitive_and_anchored(marker):
+    sigs = classify_turn(turn(degraded=[marker]))
+    assert [s.fingerprint for s in sigs] == [f"degraded::{marker}"]
+
+
+def test_portable_provenance_prefix_is_checked_after_strip():
+    assert classify_turn(turn(degraded=[" \tportable_trust:owner\n"])) == []
+
+
 def test_tool_failure_classifies_error():
     sigs = classify_turn(
         turn(tool_calls=[{"name": "search_web", "ok": False, "error_class": "timeout"}])

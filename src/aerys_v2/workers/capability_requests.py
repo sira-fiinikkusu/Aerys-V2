@@ -73,6 +73,10 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # They stay in v2_turns for misroute-rate auditing — they just aren't gaps.
 BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed"})
 
+# Remote body provenance markers carry origin metadata (trust, observed time,
+# admission verdict); this namespace never describes subsystem health.
+PROVENANCE_PREFIXES = ("portable_",)
+
 # required_tier is DERIVED from origin_class, never set independently — the fakeable
 # 'complaint' path always lands on the stricter gate. Kept as a table so the mapping
 # is one obvious place; GapSignal.required_tier reads it as a property so a signal's
@@ -193,7 +197,7 @@ def _error_signals(turn: dict) -> list[GapSignal]:
         if not isinstance(marker, str) or not marker.strip():
             continue
         m = marker.strip()
-        if m in BY_DESIGN_MARKERS:
+        if m in BY_DESIGN_MARKERS or m.startswith(PROVENANCE_PREFIXES):
             continue
         signals.append(
             GapSignal(
