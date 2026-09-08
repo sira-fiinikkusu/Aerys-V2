@@ -73,6 +73,13 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # They stay in v2_turns for misroute-rate auditing — they just aren't gaps.
 BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed"})
 
+# These channels are test rigs whose failures describe the harness, not a
+# missing capability. The skip lives in Python, NOT in the miner's SQL: an
+# excluded row still has to be READ so the watermark can move past it, or a
+# stretch of pure lab traffic would make the miner rescan the same window
+# forever (Gemini review, 2026-09-08).
+LAB_CHANNELS = frozenset({"bench"})
+
 # Remote body provenance markers carry origin metadata (trust, observed time,
 # admission verdict); this namespace never describes subsystem health.
 PROVENANCE_PREFIXES = ("portable_",)
@@ -271,6 +278,8 @@ def classify_turn(turn: dict) -> list[GapSignal]:
     (reply-phrase). The two detectors read DISJOINT columns, which is what makes a
     reply full of failure words but with clean structured fields classify as a
     complaint (stricter gate), never an error."""
+    if turn.get("channel") in LAB_CHANNELS:
+        return []
     return _error_signals(turn) + _complaint_signals(turn)
 
 

@@ -172,6 +172,44 @@ def test_degraded_marker_classifies_error():
     assert "ha_unreachable" in s.summary
 
 
+@pytest.mark.parametrize("channel", ["bench", "discord", None, "missing"])
+def test_lab_channel_excludes_both_structural_signals(channel):
+    t = turn(
+        channel=channel,
+        degraded=["recursion_limit"],
+        tool_calls=[{"name": "search_web", "ok": False, "error_class": "timeout"}],
+    )
+    if channel == "missing":
+        del t["channel"]
+    expected = [] if channel == "bench" else [
+        GapSignal("degraded", "error", "degraded::recursion_limit",
+                  "degraded subsystem marker: recursion_limit"),
+        GapSignal("tool_error", "error", "tool_error::search_web::timeout",
+                  "tool 'search_web' failed (timeout)"),
+    ]
+    assert classify_turn(t) == expected
+
+
+def test_lab_channel_excludes_complaints():
+    assert classify_turn(turn(channel="bench", raw_reply="I wish I could help.")) == []
+
+
+def test_lab_turn_returned_by_fetch_records_nothing_and_advances_watermark():
+    # The fake deliberately returns a lab row despite the SQL filter, exercising
+    # the Python guard and preserving progress through a signal-free turn.
+    conn = GapConn(turns=[turn_tuple(
+        channel="bench", degraded=["recursion_limit"],
+        tool_calls=[{"name": "search_web", "ok": False, "error_class": "timeout"}],
+        raw_reply="I wish I could help.",
+    )])
+    stats = run_gap_mining(conn, allowlist={turn()["person_id"]})
+    assert stats["signals"] == stats["errors"] == stats["complaints"] == 0
+    assert stats["processing_failures"] == 0
+    assert conn.examples == set()
+    assert conn.parents == {}
+    assert conn.saved_watermark == _raw(T0)
+
+
 def test_by_design_markers_are_not_gaps():
     # The return-loop's audit pair (chat_handoff / escalated_from_chat) is the
     # escalation feature working, not degradation — never mined (2026-07-21).
@@ -573,3 +611,12 @@ def test_format_active_gaps_all_terminal_reads_none():
 
 def test_terminal_statuses_are_exactly_the_closed_set():
     assert TERMINAL_STATUSES == {"built", "rejected", "wont_fix"}
+
+
+def test_lab_traffic_still_advances_the_watermark():
+    """The lab skip lives in Python, not in the SQL: a window of pure bench
+    traffic must be read and passed over, or the miner rescans it forever."""
+    import inspect
+    from aerys_v2.workers import capability_requests as module
+    assert 'lab_channels' not in module.MINER_SQL
+    assert 'LAB_CHANNELS' in inspect.getsource(module.classify_turn)
