@@ -1279,6 +1279,31 @@ LENS_SURFACE_OVERLAY = (
 )
 
 
+# The counterpart the text path never had. Her thread is PERSON-keyed, so voice,
+# glasses and typed turns share one history — and the voice branch styles only the
+# turn it is on. On a typed turn nothing was said at all, so the thread's own
+# precedent (replies full of [thoughtfully] and STT caution) was the only style
+# signal left, and she followed it. Live 2026-09-13 in #resonance: Chris typed
+# "Okay how about now" and got "[thoughtfully] Still not landing ... is the glasses
+# garbling again?" — an emotion tag and a mis-hearing excuse on a channel where he
+# typed every character. Same shape a week earlier in a Discord DM. So the text
+# branch speaks now: it names the surface, kills the excuse, and tells her the
+# earlier tags in her own history are history, not a house style.
+TYPED_SURFACE_STYLE = (
+    "\n\nThis is a TYPED conversation. Their words reach you exactly as they "
+    "wrote them — there is no speech-to-text anywhere in this path, so never "
+    "explain a surprising or garbled-looking line as a mis-hearing, a bad "
+    "transcript, or the glasses. If something reads oddly, it was typed that way, "
+    "and the room around it is usually what makes sense of it. Write plain prose: "
+    "no bracket emotion tags ([warmly], [thoughtfully]) — those are stage "
+    "directions for the speech engine, and a "
+    "reader just sees the brackets. Earlier replies in this thread may carry "
+    "them, because your conversation with this person runs on ONE thread across "
+    "voice, glasses and text. That is history from another surface, not a style "
+    "to copy here."
+)
+
+
 SPECIALIST_CHARTER = (
     "You are the tool specialist acting for Aerys, the household assistant — her "
     "hands, not her conversational voice. You get ONE job per turn: the user's "
@@ -1507,12 +1532,21 @@ def build_action_graph(
         # because on that path the ack was already spoken and no reply channel
         # exists for a question.
         spoken_ack = (config.get("configurable") or {}).get("spoken_ack")
+        # Read before the styling chain: the typed fence below must use the SAME
+        # voice test the chat node uses (is_voice_turn also honours a legacy
+        # 'voice:*' thread_id), or one mind styles a turn for speech while the
+        # other tells it there is no speech in the path.
+        thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         if spoken_ack:
             ack_block = f"\n\n{VOICE_ACK_OVERLAY.format(ack=spoken_ack)}"
         elif identity.get("voice"):
             # Voice-always-action banter branch: no ack was spoken (synchronous
             # single-reply turn) — style the reply for voice instead.
             ack_block = f"\n\n{VOICE_BANTER_OVERLAY}"
+        elif not is_voice_turn(identity, thread) and not is_lens_surface(identity):
+            # The typed counterpart, same reason as the chat node: this mind shares
+            # the same person-keyed thread, so it inherits the same voice precedent.
+            ack_block = TYPED_SURFACE_STYLE
         else:
             ack_block = ""
         # Lens surface rides on top of (and after) the voice styling so its
@@ -1550,7 +1584,6 @@ def build_action_graph(
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
-        thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         where_when = _where_when_line(thread, identity)
         # Family splice on the ACTION mind too (owner nit, 2026-08-05): voice and
         # glasses turns ALWAYS run this graph, and those are exactly the surfaces
@@ -2212,6 +2245,12 @@ def build_graph(
                 "honestly), and a clarifying question on a one-way voice channel "
                 "costs far more than a wrong-but-correctable guess."
             )
+        elif not is_lens_surface(identity):
+            # Every turn now says which KIND of surface it is. Saying nothing on the
+            # text path is what let the shared thread's voice styling bleed into
+            # Discord; the lens keeps its own overlay and is spoken into, so it is
+            # not typed either.
+            voice_style = TYPED_SURFACE_STYLE
         # Where + when — the text path had no clock (she couldn't say what day it
         # was) and no sense of which surface she's on. Both derived per turn: the
         # wall clock in Chris's timezone, and the channel from the thread key (the

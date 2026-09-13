@@ -10,7 +10,13 @@ import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage
 
-from aerys_v2.factory import FALLBACK_SOUL, _channel_phrase, build_graph, load_soul
+from aerys_v2.factory import (
+    FALLBACK_SOUL,
+    TYPED_SURFACE_STYLE,
+    _channel_phrase,
+    build_graph,
+    load_soul,
+)
 from aerys_v2.service import ask
 from aerys_v2.state import UNKNOWN_CALLER
 
@@ -89,7 +95,13 @@ def test_voice_threads_get_emotion_tag_instruction():
     ask(graph, "hi", identity=CHRIS, thread_id="voice:beta")
     ask(graph, "hi", identity=CHRIS, thread_id="t1")
     assert "[warmly]" in RecordingModel.seen[0]        # voice thread gets tags
-    assert "[warmly]" not in RecordingModel.seen[1]    # text thread stays clean
+    # The text turn keeps its token-level check, but run it on the prompt with the
+    # typed fence REMOVED: since 2026-09-13 that fence quotes "[warmly]" in order
+    # to forbid it, and a bare search would read the guard as the thing it guards
+    # against. Everything the old assertion caught is still caught here.
+    assert TYPED_SURFACE_STYLE.strip() in RecordingModel.seen[1]
+    assert "[warmly]" not in RecordingModel.seen[1].replace(TYPED_SURFACE_STYLE.strip(), "")
+    assert "VOICE conversation" not in RecordingModel.seen[1]
     assert all("memory is durable" in s for s in RecordingModel.seen)  # capability line everywhere
 
 
@@ -108,8 +120,14 @@ def test_person_keyed_voice_flag_gets_emotion_tags_and_stt_note():
     ask(graph, "hi", identity=CHRIS, thread_id="person:p1")         # same thread, text turn
     assert "[warmly]" in RecordingModel.seen[0]                     # emotion tags off the FLAG
     assert "speech-to-text" in RecordingModel.seen[0]              # STT-fallibility caution
-    assert "[warmly]" not in RecordingModel.seen[1]                # text turn stays clean
-    assert "speech-to-text" not in RecordingModel.seen[1]
+    # Same substitution as above: strip the typed fence (which quotes both
+    # "[warmly]" and "speech-to-text" to rule them out) and then run the original
+    # token checks against what is left.
+    assert TYPED_SURFACE_STYLE.strip() in RecordingModel.seen[1]
+    rest = RecordingModel.seen[1].replace(TYPED_SURFACE_STYLE.strip(), "")
+    assert "[warmly]" not in rest                                  # text turn stays clean
+    assert "speech-to-text" not in rest
+    assert "VOICE conversation" not in RecordingModel.seen[1]
 
 
 def test_person_keyed_voice_where_line_reports_voice():
