@@ -211,10 +211,10 @@ def main() -> None:
             # model needs is structurally required by Settings). None = ask()
             # runs chat-only, exactly as before tools existed.
             router = action_graph = guest_action_graph = None
-            stack = action_stack_for(settings, soul)
+            stack = action_stack_for(settings, soul, room_context_fn=room_context)
             if stack is not None:
                 router, action_graph = stack
-                guest_action_graph = guest_action_graph_for(settings, soul)
+                guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
                 log.info("action stack armed | ha=%s canary=[%s] media=%s",
                          settings.ha_base_url if settings.ha_token else "(off)",
                          settings.ha_canary_entities,
@@ -362,10 +362,10 @@ def main() -> None:
         # Panel-face seam: text turns move her desk face too (working/mood).
         face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
-        stack = action_stack_for(settings, soul)
+        stack = action_stack_for(settings, soul, room_context_fn=room_context)
         if stack is not None:
             router, action_graph = stack
-            guest_action_graph = guest_action_graph_for(settings, soul)
+            guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
         # aerys DB wired, a known platform account resolves to its real person_id
@@ -497,10 +497,10 @@ def main() -> None:
         # Panel-face seam: text turns move her desk face too (working/mood).
         face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
-        stack = action_stack_for(settings, soul)
+        stack = action_stack_for(settings, soul, room_context_fn=room_context)
         if stack is not None:
             router, action_graph = stack
-            guest_action_graph = guest_action_graph_for(settings, soul)
+            guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py), wired
         # exactly as --discord. With the aerys DB, a known Telegram account resolves

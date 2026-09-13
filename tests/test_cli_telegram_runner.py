@@ -61,7 +61,7 @@ def test_telegram_runner_wires_client(monkeypatch):
     monkeypatch.setattr(factory, "deep_gate_for", lambda s: "DEEPGATE")
     monkeypatch.setattr(factory, "turn_recorder_for", lambda s: "RECORDER")
     monkeypatch.setattr(factory, "action_allowlist_for", lambda s: "ALLOW")
-    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul: None)  # chat-only
+    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul, **kw: None)  # chat-only
     # Long-term memory context seam: a sentinel so the assertion proves the runner
     # calls context_fn_for(settings) and threads its result into build_graph — the
     # SAME memory wiring --serve has (text chats must recall memory too, not only voice).
@@ -186,7 +186,7 @@ def test_telegram_runner_resolver_is_cold_and_room_scoped(monkeypatch):
     monkeypatch.setattr(factory, "deep_gate_for", lambda s: None)
     monkeypatch.setattr(factory, "turn_recorder_for", lambda s: None)
     monkeypatch.setattr(factory, "action_allowlist_for", lambda s: None)
-    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul: None)
+    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul, **kw: None)
     monkeypatch.setattr(factory, "build_graph", lambda *a, **k: "GRAPH")
     monkeypatch.setattr(service, "ask", lambda *a, **k: "ok")
 

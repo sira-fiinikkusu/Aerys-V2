@@ -50,7 +50,7 @@ def test_discord_runner_wires_context_fn(monkeypatch):
     monkeypatch.setattr(factory, "deep_gate_for", lambda s: "DEEPGATE")
     monkeypatch.setattr(factory, "turn_recorder_for", lambda s: "RECORDER")
     monkeypatch.setattr(factory, "action_allowlist_for", lambda s: "ALLOW")
-    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul: None)  # chat-only
+    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul, **kw: None)  # chat-only
     # The seam under test: build_graph must receive context_fn_for(settings), the
     # SAME long-term memory wiring --serve has.
     monkeypatch.setattr(factory, "context_fn_for", lambda s: "CTXFN")
