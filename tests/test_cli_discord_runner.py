@@ -56,16 +56,18 @@ def test_discord_runner_wires_context_fn(monkeypatch):
     monkeypatch.setattr(factory, "context_fn_for", lambda s: "CTXFN")
     # Cross-surface continuity seams (track/memory-continuity) — wired like --serve.
     monkeypatch.setattr(factory, "room_context_fn_for", lambda s: "ROOMFN")
+    monkeypatch.setattr(factory, "portable_context_fn_for", lambda s: "PORTFN")
     monkeypatch.setattr(factory, "content_privacy_fn_for", lambda s: "CPFN")
 
     graph_calls = {}
 
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
-                         room_context_fn):
+                         room_context_fn, portable_context_fn):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
             room_context_fn=room_context_fn,
+            portable_context_fn=portable_context_fn,
         )
         return "GRAPH"
 
@@ -106,4 +108,5 @@ def test_discord_runner_wires_context_fn(monkeypatch):
         # The runner now wraps the turns reader in the live-channel one and
         # attaches it to the gateway; the fallback is still what it was given.
         "room_context_fn": LIVE_ROOM,
+        "portable_context_fn": "PORTFN",
     }

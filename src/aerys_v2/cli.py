@@ -147,6 +147,7 @@ def main() -> None:
             followup_router_for,
             gaps_reader_for,
             load_soul,
+            portable_context_fn_for,
             resolve_announce_entity,
             room_context_fn_for,
             satellite_map_from,
@@ -192,6 +193,9 @@ def main() -> None:
             # turn's fail-closed tag once a judge deems it general. Built ONCE (the
             # judge holds a model client) and reused per request.
             room_context = room_context_fn_for(settings)
+            # Board #12: her portable turns, read back into the house body, so
+            # "1 identity, 1 memory" holds in BOTH directions.
+            portable_context = portable_context_fn_for(settings)
             content_privacy = content_privacy_fn_for(settings)
             graph = build_graph(
                 build_model(settings),
@@ -202,6 +206,7 @@ def main() -> None:
                 context_fn=context_fn_for(settings),
                 tier_models=tier_models,
                 room_context_fn=room_context,
+                portable_context_fn=portable_context,
                 # Family splice (task #66): owner threads see Kael's
                 # family_visible notes; fn enforces the owner gate itself.
                 family_notes_fn=family_notes_fn_for(settings),
@@ -211,7 +216,9 @@ def main() -> None:
             # model needs is structurally required by Settings). None = ask()
             # runs chat-only, exactly as before tools existed.
             router = action_graph = guest_action_graph = None
-            stack = action_stack_for(settings, soul, room_context_fn=room_context)
+            stack = action_stack_for(
+                settings, soul, room_context_fn=room_context,
+                portable_context_fn=portable_context)
             if stack is not None:
                 router, action_graph = stack
                 guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
@@ -313,6 +320,7 @@ def main() -> None:
             context_fn_for,
             deep_gate_for,
             load_soul,
+            portable_context_fn_for,
             room_context_fn_for,
             tier_models_for,
             face_pusher_for,
@@ -345,6 +353,9 @@ def main() -> None:
         # the fallback for a hiccup or a closed loop. Attached to the client below,
         # because the graph needs the seam before the gateway exists.
         room_context = LiveRoomReader(fallback=room_context_fn_for(settings))
+        # Board #12: her portable turns, read back into the house body, so
+        # "1 identity, 1 memory" holds in BOTH directions.
+        portable_context = portable_context_fn_for(settings)
         content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
@@ -354,6 +365,7 @@ def main() -> None:
             context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
             room_context_fn=room_context,
+            portable_context_fn=portable_context,
         )
         deep_gate = deep_gate_for(settings)
         # v2_turns audit writer (migration 001) — the soak container's turns must
@@ -362,7 +374,9 @@ def main() -> None:
         # Panel-face seam: text turns move her desk face too (working/mood).
         face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
-        stack = action_stack_for(settings, soul, room_context_fn=room_context)
+        stack = action_stack_for(
+            settings, soul, room_context_fn=room_context,
+            portable_context_fn=portable_context)
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
@@ -456,6 +470,7 @@ def main() -> None:
             context_fn_for,
             deep_gate_for,
             load_soul,
+            portable_context_fn_for,
             room_context_fn_for,
             tier_models_for,
             face_pusher_for,
@@ -480,6 +495,9 @@ def main() -> None:
         # room block restores the shared-channel view, and the content-privacy judge
         # governs what DM content may carry into public.
         room_context = room_context_fn_for(settings)
+        # Board #12: her portable turns, read back into the house body, so
+        # "1 identity, 1 memory" holds in BOTH directions.
+        portable_context = portable_context_fn_for(settings)
         content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
@@ -489,6 +507,7 @@ def main() -> None:
             context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
             room_context_fn=room_context,
+            portable_context_fn=portable_context,
         )
         deep_gate = deep_gate_for(settings)
         # v2_turns audit writer (migration 001) — Telegram turns are audited too,
@@ -497,7 +516,9 @@ def main() -> None:
         # Panel-face seam: text turns move her desk face too (working/mood).
         face_push = face_pusher_for(settings)
         router = action_graph = guest_action_graph = None
-        stack = action_stack_for(settings, soul, room_context_fn=room_context)
+        stack = action_stack_for(
+            settings, soul, room_context_fn=room_context,
+            portable_context_fn=portable_context)
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)

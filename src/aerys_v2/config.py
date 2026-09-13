@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # v2_turns (database_url); None database_url = the feature is off. Only public
     # turns ever query it — DMs never do.
     room_context_limit: int = 50
+    # How many of HER portable turns the house body reads back (board #12). Chris,
+    # on the stick's side of the same seam: "just dont make it short like... 10 turns
+    # lmao". These are his own turns with her, not a whole room, so the count can be
+    # generous; the door's own ceiling for the mirror direction is 100.
+    portable_context_limit: int = 100
 
     # The owner's persons.id (UUID string). HTTP callers can't prove who they
     # are beyond the Bearer token, so when this is set, voice + /ask identities

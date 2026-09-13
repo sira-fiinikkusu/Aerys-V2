@@ -884,6 +884,10 @@ def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
 # Injectable exactly like context_fn — tests pass a lambda, --serve/--discord pass
 # the DB-backed builder from room_context_fn_for(), and None means the feature is OFF.
 RoomContextFn = Callable[[str, str], str]
+#: (person_id) -> a rendered block of what she said on her PORTABLE bodies, or ''.
+#: One argument, not two, because this seam is keyed on the PERSON and not on a
+#: room: her bodies are one identity, which is the whole point of it.
+PortableContextFn = Callable[[str], str]
 
 
 def memory_key_labeler_for(settings: Settings):
@@ -987,6 +991,48 @@ def room_context_fn_for(settings: Settings) -> RoomContextFn | None:
             return ""
 
     return room
+
+
+def portable_context_fn_for(settings: Settings) -> PortableContextFn | None:
+    """Wire the portable-turns seam from Settings — None when DB-less.
+
+    Reads HER portable turns back out of the brain's own aerys_v2 database, the same
+    one the door writes them into and the audit writer fills. Same shape as
+    room_context_fn_for right above: a fresh short READ-ONLY connection per call with
+    bounded blocking so a slow or dead NAS cannot hang a turn, and FAIL-OPEN — any DB
+    trouble logs and returns '', costing the block and never the reply. Boot
+    assertions already proved database_url points at aerys_v2, so this cannot read
+    prod `aerys`.
+    """
+    if settings.database_url is None:
+        return None
+    import psycopg
+
+    from aerys_v2.services.portable_context import (
+        PORTABLE_TURNS_SQL,
+        format_portable_context,
+    )
+
+    limit = settings.portable_context_limit
+
+    def portable(person_id: str) -> str:
+        try:
+            with psycopg.connect(
+                settings.database_url,
+                connect_timeout=5,
+                options="-c statement_timeout=5000",
+            ) as conn:
+                conn.read_only = True
+                rows = conn.execute(
+                    PORTABLE_TURNS_SQL,
+                    {"person_id": person_id, "limit": limit},
+                ).fetchall()
+            return format_portable_context(rows)
+        except Exception:
+            log.warning("portable-context read failed for %s — empty block", person_id, exc_info=True)
+            return ""
+
+    return portable
 
 
 # The content-privacy classifier seam: text -> 'public'|'private'. Used OFF the hot
@@ -1493,6 +1539,7 @@ def build_action_graph(
     overlay: str = ACTION_OVERLAY,
     family_notes_fn=None,
     room_context_fn: RoomContextFn | None = None,
+    portable_context_fn: PortableContextFn | None = None,
     shared_surface_ids: dict | None = None,
     charter: str = SPECIALIST_CHARTER,
     checkpointer=None,
@@ -1600,8 +1647,11 @@ def build_action_graph(
         # The room, on her HANDS as well as her voice: a job asked in a shared
         # channel needs the channel as much as a conversation does.
         room = room_block(identity, room_context_fn)
+        # Her other bodies, on her hands too: a job asked here may continue one begun
+        # on the stick, and "do the thing I asked you about last night" has to resolve.
+        portable = portable_block(identity, portable_context_fn)
         system = SystemMessage(
-            content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{room}{family}{shared}"
+            content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}"
         )
         prompt = [system, *state["messages"]]
         if isinstance(api_model_with_tools, ToolModelPair):
@@ -1925,7 +1975,7 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
     return "\n\n".join(parts)
 
 
-def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None) -> tuple | None:
+def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None, portable_context_fn: PortableContextFn | None = None) -> tuple | None:
     """Wire the whole TOOLS block from Settings: (router, action_graph), or None.
 
     Arms when ANY tool half exists — ha_token (home) and/or embeddings_api_key
@@ -1955,6 +2005,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         shared_surface_ids=_parse_shared_surfaces(settings.ha_shared_surface_ids),
         # Same room seam the chat graph gets, same public-only fence inside it.
         room_context_fn=room_context_fn,
+        portable_context_fn=portable_context_fn,
     )
     return router_for(settings, soul), action_graph
 
@@ -1979,6 +2030,10 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
         # A guest in a PUBLIC room holds that room too; the fence inside the helper
         # is what keeps a DM out, not the caller's status.
         room_context_fn=room_context_fn,
+        # NO portable seam here, on purpose. The portable block is keyed on the
+        # caller's own person_id, so a guest would only ever read their OWN portable
+        # turns — and a guest has no portable body. Wiring it would buy nothing and
+        # would put a person-keyed read on the path used by people she does not know.
     )
 
 
@@ -2005,6 +2060,59 @@ def _channel_phrase(thread: str, room: str = "") -> str:
     if thread.startswith("telegram"):
         return "a private Telegram chat"
     return "a direct message"
+
+
+def portable_block(identity: dict, portable_context_fn) -> str:
+    """What she said on her PORTABLE bodies, for this turn — or ''.
+
+    PRIVATE turns only — a DM, Telegram, voice, the glasses. Not a room.
+
+    My first cut injected it everywhere, reasoning that his own words on his own body
+    are his to carry anywhere. That holds for a DM and fails for a room. He talks to
+    the stick alone, so its history is private-origin, and this codebase already fails
+    closed in that exact direction: a DM turn's content only reaches a public room
+    once the content-privacy judge has called it general (redact_private_history and
+    content_privacy_fn). Injecting the stick verbatim into a public guild turn walked
+    around that fence, and the failure mode is her answering "what did I tell you
+    earlier?" with other people in the channel. Caught in adversarial review,
+    2026-09-13, before it shipped.
+
+    Fail closed: only an explicit 'private' passes. Every real surface pins one — the
+    resolver derives it from the room, voice and HTTP pin 'private' — so an absent
+    context means a caller this was not built for.
+
+    Consequence worth knowing: this and room_block are now mutually exclusive, so a
+    turn makes at most one of the two database reads, not both.
+
+    The person filter in the query bounds it further, so a second person's stick can
+    never appear in his prompt.
+
+    Board #12, and the last piece of what he called "1 identity, 1 memory": his
+    counting test already carries across Discord DM, public Discord, Telegram and
+    voice, because those all share one person-keyed thread. The stick runs its own,
+    and already reads this direction (aerys-portable c380e15 / 2275471). This is the
+    return leg.
+
+    Degrade-safe like every other context seam: no reader, no person, an empty read
+    or a raise all contribute nothing rather than costing the turn.
+    """
+    if portable_context_fn is None:
+        return ""
+    if identity.get("privacy_context") != "private":
+        return ""
+    person = str(identity.get("user_id") or "")
+    if not person:
+        return ""
+    try:
+        block = portable_context_fn(person)
+    except Exception:
+        log.warning("portable_context_fn raised; continuing without it", exc_info=True)
+        return ""
+    if not block:
+        return ""
+    from aerys_v2.services.portable_context import HEADING
+
+    return f"\n\n{HEADING}\n{block}"
 
 
 def room_block(identity: dict, room_context_fn) -> str:
@@ -2144,6 +2252,7 @@ def build_graph(
     context_fn: ContextFn | None = None,
     tier_models: dict[str, BaseChatModel] | None = None,
     room_context_fn: RoomContextFn | None = None,
+    portable_context_fn: PortableContextFn | None = None,
     family_notes_fn=None,
 ) -> object:
     """START → chat → END, checkpointed.
@@ -2319,6 +2428,10 @@ def build_graph(
         # this splices in the last N turns of THIS channel (everyone). Degrade-safe:
         # a raise or empty block just omits it, mirroring the context_fn fence.
         room = room_block(identity, room_context_fn) if public else ""
+        # Her portable bodies (board #12). PRIVATE turns only, and the helper owns
+        # that fence: the stick is where he talks to her alone, so its history must
+        # not walk into a room around the content-privacy judge.
+        portable = portable_block(identity, portable_context_fn)
         # Family splice (task #66, owner-designed): on the OWNER's threads only,
         # the last few family_visible notes from Kael's line — what he chose to
         # share with the household. The fn itself enforces the owner gate and
@@ -2335,7 +2448,7 @@ def build_graph(
         if is_lens_surface(identity):
             voice_style = f"{voice_style}\n\n{LENS_SURFACE_OVERLAY}"
         system = SystemMessage(
-            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{family}{voice_style}"
+            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{voice_style}"
         )
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
         # just ask() — belt-and-braces: whatever garbage reaches config,
