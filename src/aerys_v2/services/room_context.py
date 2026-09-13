@@ -32,6 +32,10 @@ from __future__ import annotations
 # caller passing the right channel.
 _PUBLIC_CHANNELS = ("guild", "telegram_group")
 
+#: The genuinely public surfaces. The SQL whitelists these and the live reader
+#: checks the same set, so no private-origin room can be read either way.
+PUBLIC_CHANNELS = frozenset({'guild', 'telegram_group'})
+
 ROOM_TURNS_SQL = """\
 SELECT display_name, person_id, input_text, emitted_reply, created_at
 FROM v2_turns
@@ -62,6 +66,20 @@ def _speaker(display_name: object, person_id: object) -> str:
         return name
     pid = str(person_id or "").strip()
     return f"person·{pid[-4:]}" if pid else "Someone"
+
+
+def format_room_messages(rows) -> str:
+    """(speaker, text) pairs, chronological, -> the same block shape as turns.
+
+    Used by the live-channel reader: these are plain messages, most of which were
+    never addressed to her, so there is no reply half to render.
+    """
+    lines = []
+    for display_name, text in rows:
+        clipped = _clip(text)
+        if clipped:
+            lines.append(f"{_speaker(display_name, None)}: {clipped}")
+    return "\n".join(lines)
 
 
 def format_room_context(rows: list) -> str:

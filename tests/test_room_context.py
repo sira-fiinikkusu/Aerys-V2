@@ -193,3 +193,117 @@ def test_room_context_fn_for_arming():
         types.SimpleNamespace(database_url="postgresql://x@nas/aerys_v2", room_context_limit=50)
     )
     assert callable(fn)
+
+
+# --- Reading the actual room, not only the turns she answered (2026-09-13) -------
+#
+# Chris sent two messages seconds apart in #resonance; only the one that mentioned
+# her became a turn, so when he asked what he had said before it, she answered from
+# the last thing they had genuinely exchanged and looked absent-minded while being
+# accurate. Room context read v2_turns, so it could only ever show her the part of
+# the room that was addressed to her.
+#
+# The fix reads the channel from Discord when she is summoned. Proportionate: she
+# looks at the room when spoken to, rather than recording everyone always.
+
+import pytest
+
+from aerys_v2.services.live_room import LiveRoomReader
+from aerys_v2.services.room_context import format_room_messages
+
+
+def test_messages_render_like_turns_do():
+    block = format_room_messages([
+        ('Chris', 'I just noticed this. I believe she decided not to answer'),
+        ('Chris', 'Right ?'),
+    ])
+    assert block.splitlines() == [
+        'Chris: I just noticed this. I believe she decided not to answer',
+        'Chris: Right ?',
+    ]
+    assert format_room_messages([]) == ''
+    assert format_room_messages([('Chris', '   ')]) == '', 'nothing to say is no line'
+    long = format_room_messages([('Chris', 'x' * 500)])
+    assert len(long) < 350 and long.endswith('…'), 'one wall of text cannot own the block'
+    assert format_room_messages([(None, 'hi')]).startswith('Someone: ')
+
+
+class FakeChannel:
+    def __init__(self, messages):
+        self._messages = messages
+
+    def history(self, limit=None, before=None):  # pragma: no cover - async generator
+        async def gen():
+            for m in self._messages[:limit]:
+                yield m
+        return gen()
+
+
+def message(name, content):
+    from types import SimpleNamespace
+    return SimpleNamespace(author=SimpleNamespace(display_name=name), content=content)
+
+
+class FakeClient:
+    def __init__(self, channel):
+        import asyncio
+        self.loop = asyncio.new_event_loop()
+        self._channel = channel
+
+    def get_channel(self, channel_id):
+        return self._channel
+
+
+def read_in_thread(reader, channel_id='1', channel='guild'):
+    """The graph calls the reader from ask()'s executor thread, never the loop."""
+    import threading
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(block=reader(channel_id, channel)))
+    thread.start()
+    thread.join(timeout=10)
+    return result.get('block')
+
+
+def run_loop(client):
+    import threading
+    thread = threading.Thread(target=client.loop.run_forever, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_the_live_reader_shows_messages_nobody_addressed_to_her():
+    # newest first, as discord.py history() yields
+    channel = FakeChannel([message('Chris', 'Right ?'),
+                           message('Chris', 'I just noticed this'),
+                           message('Stratus', 'unrelated chatter')])
+    client = FakeClient(channel)
+    run_loop(client)
+    reader = LiveRoomReader(limit=10)
+    reader.attach(client)
+    try:
+        block = read_in_thread(reader)
+    finally:
+        client.loop.call_soon_threadsafe(client.loop.stop)
+    assert block.splitlines() == ['Stratus: unrelated chatter',
+                                  'Chris: I just noticed this',
+                                  'Chris: Right ?'], 'chronological, everything said'
+
+
+def test_a_private_surface_is_never_read_and_a_failure_falls_back():
+    reader = LiveRoomReader(fallback=lambda cid, ch: 'FROM THE TURNS TABLE', limit=5)
+    assert reader('1', 'dm') == '', 'DMs are never a room'
+    # No client attached yet (startup order) -> the fallback answers.
+    assert read_in_thread(reader) == 'FROM THE TURNS TABLE'
+
+    class Broken:
+        loop = None
+
+        def get_channel(self, channel_id):
+            raise RuntimeError('gateway hiccup')
+
+    reader.attach(Broken())
+    assert read_in_thread(reader) == 'FROM THE TURNS TABLE', 'a hiccup degrades, never raises'
+
+
+def test_no_fallback_and_no_client_is_simply_empty():
+    assert read_in_thread(LiveRoomReader()) == ''

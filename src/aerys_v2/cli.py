@@ -319,6 +319,7 @@ def main() -> None:
             turn_recorder_for,
         )
         from aerys_v2.service import ask
+        from aerys_v2.services.live_room import LiveRoomReader
         from aerys_v2.transports.discord_gateway import AerysDiscordClient
 
         # [01-05 PHOENIX] same degrade-safe arming as --serve: the soak
@@ -337,7 +338,13 @@ def main() -> None:
         # threads make Discord DM + guild + Telegram one thread per person; the room
         # block restores the shared-channel view, and the content-privacy judge lets
         # general DM content carry into public rooms while private content never does.
-        room_context = room_context_fn_for(settings)
+        # The room she is standing in, read from Discord when she is summoned rather
+        # than from the turns she happened to answer: a message nobody addressed to
+        # her never became a turn, so the turns-table reader could only ever show her
+        # her own conversations (2026-09-13, #resonance). The turns reader stays as
+        # the fallback for a hiccup or a closed loop. Attached to the client below,
+        # because the graph needs the seam before the gateway exists.
+        room_context = LiveRoomReader(fallback=room_context_fn_for(settings))
         content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
@@ -419,6 +426,9 @@ def main() -> None:
                 telegram_notify=telegram_notify_for(settings),
             )
             log.info("slash commands attached (guild %s)", settings.discord_guild_id)
+        # The room reader needs the gateway that did not exist when the graph was
+        # built; until this line it quietly answers from the turns table.
+        room_context.attach(client)
         client.run(settings.discord_bot_token.get_secret_value())
         sys.exit(0)
 

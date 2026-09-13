@@ -19,6 +19,21 @@ import aerys_v2.service as service
 import aerys_v2.transports.discord_gateway as dg
 
 
+
+
+class _LiveRoom:
+    """Matches any LiveRoomReader that fell back to the turns reader we injected."""
+
+    def __eq__(self, other):
+        from aerys_v2.services.live_room import LiveRoomReader
+        return isinstance(other, LiveRoomReader) and other._fallback == 'ROOMFN'
+
+    def __repr__(self):
+        return '<a LiveRoomReader wrapping ROOMFN>'
+
+
+LIVE_ROOM = _LiveRoom()
+
 def test_discord_runner_wires_context_fn(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "dev-bot-token")
@@ -88,5 +103,7 @@ def test_discord_runner_wires_context_fn(monkeypatch):
         "checkpointer": "CP",
         "context_fn": "CTXFN",
         "tier_models": None,
-        "room_context_fn": "ROOMFN",
+        # The runner now wraps the turns reader in the live-channel one and
+        # attaches it to the gateway; the fallback is still what it was given.
+        "room_context_fn": LIVE_ROOM,
     }
