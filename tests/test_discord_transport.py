@@ -138,3 +138,57 @@ def test_normalize_bare_mention_is_empty():
         self_id=SELF_ID,
     )
     assert ev.text == ""
+
+
+# --- A dropped summon must not be silent (2026-09-13) ---------------------------
+#
+# Stratus asked her a direct question in a guild channel on 09-11 and nothing
+# happened: no turn, no reply, no refusal, and nothing in any log, because
+# on_message returns on a False gate without a word. Chris read the silence as her
+# choosing not to answer. Nobody could tell him otherwise, which is the actual
+# defect: the drop is correct sometimes, invisible always.
+
+def test_drop_reason_names_why_each_message_was_not_handled():
+    from aerys_v2.transports.discord_gateway import drop_reason
+    assert drop_reason(**gate_args()) is None, 'a handled message has no reason'
+    assert drop_reason(**gate_args(author_is_self=True)) == 'self'
+    assert drop_reason(**gate_args(author_is_bot=True)) == 'bot'
+    assert drop_reason(**gate_args(guild_id=7)) == 'other-guild'
+    assert drop_reason(**gate_args(allowed_channel_ids=frozenset({5}))) == 'channel-not-allowed'
+    assert drop_reason(**gate_args(mentions_me=False)) == 'no-mention'
+    assert drop_reason(**gate_args(is_dm=True, mentions_me=False)) is None, 'a DM needs no mention'
+
+
+def test_a_message_that_names_her_without_a_real_mention_is_flagged_loudly():
+    """The likeliest cause of a vanished summon: the name typed, not the mention picked."""
+    from aerys_v2.transports.discord_gateway import looks_like_a_summon
+    assert looks_like_a_summon('Aerys - tell me what changed this month', names=('aerys',))
+    assert looks_like_a_summon('hey AERYS you around?', names=('aerys',))
+    assert looks_like_a_summon('@Aerys - Resonant Span', names=('aerys', 'resonant span'))
+    assert not looks_like_a_summon('the barometric pressure is falling', names=('aerys',))
+    assert not looks_like_a_summon('', names=('aerys',))
+
+
+def gate_args(**overrides):
+    base = dict(
+        author_is_self=False,
+        author_is_bot=False,
+        is_dm=False,
+        guild_id=42,
+        allowed_guild_id=42,
+        channel_id=1,
+        allowed_channel_ids=frozenset(),
+        mentions_me=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_the_gate_and_the_reason_never_disagree():
+    from aerys_v2.transports.discord_gateway import drop_reason
+    for overrides in ({}, {'author_is_self': True}, {'author_is_bot': True},
+                      {'guild_id': 7}, {'allowed_channel_ids': frozenset({5})},
+                      {'mentions_me': False}, {'is_dm': True, 'mentions_me': False},
+                      {'is_dm': True, 'author_is_bot': True}):
+        args = gate_args(**overrides)
+        assert should_handle(**args) is (drop_reason(**args) is None), overrides

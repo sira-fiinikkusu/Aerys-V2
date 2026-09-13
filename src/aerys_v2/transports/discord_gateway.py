@@ -104,6 +104,50 @@ def should_handle(
     return mentions_me
 
 
+def drop_reason(
+    *,
+    author_is_self: bool,
+    author_is_bot: bool,
+    is_dm: bool,
+    guild_id: int | None,
+    allowed_guild_id: int | None,
+    channel_id: int,
+    allowed_channel_ids: frozenset[int],
+    mentions_me: bool,
+) -> str | None:
+    """Why this message was not handled, or None when it was. Same rules as
+    should_handle, kept in step by a test, so a drop can be SAID rather than
+    only done.
+
+    On 2026-09-11 someone asked her a direct question in a guild channel and
+    nothing happened: no turn, no reply, no log line, because on_message returns
+    on a False gate without a word. Chris reasonably read the silence as her
+    declining. Dropping is often right; dropping invisibly never is.
+    """
+    if author_is_self:
+        return 'self'
+    if author_is_bot:
+        return 'bot'
+    if is_dm:
+        return None
+    if allowed_guild_id is None or guild_id != allowed_guild_id:
+        return 'other-guild'
+    if allowed_channel_ids and channel_id not in allowed_channel_ids:
+        return 'channel-not-allowed'
+    return None if mentions_me else 'no-mention'
+
+
+def looks_like_a_summon(text: str, *, names: tuple[str, ...]) -> bool:
+    """Does this text name her, even though Discord sent us no mention?
+
+    The likeliest cause of a vanished summon is a name typed by hand instead of
+    picked from autocomplete: it reads as a mention to a human and arrives as
+    plain text to us. Worth one loud log line so the next one is diagnosable.
+    """
+    lowered = (text or '').casefold()
+    return any(name.casefold() in lowered for name in names if name)
+
+
 def normalize(message: object, *, self_id: int) -> NormalizedEvent:
     """Map a discord.py Message to the neutral event (pure — fakes in tests).
 
@@ -176,7 +220,7 @@ class AerysDiscordClient(discord.Client):
         print(f"gateway up as {self.user} (guild={self._guild_id})")
 
     async def on_message(self, message: discord.Message) -> None:  # pragma: no cover - live only
-        if not should_handle(
+        gate = dict(
             author_is_self=(message.author.id == self.user.id),
             author_is_bot=message.author.bot,
             is_dm=message.guild is None,
@@ -185,7 +229,23 @@ class AerysDiscordClient(discord.Client):
             channel_id=message.channel.id,
             allowed_channel_ids=self._channel_ids,
             mentions_me=self.user in message.mentions,
-        ):
+        )
+        reason = drop_reason(**gate)
+        if reason is not None:
+            # Say every drop. 'self' and 'bot' are constant background, so they stay
+            # at debug; anything else in her own guild is a human she did not answer.
+            names = tuple(n for n in (getattr(self.user, 'name', ''),
+                                      getattr(self.user, 'display_name', '')) if n)
+            named = looks_like_a_summon(getattr(message, 'content', ''), names=names)
+            log.log(
+                logging.INFO if (reason not in ('self', 'bot') or named) else logging.DEBUG,
+                'discord: dropped a message (%s)%s from %s in channel %s',
+                reason,
+                ' THAT NAMES HER — a summon Discord did not mark as a mention' if named
+                and reason == 'no-mention' else '',
+                getattr(message.author, 'id', '?'),
+                message.channel.id,
+            )
             return
         event = normalize(message, self_id=self.user.id)
         identity: Identity = self._resolve(event)
