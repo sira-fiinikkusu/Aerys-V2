@@ -137,7 +137,8 @@ class FakeConn:
         self.statements.append(sql)
         if 'FROM v2_turns' in sql and 'room_context' in sql:
             rows = [(t['id'], t['channel'], t.get('display_name'),
-                     t.get('emitted_reply'), t.get('room_context')) for t in self.turns]
+                     t.get('emitted_reply'), t.get('room_context'),
+                     t.get('created_at')) for t in self.turns]
         elif 'portable_held' in sql:
             rows = [(h['id'], h['reason']) for h in self.held]
         elif 'FROM memories' in sql:
@@ -193,3 +194,20 @@ def test_it_only_ever_reads():
     assert conn.statements, 'it did run something'
     for sql in conn.statements:
         assert sql.lstrip().upper().startswith('SELECT'), sql
+
+
+def test_a_failure_says_WHEN_the_newest_offender_was():
+    """Without a date every morning reads the same whether the bug is live or was
+    fixed yesterday. The first real run proved it: all three failures were rows from
+    before that morning's fixes and nothing on screen said so."""
+    from datetime import datetime
+
+    when = datetime(2026, 9, 14, 10, 13)
+    result = signals.room_on_public_turns([
+        {'id': 7, 'channel': 'guild', 'room_context': None, 'created_at': when}])
+    assert result.failed and '09-14 10:13' in result.detail, result.detail
+
+
+def test_undated_rows_simply_omit_the_when():
+    result = signals.room_on_public_turns([{'id': 7, 'channel': 'guild', 'room_context': None}])
+    assert result.failed and 'newest' not in result.detail

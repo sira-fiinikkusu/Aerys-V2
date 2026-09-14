@@ -56,6 +56,24 @@ class Signal:
         return self.status == FAIL
 
 
+def newest_when(rows) -> str:
+    """' (newest 09-14 10:13)' for a set of offending rows, or '' when undated.
+
+    Without this every morning's report reads the same whether the bug is live or was
+    fixed yesterday, and a report he has to go and date himself is one he stops
+    reading. The first real run made the point: all three failures were rows from
+    BEFORE the fixes landed that morning, and nothing on screen said so.
+    """
+    stamps = [r.get('created_at') for r in rows if isinstance(r, dict) and r.get('created_at')]
+    if not stamps:
+        return ''
+    newest = max(stamps)
+    try:
+        return f" (newest {newest:%m-%d %H:%M})"
+    except (TypeError, ValueError):
+        return f' (newest {newest})'
+
+
 def _result(name, offenders, checked, *, ok_detail, bad_detail):
     if not checked:
         return Signal(name, SKIP, 'nothing to check in this window', 0)
@@ -74,7 +92,8 @@ def room_on_public_turns(turns) -> Signal:
         'room_on_public_turns', missing, len(public),
         ok_detail='every public turn carried its room',
         bad_detail=lambda bad: f"{len(bad)} public turn(s) carried no room: "
-                               + ', '.join(str(t.get('id')) for t in bad[:5]))
+                               + ', '.join(str(t.get('id')) for t in bad[:5])
+                               + newest_when(bad))
 
 
 def owner_named_in_room(turns, *, aliases) -> Signal:
@@ -92,13 +111,14 @@ def owner_named_in_room(turns, *, aliases) -> Signal:
     for turn in with_room:
         for alias in aliases:
             if re.search(rf'(?:^|\n)\s*{re.escape(alias)}\s*:', turn['room_context']):
-                offenders.append((turn.get('id'), alias))
+                offenders.append((turn.get('id'), alias, turn.get('created_at')))
                 break
     return _result(
         'owner_named_in_room', offenders, len(with_room),
         ok_detail='his room lines carry his own name',
         bad_detail=lambda bad: 'his display name appears unresolved in the room on turn(s) '
-                               + ', '.join(f'{i} (as {a})' for i, a in bad[:5]))
+                               + ', '.join(f'{i} (as {a})' for i, a, _ in bad[:5])
+                               + newest_when([{'created_at': w} for *_, w in bad if w]))
 
 
 def memory_not_truncated(memories) -> Signal:
@@ -120,7 +140,8 @@ def typed_replies_untagged(turns) -> Signal:
         'typed_replies_untagged', tagged, len(typed),
         ok_detail='no typed reply carried a spoken-surface tag',
         bad_detail=lambda bad: f"{len(bad)} typed repl(y/ies) carried an emotion tag: "
-                               + ', '.join(str(t.get('id')) for t in bad[:5]))
+                               + ', '.join(str(t.get('id')) for t in bad[:5])
+                               + newest_when(bad))
 
 
 def quarantine_not_noisy(held) -> Signal:
@@ -166,7 +187,7 @@ def format_report(results) -> str:
 # ── reading the traffic (SELECT only; the worker holds a read-only connection) ──
 
 WINDOW_TURNS_SQL = """\
-SELECT id, channel, display_name, emitted_reply, room_context
+SELECT id, channel, display_name, emitted_reply, room_context, created_at
 FROM v2_turns
 WHERE created_at > now() - %(window)s::interval
 """
@@ -207,7 +228,8 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
     the turns and the quarantine live in the brain's own — the same split every other
     worker here observes.
     """
-    turns = [dict(zip(('id', 'channel', 'display_name', 'emitted_reply', 'room_context'), row))
+    turns = [dict(zip(('id', 'channel', 'display_name', 'emitted_reply', 'room_context',
+                      'created_at'), row))
              for row in turns_conn.execute(WINDOW_TURNS_SQL, {'window': window}).fetchall()]
     held = [dict(zip(('id', 'reason'), row))
             for row in turns_conn.execute(HELD_SQL).fetchall()]
