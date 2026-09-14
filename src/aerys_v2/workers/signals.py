@@ -69,8 +69,15 @@ def newest_when(rows) -> str:
         return ''
     newest = max(stamps)
     try:
-        return f" (newest {newest:%m-%d %H:%M})"
-    except (TypeError, ValueError):
+        # HIS clock. Postgres hands back UTC, he reads Eastern, and a report that
+        # makes him do the arithmetic to answer "is this live or was it fixed this
+        # morning" is the confusion this timestamp exists to remove.
+        from ..factory import EASTERN
+
+        if getattr(newest, 'tzinfo', None) is not None:
+            newest = newest.astimezone(EASTERN)
+        return f" (newest {newest:%m-%d %H:%M} ET)"
+    except (TypeError, ValueError, ImportError):
         return f' (newest {newest})'
 
 

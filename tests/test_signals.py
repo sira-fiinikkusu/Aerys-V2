@@ -208,6 +208,18 @@ def test_a_failure_says_WHEN_the_newest_offender_was():
     assert result.failed and '09-14 10:13' in result.detail, result.detail
 
 
+def test_the_time_is_shown_in_HIS_clock_not_the_database_s():
+    """Postgres hands back UTC and he reads Eastern. Making him do the arithmetic to
+    answer "is this live or did I fix it this morning" is the confusion the timestamp
+    exists to remove."""
+    from datetime import datetime, timezone
+
+    utc_noon = datetime(2026, 9, 14, 16, 13, tzinfo=timezone.utc)   # 12:13 ET
+    result = signals.room_on_public_turns([
+        {'id': 7, 'channel': 'guild', 'room_context': None, 'created_at': utc_noon}])
+    assert '12:13 ET' in result.detail, result.detail
+
+
 def test_undated_rows_simply_omit_the_when():
     result = signals.room_on_public_turns([{'id': 7, 'channel': 'guild', 'room_context': None}])
     assert result.failed and 'newest' not in result.detail
