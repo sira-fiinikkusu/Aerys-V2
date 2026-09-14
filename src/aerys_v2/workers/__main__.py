@@ -5,6 +5,8 @@ Subcommands:
   gaps-mine  [--once]           — capability-request miner (self-iteration, Phase A)
   email-watch [--once]          — her-inbox arrival pings (n8n 05-03 Gmail Trigger, IMAP rebuild)
   gaps       [--status] [--limit] — the owner READ path for mined gaps (/gaps)
+  signals    [--window] [--quiet] — invariants over real traffic; the checks that
+                                    would have caught the week of 2026-09-13
 
 n8n mapping: the Schedule Trigger node. `--once` is a manual "Execute Workflow"
 click (one pass, exit code says whether anything landed); without it, APScheduler
@@ -372,6 +374,51 @@ def _gaps_read_main(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
+    """`signals [--window] [--quiet]` — invariants over the traffic that happened.
+
+    READ-ONLY, by design and by connection. It plants nothing: a plant-and-ask probe
+    has to write a synthetic turn into his thread and junk into her memory, so testing
+    the real path would mean polluting it. Exit 1 when a signal fails, so a scheduler
+    or a cron can treat this like any other check.
+    """
+    if not settings.database_url:
+        print("signals needs: DATABASE_URL", file=sys.stderr)
+        return 2
+    try:
+        run_boot_assertions(settings)
+    except BootConfigError as e:
+        print(f"signals refusing to start: {e}", file=sys.stderr)
+        return 2
+    import psycopg
+
+    from ..factory import owner_room_names_for
+    from .signals import format_report, run_signals, should_speak
+
+    # The names his own account answers to on a platform. If a room line carries one
+    # of these as a speaker, identity resolution was bypassed somewhere.
+    aliases = args.alias or []
+
+    with psycopg.connect(settings.database_url) as turns_conn:
+        turns_conn.read_only = True
+        memories_conn = None
+        try:
+            if settings.memories_database_url:
+                memories_conn = psycopg.connect(settings.memories_database_url)
+                memories_conn.read_only = True
+            results = run_signals(
+                turns_conn=turns_conn, memories_conn=memories_conn,
+                person_id=settings.owner_person_id, aliases=aliases, window=args.window)
+        finally:
+            if memories_conn is not None:
+                memories_conn.close()
+
+    report = format_report(results)
+    if should_speak(results) or not args.quiet:
+        print(report)
+    return 1 if should_speak(results) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="python -m aerys_v2.workers")
@@ -404,6 +451,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     gaps.add_argument("--limit", type=int, default=50, help="max rows (default 50)")
 
+    signals = sub.add_parser(
+        "signals", help="check invariants over recent real traffic (read-only)")
+    signals.add_argument("--window", default="24 hours",
+                         help="how far back to look, as a Postgres interval (default 24 hours)")
+    signals.add_argument("--alias", action="append", default=None,
+                         help="a display name his own account answers to (repeatable); "
+                              "a room line speaking as one means identity resolution was skipped")
+    signals.add_argument("--quiet", action="store_true",
+                         help="print only when something failed — a green run says nothing")
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -415,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
         return _email_watch_main(settings, args)
     if args.worker == "gaps":
         return _gaps_read_main(settings, args)
+    if args.worker == "signals":
+        return _signals_main(settings, args)
     return 2  # unreachable: subparsers is required=True
 
 
