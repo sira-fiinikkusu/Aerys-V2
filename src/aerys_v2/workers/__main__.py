@@ -7,6 +7,7 @@ Subcommands:
   gaps       [--status] [--limit] — the owner READ path for mined gaps (/gaps)
   signals    [--window] [--quiet] — invariants over real traffic; the checks that
                                     would have caught the week of 2026-09-13
+  gap-board                       — publish her own filed gaps to the shared board
 
 n8n mapping: the Schedule Trigger node. `--once` is a manual "Execute Workflow"
 click (one pass, exit code says whether anything landed); without it, APScheduler
@@ -419,6 +420,38 @@ def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
     return 1 if should_speak(results) else 0
 
 
+def _gap_board_main(settings: Settings, args: argparse.Namespace) -> int:
+    """`gap-board [--once]` — put her unpublished open gaps on the shared board.
+
+    The table stays the source of truth; this is the pass that makes a gap WORKABLE
+    by putting it where comments, labels and closes happen. Idempotent by the
+    board_issue column (migration 011), bounded per run, private repo only, and
+    anything credential-shaped is held back rather than redacted and sent.
+    """
+    if not settings.database_url:
+        print("gap-board needs: DATABASE_URL", file=sys.stderr)
+        return 2
+    if not (settings.board_repo and settings.board_token):
+        print("gap-board needs: BOARD_REPO and BOARD_TOKEN (her GitHub identity)",
+              file=sys.stderr)
+        return 2
+    try:
+        run_boot_assertions(settings)
+    except BootConfigError as e:
+        print(f"gap-board refusing to start: {e}", file=sys.stderr)
+        return 2
+    import psycopg
+
+    from .gap_board import GitHubBoard, run_publish
+
+    board = GitHubBoard(repo=settings.board_repo, token=settings.board_token,
+                        private=True)
+    with psycopg.connect(settings.database_url) as conn:
+        filed = run_publish(conn, board=board)
+    print(f"filed {filed} gap(s) on {settings.board_repo}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="python -m aerys_v2.workers")
@@ -461,6 +494,10 @@ def main(argv: list[str] | None = None) -> int:
     signals.add_argument("--quiet", action="store_true",
                          help="print only when something failed — a green run says nothing")
 
+    sub.add_parser(
+        "gap-board",
+        help="put her unpublished open gaps on the shared board (private repo only)")
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -474,6 +511,8 @@ def main(argv: list[str] | None = None) -> int:
         return _gaps_read_main(settings, args)
     if args.worker == "signals":
         return _signals_main(settings, args)
+    if args.worker == "gap-board":
+        return _gap_board_main(settings, args)
     return 2  # unreachable: subparsers is required=True
 
 

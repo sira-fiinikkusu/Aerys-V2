@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     # anonymous "http-caller" bucket that matches nothing in the database.
     owner_person_id: str | None = None
 
+    # ---- HER BOARD ------------------------------------------------------------
+    # Her own GitHub identity (aerys-resonantspan), used to put the gaps she files
+    # on the board Chris and Kael actually work from. PRIVATE repo only — her gap
+    # text is model-authored and the publisher refuses a public one outright.
+    # Unset = the publisher does not run and nothing changes.
+    board_repo: str | None = None
+    board_token: str | None = None
+
     # Additional person_ids (CSV) granted ACTION/house-control access beyond the
     # owner. The owner is ALWAYS included implicitly (factory.action_allowlist_for).
     # Extending access = add a person_id here, no code change — this is where
