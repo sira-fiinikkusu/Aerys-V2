@@ -993,6 +993,47 @@ def room_context_fn_for(settings: Settings) -> RoomContextFn | None:
     return room
 
 
+#: Every account the owner speaks from on a platform, mapped to the name the rest of
+#: her context already calls him. Read ONCE at startup.
+OWNER_ROOM_NAMES_SQL = """\
+SELECT pi.platform_user_id, p.display_name
+FROM platform_identities pi
+JOIN persons p ON p.id = pi.person_id
+WHERE pi.platform = %(platform)s AND pi.person_id = %(person_id)s::uuid
+"""
+
+
+def owner_room_names_for(settings: Settings, platform: str = "discord") -> dict:
+    """{platform_user_id: canonical name} for the owner, or {} when unknowable.
+
+    The live room read is the one path that bypasses identity resolution: it shows
+    whatever the platform shows. So his own un-addressed messages arrived labelled
+    with his DISCORD name while his turns carried his canonical one, and on
+    2026-09-14 she told him "the word came from Sira, not from you" — Sira being him.
+
+    Resolved once here rather than per message, because a room read is thirty messages
+    and this must not become thirty queries. Fail-open: no database, no owner
+    configured, or a sick NAS all yield {} and the room simply reads as it did before.
+    """
+    if settings.memories_database_url is None or not settings.owner_person_id:
+        return {}
+    import psycopg
+
+    try:
+        with psycopg.connect(settings.memories_database_url, connect_timeout=5,
+                             options="-c statement_timeout=5000") as conn:
+            conn.read_only = True
+            rows = conn.execute(
+                OWNER_ROOM_NAMES_SQL,
+                {"platform": platform, "person_id": str(settings.owner_person_id)},
+            ).fetchall()
+    except Exception:
+        log.warning("owner room names unavailable; the room will use platform names",
+                    exc_info=True)
+        return {}
+    return {str(user_id): name for user_id, name in rows if user_id and name}
+
+
 def portable_context_fn_for(settings: Settings) -> PortableContextFn | None:
     """Wire the portable-turns seam from Settings — None when DB-less.
 

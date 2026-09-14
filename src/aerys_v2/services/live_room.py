@@ -41,10 +41,20 @@ class LiveRoomReader:
     """
 
     def __init__(self, fallback: Callable[[str, str], str] | None = None, *,
-                 limit: int = DEFAULT_LIMIT, timeout_s: float = DEFAULT_TIMEOUT_S):
+                 limit: int = DEFAULT_LIMIT, timeout_s: float = DEFAULT_TIMEOUT_S,
+                 speaker_names: dict | None = None):
         self._fallback = fallback
         self._limit = limit
         self._timeout_s = timeout_s
+        # {platform_user_id: canonical name}. The turns table already carries the
+        # resolved name, so a TURN of his says "Chris"; the live room read is the one
+        # path that bypasses identity resolution and shows whatever Discord shows.
+        # On 2026-09-14 that had her tell him "the word came from Sira, not from you"
+        # — Sira being his own Discord display name. Resolved ONCE at startup rather
+        # than per message: a room read is thirty messages and must not become thirty
+        # queries. Keyed on the ACCOUNT ID, never the display name, because a display
+        # name is not an identity and anyone can set theirs to his.
+        self._speaker_names = dict(speaker_names or {})
         self._client = None
 
     def attach(self, client) -> None:
@@ -84,6 +94,7 @@ class LiveRoomReader:
         async for message in channel.history(limit=self._limit):
             author = getattr(message, 'author', None)
             name = getattr(author, 'display_name', None) or getattr(author, 'name', None)
-            rows.append((name, getattr(message, 'content', '')))
+            known = self._speaker_names.get(str(getattr(author, 'id', '')))
+            rows.append((known or name, getattr(message, 'content', '')))
         rows.reverse()  # history yields newest first; the block reads chronologically
         return rows

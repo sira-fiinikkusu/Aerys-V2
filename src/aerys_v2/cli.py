@@ -320,6 +320,7 @@ def main() -> None:
             context_fn_for,
             deep_gate_for,
             load_soul,
+            owner_room_names_for,
             portable_context_fn_for,
             room_context_fn_for,
             tier_models_for,
@@ -352,7 +353,10 @@ def main() -> None:
         # her own conversations (2026-09-13, #resonance). The turns reader stays as
         # the fallback for a hiccup or a closed loop. Attached to the client below,
         # because the graph needs the seam before the gateway exists.
-        room_context = LiveRoomReader(fallback=room_context_fn_for(settings))
+        # His own un-addressed messages must read as HIM, not as his Discord handle:
+        # the live read is the one path that skips identity resolution (2026-09-14).
+        room_context = LiveRoomReader(fallback=room_context_fn_for(settings),
+                                      speaker_names=owner_room_names_for(settings))
         # Board #12: her portable turns, read back into the house body, so
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
