@@ -111,3 +111,24 @@ def test_a_multibyte_fact_is_measured_the_same_way_as_any_other():
     assert len(fact) <= FACT_LIMIT, 'precondition: under the limit in characters'
     assert call(obj, fact).startswith("Kept:")
     assert written[0]["fact"] == fact, 'stored whole, not re-encoded or clipped'
+
+
+def test_the_turns_query_carries_a_valid_python_string():
+    """A stray invalid escape survives by accident until it does not.
+
+    `~ '^\\d{4}-...'` sat inside a plain (non-raw) triple-quoted string in
+    workers/extraction.py. Python passes an unknown escape through unchanged, so the
+    SQL was always right, but 3.12 warns and a later Python makes it an error — and
+    the stick's runtime is 3.12, so the warning was printing on every import there.
+    Doubling the backslashes keeps the SQL byte-identical and the source valid.
+    """
+    import py_compile
+    import warnings
+
+    from aerys_v2.workers.extraction import V2_TURNS_SQL
+
+    assert r'^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}' in V2_TURNS_SQL, 'Postgres sees the same pattern'
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', SyntaxWarning)
+        py_compile.compile(
+            __import__('aerys_v2.workers.extraction', fromlist=['x']).__file__, doraise=True)

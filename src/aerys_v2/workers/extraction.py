@@ -261,7 +261,10 @@ SELECT
          FROM jsonb_array_elements_text(t.degraded) marker
         WHERE marker LIKE 'portable_observed_at:%%'
           -- shape-check before the cast: a malformed marker must never crash the loop
-          AND substring(marker from 22) ~ '^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}'
+          -- Backslashes DOUBLED: this is a plain (non-raw) Python string, so \d
+          -- is an invalid escape. 3.12 warns on it and a later Python makes it
+          -- an error; it survived only because an unknown escape passes through.
+          AND substring(marker from 22) ~ '^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}'
         LIMIT 1), t.created_at)
     ELSE t.created_at END AS created_at,
   t.created_at::text AS created_at_raw,
