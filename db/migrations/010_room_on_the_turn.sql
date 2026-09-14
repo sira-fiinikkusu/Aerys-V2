@@ -1,0 +1,30 @@
+-- 010: keep the room she was standing in ON the turn she answered (board #17).
+-- Runs against the aerys_v2 database (NAS Postgres), same as 001 and 005.
+--
+-- WHY: his own words already cross to her portable bodies — the house thread is
+-- person-keyed, so a public Discord message of his is already in the stick's window.
+-- What is missing is the room AROUND him. When a line of his was a reply to someone
+-- else, the stick sees his line without the thing it answered.
+--
+-- WHY NOT A RECORDER: the obvious fix is to log every public channel message into a
+-- table. Chris raised the three objections against that himself and they are right —
+-- it creates a retention obligation over other people's messages, the channel is
+-- usually quiet so it buys little, and a busy one would drown the rolling hundred the
+-- stick pulls. It is also the option turned down on 2026-09-13 when fixing room
+-- blindness: she reads the channel live when summoned and stores nothing.
+--
+-- So this keeps what she ALREADY READ, with the turn she read it for. Retention is a
+-- few lines hanging off rows already kept under the existing policy; a quiet channel
+-- costs nothing; and a busy channel cannot grow this, because the row count is set by
+-- how often HE speaks to her, not by how loud the room is.
+--
+-- NULL on every private surface and whenever there was nothing to read, so an absent
+-- room stays distinguishable from an empty one. Bounded in the writer
+-- (turns.ROOM_CONTEXT_LIMIT), newest lines kept, since the lines nearest his message
+-- are the ones that explain it.
+--
+-- Append-only and nullable: existing rows and every existing reader name their columns
+-- explicitly, so nothing already running has to change. The audit recorder is
+-- FAIL-OPEN, so a brain that has not run this migration logs the insert failure and
+-- keeps serving — a missing migration costs audit rows, never a live turn.
+ALTER TABLE v2_turns ADD COLUMN IF NOT EXISTS room_context TEXT;

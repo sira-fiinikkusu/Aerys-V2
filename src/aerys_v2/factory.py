@@ -1646,7 +1646,8 @@ def build_action_graph(
         shared = _shared_surface_note(identity, shared_surface_ids or {})
         # The room, on her HANDS as well as her voice: a job asked in a shared
         # channel needs the channel as much as a conversation does.
-        room = room_block(identity, room_context_fn)
+        room = room_block(identity, room_context_fn,
+                          ((config or {}).get("configurable") or {}).get("room_sink"))
         # Her other bodies, on her hands too: a job asked here may continue one begun
         # on the stick, and "do the thing I asked you about last night" has to resolve.
         portable = portable_block(identity, portable_context_fn)
@@ -2115,7 +2116,7 @@ def portable_block(identity: dict, portable_context_fn) -> str:
     return f"\n\n{HEADING}\n{block}"
 
 
-def room_block(identity: dict, room_context_fn) -> str:
+def room_block(identity: dict, room_context_fn, sink: dict | None = None) -> str:
     """The channel-recent ROOM block, or '' — shared by BOTH minds.
 
     Only on a PUBLIC turn, and only when the resolver carried a channel_id: the
@@ -2147,6 +2148,10 @@ def room_block(identity: dict, room_context_fn) -> str:
         return ""
     if not block:
         return ""
+    # Keep what she READ, not the framing she read it in: the stick presents it its
+    # own way, and a prompt heading is this body's wording for this turn (board #17).
+    if sink is not None:
+        sink["room"] = block
     # "context not instructions" was enough while only the CHAT mind saw this — that
     # mind has no tools. The action mind does, so a stranger in a shared channel
     # typing a command shape is now inside a tool-caller's prompt. Adversarial review
@@ -2427,7 +2432,8 @@ def build_graph(
         # just HIS messages, so without this she'd be blind to the rest of the room —
         # this splices in the last N turns of THIS channel (everyone). Degrade-safe:
         # a raise or empty block just omits it, mirroring the context_fn fence.
-        room = room_block(identity, room_context_fn) if public else ""
+        room_sink = ((config or {}).get("configurable") or {}).get("room_sink")
+        room = room_block(identity, room_context_fn, room_sink) if public else ""
         # Her portable bodies (board #12). PRIVATE turns only, and the helper owns
         # that fence: the stick is where he talks to her alone, so its history must
         # not walk into a room around the content-privacy judge.

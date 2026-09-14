@@ -44,14 +44,22 @@ INSERT INTO v2_turns
   (thread_id, channel, channel_id, display_name, person_id, platform_identity,
    resolver_version, classifier_intent, tier, tier_override_source, guard_verdict,
    input_text, raw_reply, emitted_reply, tool_calls, degraded,
-   error, latency_ms, trace_id)
+   error, latency_ms, trace_id, room_context)
 VALUES
   (%(thread_id)s, %(channel)s, %(channel_id)s, %(display_name)s, %(person_id)s::uuid,
    %(platform_identity)s, %(resolver_version)s, %(classifier_intent)s, %(tier)s,
    %(tier_override_source)s, %(guard_verdict)s, %(input_text)s, %(raw_reply)s,
    %(emitted_reply)s, %(tool_calls)s::jsonb, %(degraded)s::jsonb, %(error)s,
-   %(latency_ms)s, %(trace_id)s)
+   %(latency_ms)s, %(trace_id)s, %(room_context)s)
 """
+
+
+#: Characters of surrounding room kept on one turn (migration 010, board #17).
+#: This is what she READ at summon time, not a recording of the channel, so the
+#: bound is per-turn and small: enough to make his reply make sense later, never
+#: enough for one turn to carry a wall. A busy channel cannot grow this, because
+#: the number of rows is set by how often HE speaks to her.
+ROOM_CONTEXT_LIMIT = 4000
 
 
 def _is_uuid(value: object) -> bool:
@@ -288,6 +296,27 @@ def degraded_markers(messages: list, extra: list[str] | None = None) -> list[str
     return ordered
 
 
+def _clip_room(room: str | None) -> str | None:
+    """Bound the room kept on a turn, keeping the NEWEST lines.
+
+    The lines immediately before his message are the ones that make it make sense;
+    the top of the window is the least useful part to keep. Returns None for nothing,
+    so the column distinguishes "no room" from "an empty room".
+    """
+    text = (room or "").strip()
+    if not text:
+        return None
+    if len(text) <= ROOM_CONTEXT_LIMIT:
+        return text
+    cut = text[-ROOM_CONTEXT_LIMIT:]
+    # Cut on a LINE boundary, not mid-word. A character cut leaves the first line a
+    # fragment — "...rly worth a look" — which reads on the stick as though someone
+    # said that, and half a sentence attributed to a real person is worse than one
+    # line fewer (adversarial review, 2026-09-14).
+    newline = cut.find("\n")
+    return (cut[newline + 1:] if newline != -1 else cut).lstrip() or None
+
+
 def build_turn_row(
     *,
     thread_id: str,
@@ -305,6 +334,7 @@ def build_turn_row(
     error: str | None = None,
     trace_id: str | None = None,
     resolver_version: str | None = None,
+    room_context: str | None = None,
 ) -> dict:
     """Assemble the parameter dict for INSERT_TURN_SQL — the whole row, one place.
 
@@ -361,6 +391,12 @@ def build_turn_row(
         "degraded": json.dumps(degraded_markers(messages, extra_degraded)),
         "error": error,
         "latency_ms": latency_ms,
+        # migration 010 (board #17): the room she was standing in when she answered
+        # THIS turn — other people's lines, as she read them live at summon time.
+        # NULL on every private surface and whenever there was nothing to read, so
+        # an absent room is absent rather than empty. Bounded; oldest goes first,
+        # because the lines nearest his message are the ones that explain it.
+        "room_context": _clip_room(room_context),
         "trace_id": trace_id,
     }
 

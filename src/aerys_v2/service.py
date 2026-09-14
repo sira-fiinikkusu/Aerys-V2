@@ -133,6 +133,8 @@ def _fire_turn_record(
             input_text=text,
             latency_ms=latency_ms,
             trace_id=current_trace_id(),
+            # What the graph read of the room for THIS turn, via the shared holder.
+            room_context=(configurable.get("room_sink") or {}).get("room"),
             **fields,  # type: ignore[arg-type]
         )
     except Exception:
@@ -935,8 +937,16 @@ def ask(
             router = None
 
     started = time.monotonic()
+    # A mutable holder the graph writes into and the audit row reads back out.
+    # `configurable` is the existing per-call channel and LangGraph copies it
+    # SHALLOWLY, so this inner dict is the same object on both sides — which is the
+    # whole point: the room she was standing in has to reach the turn she answered
+    # without the value making a second trip to Discord (board #17). It never enters
+    # checkpointed state, exactly like identity.
+    room_sink: dict = {}
     config = {
-        "configurable": {"thread_id": thread_id, "identity": identity},
+        "configurable": {"thread_id": thread_id, "identity": identity,
+                         "room_sink": room_sink},
         "recursion_limit": rails.turn_limit,
     }
 
