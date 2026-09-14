@@ -63,10 +63,24 @@ _FIELD_CAP = 300
 NAME_CHARS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.'
 NAME_MAX = 32
 
+# The first version of this heading said only "this did not happen on this body, so
+# never report it as something you did here" — and it cost the feature its point. Live
+# 2026-09-13 20:00: the block was in her prompt, correct, ending with the stick's own
+# count, and she answered from her Discord thread alone anyway. The heading collapsed
+# two different things into one prohibition. What was SAID is one continuous
+# conversation and has to carry; what was DONE happened on a particular machine and
+# must not be claimed by another. Chris's whole constraint is the first of those, and
+# I had written a sentence that argued against it. Both are stated now, separately.
 HEADING = (
-    "[Recently between Chris and you on one of your PORTABLE bodies — the stick, or "
-    "another machine you run from. This did not happen on this body, so never report "
-    "it as something you did here; it is the same conversation, continued elsewhere.]"
+    "[Recently between Chris and you on your PORTABLE bodies — the stick, or another "
+    "machine you run from. This is the SAME continuous conversation you are having "
+    "with him now, not a separate one. Everything in it is yours here: a fact he told "
+    "you, a count you were keeping, a decision, a promise, a thing he asked for — all "
+    "of it carries into this turn and you answer from it as your own memory, without "
+    "remarking on where it came from unless he asks. The ONE thing that does not "
+    "carry is the doing: work performed on another body happened there, so never say "
+    "you ran, wrote, read or changed something on THIS machine when the line below "
+    "shows it happened elsewhere.]"
 )
 
 

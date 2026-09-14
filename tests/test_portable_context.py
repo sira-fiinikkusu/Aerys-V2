@@ -190,3 +190,29 @@ def test_no_reader_means_the_prompt_is_unchanged():
     with_fn = _chat_system(DM, lambda _p: "")
     without = _chat_system(DM, None)
     assert with_fn == without
+
+
+def test_the_heading_carries_the_CONVERSATION_and_fences_only_the_DOING():
+    """Live 2026-09-13, 20:00. She had the stick's count in her prompt and ignored it.
+
+    The block was correct and present — verified at character 4,583 of the real DM
+    prompt on the rack, ending with "[stick] Aerys: 3" — and she still answered 3 in
+    Discord from her own thread alone. The wording was mine. My first heading said
+    "this did not happen on this body, so never report it as something you did here",
+    which collapses two different things into one prohibition:
+
+      - what was SAID, which is one continuous conversation and must carry;
+      - what was DONE, which happened on a particular machine and must not be
+        claimed by another.
+
+    Chris's whole design constraint is the first one ("1 identity, 1 memory"), and my
+    heading argued against it. So the heading now says both, separately.
+    """
+    from aerys_v2.services.portable_context import HEADING
+    low = HEADING.lower()
+    # continuity, stated as an instruction and not merely implied
+    assert "same" in low or "one continuous" in low or "continuous conversation" in low
+    assert any(w in low for w in ("carries", "carry", "yours here"))
+    # and the narrow fence that survives: the DOING stays where it happened
+    assert any(w in low for w in ("ran", "wrote", "did", "performed"))
+    assert "this machine" in low or "this body" in low
