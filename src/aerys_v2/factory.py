@@ -17,7 +17,7 @@ import anthropic
 import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -1343,10 +1343,9 @@ TYPED_SURFACE_STYLE = (
     "and the room around it is usually what makes sense of it. Write plain prose: "
     "no bracket emotion tags ([warmly], [thoughtfully]) — those are stage "
     "directions for the speech engine, and a "
-    "reader just sees the brackets. Earlier replies in this thread may carry "
-    "them, because your conversation with this person runs on ONE thread across "
-    "voice, glasses and text. That is history from another surface, not a style "
-    "to copy here."
+    "reader just sees the brackets. This holds wherever a tag came from, including "
+    "your own earlier typed replies — it is about the surface you are on now, not "
+    "about where the habit started."
 )
 
 
@@ -2116,6 +2115,50 @@ def portable_block(identity: dict, portable_context_fn) -> str:
     return f"\n\n{HEADING}\n{block}"
 
 
+def _untag_own_replies(messages):
+    """Prior assistant replies with voice-only emotion tags removed.
+
+    Only her own messages, and only the closed list of real tags — his "[July]" stays
+    his. Returns the same list when there is nothing to do, so the usual turn pays
+    nothing for this.
+    """
+    from aerys_v2.service import strip_emotion_tags
+
+    def _clean(content):
+        """A string, or the text blocks inside a multimodal list. Anything else is
+        returned untouched — an image block has no tags to strip, and a shape we do
+        not recognise is a shape we do not rewrite."""
+        if isinstance(content, str):
+            return strip_emotion_tags(content) if "[" in content else content
+        if isinstance(content, list):
+            blocks, moved = [], False
+            for block in content:
+                text = block.get("text") if isinstance(block, dict) else None
+                if isinstance(text, str) and "[" in text:
+                    stripped = strip_emotion_tags(text)
+                    if stripped != text:
+                        blocks.append({**block, "text": stripped})
+                        moved = True
+                        continue
+                blocks.append(block)
+            return blocks if moved else content
+        return content
+
+    out, changed = [], False
+    for message in messages:
+        if isinstance(message, AIMessage):
+            content = getattr(message, "content", None)
+            cleaned = _clean(content)
+            if cleaned is not content and cleaned != content:
+                # model_copy keeps the id, the tool_calls and every other field: only
+                # the text she is shown changes, and only in this prompt.
+                out.append(message.model_copy(update={"content": cleaned}))
+                changed = True
+                continue
+        out.append(message)
+    return out if changed else messages
+
+
 def room_block(identity: dict, room_context_fn, sink: dict | None = None) -> str:
     """The channel-recent ROOM block, or '' — shared by BOTH minds.
 
@@ -2310,6 +2353,17 @@ def build_graph(
             from aerys_v2.services.content_privacy import redact_private_history
 
             messages = redact_private_history(messages)
+        # Her own replies, as the READER saw them. Tags are stripped at the door for a
+        # screen but the message she keeps is what the model produced, so a typed
+        # thread fills with tagged replies and she imitates herself — measured after
+        # the fence shipped: one typed turn in fourteen still carried one, and it was
+        # a nine-character turn where the precedent was most of what there was to go
+        # on. Telling her not to copy a pattern is weaker than not showing her one.
+        # The checkpoint keeps the literal record; this is only what she is SHOWN,
+        # the same seam that already redacts private history above.
+        if not is_voice_turn(identity,
+                             ((config or {}).get("configurable") or {}).get("thread_id", "")):
+            messages = _untag_own_replies(messages)
         # Capability overlay, anti-UNDERclaim direction: the soul was written for a
         # brain that couldn't see its own memory. This one can — telling her stops
         # replies like "that won't survive this session" (heard live, voice, 7/3).
