@@ -261,9 +261,11 @@ SELECT
          FROM jsonb_array_elements_text(t.degraded) marker
         WHERE marker LIKE 'portable_observed_at:%%'
           -- shape-check before the cast: a malformed marker must never crash the loop
-          -- Backslashes DOUBLED: this is a plain (non-raw) Python string, so \d
-          -- is an invalid escape. 3.12 warns on it and a later Python makes it
-          -- an error; it survived only because an unknown escape passes through.
+          -- Backslashes are DOUBLED below because this is a plain (non-raw)
+          -- Python string, where a lone backslash before d is an invalid escape.
+          -- 3.12 warns and a later Python errors; it survived this long only
+          -- because Python passes an unknown escape through unchanged. (This
+          -- comment lives inside the string too, so it must not contain one.)
           AND substring(marker from 22) ~ '^\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}'
         LIMIT 1), t.created_at)
     ELSE t.created_at END AS created_at,
@@ -428,15 +430,44 @@ def values_similar(a: str, b: str, *, threshold: float = VALUE_SIMILARITY_THRESH
 
 # Keep this gate independent of the extraction model's phrasing. Log only the
 # verdict, never the testimony. Source questions are filtered before LLM calls too.
-_QUESTION = re.compile(
-    r"^(?:what|which|who|where|when|why|how|do|does|did|is|are|can|could|would|will|should)\b", re.I,
+# A yes/no question opens with the auxiliary itself — "do you know my birthday",
+# "is the pool guy coming". No declarative sentence does that, so the opening word
+# alone is enough here.
+#: EXACTLY the auxiliaries the original rule carried, and no more. Memory values are
+#: often declarative FRAGMENTS with the subject elided — "Has two dogs", "Was born on
+#: April 12, 1990" — and those are facts, not questions. Widening this list to was /
+#: were / has / had swept them up; existing tests caught it immediately. If a yes/no
+#: question opening with one of those ever needs catching, it needs a real subject
+#: check, not a longer list.
+_YES_NO = re.compile(
+    r"^(?:do|does|did|is|are|can|could|would|will|should)\b", re.I,
 )
+# A wh-word is NOT enough. English opens declaratives with these constantly —
+# "what makes it safe is a surface", "where the checkpointer lives matters", "why she
+# refused is in the log" — and treating the opening word as the signal threw away a
+# real memory on 2026-09-13. What separates them is punctuation: a wh-clause that ends
+# in a full stop is a cleft. A real question carries its question mark, or (typed in a
+# hurry) carries no terminal punctuation at all.
+_WH = re.compile(r"^(?:what|which|who|whom|whose|where|when|why|how)\b", re.I)
+_ENDS_STATEMENT = re.compile(r"[.!\u2026]\s*$")
 KEY_LABEL_PATTERN = r"(?:basic|user|work|vehicle|interest|relationship|preference|event)\.[a-z0-9_]+(?:\.[a-z0-9_]+)*"
 
 
 def question_shaped(text: str | None) -> bool:
+    """Is this an asking, rather than a telling?
+
+    A question stored as though it were a fact poisons recall with something nobody
+    ever asserted, which is what this exists to stop. It used to key on the opening
+    word, and so refused any sentence beginning with a wh-word — see _WH above.
+    """
     text = re.sub(r"^\[Portable observation time: [^\]]+\]\s*", "", (text or "").strip())
-    return bool(text and (text.endswith("?") or _QUESTION.search(text)))
+    if not text:
+        return False
+    if text.endswith("?"):
+        return True
+    if _YES_NO.match(text):
+        return True
+    return bool(_WH.match(text)) and not _ENDS_STATEMENT.search(text)
 
 
 _EXPLICIT_REMEMBER = re.compile(r"^(?:please\s+)?remember\s+that\b", re.I)
