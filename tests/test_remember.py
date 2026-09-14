@@ -73,11 +73,26 @@ def test_gates_empty_fact_and_unlinked_caller():
     writer.assert_not_called()
 
 
-def test_long_facts_are_truncated_not_refused():
+def test_long_facts_are_refused_not_truncated():
+    """Reversed 2026-09-13, on live evidence.
+
+    This tool originally sliced an over-long fact at FACT_LIMIT and kept the front
+    half. That was not a considered choice — it is simply how I wrote it, and the
+    original Gemini review never raised it. What it produced in practice was a
+    memory of exactly 500 characters ending mid-word at "poisoned by ba", stored as
+    if whole, with its embedding built from the surviving half. Chris saw it come
+    through the door flagged unclear and said he was not pleased it had been cut.
+
+    The content was four separate facts run together, which is what an over-long
+    "fact" almost always is. Refusing says so, costs nothing (she still has the text
+    and can call once per fact), and stores better: each fact gets its own key and
+    its own embedding. A silent half is worse than a visible nothing.
+    """
     writer = Mock(return_value="insert")
     tool = build_remember_tool(writer, key_labeler=lambda fact: "event.pool_service")
     reply = tool.invoke({"fact": "word " * 400}, config=cfg())
-    assert reply.startswith(KEPT_PREFIX) and len(writer.call_args.args[0]["fact"]) <= mod.FACT_LIMIT
+    assert reply == mod.TOO_LONG
+    writer.assert_not_called()
 
 
 def test_tool_schema_has_no_trust_or_confirmation_parameter():

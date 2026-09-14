@@ -44,6 +44,15 @@ log = logging.getLogger(__name__)
 # the fact against what the owner actually said this turn.
 CURRENT_TURN_TEXT: contextvars.ContextVar[str] = contextvars.ContextVar("aerys_current_turn_text", default="")
 
+#: Characters, and NOT arbitrary — it is bounded by the smaller of the two
+#: embedders that have to read the same memory. The house embeds with
+#: openai/text-embedding-3-small (8k tokens, effectively unbounded here); her
+#: PORTABLE body embeds on-device with all-MiniLM-L6-v2, whose max sequence is
+#: 256 tokens and which SILENTLY TRUNCATES past it. 500 characters is roughly
+#: 125 tokens, comfortably inside that. Raising this much past ~1000 would put
+#: the same mid-thought cut back, one layer down and invisible, inside the
+#: vector rather than the text — which is worse, because nothing would show it.
+#: If it ever needs to rise, raise the portable embedder first.
 FACT_LIMIT = 500
 KEY_LABEL_TIMEOUT_S = 2.0
 OWNER_QUOTE_RATIO = 0.8  # share of the fact's tokens that must appear in the turn text
@@ -56,6 +65,18 @@ ALREADY_PREFIX = "Already kept:"
 NOT_KEPT = "I couldn't save that — the memory store didn't confirm the write. Nothing was kept."
 NOT_LINKED = "I can only keep memories for a linked person; nothing was kept."
 EMPTY = "Tell me the thing to keep — I got an empty fact."
+#: An over-long "fact" is almost never one long fact — it is several that were
+#: never separated. That is exactly what arrived on 2026-09-13: four distinct
+#: things about home control, isolation, gap reporting and the dreaming pass, in
+#: one call, cut at 500 characters mid-word and stored as if whole. Refusing says
+#: so and costs nothing, because she still has the text in front of her and can
+#: call again per fact — which stores better and recalls better, since each one
+#: gets its own key and its own embedding.
+TOO_LONG = (
+    f"Nothing was kept: that is longer than {FACT_LIMIT} characters, which usually "
+    "means it is several facts at once. Keep them one at a time, each in its own "
+    "sentence, and call me again for each."
+)
 
 # writer(record) -> 'insert' | 'update' | 'replace' | 'duplicate' | 'skipped'.
 # record keys: person_id, fact, key_label, privacy_level, trust, source_platform, channel
@@ -109,12 +130,25 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
         it, pass it as they said it (that is what makes it THEIR word on record).
         Say it was kept ONLY if this tool replied "Kept:". Recalling what you
         already know needs no tool.
+
+        ONE fact per call, and keep it under 500 characters. If there are several
+        things to keep, call this once for each — they are stored and found
+        separately, so a paragraph holding four facts is four calls, not one. A
+        longer one is refused rather than trimmed; nothing is ever half-kept.
         """
         text = (fact or "").strip()
         if not text:
             return EMPTY
         if len(text) > FACT_LIMIT:
-            text = text[:FACT_LIMIT].rstrip()
+            # Refuse; never keep half. The old behaviour sliced at FACT_LIMIT and
+            # stored the fragment as though it were the whole fact — no word
+            # boundary, no marker, and the EMBEDDING built from the surviving half,
+            # so the part that was lost was also lost to search. Chris found one of
+            # these on 2026-09-13, cut mid-word at "poisoned by ba". A refusal is
+            # visible and recoverable; a silent half is neither.
+            log.warning("remember refused: fact of %d chars exceeds the %d limit",
+                        len(text), FACT_LIMIT)
+            return TOO_LONG
         identity = identity_from_config(config) if config else {}
         person_id = str(identity.get("user_id") or "")
         if not _UUID_RE.match(person_id):
