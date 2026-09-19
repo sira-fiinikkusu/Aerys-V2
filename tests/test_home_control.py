@@ -507,3 +507,68 @@ def test_empty_changed_list_is_a_caveat_not_a_done():
     assert not out.startswith("Done:")
     assert "NO state change" in out and "not have applied" in out
     assert ("GET", "/api/states/light.desk") in ha.requests  # the read-back happened
+
+
+# ---- color: set_color / turn_on with color (2026-09-19, her own gap report) ------
+
+def test_set_color_by_name_rides_turn_on_with_color_name():
+    ha = FakeHA()
+    out = make_tool(ha).invoke({"operation": "set_color", "entity_id": "light.desk", "color": "red"})
+    assert out.startswith("Done: set_color red sent to light.desk")
+    assert ("POST", "/api/services/light/turn_on") in ha.requests
+    assert ha.service_bodies == [{"entity_id": "light.desk", "color_name": "red"}]
+
+
+def test_set_color_hex_becomes_rgb_and_names_normalise():
+    ha = FakeHA()
+    tool = make_tool(ha)
+    tool.invoke({"operation": "set_color", "entity_id": "light.desk", "color": "#FF8000"})
+    tool.invoke({"operation": "set_color", "entity_id": "light.desk", "color": "Sky Blue"})
+    assert ha.service_bodies == [
+        {"entity_id": "light.desk", "rgb_color": [255, 128, 0]},
+        {"entity_id": "light.desk", "color_name": "skyblue"},
+    ]
+
+
+def test_turn_on_with_color_and_brightness_in_one_call():
+    ha = FakeHA()
+    out = make_tool(ha).invoke(
+        {"operation": "turn_on", "entity_id": "light.desk", "brightness_pct": 30, "color": "blue"})
+    assert out.startswith("Done: turn_on blue 30% sent to light.desk")
+    assert ha.service_bodies == [{"entity_id": "light.desk", "brightness_pct": 30, "color_name": "blue"}]
+
+
+def test_set_color_refuses_switches_garbage_and_missing_color():
+    ha = FakeHA()
+    tool = make_tool(ha, canary="light.desk,switch.fan")
+    assert "only applies to lights" in tool.invoke(
+        {"operation": "set_color", "entity_id": "switch.fan", "color": "red"})
+    assert "isn't a color" in tool.invoke(
+        {"operation": "set_color", "entity_id": "light.desk", "color": "rgb(1,2,3)"})
+    assert "needs a color" in tool.invoke({"operation": "set_color", "entity_id": "light.desk"})
+    assert ha.service_bodies == []  # every refusal happened before any HTTP
+
+
+def test_set_color_refuses_a_white_only_bulb_honestly():
+    class WhiteOnlyHA(FakeHA):
+        def handler(self, request):
+            if request.url.path == "/api/states/light.desk":
+                return httpx.Response(200, json={"state": "on", "attributes": {
+                    "friendly_name": "Desk Lamp", "supported_color_modes": ["color_temp"]}})
+            return super().handler(request)
+    ha = WhiteOnlyHA()
+    out = make_tool(ha).invoke({"operation": "set_color", "entity_id": "light.desk", "color": "red"})
+    assert out.startswith("Refused: light.desk does not support color")
+    assert ha.service_bodies == []
+
+
+def test_get_state_reports_color_capability_and_current_color():
+    class ColorHA(FakeHA):
+        def handler(self, request):
+            if request.url.path == "/api/states/light.desk":
+                return httpx.Response(200, json={"state": "on", "attributes": {
+                    "friendly_name": "Desk Lamp", "supported_color_modes": ["color_temp", "xy"],
+                    "rgb_color": [255, 0, 0], "brightness": 255}})
+            return super().handler(request)
+    out = json.loads(make_tool(ColorHA()).invoke({"operation": "get_state", "entity_id": "light.desk"}))
+    assert out["color_capable"] is True and out["rgb_color"] == [255, 0, 0]

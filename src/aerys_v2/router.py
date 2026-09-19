@@ -96,6 +96,9 @@ _DEVICE_WORDS = (
     "turn on", "turn off", "switch on", "switch off", "toggle",
     "light", "lights", "lamp", "switch", "plug", "outlet", "fan",
     "dim", "brighten", "thermostat",
+    # color changes (2026-09-19, her own gap: "turn the sunroom red")
+    "color", "colour", "turn it red", "turn it blue", "make it red", "make it blue",
+    "make it purple", "make it green", "turn it purple", "turn it green", "turn it pink",
     # live-state readings — questions about these need the action path's tools
     "charge", "battery", "temperature", "how warm", "how cold",
     "locked", "unlocked", "sensor",

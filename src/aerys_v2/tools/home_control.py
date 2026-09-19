@@ -35,7 +35,10 @@ from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
 
-WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle", "set_brightness"})
+WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle", "set_brightness", "set_color"})
+# HA color modes that mean "this light can take a color" (color_temp alone cannot).
+COLOR_MODES = frozenset({"xy", "rgb", "hs", "rgbw", "rgbww"})
+_HEX_COLOR = re.compile(r"^#?([0-9a-fA-F]{6})$")
 
 # The ONLY string prefix a successful write returns — service.py's silent-success
 # rule keys on it (a fast turn whose every tool note starts with this = the device
@@ -291,6 +294,15 @@ def build_home_control_tool(
             # half") never has to know about the 255 scale.
             if attrs.get("brightness") is not None:
                 out["brightness_pct"] = round(attrs["brightness"] / 255 * 100)
+            # Color (2026-09-19, her own gap report: "I can't control the color"):
+            # say what the bulb CAN do and what it is showing, so "make it red"
+            # can be refused honestly on a white-only bulb and answered on a
+            # color one.
+            if attrs.get("supported_color_modes") is not None:
+                out["supported_color_modes"] = list(attrs["supported_color_modes"])
+                out["color_capable"] = bool(COLOR_MODES & set(attrs["supported_color_modes"]))
+            if attrs.get("rgb_color") is not None:
+                out["rgb_color"] = list(attrs["rgb_color"])
             return out
         except httpx.HTTPError as e:
             return f"Home Assistant is unreachable right now ({e})."
@@ -298,9 +310,13 @@ def build_home_control_tool(
             # Malformed JSON / odd attribute types: honest string, never a raise.
             return f"Home Assistant returned an unreadable reply for {entity} ({e})."
 
-    def _desired_phrase(op: str, pct: int | None) -> str:
+    def _desired_phrase(op: str, pct: int | None, color: str | None = None) -> str:
         if op == "turn_off":
             return "off"
+        if color is not None and pct is not None:
+            return f"on, {color} at {pct}%"
+        if color is not None:
+            return f"on and {color}"
         if pct is not None:
             return f"on at {pct}%"
         return "on"
@@ -338,15 +354,18 @@ def build_home_control_tool(
         return already, pending
 
     @tool
-    def home_control(operation: str, entity_id: str, brightness_pct: int | None = None) -> str:
+    def home_control(
+        operation: str, entity_id: str, brightness_pct: int | None = None,
+        color: str | None = None,
+    ) -> str:
         """Control or inspect the smart home via Home Assistant.
 
         CALL THIS TOOL whenever the user asks to turn something on or off,
-        toggle a device, dim/brighten a light, or asks whether a light/switch
-        is currently on.
+        toggle a device, dim/brighten a light, change a light's COLOR, or asks
+        whether a light/switch is currently on or what color it is.
 
         operation: one of "get_state", "turn_on", "turn_off", "toggle",
-        "set_brightness".
+        "set_brightness", "set_color".
         entity_id: WHAT to control — any ONE of:
           - an exact entity id ("light.office_lamp", "switch.desk_fan");
           - a comma-separated list of exact ids (one call controls them all);
@@ -364,6 +383,11 @@ def build_home_control_tool(
         brighter", "down by half from where it is") needs get_state first: it
         returns the current brightness_pct; do the math, then set_brightness.
         For "off"/0%, use turn_off.
+        color: a color NAME ("red", "warm white", "sky blue") or a hex code
+        ("#ff0000"), lights only. "Turn the sunroom red" / "make it blue" =
+        set_color with color="red"/"blue" — it turns the light on if needed.
+        turn_on also accepts color (and brightness_pct) in the same call. A
+        white-only bulb refuses honestly; get_state shows color_capable.
 
         get_state works on any entity. Writes only work on lights and switches
         on the beta allowlist — if the tool refuses, tell the user honestly and
@@ -387,7 +411,7 @@ def build_home_control_tool(
         if op not in WRITE_OPS:
             return (
                 f"Unknown operation '{operation}'. "
-                "Valid operations: get_state, turn_on, turn_off, toggle, set_brightness."
+                "Valid operations: get_state, turn_on, turn_off, toggle, set_brightness, set_color."
             )
 
         # ---- writes: domain gate, then canary gate — over EVERY target -------
@@ -431,29 +455,84 @@ def build_home_control_tool(
                     f"{'is a' if len(targets) == 1 else 'are'} {'/'.join(sorted(domains))}. "
                     "Use turn_on/turn_off for it."
                 )
+        # ---- color: validate BEFORE any outbox row exists --------------------
+        # set_color is sugar over light/turn_on + color_name / rgb_color — there is
+        # no set_color service. A color only makes sense on a light that has a
+        # color mode; color_temp-only bulbs are refused with the reason.
+        wants_color = op == "set_color" or (op == "turn_on" and color is not None)
+        color_body: dict[str, Any] = {}
+        color_label: str | None = None
+        if wants_color:
+            if op == "set_color" and (color is None or not str(color).strip()):
+                return "set_color needs a color: a name like 'red' or a hex code like '#ff0000'."
+            if "light" not in domains:
+                return (
+                    f"Refused: color only applies to lights — {label} "
+                    f"{'is a' if len(targets) == 1 else 'are'} {'/'.join(sorted(domains))}."
+                )
+            raw = str(color).strip()
+            m = _HEX_COLOR.match(raw)
+            if m:
+                h = m.group(1)
+                color_body = {"rgb_color": [int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)]}
+                color_label = f"#{h.lower()}"
+            else:
+                # HA accepts CSS color names; normalise "sky blue" -> "skyblue".
+                name = re.sub(r"[\s_-]+", "", raw.lower())
+                if not name.isalpha():
+                    return (
+                        f"Refused: '{raw}' isn't a color I can send — use a color name "
+                        "('red', 'sky blue') or a hex code ('#ff0000')."
+                    )
+                color_body = {"color_name": name}
+                color_label = raw.lower()
+            # Capability check on the lights that will be written: a bulb that
+            # reports its modes and has no color mode is refused honestly; a bulb
+            # that reports nothing is tried (HA decides).
+            no_color = []
+            for e in targets:
+                if not e.startswith("light."):
+                    continue
+                st = _read_state(e)
+                if isinstance(st, dict) and st.get("color_capable") is False:
+                    no_color.append(e)
+            if no_color:
+                return (
+                    f"Refused: {', '.join(no_color)} "
+                    f"{'does' if len(no_color) == 1 else 'do'} not support color — "
+                    "white / color-temperature only. I can turn it on, off, or dim it."
+                )
         # A name can span lights AND switches ("living room"). One HA call per
         # domain (Gemini review 9/04: a refusal here was a dead end — the model
         # can only address them by that same name). Brightness applies to the
         # lights; switches in the same name are left alone and SAID so.
         groups = {d: [e for e in targets if e.split(".", 1)[0] == d] for d in sorted(domains)}
         skipped: list[str] = []
-        if wants_pct:
+        if wants_pct or wants_color:
             skipped = [e for d, es in groups.items() if d != "light" for e in es]
             groups = {"light": groups["light"]}
-        did = f"{op} {brightness_pct}%" if brightness_pct is not None else op
+        did = op
+        if color_label is not None:
+            did = f"{op} {color_label}"
+        if brightness_pct is not None:
+            did = f"{did} {brightness_pct}%"
         done: list[str] = []
         already: list[str] = []
         dropped: list[str] = []
         for domain, group in groups.items():
-            service = "turn_on" if wants_pct else op
+            service = "turn_on" if (wants_pct or wants_color) else op
             entity_field: Any = group if len(group) > 1 else group[0]
             body: dict[str, Any] = {"entity_id": entity_field}
             if wants_pct:
                 body["brightness_pct"] = brightness_pct
+            if wants_color:
+                body.update(color_body)
             # ---- the audited write: intent -> HA -> receipt ------------------
             payload = {"operation": op, "entity_id": entity_field, "domain": domain}
             if brightness_pct is not None:
                 payload["brightness_pct"] = brightness_pct
+            if color_label is not None:
+                payload["color"] = color_label
             if skipped:
                 # The resolved intent included these; they were left alone on
                 # purpose (no brightness on a switch). Audit the whole intent.
