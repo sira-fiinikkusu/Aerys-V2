@@ -41,10 +41,10 @@ def test_query_is_parameterized_and_read_only():
             return self
 
         def fetchall(self):
-            return [('hello', {'jev': {'error': 'timeout'}})]
+            return [('hello', {'jev': {'error': 'timeout'}}, 1234)]
 
     assert read_reflex_rows(Conn(), '2 hours') == [
-        {'input_text': 'hello', 'reflex': {'jev': {'error': 'timeout'}}}]
+        {'input_text': 'hello', 'reflex': {'jev': {'error': 'timeout'}}, 'latency_ms': 1234}]
 
 
 def test_worker_dispatch_and_read_only_connection(monkeypatch, capsys):
