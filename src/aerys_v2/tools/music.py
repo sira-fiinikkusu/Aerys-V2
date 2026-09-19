@@ -264,34 +264,57 @@ def build_music_tool(
             order = ((_TYPE_TO_CATEGORY[wanted], wanted),)
         else:
             order = _CATEGORY_ORDER
-        item, chosen_type = None, ""
-        for category, singular in order:
-            hits = results.get(category) or []
-            if hits:
-                item, chosen_type = hits[0], singular
-                break
-        if item is None:
-            return f"I couldn't find anything matching '{what}' on Spotify."
+        # Candidates in preference order. 2026-09-19 (bedroom, "play music from
+        # Lilith Max"): the first TRACK hit won over the ARTIST the owner named,
+        # radio mode asked Music Assistant for an "Endless Mix" the Spotify
+        # provider could not fill, and the play failed with nothing to fall back
+        # to. Two fixes: a result whose NAME is what the user said is promoted to
+        # the front of the line whatever its category, and a failed play tries
+        # the same item without radio mode, then the next candidate, before
+        # giving up honestly.
+        def norm(t: object) -> str:
+            return " ".join(str(t or "").lower().replace("the ", " ").split())
 
-        name, uri = _item_line(item)
-        if not uri:
-            return f"Music search returned '{name}' without a playable id — try rephrasing."
-        payload = {"entity_id": player, "media_id": uri, "media_type": chosen_type}
-        if chosen_type == "track":
-            # Owner call (2026-07-18): asking for ONE song means "start music",
-            # not "play 3:44 then silence" — radio mode keeps similar tracks
-            # coming after the requested one. Albums/playlists/artists keep
-            # their natural scope and end; "stop" works anytime.
-            payload["radio_mode"] = True
-        try:
-            r = http.post(
-                f"{base}/api/services/music_assistant/play_media",
-                headers=headers,
-                json=payload,
-            )
-            r.raise_for_status()
-        except httpx.HTTPError as e:
-            return f"Starting '{name}' on {_friendly(player)} FAILED — Home Assistant said: {e}."
-        return f"{WRITE_OK_PREFIX} playing {name} on {_friendly(player)}."
+        candidates: list[tuple[dict, str]] = []
+        for category, singular in order:
+            for hit in (results.get(category) or [])[:3]:
+                candidates.append((hit, singular))
+        exact = [c for c in candidates if norm(c[0].get("name")) == norm(what)]
+        others = [c for c in candidates if c not in exact]
+        candidates = exact + others
+        if not candidates:
+            return f"I couldn't find anything matching '{what}' on Spotify."
+        tried: list[str] = []
+        last_error = ""
+        for item, chosen_type in candidates[:4]:
+            name, uri = _item_line(item)
+            if not uri:
+                continue
+            attempts = [{"entity_id": player, "media_id": uri, "media_type": chosen_type}]
+            if chosen_type == "track":
+                # Owner call (2026-07-18): asking for ONE song means "start music",
+                # not "play 3:44 then silence" — radio mode keeps similar tracks
+                # coming after the requested one. Albums/playlists/artists keep
+                # their natural scope and end; "stop" works anytime. If the
+                # provider cannot build the radio, the plain track still plays.
+                attempts.insert(0, {**attempts[0], "radio_mode": True})
+            for payload in attempts:
+                try:
+                    r = http.post(
+                        f"{base}/api/services/music_assistant/play_media",
+                        headers=headers,
+                        json=payload,
+                    )
+                    r.raise_for_status()
+                except httpx.HTTPError as e:
+                    last_error = str(e)
+                    tried.append(f"{name} ({chosen_type}{', radio' if payload.get('radio_mode') else ''})")
+                    continue
+                note = "" if payload.get("radio_mode") or chosen_type != "track" else " (just the song — similar-tracks radio wasn't available)"
+                return f"{WRITE_OK_PREFIX} playing {name} on {_friendly(player)}.{note}"
+        return (
+            f"Starting music on {_friendly(player)} FAILED — Home Assistant said: {last_error}. "
+            f"Tried: {'; '.join(tried) or what}."
+        )
 
     return music

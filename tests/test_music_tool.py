@@ -272,3 +272,45 @@ def test_ha_unreachable_is_honest_never_raises():
     )
     out = tool.invoke({"operation": "play", "query": "x"}, config=cfg(OFFICE_DEV))
     assert "unreachable" in out
+
+
+# ---- 2026-09-19: the owner named an ARTIST; radio mode had nothing to give ------
+
+def make_tool_with(handler):
+    return build_music_tool(
+        base_url="http://ha.test:8123", token="t", config_entry_id="ce1", players=PLAYERS,
+        default_player="media_player.office_satellite",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def test_a_query_that_names_the_artist_plays_the_artist_not_the_first_track():
+    ha = FakeHA()
+    out = make_tool_with(ha).invoke({"operation": "play", "query": "Daft Punk", "device_id": OFFICE_DEV})
+    plays = [b for p, b in ha.calls if p.endswith("/play_media")]
+    assert plays == [{"entity_id": "media_player.office_satellite", "media_id": "spotify://artist/a1", "media_type": "artist"}]
+    assert out.startswith(WRITE_OK_PREFIX) and "Daft Punk" in out
+
+
+def test_failed_radio_mode_retries_the_plain_track_then_the_next_candidate():
+    class RadioDead(FakeHA):
+        def __call__(self, request):
+            path = request.url.path
+            body = json.loads(request.content) if request.content else {}
+            if path.endswith("/play_media") and body.get("radio_mode"):
+                self.calls.append((path, body))
+                return httpx.Response(500, text="MediaNotFoundError: There is nothing to play here.")
+            return super().__call__(request)
+    ha = RadioDead()
+    out = make_tool_with(ha).invoke({"operation": "play", "query": "one more time", "device_id": OFFICE_DEV})
+    plays = [b for p, b in ha.calls if p.endswith("/play_media")]
+    assert plays[0].get("radio_mode") is True and plays[1] == {
+        "entity_id": "media_player.office_satellite", "media_id": "spotify://track/t1", "media_type": "track"}
+    assert out.startswith(WRITE_OK_PREFIX) and "just the song" in out
+
+
+def test_every_candidate_failing_is_one_honest_line_with_what_was_tried():
+    ha = FakeHA(fail_play=True)
+    out = make_tool_with(ha).invoke({"operation": "play", "query": "one more time", "device_id": OFFICE_DEV})
+    assert out.startswith("Starting music on") and "FAILED" in out and "Tried:" in out
+    assert "One More Time" in out and "Daft Punk" in out
