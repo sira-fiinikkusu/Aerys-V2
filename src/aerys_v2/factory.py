@@ -2080,6 +2080,15 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         portable_context_fn=portable_context_fn,
         context_trailing=settings.prompt_context_trailing,
     )
+    # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
+    # command through this same tool before the specialist speaks. Graph
+    # configuration, never state — like history_window_messages.
+    from aerys_v2.tools.home_control import canary_set, device_target_choices
+    home_tool = next((t for t in tools if getattr(t, "name", "") == "home_control"), None)
+    canary = canary_set(settings.ha_canary_entities)
+    action_graph.home_control_tool = home_tool
+    action_graph.device_targets = device_target_choices(canary) if home_tool is not None else {}
+    action_graph.canary_entities = canary
     return router_for(settings, soul), action_graph
 
 

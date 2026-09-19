@@ -41,6 +41,20 @@ class Settings(BaseSettings):
     reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
     # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
     reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
+    # Phase 4 (2026-09-19, "go for it"): plain single-target device commands
+    # skip the specialist's tool-picking call. Jev answers the device questions
+    # in the SAME call that routes the turn; the write still goes through the
+    # home_control tool (canary allowlist, outbox row, read-back), and her
+    # confirmation is still the specialist's own sentence. REFLEX_DIRECT=false
+    # keeps live routing but sends every action turn the old way.
+    reflex_direct: bool = True
+    reflex_direct_command_floor: float = Field(default=0.85, ge=0, le=1)
+    reflex_direct_target_confidence: float = Field(default=0.7, ge=0, le=1)
+    # Domains that may be written directly; anything else waits for the specialist.
+    reflex_direct_domains: str = "light,switch,fan"
+    # Substrings of entity ids that NEVER go direct (J3: lock, EV charging,
+    # climate, alarm keep the specialist path and its confirmation semantics).
+    reflex_direct_deny: str = "lock.,alarm,climate,ev_charging"
 
     # ---- ACTION SPECIALIST (2026-09-04) --------------------------------------
     # The tool subgraph is a stateless SPECIALIST: it gets the request (plus a

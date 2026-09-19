@@ -116,6 +116,104 @@ def canary_set(csv: str) -> frozenset[str]:
     return frozenset(e.strip() for e in csv.split(",") if e.strip())
 
 
+def resolve_targets(raw: str, op: str, canary_entities: frozenset[str]) -> tuple[list[str], str | None]:
+    """WHAT the call is about: exact id, comma list of ids, or a room/device
+    NAME matched against the controllable set. Returns (targets, problem).
+
+    Why (2026-09-04 trace): "dim the sunroom lights by half" cost five model
+    round-trips because the tool took ONE exact id per call — the model
+    guessed ids, hit the allowlist refusal, then wrote four lights one by one.
+    A name resolves here, against the allowlist, into ONE call."""
+    raw = raw.strip()
+    if "," in raw:
+        ids = [e.strip() for e in raw.split(",") if e.strip()]
+        bad = [e for e in ids if "." not in e]
+        if bad:
+            return [], (
+                f"'{', '.join(bad)}' aren't entity ids — a list must be exact ids "
+                "like light.a, light.b (or give ONE room/device name instead)."
+            )
+        return ids, None
+    if "." in raw:
+        return [raw], None
+    terms = [
+        w for w in re.split(r"[\s_\-]+", raw.lower()) if w and w not in _NAME_STOPWORDS
+    ]
+    if not terms:
+        return [], "home_control needs an entity id or a room/device name."
+    if all(w in _GENERIC_TERMS for w in terms):
+        rooms = sorted({_room_of(e) for e in canary_entities} - {""})
+        return [], (
+            f"Which ones? '{raw}' names a kind of device, not a place. Ask the user "
+            f"ONE short question naming the choices: {', '.join(rooms) or 'none configured'}."
+        )
+
+    # WHOLE-TOKEN matching (Codex review 9/04): "office" must not reach
+    # light.office_closet_1 by substring. Tokens of the object id; a term
+    # matches a token exactly (plural-stripped), and "sun room" also matches
+    # "sunroom" via the joined non-generic terms.
+    joined = "".join(w for w in terms if w not in _GENERIC_TERMS)
+
+    def hit(eid: str) -> bool:
+        # Plural-insensitive on BOTH sides (Gemini review 9/05): "fan" must
+        # reach switch.fans and "lights" must reach light.sunroom_light_1.
+        toks = {tok.rstrip("s") for tok in re.split(r"[._\-\s]+", eid.lower())}
+        ok = lambda w: w.rstrip("s") in toks  # noqa: E731
+        return all(ok(w) for w in terms) or (
+            bool(joined) and joined.rstrip("s") in toks
+            and all(ok(w) for w in terms if w in _GENERIC_TERMS)
+        )
+
+    matches = sorted(e for e in canary_entities if hit(e))
+    if matches:
+        log.info("home_control resolved %r -> %s", raw, matches)
+        return matches, None
+    allowed = ", ".join(sorted(canary_entities)) or "(none configured)"
+    if op == "get_state":
+        return [], (
+            f"No controllable entity matches '{raw}'. To read other devices "
+            "(cars, sensors, phones) call search_entities with that name to get "
+            f"the exact id, then get_state with it. Entities I can control: {allowed}."
+        )
+    return [], (
+        f"Refused: nothing I may control matches '{raw}'. "
+        f"The entities I may control are: {allowed}."
+    )
+
+
+def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250) -> dict[str, str]:
+    """Choice criteria for a decision model: every ROOM and every DEVICE on the
+    allowlist, keyed by a NAME resolve_targets() already understands.
+
+    Phase 4 (2026-09-19): the decision model cannot generate an entity id, so it
+    picks a name from this list and the tool resolves it exactly as it would a
+    name the specialist typed. Rooms first ("sunroom" -> all four sunroom
+    lights), then single devices ("office fan"). Keys are checked by tests to
+    resolve to a non-empty target list.
+    """
+    out: dict[str, str] = {}
+    rooms: dict[str, list[str]] = {}
+    for e in sorted(canary_entities):
+        r = _room_of(e)
+        if r:
+            rooms.setdefault(r, []).append(e)
+    for room, ids in rooms.items():
+        targets, problem = resolve_targets(room, "turn_on", canary_entities)
+        if targets and not problem:
+            out[room] = f"everything in the {room}: {', '.join(targets)}"
+    for e in sorted(canary_entities):
+        obj = e.split(".", 1)[-1]
+        name = " ".join(w for w in obj.split("_") if w)
+        if name in out:
+            continue
+        targets, problem = resolve_targets(name, "turn_on", canary_entities)
+        if targets == [e] and not problem:
+            out[name] = e
+        if len(out) >= limit:
+            break
+    return out
+
+
 def build_home_control_tool(
     *,
     base_url: str,
@@ -206,68 +304,7 @@ def build_home_control_tool(
             log.warning("outbox UPDATE failed for row %s", outbox_id, exc_info=True)
 
     def _resolve_targets(raw: str, op: str) -> tuple[list[str], str | None]:
-        """WHAT the call is about: exact id, comma list of ids, or a room/device
-        NAME matched against the controllable set. Returns (targets, problem).
-
-        Why (2026-09-04 trace): "dim the sunroom lights by half" cost five model
-        round-trips because the tool took ONE exact id per call — the model
-        guessed ids, hit the allowlist refusal, then wrote four lights one by one.
-        A name resolves here, against the allowlist, into ONE call."""
-        raw = raw.strip()
-        if "," in raw:
-            ids = [e.strip() for e in raw.split(",") if e.strip()]
-            bad = [e for e in ids if "." not in e]
-            if bad:
-                return [], (
-                    f"'{', '.join(bad)}' aren't entity ids — a list must be exact ids "
-                    "like light.a, light.b (or give ONE room/device name instead)."
-                )
-            return ids, None
-        if "." in raw:
-            return [raw], None
-        terms = [
-            w for w in re.split(r"[\s_\-]+", raw.lower()) if w and w not in _NAME_STOPWORDS
-        ]
-        if not terms:
-            return [], "home_control needs an entity id or a room/device name."
-        if all(w in _GENERIC_TERMS for w in terms):
-            rooms = sorted({_room_of(e) for e in canary_entities} - {""})
-            return [], (
-                f"Which ones? '{raw}' names a kind of device, not a place. Ask the user "
-                f"ONE short question naming the choices: {', '.join(rooms) or 'none configured'}."
-            )
-
-        # WHOLE-TOKEN matching (Codex review 9/04): "office" must not reach
-        # light.office_closet_1 by substring. Tokens of the object id; a term
-        # matches a token exactly (plural-stripped), and "sun room" also matches
-        # "sunroom" via the joined non-generic terms.
-        joined = "".join(w for w in terms if w not in _GENERIC_TERMS)
-
-        def hit(eid: str) -> bool:
-            # Plural-insensitive on BOTH sides (Gemini review 9/05): "fan" must
-            # reach switch.fans and "lights" must reach light.sunroom_light_1.
-            toks = {tok.rstrip("s") for tok in re.split(r"[._\-\s]+", eid.lower())}
-            ok = lambda w: w.rstrip("s") in toks  # noqa: E731
-            return all(ok(w) for w in terms) or (
-                bool(joined) and joined.rstrip("s") in toks
-                and all(ok(w) for w in terms if w in _GENERIC_TERMS)
-            )
-
-        matches = sorted(e for e in canary_entities if hit(e))
-        if matches:
-            log.info("home_control resolved %r -> %s", raw, matches)
-            return matches, None
-        allowed = ", ".join(sorted(canary_entities)) or "(none configured)"
-        if op == "get_state":
-            return [], (
-                f"No controllable entity matches '{raw}'. To read other devices "
-                "(cars, sensors, phones) call search_entities with that name to get "
-                f"the exact id, then get_state with it. Entities I can control: {allowed}."
-            )
-        return [], (
-            f"Refused: nothing I may control matches '{raw}'. "
-            f"The entities I may control are: {allowed}."
-        )
+        return resolve_targets(raw, op, canary_entities)
 
     def _read_state(entity: str) -> dict | str:
         """GET one entity's state: a dict, or an honest error STRING."""

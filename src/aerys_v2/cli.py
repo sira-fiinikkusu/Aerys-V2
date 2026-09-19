@@ -9,7 +9,7 @@ logging.basicConfig(
 )
 
 
-def _arm_live_reflex(settings, reflex, router):
+def _arm_live_reflex(settings, reflex, router, action_graph=None):
     """REFLEX_MODE=live: Jev decides when sure, the Haiku router otherwise (Phase 2).
 
     Returns (router, reflex): in live mode the router becomes the combined
@@ -18,10 +18,16 @@ def _arm_live_reflex(settings, reflex, router):
     """
     if settings.reflex_mode != "live" or reflex is None or router is None:
         return router, reflex
-    log.info("reflex LIVE | model=%s route_conf>=%.2f action_floor=%.2f unaddressed>=%.2f",
+    targets = getattr(action_graph, "device_targets", None) or None
+    log.info("reflex LIVE | model=%s route_conf>=%.2f action_floor=%.2f unaddressed>=%.2f direct=%s targets=%d",
              settings.reflex_model, settings.reflex_route_confidence,
-             settings.reflex_action_floor, settings.reflex_unaddressed_floor)
-    return live_router_for(settings, reflex, router), None
+             settings.reflex_action_floor, settings.reflex_unaddressed_floor,
+             settings.reflex_direct, len(targets or {}))
+    return live_router_for(
+        settings, reflex, router,
+        device_targets=targets if settings.reflex_direct else None,
+        canary_entities=getattr(action_graph, "canary_entities", None),
+    ), None
 log = logging.getLogger("aerys_v2")
 
 
@@ -262,7 +268,7 @@ def main() -> None:
             if stack is not None:
                 router, action_graph = stack
                 guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
-                router, reflex = _arm_live_reflex(settings, reflex, router)
+                router, reflex = _arm_live_reflex(settings, reflex, router, action_graph)
                 log.info("action stack armed | ha=%s canary=[%s] media=%s",
                          settings.ha_base_url if settings.ha_token else "(off)",
                          settings.ha_canary_entities,
@@ -428,7 +434,7 @@ def main() -> None:
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
-            router, reflex = _arm_live_reflex(settings, reflex, router)
+            router, reflex = _arm_live_reflex(settings, reflex, router, action_graph)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
         # aerys DB wired, a known platform account resolves to its real person_id
@@ -574,7 +580,7 @@ def main() -> None:
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
-            router, reflex = _arm_live_reflex(settings, reflex, router)
+            router, reflex = _arm_live_reflex(settings, reflex, router, action_graph)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py), wired
         # exactly as --discord. With the aerys DB, a known Telegram account resolves

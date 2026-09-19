@@ -46,12 +46,21 @@ def test_confident_chat_decides_without_waiting_for_router():
     assert rec["decided"] == {"route": "chat", "tier": "fast", "unaddressed": False}
 
 
-def test_confident_action_waits_for_the_generated_ack():
+def test_confident_action_waits_for_the_generated_ack_on_voice_only():
     router = SlowRouter(RouteDecision(route="action", ack="Getting the light.", tier="standard"), delay=0.15)
     decide = live_router_for(settings(), lambda t, c: jev_result("action", 0.97, 0.98), router)
+    REFLEX_SURFACE.set("voice")
+    t0 = time.monotonic()
     d = decide("turn off the office light")
+    assert time.monotonic() - t0 >= 0.14          # waited for Haiku's ack
     assert d.route == "action" and d.ack == "Getting the light."
     assert LAST_REFLEX.get().collect()["decided_by"] == "jev"
+    # A typed surface never speaks the ack, so it does not wait for it.
+    REFLEX_SURFACE.set("discord_dm")
+    t0 = time.monotonic()
+    d = decide("turn off the office light")
+    assert time.monotonic() - t0 < 0.12
+    assert d.route == "action" and d.ack == ""
 
 
 def test_action_floor_pulls_confident_chat_toward_action():

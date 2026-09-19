@@ -4,11 +4,11 @@ from __future__ import annotations
 
 def read_reflex_rows(conn, window: str = '24 hours') -> list[dict]:
     rows = conn.execute(
-        "SELECT input_text, reflex FROM v2_turns "
+        "SELECT input_text, reflex, latency_ms FROM v2_turns "
         "WHERE reflex IS NOT NULL AND created_at >= now() - %s::interval "
         "ORDER BY created_at", (window,),
     ).fetchall()
-    return [{'input_text': text, 'reflex': reflex} for text, reflex in rows]
+    return [{'input_text': text, 'reflex': reflex, 'latency_ms': latency} for text, reflex, latency in rows]
 
 
 def _percentile(values, fraction):
@@ -54,6 +54,31 @@ def summarize(rows: list[dict]) -> dict:
     }
 
 
+def direct_summary(rows: list[dict]) -> dict:
+    """Phase 4: how often a device command went direct, and how it compared."""
+    direct, specialist, bad = [], [], []
+    for row in rows:
+        shadow = row['reflex']
+        dev = shadow.get('device') or {}
+        verdict = dev.get('direct') or {}
+        if shadow.get('decided', {}).get('route') != 'action' and shadow.get('router', {}) is not None \
+                and (shadow.get('router') or {}).get('route') != 'action':
+            continue
+        lat = row.get('latency_ms')
+        if verdict.get('executed'):
+            direct.append(lat)
+            receipt = str(verdict.get('receipt') or '')
+            if not (receipt.startswith('Done:') or receipt.startswith('OK (already there)')):
+                bad.append((row.get('input_text') or '', receipt))
+        elif shadow.get('decided', {}).get('route') == 'action' or (shadow.get('router') or {}).get('route') == 'action':
+            specialist.append(lat)
+    direct = [x for x in direct if x is not None]
+    specialist = [x for x in specialist if x is not None]
+    return {'direct_n': len(direct), 'direct_p50': _percentile(direct, .5), 'direct_p90': _percentile(direct, .9),
+            'specialist_n': len(specialist), 'specialist_p50': _percentile(specialist, .5),
+            'direct_not_done': bad}
+
+
 def format_report(rows: list[dict]) -> str:
     report = summarize(rows)
 
@@ -71,6 +96,13 @@ def format_report(rows: list[dict]) -> str:
         f"tier agreement={pct(report['tier_agreement'])}",
         f"unaddressed agreement (noul >= 0.5)={pct(report['unaddressed_agreement'])}",
     ]
+    d = direct_summary(rows)
+    lines.append(
+        f"direct device commands: n={d['direct_n']} p50={ms(d['direct_p50'])} p90={ms(d['direct_p90'])} | "
+        f"specialist action turns: n={d['specialist_n']} p50={ms(d['specialist_p50'])}"
+    )
+    for text, receipt in d['direct_not_done']:
+        lines.append(f"  direct but not Done: {text[:60]!r} -> {receipt[:80]!r}")
     for row in rows:
         shadow = row['reflex']
         jev, router = shadow['jev'], shadow.get('router') or {}

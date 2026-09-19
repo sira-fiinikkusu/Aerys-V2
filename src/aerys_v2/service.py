@@ -40,7 +40,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from langgraph.errors import GraphRecursionError
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
 from aerys_v2.history import window_messages
@@ -64,6 +64,42 @@ from aerys_v2.turns import (
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
 from aerys_v2.reflex import LAST_REFLEX, REFLEX_SURFACE, error_result
+
+
+def _direct_device_seed(action_graph: object, seed: list) -> list:
+    """Phase 4: carry out the ONE plain device command the live decider found,
+    then hand the specialist the executed call so it only has to SPEAK.
+
+    The write goes through the same home_control tool as always (canary
+    allowlist, outbox row, HA, read-back), so nothing about safety changes —
+    only the 1.2–1.6 s the specialist spent choosing that call is gone. The
+    injected tool_call/ToolMessage pair is real history for the audit row and
+    the honesty gate, and a "Done:" note keeps a fast clean voice write silent
+    exactly as before. A refusal or failure string still reaches the specialist,
+    so she says it honestly. No command, no tool, or any error -> the seed is
+    returned untouched and the turn runs the old way."""
+    rec = LAST_REFLEX.get(None)
+    record = getattr(rec, "record", None)
+    command = (record or {}).get("command") if isinstance(record, dict) else None
+    tool = getattr(action_graph, "home_control_tool", None)
+    if not command or tool is None:
+        return seed
+    direct = record.setdefault("device", {}).setdefault("direct", {})
+    try:
+        receipt = tool.invoke(dict(command))
+        if not isinstance(receipt, str):
+            receipt = str(receipt)
+    except Exception as exc:  # the tool never raises by contract; belt and braces
+        log.warning("direct device command raised — handing the specialist the failure", exc_info=True)
+        receipt = f"The {command.get('operation')} on {command.get('entity_id')} FAILED — {exc}"
+    direct["executed"] = True
+    direct["receipt"] = receipt[:200]
+    call_id = f"direct-{uuid.uuid4().hex[:12]}"
+    return [
+        *seed,
+        AIMessage(content="", tool_calls=[{"id": call_id, "name": "home_control", "args": dict(command)}]),
+        ToolMessage(content=receipt, tool_call_id=call_id, name="home_control"),
+    ]
 
 log = logging.getLogger(__name__)
 
@@ -1618,6 +1654,7 @@ def _action_turn(
             graph, config["configurable"], text, escalated=escalated, specialist=True
         )
         CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
+        seed = _direct_device_seed(action_graph, seed)
         result, gate_degraded = _run_action_gated(
             action_graph,
             seed,
@@ -1929,7 +1966,7 @@ def _voice_parallel_start(
                 # it still touched nothing.
                 result, gate_degraded = _run_action_gated(
                     action_graph,
-                    seeded_messages,
+                    _direct_device_seed(action_graph, seeded_messages),
                     action_config,
                 )
                 result_messages = result["messages"]

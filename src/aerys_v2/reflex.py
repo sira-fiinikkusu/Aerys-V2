@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextvars
+import re
 import logging
 import threading
 import time
@@ -52,6 +53,150 @@ def error_result(exc: Exception) -> dict:
     return {'error': f'{type(exc).__name__}: {str(exc)[:120]}'}
 
 
+# ---- Phase 4: speculative device questions, asked in the SAME call as the route.
+# Extra questions cost no extra latency on this model class; the answers are
+# recorded on every action turn and only ACTED on when plain_device_command()
+# says the request is one plain thing on one allowed target.
+DEVICE_ACTIONS = {
+    'turn_on': 'turn it on',
+    'turn_off': 'turn it off',
+    'toggle': 'toggle / flip it',
+    'set_brightness': 'set or change how bright or dim it is, or a percentage',
+    'set_color': 'set or change its color',
+    'other': 'something else, or more than one of these',
+}
+NONE_TARGET = 'none_of_these'
+
+
+def device_questions(target_choices: dict[str, str]) -> dict:
+    return {
+        'is_device_command': {
+            'type': 'noul',
+            'instructions': ('The message asks to turn a light, switch, plug or fan on or off, '
+                             'toggle it, dim or brighten it, or change its color — RIGHT NOW, as a '
+                             'command. Not a question about its state, not a schedule or timer, '
+                             'not talk about devices.'),
+        },
+        'is_state_question': {
+            'type': 'noul',
+            'instructions': ("The message asks what a device's current state is (is it on, how "
+                             'bright, what color, is it locked) rather than asking to change it.'),
+        },
+        'is_compound': {
+            'type': 'noul',
+            'instructions': ('The message asks for more than one distinct thing — two devices in '
+                             'different rooms, an action plus a question, or an action plus '
+                             'anything unrelated.'),
+        },
+        'device_target': {
+            'type': 'choice',
+            'instructions': 'Which room or device does the message refer to?',
+            'criteria': {**target_choices, NONE_TARGET: 'no listed room or device is named'},
+        },
+        'device_action': {
+            'type': 'choice',
+            'instructions': 'What does the message ask to do to it?',
+            'criteria': dict(DEVICE_ACTIONS),
+        },
+    }
+
+
+_PCT_RE = re.compile(r'(\d{1,3})\s*(?:%|percent)')
+# Absolute levels only. "dim"/"dimmer"/"brighter" are RELATIVE asks and must fall
+# through to the specialist, which reads the current level first.
+_PCT_WORDS = (('full', 100), ('max', 100), ('all the way up', 100), ('half', 50),
+              ('quarter', 25), ('low', 20), ('minimum', 10))
+_COLOR_WORDS = ('warm white', 'soft white', 'cool white', 'daylight', 'red', 'orange', 'yellow',
+                'green', 'blue', 'purple', 'violet', 'pink', 'magenta', 'cyan', 'teal', 'white',
+                'amber')
+_HEX_RE = re.compile(r'#[0-9a-fA-F]{6}\b')
+
+
+def brightness_from_text(text: str) -> int | None:
+    """Numbers stay in code: the decision model does not do arithmetic."""
+    m = _PCT_RE.search(text)
+    if m:
+        n = int(m.group(1))
+        return n if 1 <= n <= 100 else None
+    low = text.lower()
+    for word, pct in _PCT_WORDS:
+        if re.search(r'\b' + re.escape(word) + r'\b', low):
+            return pct
+    return None
+
+
+def color_from_text(text: str) -> str | None:
+    m = _HEX_RE.search(text)
+    if m:
+        return m.group(0).lower()
+    low = text.lower()
+    for name in _COLOR_WORDS:  # multi-word names first (tuple order)
+        if re.search(r'\b' + re.escape(name) + r'\b', low):
+            return name
+    return None
+
+
+def plain_device_command(record: dict, text: str, settings: Settings, canary_entities) -> dict | None:
+    """One plain thing, on one allowed target, that the model is sure about — else None.
+
+    Sets record['device']['direct'] = {'ok': bool, 'reason': str} so the row shows
+    why a turn did or did not go direct. Never raises.
+    """
+    from aerys_v2.tools.home_control import resolve_targets
+
+    dev = record.setdefault('device', {})
+
+    def no(reason: str) -> None:
+        dev['direct'] = {'ok': False, 'reason': reason}
+        return None
+
+    try:
+        if not settings.reflex_direct:
+            return no('disabled')
+        if record.get('decided', {}).get('route') != 'action' or record.get('decided_by') != 'jev':
+            return no('not a jev action route')
+        if float(dev.get('is_device_command', 0)) < settings.reflex_direct_command_floor:
+            return no('not clearly a device command')
+        if float(dev.get('is_state_question', 0)) > 0.3:
+            return no('reads as a state question')
+        if float(dev.get('is_compound', 0)) > 0.3:
+            return no('compound request')
+        target = dev.get('device_target') or {}
+        action = dev.get('device_action') or {}
+        if target.get('choice') in (None, NONE_TARGET) or float(target.get('confidence', 0)) < settings.reflex_direct_target_confidence:
+            return no('target unsure')
+        if action.get('choice') in (None, 'other') or float(action.get('confidence', 0)) < settings.reflex_direct_target_confidence:
+            return no('action unsure')
+        op = action['choice']
+        command: dict = {'operation': op, 'entity_id': target['choice']}
+        if op == 'set_brightness':
+            pct = brightness_from_text(text)
+            if pct is None:
+                return no('brightness needs the specialist (relative or unstated)')
+            command['brightness_pct'] = pct
+        if op == 'set_color':
+            color = color_from_text(text)
+            if color is None:
+                return no('color not stated')
+            command['color'] = color
+        targets, problem = resolve_targets(target['choice'], op, frozenset(canary_entities or ()))
+        if problem or not targets:
+            return no('target does not resolve')
+        # The explicit owner ruling (J3) first, then the domain gate.
+        deny = [d.strip() for d in settings.reflex_direct_deny.split(',') if d.strip()]
+        hit = [e for e in targets if any(d in e for d in deny)]
+        if hit:
+            return no(f'deny-listed: {hit}')
+        domains = {e.split('.', 1)[0] for e in targets}
+        allowed = {d.strip() for d in settings.reflex_direct_domains.split(',') if d.strip()}
+        if not domains <= allowed:
+            return no(f'domain not direct: {sorted(domains - allowed)}')
+        dev['direct'] = {'ok': True, 'reason': 'plain command', 'targets': targets}
+        return command
+    except Exception as exc:  # the direct path is an optimisation; never a crash
+        return no(f'error {type(exc).__name__}')
+
+
 class ReflexClient:
     def __init__(self, *, client: object, timeout_s: float = .6):
         self.client = client
@@ -67,12 +212,28 @@ class ReflexClient:
         def run():
             nonlocal result, completed_at
             try:
+                questions = dict(QUESTIONS)
+                targets = context.get('device_targets')
+                if targets:
+                    questions.update(device_questions(targets))
                 response = self.client.system_one(
                     state={'message': text[:2000], 'surface': context.get('surface', 'unknown')},
-                    questions=QUESTIONS,
+                    questions=questions,
                 )
                 route = response.answers['route']
                 score = float(response.answers['tier'].score)
+                device = {}
+                if targets:
+                    a = response.answers
+                    device = {
+                        'is_device_command': float(a['is_device_command'].noul),
+                        'is_state_question': float(a['is_state_question'].noul),
+                        'is_compound': float(a['is_compound'].noul),
+                        'device_target': {'choice': str(a['device_target'].choice),
+                                          'confidence': float(a['device_target'].confidence)},
+                        'device_action': {'choice': str(a['device_action'].choice),
+                                          'confidence': float(a['device_action'].confidence)},
+                    }
                 result = {
                     'route': str(route.choice),
                     'p_action': float(route.probabilities['action']),
@@ -83,6 +244,8 @@ class ReflexClient:
                     'model': str(response.model),
                     'input_tokens': int(response.usage.input_tokens),
                 }
+                if device:
+                    result['device'] = device
             except Exception as exc:
                 result = error_result(exc)
             finally:
@@ -155,6 +318,8 @@ def live_router_for(
     router: Callable[[str], RouteDecision],
     *,
     registered_routes: tuple[str, ...] = ('chat', 'action'),
+    device_targets: dict[str, str] | None = None,
+    canary_entities=None,
 ) -> Callable[[str], RouteDecision]:
     """Phase 2: Jev decides when it is sure; the Haiku router otherwise.
 
@@ -184,13 +349,19 @@ def live_router_for(
         thread = threading.Thread(target=lambda: ctx.run(run_router), daemon=True)
         thread.start()
 
+        surface = REFLEX_SURFACE.get()
+        context = {'surface': surface}
+        if device_targets:
+            context['device_targets'] = device_targets
         try:
-            jev = reflex(text, {'surface': REFLEX_SURFACE.get()})
+            jev = reflex(text, context)
         except Exception as exc:
             jev = error_result(exc)
         if not isinstance(jev, dict):
             jev = {'error': 'no result'}
         record = {'jev': jev, 'router': None, 'mode': 'live', 'decided_by': 'router'}
+        if isinstance(jev.get('device'), dict):
+            record['device'] = dict(jev['device'])
 
         decision = None
         confident = (
@@ -203,8 +374,10 @@ def live_router_for(
             if route == 'chat' and float(jev.get('p_action', 0)) >= action_floor:
                 route = 'action'
             ack = ''
-            if route == 'action':
-                # The ack is generated by the router (J2). Its own timeout bounds this.
+            if route == 'action' and surface == 'voice':
+                # The spoken ack is generated by the router (J2) and only VOICE
+                # consumes it (service._launch_background_action). Text and lens
+                # surfaces never speak it, so they no longer wait for Haiku.
                 thread.join()
                 rd = box.get('decision')
                 record['router'] = _router_verdict(rd)
@@ -224,6 +397,11 @@ def live_router_for(
             decision = rd
         record['decided'] = {'route': decision.route, 'tier': decision.tier,
                              'unaddressed': decision.unaddressed}
+        # Phase 4: is this one plain device command the code may carry out itself?
+        record['command'] = (
+            plain_device_command(record, text, settings, canary_entities)
+            if device_targets and decision.route == 'action' else None
+        )
         record['latency_ms'] = int((time.monotonic() - started) * 1000)
         LAST_REFLEX.set(LiveReflexRecord(record, thread, box))
         return decision
