@@ -24,7 +24,12 @@ def _percentile(values, fraction):
 def _agreement(pairs, field, *, confident=False):
     eligible = [(jev, router) for jev, router in pairs
                 if router.get(field) is not None and jev.get(field) is not None
-                and (not confident or jev.get('confidence', 0) >= .6)]
+                and (not confident or jev.get('confidence', 0) >= .6)
+                # The router grades tier for CHAT routes only (the action subgraph
+                # runs its own fixed tier), so a tier comparison on an action row
+                # measures nothing. First live report (2026-09-19) showed 46% for
+                # exactly this reason.
+                and (field != 'tier' or router.get('route') == 'chat')]
     if not eligible:
         return None
     # Noul is a probability; the router's boolean is compared at the midpoint.
@@ -73,6 +78,7 @@ def format_report(rows: list[dict]) -> str:
             continue
         disagreements = [field for field in ('route', 'tier', 'unaddressed')
                          if router.get(field) is not None and jev.get(field) is not None
+                         and (field != 'tier' or router.get('route') == 'chat')
                          and (jev[field] >= .5 if field == 'unaddressed' else jev[field]) != router[field]]
         if disagreements:
             lines.append(

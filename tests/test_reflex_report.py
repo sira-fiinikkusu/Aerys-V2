@@ -77,3 +77,22 @@ def test_worker_dispatch_and_read_only_connection(monkeypatch, capsys):
     monkeypatch.setattr(psycopg, 'connect', lambda *a, **k: Conn())
     assert worker.main(['reflex-report', '--window', '2 hours']) == 0
     assert 'n=0 errors=0' in capsys.readouterr().out
+
+
+def test_tier_is_not_compared_on_action_rows():
+    # The router grades tier for chat routes only; an action row's tier mismatch is noise.
+    from aerys_v2.workers.reflex_report import format_report, summarize
+    rows = [
+        {'input_text': 'turn off the office light', 'reflex': {'mode': 'shadow',
+            'router': {'route': 'action', 'tier': 'standard', 'unaddressed': False},
+            'jev': {'route': 'action', 'p_action': .99, 'confidence': .98, 'tier': 'fast',
+                    'unaddressed': .1, 'latency_ms': 200}}},
+        {'input_text': 'tell me a joke', 'reflex': {'mode': 'shadow',
+            'router': {'route': 'chat', 'tier': 'fast', 'unaddressed': False},
+            'jev': {'route': 'chat', 'p_action': .01, 'confidence': .99, 'tier': 'standard',
+                    'unaddressed': .1, 'latency_ms': 210}}},
+    ]
+    assert summarize(rows)['tier_agreement'] == 0.0      # only the chat row counts, and it disagrees
+    report = format_report(rows)
+    assert 'turn off the office light' not in report      # action row: no tier diff line
+    assert 'tell me a joke' in report and '[diff: tier]' in report
