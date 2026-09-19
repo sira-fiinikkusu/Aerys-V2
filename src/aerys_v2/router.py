@@ -40,8 +40,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 log = logging.getLogger(__name__)
 
-# Haiku at temperature 0: the decision must be deterministic and fast (~300ms) —
-# it sits on the voice hot path, racing the chat generation (see service.py).
+# Haiku at temperature 0: the decision must be deterministic and as fast as the
+# API allows — it sits on the voice hot path, racing the chat generation (see
+# service.py). MEASURED 2026-09-19 (Phoenix, 30 days of voice turns + a direct
+# bench from the LAN): this call runs 0.7–0.8s at best and 0.8–2.0s live, not
+# the ~300ms this comment used to promise. The floor is the API round trip plus
+# Haiku's time-to-first-token on a ~3.6k-token prompt; prompt caching does not
+# move it (bench: cached 5.1k tokens p50 966ms vs uncached 811ms), and dropping
+# the soul saves ~50ms. A materially faster router needs a different class of
+# model (a non-generating decision model), not a faster prompt.
+
 ROUTER_MODEL = "claude-haiku-4-5"
 
 # Degraded-path ack ONLY — fires when the router call itself failed, so there is
