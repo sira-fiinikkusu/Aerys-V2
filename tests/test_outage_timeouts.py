@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from aerys_v2.anthropic_model import build_metered_model
+from aerys_v2.anthropic_model import _PrefixCached, build_metered_model
 from aerys_v2.config import Settings
 from aerys_v2.evals.runner import Judge
 from aerys_v2.factory import (
@@ -83,7 +83,9 @@ def test_all_metered_clients_preserve_read_budget_and_set_connection_policy(
     for model, read, retries in clients:
         assert isinstance(model, ChatAnthropic)
         if not armed:
-            assert type(model) is ChatAnthropic
+            # Unarmed transports stay the plain client; the tool-turn models add
+            # only a payload marker (_PrefixCached), never a transport change.
+            assert type(model) in (ChatAnthropic, _PrefixCached)
         assert model.default_request_timeout == read
         assert model.max_retries == (0 if armed else retries)
         # SDK request options override the shared transport's scalar default.

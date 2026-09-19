@@ -1551,14 +1551,14 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
             # Prompt caching (measured 2026-09-19): an action turn sends the same
             # ~14k-token prefix (overlay + capability block + 21 tool schemas)
             # at least twice — once to pick the tool, once to read its result —
-            # and paid full input price both times. Top-level cache_control lets
-            # the API place the breakpoint on the last cacheable block, so the
-            # shared prefix is read from cache at 10% of the price. This is a
-            # cost change only: the LAN bench showed no latency win, and nothing
-            # about routing, tools, or the reply changes. Kept to the action
-            # path — the router prompt sits below Haiku's 4,096-token cache
-            # minimum and would not cache anyway.
-            model_kwargs={"cache_control": {"type": "ephemeral"}},
+            # and paid full input price both times. cache_prefix puts ONE
+            # breakpoint on the system block so tools + system are read from
+            # cache at 10% of the price on the second call (and on any turn
+            # inside the 5-minute window with the same prefix). Cost change
+            # only: the LAN bench showed no latency win, and nothing about
+            # routing, tools, or the reply changes. Kept to the action path —
+            # the router prompt sits below Haiku's 4,096-token cache minimum.
+            cache_prefix=True,
         )
 
     def pair(model_name: str) -> tuple[object, object]:
