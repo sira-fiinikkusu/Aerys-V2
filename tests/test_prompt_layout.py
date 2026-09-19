@@ -27,6 +27,7 @@ def test_static_history_dynamic_layout_preserves_state(monkeypatch, action, cont
     monkeypatch.setattr("aerys_v2.factory._where_when_line", lambda *_: "\nCLOCK_SENTINEL")
     model = Recorder()
     kwargs = dict(context_fn=lambda *_: "KNOWLEDGE_SENTINEL")
+    kwargs["context_trailing"] = True
     graph = (build_action_graph(model, "SOUL_SENTINEL", [], overlay="OVERLAY_SENTINEL", **kwargs)
              if action else build_graph(model, "SOUL_SENTINEL", **kwargs))
     current = HumanMessage(content=deepcopy(content), id="current", name="caller",
@@ -64,6 +65,7 @@ def test_no_human_keeps_dynamic_context_in_system(monkeypatch, action):
     monkeypatch.setattr("aerys_v2.factory._where_when_line", lambda *_: "\nCLOCK_SENTINEL")
     model = Recorder()
     kwargs = dict(context_fn=lambda *_: "KNOWLEDGE_SENTINEL")
+    kwargs["context_trailing"] = True
     graph = build_action_graph(model, "soul", [], **kwargs) if action else build_graph(model, "soul", **kwargs)
     graph.invoke({"messages": []}, {"configurable": {"thread_id": "empty"}})
     assert "CLOCK_SENTINEL" in model.prompts[0][0].content
@@ -78,7 +80,7 @@ def test_action_loop_augments_current_once_each_pass(monkeypatch):
         return "ready"
     model = Recorder([AIMessage(content="", tool_calls=[{"id": "t", "name": "read_status", "args": {}}]),
                       AIMessage(content="ready")])
-    graph = build_action_graph(model, "soul", [read_status])
+    graph = build_action_graph(model, "soul", [read_status], context_trailing=True)
     current = HumanMessage(content="status?", id="request", additional_kwargs={"content_privacy": "private"})
     result = graph.invoke({"messages": [current]}, {"configurable": {"identity": {"privacy_context": "private"}}})
     assert len(model.prompts) == 2
@@ -86,3 +88,20 @@ def test_action_loop_augments_current_once_each_pass(monkeypatch):
     assert len(model.prompts[1][1].content) == 2
     assert [m.type for m in model.prompts[1]] == ["system", "human", "ai", "tool"]
     assert result["messages"][0] == current
+
+
+@pytest.mark.parametrize("action", [False, True])
+def test_default_layout_keeps_context_in_the_system_prompt(monkeypatch, action):
+    # 2026-09-19 16:55 live: with the context trailing the current message she
+    # answered the context instead of the owner. The default is the old layout.
+    monkeypatch.setattr("aerys_v2.factory._where_when_line", lambda *_: "\nCLOCK_SENTINEL")
+    model = Recorder()
+    kwargs = dict(context_fn=lambda *_: "KNOWLEDGE_SENTINEL")
+    graph = build_action_graph(model, "soul", [], **kwargs) if action else build_graph(model, "soul", **kwargs)
+    current = HumanMessage(content="hello there", id="c")
+    graph.invoke({"messages": [current]}, {"configurable": {"thread_id": "default", "identity": {"privacy_context": "private"}}})
+    system, *shown = model.prompts[0]
+    assert isinstance(system.content, str)
+    assert "CLOCK_SENTINEL" in system.content and "KNOWLEDGE_SENTINEL" in system.content
+    assert shown[-1] is current or shown[-1].content == "hello there"
+    assert isinstance(shown[-1].content, str)

@@ -1597,6 +1597,7 @@ def build_action_graph(
     shared_surface_ids: dict | None = None,
     charter: str = SPECIALIST_CHARTER,
     checkpointer=None,
+    context_trailing: bool = False,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -1713,10 +1714,18 @@ def build_action_graph(
         # the static prefix so the cache survives from one voice command to the
         # next.
         static_ack, dynamic_ack = ("", ack_block) if spoken_ack else (ack_block, "")
-        prompt = prompt_with_context(
-            f"{persona}\n\n{overlay}{static_ack}", state["messages"],
-            f"{dynamic_ack}{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}",
-        )
+        if context_trailing:
+            prompt = prompt_with_context(
+                f"{persona}\n\n{overlay}{static_ack}", state["messages"],
+                f"{dynamic_ack}{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}",
+            )
+        else:
+            # The pre-2026-09-19 layout, byte for byte: every block in the
+            # system prompt, ahead of the history.
+            system = SystemMessage(
+                content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}"
+            )
+            prompt = [system, *state["messages"]]
         if isinstance(api_model_with_tools, ToolModelPair):
             reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
         else:
@@ -2069,6 +2078,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         # Same room seam the chat graph gets, same public-only fence inside it.
         room_context_fn=room_context_fn,
         portable_context_fn=portable_context_fn,
+        context_trailing=settings.prompt_context_trailing,
     )
     return router_for(settings, soul), action_graph
 
@@ -2090,6 +2100,7 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
         overlay=action_overlay_for(settings, guest=True),
+        context_trailing=settings.prompt_context_trailing,
         # A guest in a PUBLIC room holds that room too; the fence inside the helper
         # is what keeps a DM out, not the caller's status.
         room_context_fn=room_context_fn,
@@ -2366,6 +2377,7 @@ def build_graph(
     portable_context_fn: PortableContextFn | None = None,
     family_notes_fn=None,
     history_window_messages: int = 200,
+    context_trailing: bool = False,
 ) -> object:
     """START → chat → END, checkpointed.
 
@@ -2576,10 +2588,17 @@ def build_graph(
         if is_lens_surface(identity):
             voice_style = f"{voice_style}\n\n{LENS_SURFACE_OVERLAY}"
         messages = window_messages(messages, history_window_messages)
-        prompt = prompt_with_context(
-            f"{soul}\n\n{capability}{voice_style}", messages,
-            f"{caller_line}{knowledge}{where_when}{room}{portable}{family}",
-        )
+        if context_trailing:
+            prompt = prompt_with_context(
+                f"{soul}\n\n{capability}{voice_style}", messages,
+                f"{caller_line}{knowledge}{where_when}{room}{portable}{family}",
+            )
+        else:
+            # The pre-2026-09-19 layout, byte for byte (see Settings.prompt_context_trailing).
+            system = SystemMessage(
+                content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{voice_style}"
+            )
+            prompt = [system, *messages]
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
         # just ask() — belt-and-braces: whatever garbage reaches config,
         # the node answers with a REAL model and the trace shows which).

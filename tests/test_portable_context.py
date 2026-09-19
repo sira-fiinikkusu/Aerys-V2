@@ -51,7 +51,7 @@ class RecordingModel(GenericFakeChatModel):
     seen: list = []
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        type(self).seen.append(messages[0].content + "\n" + messages[-1].content[0]["text"])
+        type(self).seen.append(str(messages[0].content))
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
@@ -116,12 +116,12 @@ def _chat_system(identity, fn):
     return RecordingModel.seen[0]
 
 
-def _action_context(identity, fn):
+def _action_system(identity, fn):
     model = RecordingToolModel()
     graph = build_action_graph(model, soul="s", tools=[], portable_context_fn=fn)
     graph.invoke({"messages": [HumanMessage(content="here")]},
                  {"configurable": {"identity": identity}})
-    return model.prompts[0][-1].content[0]["text"]
+    return model.prompts[0][0].content
 
 
 def test_a_DM_turn_gets_the_portable_block():
@@ -166,7 +166,7 @@ def test_an_unknown_surface_gets_nothing_either():
 
 
 def test_her_hands_get_it_as_well():
-    assert "Two." in _action_context(DM, lambda _p: "Chris: here\nAerys: Two.")
+    assert "Two." in _action_system(DM, lambda _p: "Chris: here\nAerys: Two.")
 
 
 def test_the_block_says_it_happened_on_another_body():

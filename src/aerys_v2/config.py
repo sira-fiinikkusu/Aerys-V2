@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # (chat includes the current human in this tail). The checkpointer keeps
     # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.
     history_window_messages: int = 200
+    # PROMPT_CONTEXT_TRAILING: where the per-turn context (clock, memories, room,
+    # portable, family) sits. False = inside the system prompt ahead of the
+    # history, exactly as before 2026-09-19. True = a trailing block on the
+    # current message (cache-friendly). Live on 2026-09-19 16:55 the trailing
+    # layout made her answer the context instead of the owner ("you explained
+    # Jev; she answered about the sunroom"), so it is OFF until evaluated.
+    prompt_context_trailing: bool = False
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
 

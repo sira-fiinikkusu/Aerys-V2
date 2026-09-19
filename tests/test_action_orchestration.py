@@ -674,21 +674,17 @@ def test_spoken_ack_flips_subgraph_prompt_to_never_ask():
         {"configurable": {"identity": CHRIS, "spoken_ack": "Turning off the office light."}},
     )
     system = model.prompts[0][0].content
-    # The spoken-ack overlay quotes THIS turn's ack, so it rides with the
-    # per-turn context on the human copy, not in the cached static prefix.
-    context = model.prompts[0][1].content[0]["text"]
-    assert "Turning off the office light." in context
-    assert "NEVER ask a clarifying question" in context
-    assert "Turning off the office light." not in system
-    # The original garbled text follows the live context in the human copy.
-    assert model.prompts[0][1].content[-1]["text"] == "Can you turn off office light on?"
+    assert "Turning off the office light." in system
+    assert "NEVER ask a clarifying question" in system
+    # the garbled text arrives as the single human turn, untouched
+    assert model.prompts[0][1].content == "Can you turn off office light on?"
 
 
 def test_action_graph_injects_profile_context_block():
     # Live gap (2026-07-03): "enough charge to get to Tampa and back from home?"
     # routed to the action path, which had NO profile block — the agent read the
     # battery but didn't know where home is. context_fn output must ride the
-    # action current-turn context.
+    # action system prompt.
     model = RecordingToolModel()
     seen = []
 
@@ -701,9 +697,9 @@ def test_action_graph_injects_profile_context_block():
         {"messages": [HumanMessage(content="enough charge to reach Tampa from home?")]},
         {"configurable": {"identity": CHRIS}},
     )
-    context = model.prompts[0][-1].content[0]["text"]
-    assert "[What you know about this person]" in context
-    assert "Rotonda West" in context
+    system = model.prompts[0][0].content
+    assert "[What you know about this person]" in system
+    assert "Rotonda West" in system
     # called with the caller's id and the latest human text
     assert seen[0] == (CHRIS["user_id"], "enough charge to reach Tampa from home?")
 
@@ -719,7 +715,7 @@ def test_action_graph_context_fn_failure_never_kills_the_turn():
         {"configurable": {"identity": CHRIS}},
     )
     assert result["messages"][-1].content == "done"
-    assert "[What you know about this person]" not in model.prompts[0][-1].content[0]["text"]
+    assert "[What you know about this person]" not in model.prompts[0][0].content
 
 
 def test_action_graph_without_context_fn_prompt_unchanged():
@@ -729,7 +725,7 @@ def test_action_graph_without_context_fn_prompt_unchanged():
         {"messages": [HumanMessage(content="lights off")]},
         {"configurable": {"identity": CHRIS}},
     )
-    assert "[What you know about this person]" not in model.prompts[0][-1].content[0]["text"]
+    assert "[What you know about this person]" not in model.prompts[0][0].content
 
 
 # ---- regression: speculative chat must NEVER pollute the real thread -------------
@@ -1047,7 +1043,7 @@ def test_action_node_carries_the_clock():
 
     class CaptureModel:
         def invoke(self, messages, *a, **k):
-            seen.append(messages[-1].content[0]["text"])
+            seen.append(str(messages[0].content))
             return AIMessage(content="It's mid-morning.")
 
     graph = build_action_graph(CaptureModel(), soul="s", tools=[home_tool()])

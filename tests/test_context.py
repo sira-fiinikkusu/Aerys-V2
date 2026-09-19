@@ -220,12 +220,12 @@ HEADER = "[What you know about this person]"
 
 
 class RecordingModel(GenericFakeChatModel):
-    """Fake that records the static prompt and live context each turn (for prompt-shape tests)."""
+    """Fake that records the system prompt each turn (for prompt-shape tests)."""
 
     seen: list = []
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        type(self).seen.append(messages[0].content + "\n" + messages[-1].content[0]["text"])
+        type(self).seen.append(str(messages[0].content))
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
@@ -235,7 +235,7 @@ def recording_graph(context_fn, *replies):
     return build_graph(model, soul="test soul", context_fn=context_fn)
 
 
-def test_context_block_lands_under_header_in_current_turn_context():
+def test_context_block_lands_under_header_in_system_prompt():
     graph = recording_graph(lambda pid, text, pctx="private": "• Preferred name: Chris", "ok")
     ask(graph, "hi", identity=CHRIS, thread_id="t1")
     assert f"{HEADER}\n• Preferred name: Chris" in RecordingModel.seen[0]

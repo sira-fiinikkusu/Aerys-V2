@@ -175,7 +175,7 @@ def test_action_graph_splices_family_notes_for_owner():
 
     class CaptureModel:
         def invoke(self, messages):
-            seen["context"] = messages[-1].content[0]["text"]
+            seen["system"] = messages[0].content
             return AIMessage(content="done")
 
     g = build_action_graph(
@@ -187,8 +187,8 @@ def test_action_graph_splices_family_notes_for_owner():
         {"configurable": {"thread_id": "t", "identity": {"user_id": "owner-uuid",
                                                           "privacy_context": "private"}}},
     )
-    assert "[Family-visible notes]" in seen["context"]
-    assert "note one" in seen["context"]
+    assert "[Family-visible notes]" in seen["system"]
+    assert "note one" in seen["system"]
 
 
 def test_action_graph_without_family_fn_is_unchanged():
@@ -200,7 +200,7 @@ def test_action_graph_without_family_fn_is_unchanged():
 
     class CaptureModel:
         def invoke(self, messages):
-            seen["context"] = messages[-1].content[0]["text"]
+            seen["system"] = messages[0].content
             return AIMessage(content="done")
 
     g = build_action_graph(CaptureModel(), "SOUL", tools=[])
@@ -208,4 +208,4 @@ def test_action_graph_without_family_fn_is_unchanged():
         {"messages": [HumanMessage(content="hi")]},
         {"configurable": {"thread_id": "t"}},
     )
-    assert "Family-visible" not in seen["context"]
+    assert "Family-visible" not in seen["system"]

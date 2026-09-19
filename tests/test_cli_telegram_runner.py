@@ -75,13 +75,15 @@ def test_telegram_runner_wires_client(monkeypatch):
     graph_calls = {}
 
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
-                         room_context_fn, portable_context_fn, history_window_messages):
+                         room_context_fn, portable_context_fn, history_window_messages,
+                         context_trailing):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
             room_context_fn=room_context_fn,
             portable_context_fn=portable_context_fn,
             history_window_messages=history_window_messages,
+            context_trailing=context_trailing,
         )
         return "GRAPH"
 
@@ -137,6 +139,7 @@ def test_telegram_runner_wires_client(monkeypatch):
         "room_context_fn": "ROOMFN",
         "portable_context_fn": "PORTFN",
         "history_window_messages": 17,
+        "context_trailing": False,
     }
 
     # ask() seam: invoking the injected ask_fn routes a Telegram turn through the

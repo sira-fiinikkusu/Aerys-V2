@@ -90,6 +90,7 @@ def main() -> None:
             graph = build_graph(
                 build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp,
                 history_window_messages=settings.history_window_messages,
+                context_trailing=settings.prompt_context_trailing,
             )
             reply = ask(
                 graph,
@@ -123,6 +124,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=load_soul(settings.soul_file_path),
             history_window_messages=settings.history_window_messages,
+                context_trailing=settings.prompt_context_trailing,
         )
         results, summary = run_eval(LocalGraphTarget(graph), cases, Judge.from_settings(settings))
         for r in results:  # one line per case — the per-item view before the rollup
@@ -238,6 +240,7 @@ def main() -> None:
                 soul=soul,
                 checkpointer=cp,
                 history_window_messages=settings.history_window_messages,
+                context_trailing=settings.prompt_context_trailing,
                 # long-term memory context: ON only when MEMORIES_DATABASE_URL is
                 # set (read-only prod aerys DB); None keeps the graph memory-free
                 context_fn=context_fn_for(settings),
@@ -403,6 +406,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
+                context_trailing=settings.prompt_context_trailing,
             # long-term memory context: same wiring as --serve so Discord text
             # chats recall memory too. None when MEMORIES_DATABASE_URL is unset
             # (degrade-safe: memory-free graph on DB-less boxes).
@@ -548,6 +552,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
+                context_trailing=settings.prompt_context_trailing,
             # long-term memory context: same wiring as --serve/--discord so
             # Telegram text chats recall memory too. None when
             # MEMORIES_DATABASE_URL is unset (degrade-safe on DB-less boxes).
