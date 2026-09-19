@@ -24,7 +24,7 @@ class RecordingModel:
         self.systems: list[str] = []
 
     def invoke(self, messages):
-        self.systems.append(str(messages[0].content))
+        self.systems.append(messages[-1].content[0]["text"])
         return AIMessage(content="hi there")
 
 

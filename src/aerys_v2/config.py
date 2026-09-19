@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # on a turn the router already decided needs one); later passes are free so
     # the loop can end. Env ACTION_FORCE_TOOL=false to bench without it.
     action_force_tool: bool = True
+    # HISTORY_WINDOW_MESSAGES: maximum prior thread messages shown to the model
+    # (chat includes the current human in this tail). The checkpointer keeps
+    # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.
+    history_window_messages: int = 200
     soul_file_path: Path = Path("config/soul.md")
     otlp_endpoint: str | None = None
 

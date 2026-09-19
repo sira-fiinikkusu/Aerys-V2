@@ -26,6 +26,7 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.anthropic_model import build_metered_model
 from aerys_v2.config import Settings
+from aerys_v2.history import prompt_with_context, window_messages
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config, is_lens_surface, is_voice_turn
 from aerys_v2.turns import channel_enum
@@ -549,6 +550,7 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
             max_tokens=4096,
             timeout=timeout_s,
             max_retries=2,
+            cache_prefix=True,
         ),
         timeout_s,
     )
@@ -598,6 +600,7 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
                 max_tokens=4096,
                 timeout=timeout_s,
                 max_retries=2,
+                cache_prefix=True,
             ),
             timeout_s,
         )
@@ -1551,12 +1554,12 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
             # Prompt caching (measured 2026-09-19): an action turn sends the same
             # ~14k-token prefix (overlay + capability block + 21 tool schemas)
             # at least twice — once to pick the tool, once to read its result —
-            # and paid full input price both times. cache_prefix puts ONE
+            # and paid full input price both times. cache_prefix keeps a
             # breakpoint on the system block so tools + system are read from
             # cache at 10% of the price on the second call (and on any turn
             # inside the 5-minute window with the same prefix). Cost change
             # only: the LAN bench showed no latency win, and nothing about
-            # routing, tools, or the reply changes. Kept to the action path —
+            # routing, tools, or the reply changes. Chat caches its history too;
             # the router prompt sits below Haiku's 4,096-token cache minimum.
             cache_prefix=True,
         )
@@ -1702,10 +1705,18 @@ def build_action_graph(
         # Her other bodies, on her hands too: a job asked here may continue one begun
         # on the stick, and "do the thing I asked you about last night" has to resolve.
         portable = portable_block(identity, portable_context_fn)
-        system = SystemMessage(
-            content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}"
+        # act runs once per model pass; context is computed once per node call,
+        # then attached to a fresh copy, never accumulated in the tool-loop state.
+        # The spoken-ack overlay quotes THIS turn's generated ack, so it is
+        # per-turn text and rides with the dynamic block; the other ack_block
+        # variants (banter / typed / lens styling) are per-surface and stay in
+        # the static prefix so the cache survives from one voice command to the
+        # next.
+        static_ack, dynamic_ack = ("", ack_block) if spoken_ack else (ack_block, "")
+        prompt = prompt_with_context(
+            f"{persona}\n\n{overlay}{static_ack}", state["messages"],
+            f"{dynamic_ack}{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}",
         )
-        prompt = [system, *state["messages"]]
         if isinstance(api_model_with_tools, ToolModelPair):
             reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
         else:
@@ -2354,6 +2365,7 @@ def build_graph(
     room_context_fn: RoomContextFn | None = None,
     portable_context_fn: PortableContextFn | None = None,
     family_notes_fn=None,
+    history_window_messages: int = 200,
 ) -> object:
     """START → chat → END, checkpointed.
 
@@ -2361,9 +2373,13 @@ def build_graph(
     and the CLI today, PostgresSaver on the NAS when Phase 2 wires durability. The graph
     shape doesn't change when the storage does — that's the point of the seam.
 
+    history_window_messages limits only the privacy-gated model view; zero keeps
+    the whole view. The compiled graph also carries the limit for action seeds
+    read from this same checkpointer.
+
     context_fn is the same idea for long-term memory: None = the chat node knows
     nothing beyond the thread; set = each turn asks it (person_id, latest user text)
-    and injects whatever comes back into the system prompt.
+    and injects whatever comes back into a copy of the current human turn.
 
     tier_models is the model-as-a-per-call-parameter seam (a per-call
     model-tiering pattern): the router's tier rides `configurable` — per
@@ -2559,8 +2575,10 @@ def build_graph(
         # the surface styling must not depend on which graph the router picked.
         if is_lens_surface(identity):
             voice_style = f"{voice_style}\n\n{LENS_SURFACE_OVERLAY}"
-        system = SystemMessage(
-            content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{voice_style}"
+        messages = window_messages(messages, history_window_messages)
+        prompt = prompt_with_context(
+            f"{soul}\n\n{capability}{voice_style}", messages,
+            f"{caller_line}{knowledge}{where_when}{room}{portable}{family}",
         )
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
         # just ask() — belt-and-braces: whatever garbage reaches config,
@@ -2568,13 +2586,17 @@ def build_graph(
         tier = normalize_tier(((config or {}).get("configurable") or {}).get("tier", DEFAULT_TIER))
         turn_model = (tier_models or {}).get(tier, model)
         # n8n mapping: this is the AI Agent node's invoke — prompt + history in, one
-        # AIMessage out. `messages` is the privacy-gated view (== state["messages"] in
-        # a DM); add_messages appends the reply to the FULL thread history regardless.
-        reply = turn_model.invoke([system, *messages])
+        # AIMessage out. `messages` is the privacy-gated, windowed view;
+        # add_messages appends the reply to the FULL thread history regardless.
+        reply = turn_model.invoke(prompt)
         return {"messages": [reply]}
 
     graph = StateGraph(ChatState)
     graph.add_node("chat", chat)
     graph.add_edge(START, "chat")
     graph.add_edge("chat", END)
-    return graph.compile(checkpointer=checkpointer or InMemorySaver())
+    compiled = graph.compile(checkpointer=checkpointer or InMemorySaver())
+    # The action seed reads this same thread, so it must inherit its view limit.
+    # This is graph configuration, never checkpointed conversation state.
+    compiled.history_window_messages = history_window_messages
+    return compiled

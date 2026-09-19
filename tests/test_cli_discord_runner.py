@@ -59,15 +59,17 @@ def test_discord_runner_wires_context_fn(monkeypatch):
     monkeypatch.setattr(factory, "portable_context_fn_for", lambda s: "PORTFN")
     monkeypatch.setattr(factory, "content_privacy_fn_for", lambda s: "CPFN")
 
+    monkeypatch.setenv("HISTORY_WINDOW_MESSAGES", "17")
     graph_calls = {}
 
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
-                         room_context_fn, portable_context_fn):
+                         room_context_fn, portable_context_fn, history_window_messages):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
             room_context_fn=room_context_fn,
             portable_context_fn=portable_context_fn,
+            history_window_messages=history_window_messages,
         )
         return "GRAPH"
 
@@ -109,4 +111,5 @@ def test_discord_runner_wires_context_fn(monkeypatch):
         # attaches it to the gateway; the fallback is still what it was given.
         "room_context_fn": LIVE_ROOM,
         "portable_context_fn": "PORTFN",
+        "history_window_messages": 17,
     }

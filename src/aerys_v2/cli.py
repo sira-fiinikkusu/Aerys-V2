@@ -62,7 +62,8 @@ def main() -> None:
         text = sys.argv[sys.argv.index("--ask") + 1]
         with checkpointer_for(settings) as cp:  # Postgres when DATABASE_URL set → durable
             graph = build_graph(
-                build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp
+                build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp,
+                history_window_messages=settings.history_window_messages,
             )
             reply = ask(
                 graph,
@@ -88,7 +89,10 @@ def main() -> None:
 
         cases = load_cases()  # golden.json locally; example.json on a fresh clone/CI
         log.info("eval: %d case(s) loaded, judging with model=%s", len(cases), settings.model)
-        graph = build_graph(build_model(settings), soul=load_soul(settings.soul_file_path))
+        graph = build_graph(
+            build_model(settings), soul=load_soul(settings.soul_file_path),
+            history_window_messages=settings.history_window_messages,
+        )
         results, summary = run_eval(LocalGraphTarget(graph), cases, Judge.from_settings(settings))
         for r in results:  # one line per case — the per-item view before the rollup
             print(f"[{r['score']}] {r['id']} ({r['category']}, {r['latency_ms']:.0f}ms) — {r['reasoning']}")
@@ -201,6 +205,7 @@ def main() -> None:
                 build_model(settings),
                 soul=soul,
                 checkpointer=cp,
+                history_window_messages=settings.history_window_messages,
                 # long-term memory context: ON only when MEMORIES_DATABASE_URL is
                 # set (read-only prod aerys DB); None keeps the graph memory-free
                 context_fn=context_fn_for(settings),
@@ -363,6 +368,7 @@ def main() -> None:
         content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
+            history_window_messages=settings.history_window_messages,
             # long-term memory context: same wiring as --serve so Discord text
             # chats recall memory too. None when MEMORIES_DATABASE_URL is unset
             # (degrade-safe: memory-free graph on DB-less boxes).
@@ -505,6 +511,7 @@ def main() -> None:
         content_privacy = content_privacy_fn_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
+            history_window_messages=settings.history_window_messages,
             # long-term memory context: same wiring as --serve/--discord so
             # Telegram text chats recall memory too. None when
             # MEMORIES_DATABASE_URL is unset (degrade-safe on DB-less boxes).

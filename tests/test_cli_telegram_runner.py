@@ -71,15 +71,17 @@ def test_telegram_runner_wires_client(monkeypatch):
     monkeypatch.setattr(factory, "portable_context_fn_for", lambda s: "PORTFN")
     monkeypatch.setattr(factory, "content_privacy_fn_for", lambda s: "CPFN")
 
+    monkeypatch.setenv("HISTORY_WINDOW_MESSAGES", "17")
     graph_calls = {}
 
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
-                         room_context_fn, portable_context_fn):
+                         room_context_fn, portable_context_fn, history_window_messages):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
             room_context_fn=room_context_fn,
             portable_context_fn=portable_context_fn,
+            history_window_messages=history_window_messages,
         )
         return "GRAPH"
 
@@ -134,6 +136,7 @@ def test_telegram_runner_wires_client(monkeypatch):
         "tier_models": None,
         "room_context_fn": "ROOMFN",
         "portable_context_fn": "PORTFN",
+        "history_window_messages": 17,
     }
 
     # ask() seam: invoking the injected ask_fn routes a Telegram turn through the

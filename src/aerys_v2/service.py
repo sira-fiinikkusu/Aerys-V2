@@ -42,6 +42,7 @@ from langgraph.errors import GraphRecursionError
 from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
+from aerys_v2.history import window_messages
 from aerys_v2.tools.remember import CURRENT_TURN_TEXT
 from aerys_v2.router import (
     DEFAULT_TIER,
@@ -1414,6 +1415,7 @@ def _action_history_seed(
         # a note about handing off) — the human turn is then already the tail,
         # so appending another copy would duplicate it.
         prior = prior[:-1]
+    prior = window_messages(prior, getattr(graph, "history_window_messages", 200))
     # ── SPECIALIST SEED (2026-09-04): prior HUMAN turns only ──────────────────
     # The 7/05 continuity fix seeded the WHOLE prior exchange. Traced 9/04: her own
     # earlier line "I can't set a specific brightness" rode into the next command
@@ -1424,7 +1426,7 @@ def _action_history_seed(
     # assistant or tool message. Privacy tags travel with each kept turn so the
     # room gate below still applies.
     # specialist=False (voice banter: conversation riding the tool graph) keeps the
-    # full prior exchange — her replies ARE the context there.
+    # windowed prior exchange — her replies ARE the context there.
     current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
     private_room = identity.get("privacy_context") == PRIVATE
     if not specialist:

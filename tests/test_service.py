@@ -79,12 +79,12 @@ def test_load_soul_reads_file(tmp_path):
 
 
 class RecordingModel(GenericFakeChatModel):
-    """Fake that records the system prompt each turn (for prompt-shape tests)."""
+    """Fake that records the static prompt and live context each turn (for prompt-shape tests)."""
 
     seen: list = []
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        type(self).seen.append(str(messages[0].content))
+        type(self).seen.append(messages[0].content + "\n" + messages[-1].content[0]["text"])
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
