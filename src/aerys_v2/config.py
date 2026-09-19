@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     # Substrings of entity ids that NEVER go direct (J3: lock, EV charging,
     # climate, alarm keep the specialist path and its confirmation semantics).
     reflex_direct_deny: str = "lock.,alarm,climate,ev_charging"
+    # J8 (Chris 2026-09-19 17:51, watching it live): "the singular commands
+    # don't need an ack — she is turning things on and off before she can even
+    # speak her ack." When the plain-command verdict fires on a VOICE turn the
+    # ack is empty: the write happens, a clean fast write stays silent under the
+    # silent-success rule, and only a refusal/failure is spoken. Everything
+    # else keeps the generated ack. REFLEX_DIRECT_SILENT_ACK=false restores it.
+    reflex_direct_silent_ack: bool = True
 
     # ---- ACTION SPECIALIST (2026-09-04) --------------------------------------
     # The tool subgraph is a stateless SPECIALIST: it gets the request (plus a

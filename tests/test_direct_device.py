@@ -158,3 +158,36 @@ def test_refusal_reaches_the_specialist_and_a_raise_becomes_an_honest_failure():
     LAST_REFLEX.set(LiveReflexRecord({"command": {"operation": "turn_off", "entity_id": "sunroom"}, "device": {}}, None, {}))
     ok_seed = _direct_device_seed(ActionGraph(tool), ["seed"])
     assert _needs_spoken_followup(ok_seed, 0.5, 5.0) is False
+
+
+def test_voice_plain_command_speaks_no_ack_and_still_acts():
+    from aerys_v2.factory import build_graph
+    ha = FakeHA(); tool = ha.tool(); action = ActionGraph(tool); rec = Recorder()
+    # A real chat graph is needed for the voice path's history landing; use the
+    # in-memory one from factory with a fake model.
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    chat = build_graph(GenericFakeChatModel(messages=iter([AIMessage(content="chat")])), "soul")
+    decide = decider(tool)
+    reply = ask(chat, "turn off the sunroom", identity={"voice": True, "privacy_context": "private"},
+                thread_id="person:v", router=decide, action_graph=action, reflex=None, record_turn=rec)
+    assert reply == ""                       # no ack spoken
+    assert rec.done.wait(3)
+    assert len(ha.bodies) == 1               # the write still happened, once
+    row = rec.rows[0]
+    assert row["emitted_reply"] == "" and json.loads(row["reflex"])["silent_ack"] is True
+    assert json.loads(row["tool_calls"])[0]["name"] == "home_control"
+
+
+def test_voice_keeps_the_ack_when_silent_ack_is_off_or_no_command():
+    from aerys_v2.factory import build_graph
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+    ha = FakeHA(); tool = ha.tool(); action = ActionGraph(tool); rec = Recorder()
+    chat = build_graph(GenericFakeChatModel(messages=iter([AIMessage(content="chat")])), "soul")
+    targets = device_target_choices(CANARY)
+    router = lambda text: RouteDecision(route="action", ack="On it.")
+    decide = live_router_for(settings(reflex_direct_silent_ack=False), lambda t, c: jev(), router,
+                             device_targets=targets, canary_entities=CANARY)
+    reply = ask(chat, "turn off the sunroom", identity={"voice": True, "privacy_context": "private"},
+                thread_id="person:v2", router=decide, action_graph=action, reflex=None, record_turn=rec)
+    assert reply == "On it."
+    assert rec.done.wait(3) and len(ha.bodies) == 1

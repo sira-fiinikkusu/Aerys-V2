@@ -404,6 +404,8 @@ def live_router_for(
             plain_device_command(record, text, settings, canary_entities, aliases)
             if device_targets and decision.route == 'action' else None
         )
+        # J8: a plain command on voice speaks no ack (the device is the feedback).
+        record['silent_ack'] = bool(record['command']) and bool(settings.reflex_direct_silent_ack)
         record['latency_ms'] = int((time.monotonic() - started) * 1000)
         LAST_REFLEX.set(LiveReflexRecord(record, thread, box))
         return decision

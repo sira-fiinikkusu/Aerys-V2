@@ -66,6 +66,14 @@ from aerys_v2.turns import (
 from aerys_v2.reflex import LAST_REFLEX, REFLEX_SURFACE, error_result
 
 
+def _direct_silent_ack() -> bool:
+    """J8: True when the live decider found a plain device command on this turn
+    and the owner's setting says such commands speak no ack."""
+    rec = LAST_REFLEX.get(None)
+    record = getattr(rec, "record", None)
+    return bool(isinstance(record, dict) and record.get("command") and record.get("silent_ack"))
+
+
 def _direct_device_seed(action_graph: object, seed: list) -> list:
     """Phase 4: carry out the ONE plain device command the live decider found,
     then hand the specialist the executed call so it only has to SPEAK.
@@ -1921,7 +1929,9 @@ def _voice_parallel_start(
         ack_at = time.monotonic()  # the ack leaves for the speaker ~now
         # Her face speaks the ack; the pusher defers the working face until
         # the ack's estimated playback runs out (panel.py owns that timing).
-        _face(face_push, "speaking", ack)
+        # A silent direct command (J8) has nothing to speak: straight to working.
+        if ack:
+            _face(face_push, "speaking", ack)
         _face(face_push, "working")
 
         # The ack the caller just heard rides `configurable` into the subgraph
@@ -2062,7 +2072,12 @@ def _voice_parallel_start(
             "voice route decision | thread=%s route=action",
             real_configurable.get("thread_id"),
         )
-        return _launch_background_action(decision.ack, escalated=False)
+        # J8 (2026-09-19): a plain device command the code will carry out itself
+        # speaks NO ack on voice — the light changing is the feedback, and it
+        # happens before an ack could finish playing. Refusals and failures are
+        # still spoken by the follow-up. Empty content is a valid pipeline reply.
+        ack = "" if _direct_silent_ack() else decision.ack
+        return _launch_background_action(ack, escalated=False)
 
     # ---- banter branch: synchronous action-graph turn, single spoken reply ----
     log.info(
