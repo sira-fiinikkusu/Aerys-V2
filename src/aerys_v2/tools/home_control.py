@@ -111,12 +111,29 @@ def _room_of(entity_id: str) -> str:
     return " ".join(w.rstrip("s") for w in words)
 
 
+def room_aliases(spec: str) -> dict[str, tuple[str, ...]]:
+    """Parse HA_ROOM_ALIASES: "office=switch.a,switch.b;office lights=switch.a" ->
+    {"office": ("switch.a","switch.b"), "office lights": ("switch.a",)}. Names are
+    lower-cased with spaces collapsed; a malformed part is skipped, never fatal."""
+    out: dict[str, tuple[str, ...]] = {}
+    for part in (spec or "").split(";"):
+        if "=" not in part:
+            continue
+        name, ids = part.split("=", 1)
+        key = " ".join(name.lower().split())
+        ents = tuple(e.strip() for e in ids.split(",") if e.strip() and "." in e)
+        if key and ents:
+            out[key] = ents
+    return out
+
+
 def canary_set(csv: str) -> frozenset[str]:
     """Parse the HA_CANARY_ENTITIES csv into the allowlist set ('' -> empty)."""
     return frozenset(e.strip() for e in csv.split(",") if e.strip())
 
 
-def resolve_targets(raw: str, op: str, canary_entities: frozenset[str]) -> tuple[list[str], str | None]:
+def resolve_targets(raw: str, op: str, canary_entities: frozenset[str],
+                    aliases: dict[str, tuple[str, ...]] | None = None) -> tuple[list[str], str | None]:
     """WHAT the call is about: exact id, comma list of ids, or a room/device
     NAME matched against the controllable set. Returns (targets, problem).
 
@@ -136,6 +153,16 @@ def resolve_targets(raw: str, op: str, canary_entities: frozenset[str]) -> tuple
         return ids, None
     if "." in raw:
         return [raw], None
+    # Owner-defined names first (HA_ROOM_ALIASES): "office" is whatever Chris said
+    # it is, not whatever the word happens to match.
+    key = " ".join(raw.lower().split())
+    for prefix in ("the ", "all the ", "all of the ", "all "):
+        if key.startswith(prefix):
+            key = key[len(prefix):]
+    if aliases and key in aliases:
+        ids = list(aliases[key])
+        log.info("home_control alias %r -> %s", raw, ids)
+        return ids, None
     terms = [
         w for w in re.split(r"[\s_\-]+", raw.lower()) if w and w not in _NAME_STOPWORDS
     ]
@@ -181,7 +208,8 @@ def resolve_targets(raw: str, op: str, canary_entities: frozenset[str]) -> tuple
     )
 
 
-def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250) -> dict[str, str]:
+def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250,
+                          aliases: dict[str, tuple[str, ...]] | None = None) -> dict[str, str]:
     """Choice criteria for a decision model: every ROOM and every DEVICE on the
     allowlist, keyed by a NAME resolve_targets() already understands.
 
@@ -192,13 +220,18 @@ def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250) 
     resolve to a non-empty target list.
     """
     out: dict[str, str] = {}
+    # Owner-defined names come first and win over the derived room names.
+    for name, ids in (aliases or {}).items():
+        out[name] = f"the owner's name for: {', '.join(ids)}"
     rooms: dict[str, list[str]] = {}
     for e in sorted(canary_entities):
         r = _room_of(e)
         if r:
             rooms.setdefault(r, []).append(e)
     for room, ids in rooms.items():
-        targets, problem = resolve_targets(room, "turn_on", canary_entities)
+        if room in out:
+            continue
+        targets, problem = resolve_targets(room, "turn_on", canary_entities, aliases)
         if targets and not problem:
             out[room] = f"everything in the {room}: {', '.join(targets)}"
     for e in sorted(canary_entities):
@@ -206,7 +239,7 @@ def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250) 
         name = " ".join(w for w in obj.split("_") if w)
         if name in out:
             continue
-        targets, problem = resolve_targets(name, "turn_on", canary_entities)
+        targets, problem = resolve_targets(name, "turn_on", canary_entities, aliases)
         if targets == [e] and not problem:
             out[name] = e
         if len(out) >= limit:
@@ -221,6 +254,7 @@ def build_home_control_tool(
     canary_entities: frozenset[str],
     client: httpx.Client | None = None,
     conn_factory: ConnFactory | None = None,
+    aliases: dict[str, tuple[str, ...]] | None = None,
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -304,7 +338,7 @@ def build_home_control_tool(
             log.warning("outbox UPDATE failed for row %s", outbox_id, exc_info=True)
 
     def _resolve_targets(raw: str, op: str) -> tuple[list[str], str | None]:
-        return resolve_targets(raw, op, canary_entities)
+        return resolve_targets(raw, op, canary_entities, aliases)
 
     def _read_state(entity: str) -> dict | str:
         """GET one entity's state: a dict, or an honest error STRING."""

@@ -136,7 +136,8 @@ def color_from_text(text: str) -> str | None:
     return None
 
 
-def plain_device_command(record: dict, text: str, settings: Settings, canary_entities) -> dict | None:
+def plain_device_command(record: dict, text: str, settings: Settings, canary_entities,
+                         aliases: dict | None = None) -> dict | None:
     """One plain thing, on one allowed target, that the model is sure about — else None.
 
     Sets record['device']['direct'] = {'ok': bool, 'reason': str} so the row shows
@@ -179,7 +180,7 @@ def plain_device_command(record: dict, text: str, settings: Settings, canary_ent
             if color is None:
                 return no('color not stated')
             command['color'] = color
-        targets, problem = resolve_targets(target['choice'], op, frozenset(canary_entities or ()))
+        targets, problem = resolve_targets(target['choice'], op, frozenset(canary_entities or ()), aliases)
         if problem or not targets:
             return no('target does not resolve')
         # The explicit owner ruling (J3) first, then the domain gate.
@@ -320,6 +321,7 @@ def live_router_for(
     registered_routes: tuple[str, ...] = ('chat', 'action'),
     device_targets: dict[str, str] | None = None,
     canary_entities=None,
+    aliases: dict | None = None,
 ) -> Callable[[str], RouteDecision]:
     """Phase 2: Jev decides when it is sure; the Haiku router otherwise.
 
@@ -399,7 +401,7 @@ def live_router_for(
                              'unaddressed': decision.unaddressed}
         # Phase 4: is this one plain device command the code may carry out itself?
         record['command'] = (
-            plain_device_command(record, text, settings, canary_entities)
+            plain_device_command(record, text, settings, canary_entities, aliases)
             if device_targets and decision.route == 'action' else None
         )
         record['latency_ms'] = int((time.monotonic() - started) * 1000)

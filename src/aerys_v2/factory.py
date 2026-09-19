@@ -1783,6 +1783,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             build_home_control_tool,
             build_search_entities_tool,
             canary_set,
+            room_aliases as _room_aliases,
         )
 
         conn_factory = None
@@ -1800,6 +1801,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
                 token=settings.ha_token.get_secret_value(),
                 canary_entities=canary_set(settings.ha_canary_entities),
                 conn_factory=conn_factory,
+                aliases=_room_aliases(settings.ha_room_aliases),
             )
         )
         tools.append(
@@ -2083,12 +2085,16 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
     # command through this same tool before the specialist speaks. Graph
     # configuration, never state — like history_window_messages.
-    from aerys_v2.tools.home_control import canary_set, device_target_choices
+    from aerys_v2.tools.home_control import canary_set, device_target_choices, room_aliases
     home_tool = next((t for t in tools if getattr(t, "name", "") == "home_control"), None)
     canary = canary_set(settings.ha_canary_entities)
     action_graph.home_control_tool = home_tool
-    action_graph.device_targets = device_target_choices(canary) if home_tool is not None else {}
+    action_graph.device_targets = (
+        device_target_choices(canary, aliases=room_aliases(settings.ha_room_aliases))
+        if home_tool is not None else {}
+    )
     action_graph.canary_entities = canary
+    action_graph.room_aliases = room_aliases(settings.ha_room_aliases)
     return router_for(settings, soul), action_graph
 
 

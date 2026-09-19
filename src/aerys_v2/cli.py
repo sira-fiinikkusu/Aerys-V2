@@ -27,6 +27,7 @@ def _arm_live_reflex(settings, reflex, router, action_graph=None):
         settings, reflex, router,
         device_targets=targets if settings.reflex_direct else None,
         canary_entities=getattr(action_graph, "canary_entities", None),
+        aliases=getattr(action_graph, "room_aliases", None),
     ), None
 log = logging.getLogger("aerys_v2")
 

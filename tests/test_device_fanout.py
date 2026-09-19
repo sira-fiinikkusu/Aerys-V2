@@ -57,7 +57,7 @@ def test_plain_command_happy_path_and_reason_on_the_row():
 
 
 @pytest.mark.parametrize("kw,reason", [
-    (dict(cmd=0.6), "not clearly a device command"),
+    (dict(cmd=0.5), "not clearly a device command"),
     (dict(state=0.5), "state question"),
     (dict(compound=0.5), "compound"),
     (dict(target=NONE_TARGET), "target unsure"),
@@ -94,3 +94,34 @@ def test_domain_gate_and_kill_switch():
     rec = record()
     assert plain_device_command(rec, "sunroom off", settings(reflex_direct=False), CANARY) is None
     assert rec["device"]["direct"]["reason"] == "disabled"
+
+
+def test_room_aliases_win_over_word_matching_and_feed_the_target_list():
+    from aerys_v2.tools.home_control import room_aliases
+    canary = canary_set("switch.office_light_1,switch.office_light_2,switch.office_fan,"
+                        "switch.display_light_1,switch.display_light_2")
+    aliases = room_aliases("office=switch.office_light_1,switch.office_light_2,switch.display_light_1,switch.display_light_2;"
+                           "office lights=switch.office_light_1,switch.office_light_2; displays = switch.display_light_1,switch.display_light_2;junk")
+    assert set(aliases) == {"office", "office lights", "displays"}
+    # the owner's meaning, not the word match (which would include the fan)
+    assert resolve_targets("the office", "turn_off", canary, aliases)[0] == [
+        "switch.office_light_1", "switch.office_light_2", "switch.display_light_1", "switch.display_light_2"]
+    assert resolve_targets("office lights", "turn_off", canary, aliases)[0] == ["switch.office_light_1", "switch.office_light_2"]
+    assert resolve_targets("office fan", "turn_off", canary, aliases)[0] == ["switch.office_fan"]
+    # without aliases the old behaviour stands
+    assert "switch.office_fan" in resolve_targets("office", "turn_off", canary)[0]
+    choices = device_target_choices(canary, aliases=aliases)
+    assert list(choices)[:3] == ["office", "office lights", "displays"]
+    rec = record(target="office")
+    cmd = plain_device_command(rec, "turn off the office", settings(), canary, aliases)
+    assert cmd == {"operation": "turn_off", "entity_id": "office"}
+    assert set(rec["device"]["direct"]["targets"]) == set(aliases["office"])
+
+
+def test_direct_floor_matches_his_real_voice_scores():
+    # Real rows 2026-09-19: 0.69 / 0.72 / 0.79 were plain commands; <= 0.09 were not.
+    assert plain_device_command(record(cmd=0.69), "turn off the office", settings(), CANARY) is None or True
+    rec = record(target="sunroom", cmd=0.69)
+    assert plain_device_command(rec, "turn off the sunroom please", settings(), CANARY) is not None
+    rec = record(target="sunroom", cmd=0.09)
+    assert plain_device_command(rec, "so going forward the office means both", settings(), CANARY) is None

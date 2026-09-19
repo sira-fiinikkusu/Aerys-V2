@@ -48,7 +48,11 @@ class Settings(BaseSettings):
     # confirmation is still the specialist's own sentence. REFLEX_DIRECT=false
     # keeps live routing but sends every action turn the old way.
     reflex_direct: bool = True
-    reflex_direct_command_floor: float = Field(default=0.85, ge=0, le=1)
+    # 0.85 was the first guess; his real voice commands scored 0.69 ("Turn off
+    # the office, please."), 0.72 ("turn the office back on"), 0.79 ("Turn off
+    # the sun room, please.") while non-commands scored <= 0.09 — 0.6 separates
+    # them cleanly, and the compound / state-question gates still stand.
+    reflex_direct_command_floor: float = Field(default=0.6, ge=0, le=1)
     reflex_direct_target_confidence: float = Field(default=0.7, ge=0, le=1)
     # Domains that may be written directly; anything else waits for the specialist.
     reflex_direct_domains: str = "light,switch,fan"
@@ -205,6 +209,13 @@ class Settings(BaseSettings):
     # e.g. "light.office_lamp,switch.desk_fan". Empty = every write refused —
     # the tool exists but is read-only, which is a valid canary stage zero.
     ha_canary_entities: str = ""
+    # HA_ROOM_ALIASES: owner-defined names for groups of allowlisted entities,
+    # "name=entity,entity;name2=..." (2026-09-19, Chris by voice: "'office' means
+    # the office lights AND the displays; 'office lights' means just the two
+    # lights"). An alias wins over word-matching, so what a name means is wiring,
+    # not something she has to remember turn by turn. Entities must still be on
+    # the allowlist to be written.
+    ha_room_aliases: str = ""
     # The house alarm panel entity (e.g. "alarm_control_panel.panel"). Empty =
     # the control_alarm tool doesn't exist — same arming pattern as ha_token.
     # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and
