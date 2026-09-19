@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     typesafe_api_key: SecretStr | None = None
     reflex_model: str = "jev-1.13.0"
     reflex_timeout_s: float = Field(default=0.6, gt=0, allow_inf_nan=False)
+    # Phase 2 (2026-09-19, Chris: "why are we hedging"): in live mode Jev decides
+    # route/tier/unaddressed when its route confidence clears this bar; below it
+    # the Haiku router decides exactly as before. Derived on 184 replayed turns:
+    # 100% agreement with the live router at confidence >= 0.6.
+    reflex_route_confidence: float = Field(default=0.6, ge=0, le=1)
+    # The router's own doctrine, kept: uncertain leans TOWARD action (the audited
+    # path). A confident "chat" with this much action probability still routes
+    # to action.
+    reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
+    # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
+    reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
 
     # ---- ACTION SPECIALIST (2026-09-04) --------------------------------------
     # The tool subgraph is a stateless SPECIALIST: it gets the request (plus a

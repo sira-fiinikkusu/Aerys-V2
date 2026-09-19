@@ -2,11 +2,26 @@ import logging, sys
 import signal, threading
 from pydantic import ValidationError
 from aerys_v2.config import BootConfigError, Settings, run_boot_assertions
-from aerys_v2.reflex import reflex_for
+from aerys_v2.reflex import live_router_for, reflex_for
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
+
+
+def _arm_live_reflex(settings, reflex, router):
+    """REFLEX_MODE=live: Jev decides when sure, the Haiku router otherwise (Phase 2).
+
+    Returns (router, reflex): in live mode the router becomes the combined
+    decider and the separate shadow observer is dropped (one Jev call per turn,
+    recorded by the decider itself). Any other mode passes both through unchanged.
+    """
+    if settings.reflex_mode != "live" or reflex is None or router is None:
+        return router, reflex
+    log.info("reflex LIVE | model=%s route_conf>=%.2f action_floor=%.2f unaddressed>=%.2f",
+             settings.reflex_model, settings.reflex_route_confidence,
+             settings.reflex_action_floor, settings.reflex_unaddressed_floor)
+    return live_router_for(settings, reflex, router), None
 log = logging.getLogger("aerys_v2")
 
 
@@ -244,6 +259,7 @@ def main() -> None:
             if stack is not None:
                 router, action_graph = stack
                 guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
+                router, reflex = _arm_live_reflex(settings, reflex, router)
                 log.info("action stack armed | ha=%s canary=[%s] media=%s",
                          settings.ha_base_url if settings.ha_token else "(off)",
                          settings.ha_canary_entities,
@@ -408,6 +424,7 @@ def main() -> None:
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
+            router, reflex = _arm_live_reflex(settings, reflex, router)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
         # aerys DB wired, a known platform account resolves to its real person_id
@@ -552,6 +569,7 @@ def main() -> None:
         if stack is not None:
             router, action_graph = stack
             guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
+            router, reflex = _arm_live_reflex(settings, reflex, router)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py), wired
         # exactly as --discord. With the aerys DB, a known Telegram account resolves

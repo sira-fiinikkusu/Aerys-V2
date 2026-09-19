@@ -63,7 +63,7 @@ from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
-from aerys_v2.reflex import error_result
+from aerys_v2.reflex import LAST_REFLEX, REFLEX_SURFACE, error_result
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +111,15 @@ _MAX_INFLIGHT_AUDIT = 32
 _audit_inflight = threading.BoundedSemaphore(_MAX_INFLIGHT_AUDIT)
 
 
+def _reflex_surface(identity: dict, thread_id: str) -> str:
+    """The surface label Jev sees — the same enum the audit row records."""
+    return (
+        "voice" if is_voice_turn(identity, thread_id)
+        else channel_enum(identity.get("platform"), identity.get("channel_kind"))
+        or derive_channel(thread_id)
+    )
+
+
 class _ReflexShadow:
     """A per-turn observation; only the audit writer is allowed to collect it."""
 
@@ -120,11 +129,7 @@ class _ReflexShadow:
         self.result = {"error": "timeout"}
         self.completed_at = None
         self.router = {"route": None, "tier": None, "unaddressed": None}
-        surface = (
-            "voice" if is_voice_turn(identity, thread_id)
-            else channel_enum(identity.get("platform"), identity.get("channel_kind"))
-            or derive_channel(thread_id)
-        )
+        surface = _reflex_surface(identity, thread_id)
 
         def run():
             try:
@@ -180,6 +185,10 @@ def _fire_turn_record(
     same S2 channel the graph uses — so the row can never disagree with the turn."""
     if record_turn is None:
         return
+    if reflex is None:
+        # Live mode: the decider left its record on the turn's context (see
+        # reflex.live_router_for); nothing is threaded through the call sites.
+        reflex = LAST_REFLEX.get(None)
     try:
         configurable = (config or {}).get("configurable") or {}
         row = build_turn_row(
@@ -212,14 +221,15 @@ def _fire_turn_record(
 
     def _run() -> None:
         try:
-            if isinstance(reflex, _ReflexShadow):
+            if hasattr(reflex, "collect"):
                 # Join only here: even a dropped capture or instant local reply
                 # must not wait for the remaining shadow budget.
                 try:
                     row["reflex"] = json.dumps(reflex.collect())
                 except Exception as exc:
                     row["reflex"] = json.dumps({"jev": error_result(exc),
-                                               "router": reflex.router, "mode": "shadow"})
+                                               "router": getattr(reflex, "router", None),
+                                               "mode": "error"})
             _safe_record(record_turn, row)
         finally:
             _audit_inflight.release()
@@ -1020,6 +1030,10 @@ def ask(
     }
 
     with _turn_span(str(thread_id), text):
+        # Phase 2 plumbing: tell a live decider which surface this is, and clear
+        # any record left by an earlier turn on this context.
+        REFLEX_SURFACE.set(_reflex_surface(identity, thread_id))
+        LAST_REFLEX.set(None)
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was

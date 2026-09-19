@@ -72,7 +72,7 @@ def test_settings_defaults_and_invalid_mode():
         Settings(_env_file=None, anthropic_api_key='test', reflex_mode='typo')
 
 
-def test_factory_pins_model_timeout_and_warns_once_for_live(monkeypatch, caplog):
+def test_factory_pins_model_and_timeout(monkeypatch, caplog):
     import sys
     import aerys_v2.reflex as module
 
@@ -93,7 +93,8 @@ def test_factory_pins_model_timeout_and_warns_once_for_live(monkeypatch, caplog)
     assert first.timeout_s == second.timeout_s == .12
     assert constructed[0] == dict(api_key='fake-key', model='jev-1.13.0',
                                   timeout=.12, retry={'max_retries': 0})
-    assert sum('reserved' in r.message for r in caplog.records) == 1
+    # live is a real mode since Phase 2; the factory no longer warns about it.
+    assert not any('reserved' in r.message for r in caplog.records)
 
 
 def test_sdk_question_contract():
