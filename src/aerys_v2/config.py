@@ -1,9 +1,10 @@
 import logging
 import re
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,12 @@ class Settings(BaseSettings):
     model_backend: str = "api"
     anthropic_api_key: SecretStr
     model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
+    # The pinned observer earns evidence before any judgment can steer a turn.
+    reflex_mode: Literal["off", "shadow", "live"] = "off"
+    typesafe_api_key: SecretStr | None = None
+    reflex_model: str = "jev-1.13.0"
+    reflex_timeout_s: float = Field(default=0.6, gt=0, allow_inf_nan=False)
+
     # ---- ACTION SPECIALIST (2026-09-04) --------------------------------------
     # The tool subgraph is a stateless SPECIALIST: it gets the request (plus a
     # few prior requests for reference resolution), the tools, and a short

@@ -28,6 +28,7 @@ standard and the downgrade is logged, never an error to the caller.
 import concurrent.futures
 import contextlib
 import contextvars
+import json
 import logging
 import re
 import threading
@@ -59,7 +60,10 @@ from aerys_v2.services.content_privacy import (
     redact_private_history,
 )
 from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
-from aerys_v2.turns import build_turn_row, current_trace_id, extract_tool_calls
+from aerys_v2.turns import (
+    build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
+)
+from aerys_v2.reflex import error_result
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +111,55 @@ _MAX_INFLIGHT_AUDIT = 32
 _audit_inflight = threading.BoundedSemaphore(_MAX_INFLIGHT_AUDIT)
 
 
+class _ReflexShadow:
+    """A per-turn observation; only the audit writer is allowed to collect it."""
+
+    def __init__(self, fn: Callable, text: str, identity: dict, thread_id: str):
+        self.started = time.monotonic()
+        self.timeout_s = getattr(fn, "timeout_s", .6)
+        self.result = {"error": "timeout"}
+        self.completed_at = None
+        self.router = {"route": None, "tier": None, "unaddressed": None}
+        surface = (
+            "voice" if is_voice_turn(identity, thread_id)
+            else channel_enum(identity.get("platform"), identity.get("channel_kind"))
+            or derive_channel(thread_id)
+        )
+
+        def run():
+            try:
+                result = fn(text[:2000], {"surface": surface})
+                self.result = result if isinstance(result, dict) else {"error": "no result"}
+            except Exception as exc:
+                self.result = error_result(exc)
+            finally:
+                self.completed_at = time.monotonic()
+
+        self.thread = None
+        try:
+            self.thread = threading.Thread(target=_in_ctx(run), daemon=True)
+            self.thread.start()
+        except Exception as exc:
+            self.result = error_result(exc)
+            self.completed_at = time.monotonic()
+            self.thread = None
+
+    def observe_router(self, decision: RouteDecision) -> None:
+        # Keep the original vote: served tier and route can change at later gates.
+        self.router = {"route": decision.route, "tier": decision.tier,
+                       "unaddressed": decision.unaddressed}
+
+    def collect(self) -> dict:
+        if self.thread is not None:
+            self.thread.join(max(0, self.timeout_s - (time.monotonic() - self.started)))
+        # A slow graph may finish after Jev's deadline. A late answer is still a
+        # timeout, even if its worker has finished by the time the audit runs.
+        result = self.result
+        if self.completed_at is None or self.completed_at - self.started > self.timeout_s:
+            result = {"error": "timeout"}
+        return {"jev": result, "router": dict(self.router), "mode": "shadow"}
+
+
 def _safe_record(record_turn: Callable[[dict], None], row: dict) -> None:
     try:
         record_turn(row)
@@ -119,6 +172,7 @@ def _fire_turn_record(
     config: dict,
     text: str,
     latency_ms: int | None,
+    reflex: _ReflexShadow | dict | None = None,
     **fields: object,
 ) -> None:
     """Build the audit row now (trace/tool/latency captured in-context), write it
@@ -136,6 +190,7 @@ def _fire_turn_record(
             trace_id=current_trace_id(),
             # What the graph read of the room for THIS turn, via the shared holder.
             room_context=(configurable.get("room_sink") or {}).get("room"),
+            reflex=reflex if isinstance(reflex, dict) else None,
             **fields,  # type: ignore[arg-type]
         )
     except Exception:
@@ -157,12 +212,20 @@ def _fire_turn_record(
 
     def _run() -> None:
         try:
+            if isinstance(reflex, _ReflexShadow):
+                # Join only here: even a dropped capture or instant local reply
+                # must not wait for the remaining shadow budget.
+                try:
+                    row["reflex"] = json.dumps(reflex.collect())
+                except Exception as exc:
+                    row["reflex"] = json.dumps({"jev": error_result(exc),
+                                               "router": reflex.router, "mode": "shadow"})
             _safe_record(record_turn, row)
         finally:
             _audit_inflight.release()
 
     try:
-        threading.Thread(target=_run, daemon=True).start()
+        threading.Thread(target=_in_ctx(_run), daemon=True).start()
     except RuntimeError:  # can't start new thread — fail open, never crash the turn
         _audit_inflight.release()
         log.warning("v2_turns audit thread could not start — turn not audited", exc_info=True)
@@ -180,6 +243,7 @@ def _record_turn_failure(
     tier_override_source: str | None = None,
     base_degraded: list[str] | None = None,
     emitted_reply: str | None = None,
+    reflex: _ReflexShadow | None = None,
 ) -> None:
     """One v2_turns row for a turn whose invoke RAISED, fired before the caller
     re-raises OR emits an honest fallback. Degraded marker is 'recursion_limit' for a
@@ -196,6 +260,7 @@ def _record_turn_failure(
     latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
     _fire_turn_record(
         record_turn, config, text, latency_ms,
+        reflex=reflex,
         classifier_intent=classifier_intent,
         tier=tier,
         tier_override_source=tier_override_source,
@@ -836,6 +901,7 @@ def ask(
     thread_id: str,
     rails: Rails = Rails(),
     router: Callable[[str], RouteDecision] | None = None,
+    reflex: Callable[[str, dict], dict | None] | None = None,
     action_graph: object | None = None,
     specialists: dict[str, object] | None = None,
     guest_action_graph: object | None = None,
@@ -896,6 +962,8 @@ def ask(
       once per completed turn on EVERY path with the fully-built row, off the hot
       path and fail-open (see _fire_turn_record). None = no auditing (dev/CI, no
       DATABASE_URL), byte-for-byte the old behavior.
+    - reflex: shadow-only observer; starts before routing and is collected only
+      by the audit writer. Its verdict cannot change the reply or router gates.
     - face_push: the panel-face seam (factory.face_pusher_for) — (phase, text)
       with phase working|speaking|idle, fired at the turn's phase changes so
       her desk avatar mirrors what the brain is doing. Fire-and-forget and
@@ -952,13 +1020,14 @@ def ask(
     }
 
     with _turn_span(str(thread_id), text):
+        shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was
             # forced off it by the allowlist gate above. No router ran, so
             # classifier_intent/tier stay NULL — the row records what actually
             # happened, not a tier decision that was never made.
             reply, handoff = _chat_turn(
-                graph, text, config, rails, started, record_turn=record_turn,
+                graph, text, config, rails, started, record_turn=record_turn, reflex=shadow,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
             )
             if handoff:
@@ -998,7 +1067,7 @@ def ask(
             # judge relaxes general voice content so it still carries into public rooms.
             voice_reply = _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
-                speak_fn, satellite_for, followup_skip_s, record_turn=record_turn,
+                speak_fn, satellite_for, followup_skip_s, record_turn=record_turn, reflex=shadow,
                 followup_router=followup_router,
                 display_push=display_push,
                 content_privacy_classifier=content_privacy_classifier,
@@ -1018,6 +1087,8 @@ def ask(
         # Non-voice: nobody is waiting on a speaker, so the router runs first
         # (sequential) and only the chosen path spends model tokens.
         decision = router(text)
+        if shadow is not None:
+            shadow.observe_router(decision)
         registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
         if (
             drop_unaddressed
@@ -1037,6 +1108,7 @@ def ask(
             _fire_turn_record(
                 record_turn, config, text,
                 int((time.monotonic() - started) * 1000),
+                reflex=shadow,
                 classifier_intent="unaddressed",
                 raw_reply="", emitted_reply="",
                 extra_degraded=[DROPPED_UNADDRESSED_MARKER],
@@ -1051,7 +1123,7 @@ def ask(
             _face(face_push, "working")
             reply = _action_turn(
                 selected_graph, graph, text, config, add_human=True,
-                record_turn=record_turn, started=started,
+                record_turn=record_turn, reflex=shadow, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 tier=normalize_tier(decision.tier),
             )
@@ -1084,7 +1156,7 @@ def ask(
         log.info("route decision | thread=%s route=chat tier=%s", thread_id, tier)
         config["configurable"]["tier"] = tier
         reply, handoff = _chat_turn(
-            graph, text, config, rails, started, record_turn=record_turn,
+            graph, text, config, rails, started, record_turn=record_turn, reflex=shadow,
             classifier_intent="chat", tier=tier,
             tier_override_source=override_source, extra_degraded=downgrade_marker,
             human_privacy=origin_privacy, human_id=turn_msg_id,
@@ -1133,7 +1205,7 @@ def ask(
             _face(face_push, "working")
             reply = _action_turn(
                 action_graph, graph, text, config, add_human=False,
-                record_turn=record_turn, started=started,
+                record_turn=record_turn, reflex=shadow, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 replace_message_id=_last_ai_message_id(graph, config["configurable"]),
                 escalated=True,
@@ -1163,6 +1235,7 @@ def _chat_turn(
     extra_degraded: list[str] | None = None,
     human_privacy: str = PRIVATE,
     human_id: str | None = None,
+    reflex: _ReflexShadow | None = None,
 ) -> tuple[str, bool]:
     """The original chat path: invoke, budget-check, extract — now also audited.
 
@@ -1198,6 +1271,7 @@ def _chat_turn(
         honest = _honest_reply_for_failure(e)
         _record_turn_failure(
             record_turn, config, text, started, e,
+            reflex=reflex,
             classifier_intent=classifier_intent,
             tier=tier,
             tier_override_source=tier_override_source,
@@ -1340,6 +1414,7 @@ def _chat_turn(
 
     _fire_turn_record(
         record_turn, config, text, int(elapsed * 1000),
+        reflex=reflex,
         classifier_intent=classifier_intent,
         tier=tier,
         tier_override_source=tier_override_source,
@@ -1496,6 +1571,7 @@ def _action_turn(
     escalated: bool = False,
     extra_degraded: list[str] | None = None,
     tier: str = "standard",
+    reflex: _ReflexShadow | None = None,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -1540,7 +1616,7 @@ def _action_turn(
         # same as the chat path (cross-review correctness H).
         honest = _honest_reply_for_failure(e)
         _record_turn_failure(
-            record_turn, config, text, started, e, classifier_intent="action",
+            record_turn, config, text, started, e, classifier_intent="action", reflex=reflex,
             base_degraded=(
                 ([ESCALATED_MARKER] if escalated else []) + list(extra_degraded or [])
                 + (["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else [])
@@ -1578,6 +1654,7 @@ def _action_turn(
     latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
     _fire_turn_record(
         record_turn, config, text, latency_ms,
+        reflex=reflex,
         classifier_intent="action",
         raw_reply=final,
         emitted_reply=final,
@@ -1751,6 +1828,7 @@ def _voice_parallel_start(
     drop_unaddressed: bool = False,
     drop_conversation_window_s: float = 180.0,
     activity_registry: dict[str, float] | None = None,
+    reflex: _ReflexShadow | None = None,
 ) -> str:
     """Voice hot path — VOICE-ALWAYS-ACTION (owner's simplification, 2026-07-25).
 
@@ -1885,6 +1963,7 @@ def _voice_parallel_start(
             _fire_turn_record(
                 record_turn, config, text,
                 int((time.monotonic() - started) * 1000),
+                reflex=reflex,
                 classifier_intent="action",
                 raw_reply=final,
                 emitted_reply=ack,
@@ -1897,6 +1976,8 @@ def _voice_parallel_start(
         return ack
 
     decision = router(text)
+    if reflex is not None:
+        reflex.observe_router(decision)
     registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
     thread_key = str(real_configurable.get("thread_id", ""))
     if (
@@ -1919,6 +2000,7 @@ def _voice_parallel_start(
         _fire_turn_record(
             record_turn, config, text,
             int((time.monotonic() - started) * 1000),
+            reflex=reflex,
             classifier_intent="unaddressed",
             raw_reply="", emitted_reply="",
             extra_degraded=[DROPPED_UNADDRESSED_MARKER],
@@ -1971,6 +2053,7 @@ def _voice_parallel_start(
         honest = _honest_reply_for_failure(e)
         _record_turn_failure(
             record_turn, config, text, started, e,
+            reflex=reflex,
             classifier_intent="chat", tier=DEFAULT_TIER,
             base_degraded=["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else None,
             emitted_reply=honest,
@@ -2009,6 +2092,7 @@ def _voice_parallel_start(
         gate_degraded.append("local_model_fallback")
     _fire_turn_record(
         record_turn, config, text, int(elapsed * 1000),
+        reflex=reflex,
         classifier_intent="chat",
         tier=DEFAULT_TIER,
         raw_reply=reply,

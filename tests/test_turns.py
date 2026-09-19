@@ -530,3 +530,13 @@ def test_unresolved_tool_name_logs_a_warning(caplog):
         calls = extract_tool_calls([orphan])
     assert calls[0]["name"] == "unknown"
     assert "unresolved" in caplog.text.lower()
+
+
+def test_reflex_json_and_null():
+    from aerys_v2.turns import INSERT_TURN_SQL
+
+    fields = dict(thread_id='cli', identity={}, input_text='hello', latency_ms=1)
+    shadow = {'jev': {'route': 'action'}, 'router': {'route': 'chat'}, 'mode': 'shadow'}
+    assert json.loads(build_turn_row(**fields, reflex=shadow)['reflex']) == shadow
+    assert build_turn_row(**fields)['reflex'] is None
+    assert '%(reflex)s::jsonb' in INSERT_TURN_SQL

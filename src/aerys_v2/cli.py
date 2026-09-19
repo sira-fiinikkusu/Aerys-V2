@@ -2,6 +2,7 @@ import logging, sys
 import signal, threading
 from pydantic import ValidationError
 from aerys_v2.config import BootConfigError, Settings, run_boot_assertions
+from aerys_v2.reflex import reflex_for
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -57,7 +58,17 @@ def main() -> None:
         from aerys_v2.factory import build_graph, build_model, load_soul
         from aerys_v2.service import ask
 
-        from aerys_v2.factory import checkpointer_for
+        from aerys_v2.factory import checkpointer_for, turn_recorder_for
+
+        reflex = reflex_for(settings)
+        recorder = turn_recorder_for(settings) if reflex is not None else None
+        recorded = threading.Event()
+
+        def record_cli_turn(row):
+            try:
+                recorder(row)
+            finally:
+                recorded.set()
 
         text = sys.argv[sys.argv.index("--ask") + 1]
         with checkpointer_for(settings) as cp:  # Postgres when DATABASE_URL set → durable
@@ -70,9 +81,14 @@ def main() -> None:
                 text,
                 # CLI caller = the operator; real transports resolve identity properly (S2)
                 identity={"user_id": "cli-operator", "display_name": "Chris (CLI)"},
+                reflex=reflex, record_turn=record_cli_turn if recorder else None,
                 thread_id="cli",  # durable with DATABASE_URL: separate runs SHARE this thread
             )
-        print(reply)
+        print(reply, flush=True)
+        if recorder is not None:
+            # The one-shot process has no next turn to keep daemon writers alive.
+            # Print first; only process exit waits for the shadow receipt.
+            recorded.wait(settings.reflex_timeout_s + 10)
         sys.exit(0)
 
     if wants_eval:  # run the eval harness against the local graph: aerys-v2 --eval
@@ -201,6 +217,7 @@ def main() -> None:
             # "1 identity, 1 memory" holds in BOTH directions.
             portable_context = portable_context_fn_for(settings)
             content_privacy = content_privacy_fn_for(settings)
+            reflex = reflex_for(settings)
             graph = build_graph(
                 build_model(settings),
                 soul=soul,
@@ -265,7 +282,7 @@ def main() -> None:
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,
                     record_turn=record_turn,
-                    content_privacy_classifier=content_privacy,
+                    content_privacy_classifier=content_privacy, reflex=reflex,
                     face_push=face_push,
                     drop_unaddressed=settings.voice_drop_unaddressed,
                     drop_conversation_window_s=settings.voice_drop_conversation_window_s,
@@ -366,6 +383,7 @@ def main() -> None:
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
         content_privacy = content_privacy_fn_for(settings)
+        reflex = reflex_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
@@ -419,7 +437,7 @@ def main() -> None:
                 # ask()). Owner is always in; add others via house_control_person_ids.
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
-                content_privacy_classifier=content_privacy,
+                content_privacy_classifier=content_privacy, reflex=reflex,
                 face_push=face_push,
             ),
             resolve_fn=resolve,
@@ -509,6 +527,7 @@ def main() -> None:
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
         content_privacy = content_privacy_fn_for(settings)
+        reflex = reflex_for(settings)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
@@ -562,7 +581,7 @@ def main() -> None:
                 # chat-only (enforced in ask()). Owner is always in.
                 action_allowlist=action_allowlist_for(settings),
                 record_turn=record_turn,
-                content_privacy_classifier=content_privacy,
+                content_privacy_classifier=content_privacy, reflex=reflex,
                 face_push=face_push,
             ),
             resolve_fn=resolve,

@@ -375,6 +375,27 @@ def _gaps_read_main(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _reflex_report_main(settings: Settings, args: argparse.Namespace) -> int:
+    if not settings.database_url:
+        print("reflex-report needs: DATABASE_URL", file=sys.stderr)
+        return 2
+    try:
+        run_boot_assertions(settings)
+    except BootConfigError as e:
+        print(f"reflex-report refusing to start: {e}", file=sys.stderr)
+        return 2
+    import psycopg
+
+    from .reflex_report import format_report, read_reflex_rows
+
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
+        conn.read_only = True
+        conn.execute("SET statement_timeout = '30s'")
+        rows = read_reflex_rows(conn, args.window)
+    print(format_report(rows))
+    return 0
+
+
 def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
     """`signals [--window] [--quiet]` — invariants over the traffic that happened.
 
@@ -484,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     gaps.add_argument("--limit", type=int, default=50, help="max rows (default 50)")
 
+    reflex_report = sub.add_parser("reflex-report", help="read Jev shadow agreement")
+    reflex_report.add_argument("--window", default="24 hours",
+                               help="lookback as a Postgres interval (default 24 hours)")
+
     signals = sub.add_parser(
         "signals", help="check invariants over recent real traffic (read-only)")
     signals.add_argument("--window", default="24 hours",
@@ -509,6 +534,8 @@ def main(argv: list[str] | None = None) -> int:
         return _email_watch_main(settings, args)
     if args.worker == "gaps":
         return _gaps_read_main(settings, args)
+    if args.worker == "reflex-report":
+        return _reflex_report_main(settings, args)
     if args.worker == "signals":
         return _signals_main(settings, args)
     if args.worker == "gap-board":
