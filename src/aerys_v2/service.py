@@ -596,6 +596,7 @@ _LAST_OUTCOME: dict[str, str] = {}
 # Jev as words (see reflex.addressee_state).
 _LAST_CAPTURE: dict[str, dict] = {}
 _CAPTURE_LOG: dict[str, deque] = {}
+_CAPTURE_LOCK = threading.Lock()  # asks on different threads share these maps
 _CAPTURE_WINDOW_S = 300
 
 
@@ -603,16 +604,17 @@ def _note_capture(thread_id: str, text: str) -> dict:
     """Record this capture (outcome pending → 'answered normally' until told otherwise) and
     return the reflex context derived from the captures BEFORE it."""
     now = time.monotonic()
-    log_ = _CAPTURE_LOG.setdefault(thread_id, deque(maxlen=50))
-    while log_ and now - log_[0]["at"] > _CAPTURE_WINDOW_S:
-        log_.popleft()
-    prev = _LAST_CAPTURE.get(thread_id)
-    ctx = {"background_captures_5m": sum(1 for e in log_ if e["outcome"] != "answered normally")}
-    if prev:
-        ctx["previous_capture"] = {"text": prev["text"], "seconds_ago": round(now - prev["at"], 1), "outcome": prev["outcome"]}
-    entry = {"text": str(text)[:200], "at": now, "outcome": "answered normally"}
-    _LAST_CAPTURE[thread_id] = entry
-    log_.append(entry)
+    with _CAPTURE_LOCK:
+        log_ = _CAPTURE_LOG.setdefault(thread_id, deque(maxlen=50))
+        while log_ and now - log_[0]["at"] > _CAPTURE_WINDOW_S:
+            log_.popleft()
+        prev = _LAST_CAPTURE.get(thread_id)
+        ctx = {"background_captures_5m": sum(1 for e in log_ if e["outcome"] != "answered normally")}
+        if prev:
+            ctx["previous_capture"] = {"text": prev["text"], "seconds_ago": round(now - prev["at"], 1), "outcome": prev["outcome"]}
+        entry = {"text": str(text)[:200], "at": now, "outcome": "answered normally"}
+        _LAST_CAPTURE[thread_id] = entry
+        log_.append(entry)
     return ctx
 _DEVICE_LABELS = {
     "185bd720dd074d798a6094ad4f22e525": "office satellite (Chris's desk; he works and takes calls here)",
@@ -636,9 +638,10 @@ _CONFUSION_RE = re.compile(r"(didn.t (quite )?(come through|catch|get that)|garb
 
 def _note_outcome(thread_id: str, outcome: str) -> None:
     _LAST_OUTCOME[thread_id] = outcome
-    cur = _LAST_CAPTURE.get(thread_id)
-    if cur is not None:
-        cur["outcome"] = outcome
+    with _CAPTURE_LOCK:
+        cur = _LAST_CAPTURE.get(thread_id)
+        if cur is not None:
+            cur["outcome"] = outcome
 
 
 def _note_reply_outcome(thread_id: str, reply: str | None) -> None:
