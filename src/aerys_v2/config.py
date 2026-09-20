@@ -22,7 +22,16 @@ class Settings(BaseSettings):
     # every tier collapses onto it — local mode exists for staging twins and for
     # answering when the internet is gone, not for rationing spend.
     # The api key stays REQUIRED either way: evals/CI/fallback run on it.
+    # "cli" (2026-09-20, Chris: "shed my API costs"): langchain-claude-cli drives the
+    # Claude Code CLI on the Max subscription WITH real tool calling (our graph runs
+    # the tools). Chat tiers AND the action tool model ride the plan; the two knobs
+    # below carve out the action path and voice separately. The separate Agent SDK
+    # credit pool is paused (June 15) — this draws from the plan's normal limits.
     model_backend: str = "api"
+    cli_persistent: bool = True          # keep a warm CLI client per conversation (2 s warm vs 10 s cold)
+    cli_prewarm: bool = True             # one tiny turn at boot so the first user turn is not the cold spawn
+    cli_tool_backend: Literal["cli", "api"] = "cli"   # action/tool turns on the plan too
+    cli_voice_backend: Literal["cli", "api"] = "api"  # voice stays metered until the --serve warm soak passes
     anthropic_api_key: SecretStr
     model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
     # The pinned observer earns evidence before any judgment can steer a turn.

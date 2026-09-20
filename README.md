@@ -139,7 +139,7 @@ All configuration is environment variables (loaded from `.env`), defined and doc
 |-----|---------|
 | `ANTHROPIC_API_KEY` | **Required.** Anthropic API key. |
 | `MODEL` | Default chat model id. |
-| `MODEL_BACKEND` | `api` (metered) or `oauth` (subscription via the Claude Agent SDK, chat-only). |
+| `MODEL_BACKEND` | `api` (metered), `oauth` (subscription via the Claude Agent SDK, chat-only), or `cli` (subscription via `langchain-claude-cli` over the Agent SDK: chat tiers AND the tool model, our graph runs the tools). `CLI_TOOL_BACKEND=api` keeps action turns metered; `CLI_VOICE_BACKEND=api` (default) keeps voice metered until the warm-client soak passes. Quota, not dollars: the plan's normal limits, shared with any Claude Code session on the same login; worst case is waiting for a reset, never a bill. The API key stays required for evals, CI and fallback. |
 | `SOUL_FILE_PATH` | Path to the persona prompt file (falls back to a minimal persona if absent). |
 | `TIER_FAST_MODEL` / `TIER_STANDARD_MODEL` / `TIER_DEEP_MODEL` | Per-tier model ids. |
 | `DEEP_DAILY_CAP` | Max deep-tier turns per day (enforced when a database is configured). |

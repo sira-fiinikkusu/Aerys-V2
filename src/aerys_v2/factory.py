@@ -526,6 +526,52 @@ class LocalFailoverModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
 
+# Resolved lazily so the default-off dev/CI path never imports the CLI package and
+# tests can swap the class (monkeypatch aerys_v2.factory.CLI_MODEL_CLASS).
+CLI_MODEL_CLASS: type | None = None
+
+
+def _cli_model(settings: Settings, model_name: str, *, max_tokens: int, timeout_s: float):
+    """A chat model on the Max subscription via the Claude Code CLI (langchain-claude-cli).
+
+    Tools bind normally (the package defers execution to LangChain). auth="oauth"
+    (its default) strips ANTHROPIC_API_KEY from the subprocess, the same trap
+    oauth_model.py guards, so a stray key can never redirect the billing. The
+    CLI caches its own prefix; cache_prefix breakpoints are not needed here.
+    """
+    global CLI_MODEL_CLASS
+    cls = CLI_MODEL_CLASS
+    if cls is None:
+        from langchain_claude_cli import ChatClaudeCli
+
+        cls = CLI_MODEL_CLASS = ChatClaudeCli
+    return cls(
+        model=model_name,
+        persistent=settings.cli_persistent,
+        max_tokens=max_tokens,
+        timeout=timeout_s,
+        max_retries=0,  # the failover wrappers decide what a failure means
+    )
+
+
+def prewarm_cli_model(model: object) -> None:
+    """One tiny turn on a daemon thread so the first user turn is warm (10 s → 2 s).
+
+    Fail-open: a failed prewarm only means the first real turn pays the spawn.
+    """
+    import threading
+
+    def run():
+        from langchain_core.messages import HumanMessage
+
+        try:
+            model.invoke([HumanMessage(content="ok")])
+        except Exception as exc:  # noqa: BLE001 — prewarm must never take the process down
+            log.warning("cli prewarm failed (%s); first turn will spawn the CLI", type(exc).__name__)
+
+    threading.Thread(target=run, name="cli-prewarm", daemon=True).start()
+
+
 def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel:
     """One place that knows how to turn Settings into a chat model.
 
@@ -541,6 +587,10 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
         from aerys_v2.oauth_model import ClaudeOAuthChatModel
 
         return _maybe_failover(settings, ClaudeOAuthChatModel(model=settings.model), timeout_s)
+    if settings.model_backend == "cli":
+        return _maybe_failover(
+            settings, _cli_model(settings, settings.model, max_tokens=4096, timeout_s=timeout_s), timeout_s
+        )
     return _maybe_failover(
         settings,
         build_metered_model(
@@ -589,6 +639,19 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
         # (fast=pennies / deep=capped) only makes sense on a meter.
         local = local_model_for(settings)
         return {"fast": local, "standard": local, "deep": local}
+
+    if settings.model_backend == "cli":
+        # The CLI client takes any model name, so every tier rides the plan with
+        # its own model (unlike the single-model oauth client). deep_gate_for
+        # still rations deep turns: it is quota now, not dollars.
+        models = {
+            tier: _maybe_failover(settings, _cli_model(settings, name, max_tokens=4096, timeout_s=timeout_s), timeout_s)
+            for tier, name in (("fast", settings.tier_fast_model), ("standard", settings.tier_standard_model),
+                               ("deep", settings.tier_deep_model))
+        }
+        if settings.cli_persistent and settings.cli_prewarm:
+            prewarm_cli_model(models["standard"])
+        return models
 
     def api_model(name: str) -> BaseChatModel:
         return _maybe_failover(
@@ -1517,14 +1580,45 @@ class ToolModelPair:
         return model.invoke(messages, **kwargs)
 
 
-def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
-    """The tool-turn model: metered API primary, tools bound (Option C, ratified).
+class SurfaceSplitToolModel(ToolModelPair):
+    """One .invoke() seam, two tool models: the CLI (subscription) one for text
+    surfaces and the metered one for voice, chosen per call from REFLEX_SURFACE
+    (set by ask() before routing). Exists so voice can stay on the API key while
+    text rides the plan, without building the action graph twice.
+    """
 
-    Deliberately NOT build_model(): the oauth/SDK backend is chat-only — it can't
-    drive a LangChain tool loop — so action turns bill the API key regardless of
-    model_backend. Voice device commands are short turns; the spend is pennies.
+    def __init__(self, text_model: object, voice_model: object):
+        self._text, self._voice = text_model, voice_model
+
+    def invoke(self, messages: list, *, specialist: bool = False, fast: bool = False, **kwargs):
+        from aerys_v2.reflex import REFLEX_SURFACE
+
+        target = self._voice if REFLEX_SURFACE.get() == "voice" else self._text
+        if isinstance(target, ToolModelPair):
+            return target.invoke(messages, specialist=specialist, fast=fast, **kwargs)
+        return target.invoke(messages, **kwargs)
+
+
+def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 60.0) -> object:
+    """The tool-turn model (Option C, ratified; extended 2026-09-20 for the plan).
+
+    "api"/"oauth"/"local" backends: metered ChatAnthropic primary, tools bound —
+    the oauth/SDK backend is chat-only and cannot drive a LangChain tool loop.
+    "cli" backend with cli_tool_backend="cli": the CLI client on the subscription,
+    tools bound the same way (it defers execution to our graph); voice keeps the
+    metered model while cli_voice_backend="api", selected per call by surface.
     local_fallback_url arms a local tool lifeboat for connection failures and 5xx.
     """
+    if settings.model_backend == "cli" and settings.cli_tool_backend == "cli":
+        text = _build_tool_model(settings, tools, timeout_s=timeout_s, backend="cli")
+        if settings.cli_voice_backend == "cli":
+            return text
+        voice = _build_tool_model(settings, tools, timeout_s=timeout_s, backend="api")
+        return SurfaceSplitToolModel(text, voice)
+    return _build_tool_model(settings, tools, timeout_s=timeout_s, backend="api")
+
+
+def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, backend: str) -> object:
     lifeboat = None
     if settings.local_fallback_url is not None:
         from langchain_openai import ChatOpenAI
@@ -1543,7 +1637,9 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
             return primary
         return LocalToolFailoverModel(primary, lifeboat)
 
-    def chat(model_name: str) -> ChatAnthropic:
+    def chat(model_name: str) -> object:
+        if backend == "cli":
+            return _cli_model(settings, model_name, max_tokens=1024, timeout_s=timeout_s)
         return build_metered_model(
             settings,
             model=model_name,
