@@ -24,10 +24,11 @@ STATE_MESSAGE_CHARS = 2000
 # threading a new argument through every record call site.
 REFLEX_SURFACE: contextvars.ContextVar[str] = contextvars.ContextVar('reflex_surface', default='unknown')
 LAST_REFLEX: contextvars.ContextVar[object] = contextvars.ContextVar('last_reflex', default=None)
-# Option B (shadow, 2026-09-20): the assistant's previous reply on this thread, set by
-# ask() so the unaddressed question can be asked WITH context ("is this a reply to
-# what she just said, or unrelated speech?"). Recorded beside the plain score.
+# Option B (shadow, 2026-09-20): the thread's recent exchanges, set by ask() so the
+# unaddressed question can be asked WITH context. Recorded beside the plain score.
 REFLEX_LAST_REPLY: contextvars.ContextVar[str] = contextvars.ContextVar('reflex_last_reply', default='')
+REFLEX_RECENT: contextvars.ContextVar[list] = contextvars.ContextVar('reflex_recent', default=[])
+REFLEX_SINCE_S: contextvars.ContextVar[float | None] = contextvars.ContextVar('reflex_since_s', default=None)
 
 log = logging.getLogger(__name__)
 _LIVE_WARNED = False
@@ -69,12 +70,25 @@ QUESTIONS = {
 # Option B (shadow): the same unaddressed judgment, but with the assistant's previous
 # reply in the state. A single fragment is ambiguous ("Is the question I asked." scored
 # 0.36 alone); against her last line it is not.
+# Round 2 (13:20): background about the house + the last two exchanges + seconds since
+# she spoke + examples from the real drops. On 124 real voice turns: floor 0.6 → 7/13
+# captures caught, 9/111 real turns falsely dropped; 0.7 → 2/13, 3/111. The remaining
+# picture (who is speaking, how sure the satellite was about the wake word) is not in
+# the text yet — speaker ID and wake-word confidence are the inputs that finish this.
+VOICE_BACKGROUND = ("This is a voice satellite in Chris and Megan's home; the assistant is Aerys. The TV or a video is "
+                    "often playing in the room; other people (Megan, guests, phone calls) talk near the microphone; the "
+                    "wake word sometimes fires on background speech and captures a fragment that was never said to Aerys. "
+                    "Chris speaks to Aerys in short casual sentences and often answers her previous line with a few words.")
 UNADDRESSED_CTX_QUESTION = {
     'type': 'noul',
-    'instructions': ("Given the assistant's previous reply, this message is NOT a reply, answer, or follow-up to "
-                     "the assistant and NOT a new request to it: it is unrelated speech — a TV, radio or video, other "
-                     "people talking to each other, third-person narration, or a fragment cut off mid-sentence. "
-                     "A short answer, acknowledgment or follow-up to the assistant's previous reply IS addressed."),
+    'instructions': ("The message was NOT said to the assistant: television, video or radio speech, someone else in the "
+                     "room being spoken to, third-person narration, or a stray fragment that asks and answers nothing. "
+                     "Examples of NOT addressed: 'so I told Megan we would probably leave around nine tomorrow' | "
+                     "'and then he just left it in the driveway all weekend' | 'He interrupted Filibuster. Let me ask him "
+                     "about his trip to Italy' | 'Marcus, it's a, uh, a way to track outages'. Examples of addressed (a "
+                     "request, or a short answer/follow-up to the assistant's previous line): 'yes go ahead' | "
+                     "'the sunroom' | 'never mind' | 'can you turn off the dressers please?' | 'what time is it' | "
+                     "'So I just want to see if you can hear me on the.' | 'okay thanks'."),
 }
 
 
@@ -330,9 +344,15 @@ class ReflexClient:
                 if targets:
                     questions.update(device_questions(targets))
                 state = {'message': text[:STATE_MESSAGE_CHARS], 'surface': context.get('surface', 'unknown')}
+                exchanges = context.get('recent_exchanges') or []
                 last_reply = (context.get('last_reply') or '')[:600]
-                if last_reply:
-                    state['assistant_previous_reply'] = last_reply
+                if exchanges or last_reply:
+                    state['background'] = VOICE_BACKGROUND
+                    state['recent_exchanges'] = exchanges[-2:]
+                    if last_reply:
+                        state['assistant_previous_reply'] = last_reply
+                    if context.get('seconds_since_assistant_spoke') is not None:
+                        state['seconds_since_assistant_last_spoke'] = context['seconds_since_assistant_spoke']
                     questions['unaddressed_ctx'] = UNADDRESSED_CTX_QUESTION
                 response = self.client.system_one(state=state, questions=questions)
                 route = response.answers['route']
@@ -460,6 +480,7 @@ def live_router_for(
     unaddressed_floor = settings.reflex_unaddressed_floor
     cancel_floor = settings.reflex_cancel_floor
     router_sample = settings.reflex_router_sample
+    unaddressed_source = settings.reflex_unaddressed_source
     join_floor = settings.reflex_unaddressed_join_floor
     agree_floor = settings.reflex_unaddressed_agree_floor
     strong_floor = settings.reflex_unaddressed_strong_floor
@@ -507,6 +528,12 @@ def live_router_for(
         last_reply = REFLEX_LAST_REPLY.get()
         if last_reply:
             context['last_reply'] = last_reply
+        recent = REFLEX_RECENT.get()
+        if recent:
+            context['recent_exchanges'] = recent
+        since = REFLEX_SINCE_S.get()
+        if since is not None:
+            context['seconds_since_assistant_spoke'] = since
         try:
             jev = reflex(text, context)
         except Exception as exc:
@@ -542,6 +569,9 @@ def live_router_for(
             # Codex review 2026-09-20 #6: keep the router's command-preservation guard —
             # a command-shaped message is never dropped as unaddressed, whatever Jev said.
             jev_u = float(jev.get('unaddressed', 0))
+            if unaddressed_source == 'ctx' and jev.get('unaddressed_ctx') is not None:
+                jev_u = float(jev['unaddressed_ctx'])  # the fuller picture, when the thread has one
+            record['unaddressed_score'] = jev_u
             unaddressed = jev_u >= unaddressed_floor
             strong = jev_u >= 0.9
             if surface == 'voice' and not unaddressed and jev_u >= join_floor:

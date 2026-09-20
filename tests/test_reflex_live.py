@@ -312,3 +312,14 @@ def test_option_b_context_rides_the_call_when_a_last_reply_exists():
     finally:
         REFLEX_LAST_REPLY.reset(token)
     assert seen["last_reply"] == "What was the question?"
+
+
+def test_fuller_picture_score_gates_when_present_and_source_is_ctx():
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
+    jev_ctx = lambda t, c: {**jev_result("chat", 0.9, unaddressed=0.2), "unaddressed_ctx": 0.85}  # noqa: E731
+    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7), jev_ctx, router)("Which is tomorrow."))
+    assert d.unaddressed is True and LAST_REFLEX.get().collect()["unaddressed_score"] == 0.85
+    d2 = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7, reflex_unaddressed_source="plain"), jev_ctx, router)("Which is tomorrow."))
+    assert d2.unaddressed is False
+    d3 = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7), lambda t, c: jev_result("chat", 0.9, unaddressed=0.2), router)("x"))
+    assert d3.unaddressed is False                               # no context yet → plain score

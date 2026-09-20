@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
     # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
     reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
+    # Which Jev score gates voice: "ctx" = the fuller-picture question (background, last
+    # two exchanges, timing, examples — round 2, 2026-09-20) when context exists, else
+    # the plain one; "plain" = the single-fragment question only. Floor is Chris's knob:
+    # measured on 124 real turns, ctx @0.6 catches 7/13 and wrongly silences 9/111;
+    # @0.7 catches 2/13 and silences 3/111.
+    reflex_unaddressed_source: Literal["ctx", "plain"] = "ctx"
     # Option A ensemble on VOICE (Chris 2026-09-20 12:55): when Jev's unaddressed score
     # is at least join_floor, wait for Haiku; Haiku unaddressed + Jev >= agree_floor
     # drops; Haiku + Jev >= strong_floor drops even inside the grace window.

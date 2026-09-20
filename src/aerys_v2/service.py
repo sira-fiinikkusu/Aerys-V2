@@ -63,7 +63,7 @@ from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
-from aerys_v2.reflex import REFLEX_LAST_REPLY, LAST_REFLEX, REFLEX_SURFACE, error_result
+from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_SINCE_S, LAST_REFLEX, REFLEX_SURFACE, error_result
 
 
 def _direct_silent_ack() -> bool:
@@ -587,17 +587,29 @@ def _remember_window_for(seed: list, text: str, config: dict) -> str:
     return _remember_window(seed, text)
 
 
-def _last_ai_text(graph: object, configurable: dict) -> str:
-    """The thread's most recent AI reply as text ('' if none) — Option B's context for
-    the unaddressed question. Degrade-safe: any read failure is ''."""
+def _recent_exchanges(graph: object, configurable: dict, n: int = 2) -> list[dict]:
+    """The thread's last n (user, assistant) pairs as short text — Option B's context
+    for the unaddressed question. Degrade-safe: any read failure is []."""
     try:
         msgs = graph.get_state({"configurable": configurable}).values.get("messages", [])
-        for m in reversed(msgs):
-            if getattr(m, "type", "") == "ai":
-                return _reply_text(m)
+        pairs: list[dict] = []
+        cur: dict | None = None
+        for m in msgs:
+            t = getattr(m, "type", "")
+            if t == "human":
+                cur = {"user": str(m.content)[:300], "assistant": ""}
+                pairs.append(cur)
+            elif t == "ai" and cur is not None and not getattr(m, "tool_calls", None):
+                cur["assistant"] = _reply_text(m)[:300]
+        return [p for p in pairs if p["assistant"]][-n:]
     except Exception:
-        log.debug("last-AI-text read failed — no context for the unaddressed question", exc_info=True)
-    return ""
+        log.debug("recent-exchanges read failed — no context for the unaddressed question", exc_info=True)
+    return []
+
+
+def _last_ai_text(graph: object, configurable: dict) -> str:
+    ex = _recent_exchanges(graph, configurable, n=1)
+    return ex[-1]["assistant"] if ex else ""
 
 
 def _last_ai_message_id(graph: object, configurable: dict) -> str | None:
@@ -1096,7 +1108,12 @@ def ask(
         # any record left by an earlier turn on this context.
         REFLEX_SURFACE.set(_reflex_surface(identity, thread_id))
         LAST_REFLEX.set(None)
-        REFLEX_LAST_REPLY.set(_last_ai_text(graph, config["configurable"]) if router is not None else "")
+        recent = _recent_exchanges(graph, config["configurable"]) if router is not None else []
+        REFLEX_RECENT.set(recent)
+        REFLEX_LAST_REPLY.set(recent[-1]["assistant"] if recent else "")
+        registry_for_since = _THREAD_ACTIVITY if activity_registry is None else activity_registry
+        last_spoke = registry_for_since.get(thread_id)
+        REFLEX_SINCE_S.set(round(time.monotonic() - last_spoke, 1) if last_spoke is not None else None)
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was
