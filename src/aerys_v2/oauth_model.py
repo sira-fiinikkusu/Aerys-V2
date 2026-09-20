@@ -21,6 +21,7 @@ Warm-client design (v2 of this module — the first version spawned the CLI per 
 import asyncio
 import hashlib
 import json
+import re
 import threading
 import uuid
 from typing import Any
@@ -58,11 +59,22 @@ def _text(content: Any) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        return " ".join(
+        return "\n".join(
             (b.get("text", "") if isinstance(b, dict) else str(b)) for b in content
             if not (isinstance(b, dict) and b.get("type") in ("tool_use", "thinking"))
         ).strip()
     return str(content)
+
+
+# Gemini review 2026-09-20 (blocker): the flattened prompt is ONE user message, so text
+# that came from a user, a tool or a web page could open a line with "User:", "Aerys:"
+# or "[System instructions]" and impersonate the transcript. Every such line inside
+# untrusted text gets a visible quote mark so it reads as content, never as a speaker.
+_LABEL_RE = re.compile(r"^(\s*)(User|Aerys|\[System instructions\]|\[Tool result[^\]]*\])(\s*:?)", re.M | re.I)
+
+
+def _neutralize(text: str) -> str:
+    return _LABEL_RE.sub(lambda m: f"{m.group(1)}> {m.group(2)}{m.group(3)}", text)
 
 
 def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
@@ -82,9 +94,11 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
         if isinstance(m, SystemMessage):
             system_parts.append(str(m.content))
         elif isinstance(m, HumanMessage):
-            lines.append(f"User: {_text(m.content)}")
+            lines.append(f"User: {_neutralize(_text(m.content))}")
         elif isinstance(m, ToolMessage):
-            lines.append(f"[Tool result {names.get(m.tool_call_id, 'tool')}]: {_text(m.content)}")
+            name = names.get(m.tool_call_id, "tool")
+            # Delimited AND neutralized: the model sees a quoted block, not a speaker.
+            lines.append(f"[Tool result {name}] <<<\n{_neutralize(_text(m.content))}\n>>> end of tool result {name}")
         elif isinstance(m, AIMessage):
             parts = []
             text = _text(m.content)
@@ -93,7 +107,7 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
             for tc in m.tool_calls:
                 names[tc.get("id", "")] = tc["name"]
                 parts.append(f"<called tool {tc['name']} with {json.dumps(tc.get('args', {}), sort_keys=True)}>")
-            lines.append("Aerys: " + " ".join(parts))
+            lines.append("Aerys: " + _neutralize(" ".join(parts)))
     head = ("[System instructions]\n" + "\n\n".join(system_parts) + "\n\n") if system_parts else ""
     tail = ""
     if messages and isinstance(messages[-1], ToolMessage):
@@ -106,17 +120,20 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
 class _WarmClient:
     """Owns the event-loop thread + the connected ClaudeSDKClient (one per model + tool set)."""
 
-    def __init__(self, model: str, tool_schemas: list[dict] | None = None) -> None:
+    def __init__(self, model: str, tool_schemas: list[dict] | None = None, turn_timeout_s: float = 60.0) -> None:
         self.model = model
         self.tool_schemas = list(tool_schemas or [])
+        # Gemini review 2026-09-20: a hung CLI used to hold the lock 120 s, then 120 s
+        # more on the retry. One bounded turn; a hang resets the client and raises.
+        self.turn_timeout_s = turn_timeout_s
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True, name="oauth-model")
         self._thread.start()
         self._client = None
         self._lock = threading.Lock()  # one turn at a time — household-sized
 
-    def _run(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=120)
+    def _run(self, coro, timeout: float | None = None):
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout or self.turn_timeout_s)
 
     async def _connect(self):
         from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
@@ -220,14 +237,25 @@ class _WarmClient:
         self._client = None
 
     def ask(self, prompt: str) -> tuple[str, list[dict], dict]:
+        import concurrent.futures
+
         with self._lock:
             try:
                 return self._run(self._turn(prompt))
+            except concurrent.futures.TimeoutError as hung:
+                # A hang is not retried: drop the process so the next caller starts
+                # clean, and fail this turn now (the lifeboat/honest-failure path decides).
+                try:
+                    self._run(self._reset(), timeout=10)
+                except Exception:
+                    pass
+                self._client = None
+                raise OAuthBackendError(f"turn exceeded {self.turn_timeout_s:.0f}s; client reset") from hung
             except Exception as first:
                 # Warm process may have died (idle timeout, OOM, upgrade) —
                 # reconnect once, then let a second failure surface loudly.
                 try:
-                    self._run(self._reset())
+                    self._run(self._reset(), timeout=10)
                     return self._run(self._turn(prompt))
                 except Exception as second:
                     raise OAuthBackendError(f"{type(first).__name__}: {str(first)[:160]} / "
@@ -243,13 +271,13 @@ def _schema_key(model: str, schemas: list[dict]) -> str:
     return f"{model}:{digest}"
 
 
-def warm_client_for(model: str, schemas: list[dict]) -> _WarmClient:
+def warm_client_for(model: str, schemas: list[dict], turn_timeout_s: float = 60.0) -> _WarmClient:
     """One CLI subprocess per (model, tool set); every ChatModel copy shares it."""
     key = _schema_key(model, schemas)
     with _CLIENTS_LOCK:
         client = _CLIENTS.get(key)
         if client is None:
-            client = _CLIENTS[key] = _WarmClient(model, schemas)
+            client = _CLIENTS[key] = _WarmClient(model, schemas, turn_timeout_s=turn_timeout_s)
         return client
 
 
@@ -266,6 +294,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
     # parameters) and whether the first pass must call a tool (tool_choice="any").
     bound_tools: list[dict] = []
     force_tool: bool = False
+    turn_timeout_s: float = 60.0
 
     _warm: Any = None  # lazily created _WarmClient (pydantic private-ish)
 
@@ -307,5 +336,5 @@ class ClaudeOAuthChatModel(BaseChatModel):
 
     def _query(self, prompt: str):
         if self._warm is None:
-            object.__setattr__(self, "_warm", warm_client_for(self.model, self.bound_tools))
+            object.__setattr__(self, "_warm", warm_client_for(self.model, self.bound_tools, self.turn_timeout_s))
         return self._warm.ask(prompt)

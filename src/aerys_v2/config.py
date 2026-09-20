@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # its session resume carried a previous turn's context into the next one.
     oauth_tool_backend: Literal["oauth", "api"] = "api"    # text action/tool turns on the plan
     oauth_voice_backend: Literal["oauth", "api"] = "api"   # voice on the plan (after the soak)
+    oauth_turn_timeout_s: float = Field(default=60.0, gt=0)  # a hung CLI turn fails here, no retry, client reset
     cli_persistent: bool = True          # keep a warm CLI client per conversation (2 s warm vs 10 s cold)
     cli_prewarm: bool = True             # one tiny turn at boot so the first user turn is not the cold spawn
     cli_tool_backend: Literal["cli", "api"] = "cli"   # action/tool turns on the plan too

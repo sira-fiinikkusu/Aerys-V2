@@ -594,7 +594,9 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
         # graph gets "a chat model" and can't tell which wallet it bills.
         from aerys_v2.oauth_model import ClaudeOAuthChatModel
 
-        return _maybe_failover(settings, ClaudeOAuthChatModel(model=settings.model), timeout_s)
+        return _maybe_failover(
+            settings, ClaudeOAuthChatModel(model=settings.model, turn_timeout_s=settings.oauth_turn_timeout_s), timeout_s
+        )
     if settings.model_backend == "cli":
         raise RuntimeError(CLI_BLOCKED)
     return _maybe_failover(
@@ -1653,7 +1655,7 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
         if backend == "oauth":
             from aerys_v2.oauth_model import ClaudeOAuthChatModel
 
-            return ClaudeOAuthChatModel(model=model_name)
+            return ClaudeOAuthChatModel(model=model_name, turn_timeout_s=settings.oauth_turn_timeout_s)
         if backend == "cli":
             return _cli_model(settings, model_name, max_tokens=1024, timeout_s=timeout_s)
         return build_metered_model(
