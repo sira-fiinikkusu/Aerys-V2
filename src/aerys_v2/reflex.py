@@ -92,7 +92,9 @@ UNADDRESSED_CTX_QUESTION = {
                      "about his trip to Italy' | 'Marcus, it's a, uh, a way to track outages'. Examples of addressed (a "
                      "request, or a short answer/follow-up to the assistant's previous line): 'yes go ahead' | "
                      "'the sunroom' | 'never mind' | 'can you turn off the dressers please?' | 'what time is it' | "
-                     "'So I just want to see if you can hear me on the.' | 'okay thanks'."),
+                     "'So I just want to see if you can hear me on the.' | 'okay thanks' | 'sorry, that wasn't meant for you' | "
+                     "'I wasn't talking to you' (a correction TO the assistant after she answered background talk is "
+                     "addressed to her)."),
 }
 
 
