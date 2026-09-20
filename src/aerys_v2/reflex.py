@@ -29,6 +29,7 @@ LAST_REFLEX: contextvars.ContextVar[object] = contextvars.ContextVar('last_refle
 REFLEX_LAST_REPLY: contextvars.ContextVar[str] = contextvars.ContextVar('reflex_last_reply', default='')
 REFLEX_RECENT: contextvars.ContextVar[list] = contextvars.ContextVar('reflex_recent', default=[])
 REFLEX_SINCE_S: contextvars.ContextVar[float | None] = contextvars.ContextVar('reflex_since_s', default=None)
+REFLEX_ROOM: contextvars.ContextVar[dict] = contextvars.ContextVar('reflex_room', default={})  # device / local_time / previous_capture_outcome
 
 log = logging.getLogger(__name__)
 _LIVE_WARNED = False
@@ -75,10 +76,13 @@ QUESTIONS = {
 # captures caught, 9/111 real turns falsely dropped; 0.7 → 2/13, 3/111. The remaining
 # picture (who is speaking, how sure the satellite was about the wake word) is not in
 # the text yet — speaker ID and wake-word confidence are the inputs that finish this.
-VOICE_BACKGROUND = ("This is a voice satellite in Chris and Megan's home; the assistant is Aerys. The TV or a video is "
-                    "often playing in the room; other people (Megan, guests, phone calls) talk near the microphone; the "
-                    "wake word sometimes fires on background speech and captures a fragment that was never said to Aerys. "
-                    "Chris speaks to Aerys in short casual sentences and often answers her previous line with a few words.")
+VOICE_BACKGROUND = ("Household: Chris (the owner; speaks to the assistant Aerys in short casual sentences and often answers "
+                    "her previous line with a few words) and his wife Megan. Friends/colleagues who come up by name: Joe, "
+                    "Ben, Ricky, Marcus. Satellites are microphones in the office (Chris works and takes calls there) and "
+                    "the bedroom (TV often on); phone calls and other people happen near the mic; the wake word sometimes "
+                    "fires on background speech and captures a fragment nobody said to Aerys. Fragments tend to come in "
+                    "runs: after one false capture, the next capture within a minute is often also background speech. "
+                    "When Aerys just spoke seconds ago, a short reply is usually to her.")
 UNADDRESSED_CTX_QUESTION = {
     'type': 'noul',
     'instructions': ("The message was NOT said to the assistant: television, video or radio speech, someone else in the "
@@ -347,12 +351,18 @@ class ReflexClient:
                 exchanges = context.get('recent_exchanges') or []
                 last_reply = (context.get('last_reply') or '')[:600]
                 if exchanges or last_reply:
+                    # Round 3 (2026-09-20 13:30, Chris: "hit it with data"): the richest
+                    # picture — up to 8 prior exchanges with their age, which device, the
+                    # local time, how the previous capture went, the household names.
                     state['background'] = VOICE_BACKGROUND
-                    state['recent_exchanges'] = exchanges[-2:]
+                    state['recent_exchanges'] = exchanges[-8:]
                     if last_reply:
                         state['assistant_previous_reply'] = last_reply
                     if context.get('seconds_since_assistant_spoke') is not None:
                         state['seconds_since_assistant_last_spoke'] = context['seconds_since_assistant_spoke']
+                    for k in ('device', 'local_time', 'previous_capture_outcome'):
+                        if context.get(k):
+                            state[k] = context[k]
                     questions['unaddressed_ctx'] = UNADDRESSED_CTX_QUESTION
                 response = self.client.system_one(state=state, questions=questions)
                 route = response.answers['route']
@@ -534,6 +544,7 @@ def live_router_for(
         since = REFLEX_SINCE_S.get()
         if since is not None:
             context['seconds_since_assistant_spoke'] = since
+        context.update({k: v for k, v in (REFLEX_ROOM.get() or {}).items() if v})
         try:
             jev = reflex(text, context)
         except Exception as exc:

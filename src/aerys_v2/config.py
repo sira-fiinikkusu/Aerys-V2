@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     # to action.
     reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
     # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
-    reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
+    # Round 3 (2026-09-20, 124 real voice turns, full-state question): 0.75 catches 7/17
+    # captures and silences 0/107 real asks alone; 0.70 = 8/17 and 1/107.
+    reflex_unaddressed_floor: float = Field(default=0.75, ge=0, le=1)
     # Which Jev score gates voice: "ctx" = the fuller-picture question (background, last
     # two exchanges, timing, examples — round 2, 2026-09-20) when context exists, else
     # the plain one; "plain" = the single-fragment question only. Floor is Chris's knob:
@@ -67,9 +69,11 @@ class Settings(BaseSettings):
     # Option A ensemble on VOICE (Chris 2026-09-20 12:55): when Jev's unaddressed score
     # is at least join_floor, wait for Haiku; Haiku unaddressed + Jev >= agree_floor
     # drops; Haiku + Jev >= strong_floor drops even inside the grace window.
-    reflex_unaddressed_join_floor: float = Field(default=0.3, ge=0, le=1)
-    reflex_unaddressed_agree_floor: float = Field(default=0.3, ge=0, le=1)
-    reflex_unaddressed_strong_floor: float = Field(default=0.6, ge=0, le=1)
+    # Haiku is the FALLBACK, not the classifier (Chris 13:13): only the uncertain band
+    # [join_floor, floor) goes to it — 13 of 124 turns (10%) on the round-3 data.
+    reflex_unaddressed_join_floor: float = Field(default=0.55, ge=0, le=1)
+    reflex_unaddressed_agree_floor: float = Field(default=0.55, ge=0, le=1)
+    reflex_unaddressed_strong_floor: float = Field(default=0.65, ge=0, le=1)
     # J10 (2026-09-19, Chris: "silent on voice"): "cancel" / "never mind" drops
     # the turn — nothing spoken, nothing run, receipt row marked. Same reasoning
     # as unaddressed: a wrong "cancelled" ignores him, so the bar is higher still.

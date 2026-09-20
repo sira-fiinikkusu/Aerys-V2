@@ -63,7 +63,7 @@ from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
-from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_SINCE_S, LAST_REFLEX, REFLEX_SURFACE, error_result
+from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_ROOM, REFLEX_SINCE_S, LAST_REFLEX, REFLEX_SURFACE, error_result
 
 
 def _direct_silent_ack() -> bool:
@@ -587,20 +587,60 @@ def _remember_window_for(seed: list, text: str, config: dict) -> str:
     return _remember_window(seed, text)
 
 
-def _recent_exchanges(graph: object, configurable: dict, n: int = 2) -> list[dict]:
-    """The thread's last n (user, assistant) pairs as short text — Option B's context
-    for the unaddressed question. Degrade-safe: any read failure is []."""
+# Round 3 context: which satellite, and how the previous capture on this thread went
+# (answered / could not understand / dropped as background) — fragments come in runs.
+_LAST_OUTCOME: dict[str, str] = {}
+_DEVICE_LABELS = {
+    "185bd720dd074d798a6094ad4f22e525": "office satellite (Chris's desk; he works and takes calls here)",
+    "4f23e5d4672b5a56da3566d3522ccae7": "bedroom satellite (TV often on)",
+    "b9cde1126a975e27d4e4b852f2e798b8": "reTerminal panel (office wall display)",
+}
+
+
+def _device_label(identity: Identity | dict | None) -> str | None:
+    ident = identity or {}
+    dev = str(ident.get("device_id") or ident.get("channel_id") or "")
+    if not dev:
+        return None
+    return _DEVICE_LABELS.get(dev, f"satellite {dev[:8]}")
+
+
+_CONFUSION_RE = re.compile(r"(didn.t (quite )?(come through|catch|get that)|garbled|say that again|what was the question|"
+                           r"could you repeat|come again|missed that|not sure (what|if) you|didn.t (quite )?follow|lost you|"
+                           r"catch that|didn.t hear|cut off|tangled|only caught|part of that)", re.I)
+
+
+def _note_outcome(thread_id: str, outcome: str) -> None:
+    _LAST_OUTCOME[thread_id] = outcome
+
+
+def _note_reply_outcome(thread_id: str, reply: str | None) -> None:
+    """After a spoken/emitted reply: was it an answer, or her saying she couldn't understand?"""
+    if not reply:
+        return
+    _note_outcome(thread_id, "assistant could not understand it" if _CONFUSION_RE.search(reply) else "answered normally")
+
+
+def _recent_exchanges(graph: object, configurable: dict, n: int = 8) -> list[dict]:
+    """The thread's last n (user, assistant) pairs as short text, oldest first, with the
+    age of each in seconds when the message carries a timestamp — the unaddressed
+    question's context (round 3, 2026-09-20). Degrade-safe: any read failure is []."""
     try:
         msgs = graph.get_state({"configurable": configurable}).values.get("messages", [])
         pairs: list[dict] = []
         cur: dict | None = None
+        now = time.time()
         for m in msgs:
             t = getattr(m, "type", "")
+            kw = getattr(m, "additional_kwargs", None) or {}
             if t == "human":
-                cur = {"user": str(m.content)[:300], "assistant": ""}
+                cur = {"user": str(m.content)[:240], "assistant": ""}
+                ts = kw.get("ts") or kw.get("created_at")
+                if isinstance(ts, (int, float)):
+                    cur["seconds_before_this"] = int(now - ts)
                 pairs.append(cur)
             elif t == "ai" and cur is not None and not getattr(m, "tool_calls", None):
-                cur["assistant"] = _reply_text(m)[:300]
+                cur["assistant"] = _reply_text(m)[:240]
         return [p for p in pairs if p["assistant"]][-n:]
     except Exception:
         log.debug("recent-exchanges read failed — no context for the unaddressed question", exc_info=True)
@@ -1114,6 +1154,11 @@ def ask(
         registry_for_since = _THREAD_ACTIVITY if activity_registry is None else activity_registry
         last_spoke = registry_for_since.get(thread_id)
         REFLEX_SINCE_S.set(round(time.monotonic() - last_spoke, 1) if last_spoke is not None else None)
+        REFLEX_ROOM.set({
+            "device": _device_label(identity),
+            "local_time": datetime.now(EASTERN).strftime("%A %H:%M"),
+            "previous_capture_outcome": _LAST_OUTCOME.get(thread_id),
+        })
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was
@@ -1176,6 +1221,7 @@ def ask(
                     _THREAD_ACTIVITY if activity_registry is None else activity_registry
                 )
                 registry[thread_id] = time.monotonic()
+                _note_reply_outcome(thread_id, voice_reply)
             return voice_reply
 
         # Non-voice: nobody is waiting on a speaker, so the router runs first
@@ -1214,6 +1260,7 @@ def ask(
                 "route decision | thread=%s DROPPED (unaddressed voice capture)",
                 thread_id,
             )
+            _note_outcome(thread_id, "dropped as background speech")
             _fire_turn_record(
                 record_turn, config, text,
                 int((time.monotonic() - started) * 1000),
@@ -2126,6 +2173,7 @@ def _voice_parallel_start(
             "voice route decision | thread=%s DROPPED (unaddressed capture)",
             real_configurable.get("thread_id"),
         )
+        _note_outcome(thread_key, "dropped as background speech")
         _fire_turn_record(
             record_turn, config, text,
             int((time.monotonic() - started) * 1000),
