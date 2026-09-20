@@ -63,7 +63,7 @@ from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
-from aerys_v2.reflex import LAST_REFLEX, REFLEX_SURFACE, error_result
+from aerys_v2.reflex import REFLEX_LAST_REPLY, LAST_REFLEX, REFLEX_SURFACE, error_result
 
 
 def _direct_silent_ack() -> bool:
@@ -587,6 +587,19 @@ def _remember_window_for(seed: list, text: str, config: dict) -> str:
     return _remember_window(seed, text)
 
 
+def _last_ai_text(graph: object, configurable: dict) -> str:
+    """The thread's most recent AI reply as text ('' if none) — Option B's context for
+    the unaddressed question. Degrade-safe: any read failure is ''."""
+    try:
+        msgs = graph.get_state({"configurable": configurable}).values.get("messages", [])
+        for m in reversed(msgs):
+            if getattr(m, "type", "") == "ai":
+                return _reply_text(m)
+    except Exception:
+        log.debug("last-AI-text read failed — no context for the unaddressed question", exc_info=True)
+    return ""
+
+
 def _last_ai_message_id(graph: object, configurable: dict) -> str | None:
     """Id of the thread's most recent (just-checkpointed) AI message, or None.
 
@@ -1083,6 +1096,7 @@ def ask(
         # any record left by an earlier turn on this context.
         REFLEX_SURFACE.set(_reflex_surface(identity, thread_id))
         LAST_REFLEX.set(None)
+        REFLEX_LAST_REPLY.set(_last_ai_text(graph, config["configurable"]) if router is not None else "")
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:
             # Chat-only path: either the TOOLS block isn't armed, or the caller was
@@ -1172,9 +1186,9 @@ def ask(
             drop_unaddressed
             and decision.unaddressed
             and is_lens_surface(identity)
-            and not _conversation_in_flight(
+            and (getattr(decision, "unaddressed_strong", False) or not _conversation_in_flight(
                 registry, thread_id, drop_conversation_window_s
-            )
+            ))
         ):
             # False-wake grace on the LENS path (glasses turns arrive voice=False
             # — the G2 has no speaker — but their capture is still a mic that
@@ -2079,9 +2093,11 @@ def _voice_parallel_start(
     if (
         drop_unaddressed
         and decision.unaddressed
-        and not _conversation_in_flight(
+        # Option A: a STRONG verdict (both judges agree) drops even inside the grace
+        # window — the second TV fragment on 2026-09-20 rode a 58 s-old reply through it.
+        and (getattr(decision, "unaddressed_strong", False) or not _conversation_in_flight(
             registry, thread_key, drop_conversation_window_s
-        )
+        ))
     ):
         # False-wake grace (owner ask 2026-08-27): the router judged this
         # capture was never directed at Aerys — a wake-word misfire during a

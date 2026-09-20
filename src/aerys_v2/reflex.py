@@ -24,6 +24,10 @@ STATE_MESSAGE_CHARS = 2000
 # threading a new argument through every record call site.
 REFLEX_SURFACE: contextvars.ContextVar[str] = contextvars.ContextVar('reflex_surface', default='unknown')
 LAST_REFLEX: contextvars.ContextVar[object] = contextvars.ContextVar('last_reflex', default=None)
+# Option B (shadow, 2026-09-20): the assistant's previous reply on this thread, set by
+# ask() so the unaddressed question can be asked WITH context ("is this a reply to
+# what she just said, or unrelated speech?"). Recorded beside the plain score.
+REFLEX_LAST_REPLY: contextvars.ContextVar[str] = contextvars.ContextVar('reflex_last_reply', default='')
 
 log = logging.getLogger(__name__)
 _LIVE_WARNED = False
@@ -59,6 +63,18 @@ QUESTIONS = {
         'type': 'noul',
         'instructions': "The speaker is WITHDRAWING the request: says cancel, never mind, forget it, scratch that, or breaks off ('actually no', 'nothing', 'ignore that'). A message that asks for something new, or says never mind about one thing and then asks another, is NOT withdrawn.",
     },
+}
+
+
+# Option B (shadow): the same unaddressed judgment, but with the assistant's previous
+# reply in the state. A single fragment is ambiguous ("Is the question I asked." scored
+# 0.36 alone); against her last line it is not.
+UNADDRESSED_CTX_QUESTION = {
+    'type': 'noul',
+    'instructions': ("Given the assistant's previous reply, this message is NOT a reply, answer, or follow-up to "
+                     "the assistant and NOT a new request to it: it is unrelated speech — a TV, radio or video, other "
+                     "people talking to each other, third-person narration, or a fragment cut off mid-sentence. "
+                     "A short answer, acknowledgment or follow-up to the assistant's previous reply IS addressed."),
 }
 
 
@@ -313,10 +329,12 @@ class ReflexClient:
                 targets = context.get('device_targets')
                 if targets:
                     questions.update(device_questions(targets))
-                response = self.client.system_one(
-                    state={'message': text[:STATE_MESSAGE_CHARS], 'surface': context.get('surface', 'unknown')},
-                    questions=questions,
-                )
+                state = {'message': text[:STATE_MESSAGE_CHARS], 'surface': context.get('surface', 'unknown')}
+                last_reply = (context.get('last_reply') or '')[:600]
+                if last_reply:
+                    state['assistant_previous_reply'] = last_reply
+                    questions['unaddressed_ctx'] = UNADDRESSED_CTX_QUESTION
+                response = self.client.system_one(state=state, questions=questions)
                 route = response.answers['route']
                 score = float(response.answers['tier'].score)
                 device = {}
@@ -342,6 +360,8 @@ class ReflexClient:
                     'model': str(response.model),
                     'input_tokens': int(response.usage.input_tokens),
                 }
+                if 'unaddressed_ctx' in questions:
+                    out['unaddressed_ctx'] = float(response.answers['unaddressed_ctx'].noul)
                 if device:
                     out['device'] = device
                 box['result'] = out
@@ -440,6 +460,9 @@ def live_router_for(
     unaddressed_floor = settings.reflex_unaddressed_floor
     cancel_floor = settings.reflex_cancel_floor
     router_sample = settings.reflex_router_sample
+    join_floor = settings.reflex_unaddressed_join_floor
+    agree_floor = settings.reflex_unaddressed_agree_floor
+    strong_floor = settings.reflex_unaddressed_strong_floor
 
     def decide(text: str) -> RouteDecision:
         started = time.monotonic()
@@ -481,6 +504,9 @@ def live_router_for(
         context = {'surface': surface}
         if device_targets:
             context['device_targets'] = device_targets
+        last_reply = REFLEX_LAST_REPLY.get()
+        if last_reply:
+            context['last_reply'] = last_reply
         try:
             jev = reflex(text, context)
         except Exception as exc:
@@ -515,11 +541,26 @@ def live_router_for(
                 ack = rd.ack if rd is not None and rd.ack else FALLBACK_ACK
             # Codex review 2026-09-20 #6: keep the router's command-preservation guard —
             # a command-shaped message is never dropped as unaddressed, whatever Jev said.
-            unaddressed = (float(jev.get('unaddressed', 0)) >= unaddressed_floor
-                           and not plausibly_asks_for_action(text))
+            jev_u = float(jev.get('unaddressed', 0))
+            unaddressed = jev_u >= unaddressed_floor
+            strong = jev_u >= 0.9
+            if surface == 'voice' and not unaddressed and jev_u >= join_floor:
+                # Option A (Chris 2026-09-20 12:55, "A is a yes"): a suspicious fragment on
+                # voice waits for Haiku's verdict; both agreeing is what drops it. Two TV
+                # fragments reached her at 12:51/12:52 with Jev at 0.36 and 0.76 while
+                # Haiku said unaddressed both times.
+                join_router()
+                rd = box.get('decision')
+                record['router'] = _router_verdict(rd)
+                if rd is not None and rd.unaddressed and jev_u >= agree_floor:
+                    unaddressed = True
+                    strong = jev_u >= strong_floor
+                    record['ensemble'] = 'router+jev'
+            if plausibly_asks_for_action(text):
+                unaddressed, strong = False, False
             decision = RouteDecision(
                 route=route, ack=ack, tier=normalize_tier(jev.get('tier')),
-                unaddressed=unaddressed,
+                unaddressed=unaddressed, unaddressed_strong=unaddressed and strong,
             )
             record['decided_by'] = 'jev'
         if decision is None:
@@ -530,6 +571,8 @@ def live_router_for(
                 record['router_error'] = box.get('error', {'error': 'no decision'})
             record['router'] = _router_verdict(rd)
             decision = rd
+            if decision.unaddressed and float(jev.get('unaddressed', 0)) >= strong_floor:
+                decision = replace(decision, unaddressed_strong=True)  # both agree
         # J10: a withdrawn request is dropped whoever decided the route. The
         # cancel Noul rides the same call, so it costs nothing extra and does
         # not depend on route confidence; the floor is high because a wrong
@@ -538,6 +581,7 @@ def live_router_for(
             decision = replace(decision, cancelled=True)
         record['decided'] = {'route': decision.route, 'tier': decision.tier,
                              'unaddressed': decision.unaddressed,
+                             'unaddressed_strong': decision.unaddressed_strong,
                              'cancelled': decision.cancelled}
         # Phase 4: is this one plain device command the code may carry out itself?
         record['command'] = (

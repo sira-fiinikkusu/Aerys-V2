@@ -371,6 +371,9 @@ class RouteDecision:
     # mind"). Only the live reflex decider sets it; the Haiku router never does.
     # Voice drops the turn silently; typed surfaces answer with one word.
     cancelled: bool = False
+    # Option A (2026-09-20): both judges agree this is not for her. A strong verdict
+    # drops the turn even inside the conversation-in-flight grace window.
+    unaddressed_strong: bool = False
 
 
 def plausibly_commands_device(text: str) -> bool:

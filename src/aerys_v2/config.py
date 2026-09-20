@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
     # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
     reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
+    # Option A ensemble on VOICE (Chris 2026-09-20 12:55): when Jev's unaddressed score
+    # is at least join_floor, wait for Haiku; Haiku unaddressed + Jev >= agree_floor
+    # drops; Haiku + Jev >= strong_floor drops even inside the grace window.
+    reflex_unaddressed_join_floor: float = Field(default=0.3, ge=0, le=1)
+    reflex_unaddressed_agree_floor: float = Field(default=0.3, ge=0, le=1)
+    reflex_unaddressed_strong_floor: float = Field(default=0.6, ge=0, le=1)
     # J10 (2026-09-19, Chris: "silent on voice"): "cancel" / "never mind" drops
     # the turn — nothing spoken, nothing run, receipt row marked. Same reasoning
     # as unaddressed: a wrong "cancelled" ignores him, so the bar is higher still.

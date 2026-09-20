@@ -35,6 +35,7 @@ def test_result_shape_and_state_boundary():
         'room_context': 'never send', 'portable': 'never send'})
     assert fake.seen['state'] == {'message': 'x' * 2000, 'surface': 'guild'}
     assert set(fake.seen['questions']) == {'route', 'tier', 'unaddressed', 'cancelled'}
+    assert 'assistant_previous_reply' not in fake.seen['state']
     assert result == {
         'route': 'action', 'p_action': .8, 'confidence': .7, 'tier': 'standard',
         'tier_score': 1.2, 'unaddressed': .1, 'cancelled': .05, 'latency_ms': result['latency_ms'],
@@ -125,3 +126,15 @@ def test_sdk_question_contract():
 def test_invalid_timeout_rejected(timeout):
     with pytest.raises(ValueError):
         Settings(_env_file=None, anthropic_api_key='test', reflex_timeout_s=timeout)
+
+
+def test_option_b_context_adds_the_ctx_question_and_score():
+    class Ctx(FakeClient):
+        def system_one(self, **kwargs):
+            r = super().system_one(**kwargs)
+            r.answers['unaddressed_ctx'] = SimpleNamespace(noul=.91)
+            return r
+    ctx = Ctx()
+    result = ReflexClient(client=ctx)('is the question I asked', {'surface': 'voice', 'last_reply': 'What was the question?'})
+    assert ctx.seen['state']['assistant_previous_reply'] == 'What was the question?'
+    assert 'unaddressed_ctx' in ctx.seen['questions'] and result['unaddressed_ctx'] == .91

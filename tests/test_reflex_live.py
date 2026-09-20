@@ -44,7 +44,7 @@ def test_confident_chat_decides_without_waiting_for_router():
     rec = LAST_REFLEX.get().collect()            # audit writer gives the router time to land
     assert rec["decided_by"] == "jev" and rec["mode"] == "live"
     assert rec["router"]["route"] == "action"     # both verdicts still on the row
-    assert rec["decided"] == {"route": "chat", "tier": "fast", "unaddressed": False, "cancelled": False}
+    assert rec["decided"] == {"route": "chat", "tier": "fast", "unaddressed": False, "unaddressed_strong": False, "cancelled": False}
 
 
 def test_confident_action_waits_for_the_generated_ack_on_voice_only():
@@ -240,3 +240,75 @@ def test_sample_one_keeps_the_old_always_on_behaviour():
         REFLEX_SURFACE.reset(token)
     rec = LAST_REFLEX.get().collect()
     assert router.calls == 1 and rec["router"]["route"] == "action" and rec["router_sampled"] is True
+
+
+# ---- Option A: the voice ensemble (Chris 2026-09-20 12:55 "A is a yes") ----
+
+
+def _voice(fn):
+    token = REFLEX_SURFACE.set("voice")
+    try:
+        return fn()
+    finally:
+        REFLEX_SURFACE.reset(token)
+
+
+def test_voice_suspicious_fragment_waits_for_haiku_and_drops_when_both_agree():
+    # 12:51:13 today: "Is the question I asked." — Jev 0.36, Haiku unaddressed.
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
+    d = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.94, unaddressed=0.36), router)("Is the question I asked."))
+    assert d.unaddressed is True and d.unaddressed_strong is False and router.calls == 1
+    rec = LAST_REFLEX.get().collect()
+    assert rec["ensemble"] == "router+jev" and rec["decided"]["unaddressed_strong"] is False
+
+
+def test_voice_strong_agreement_marks_strong():
+    # 12:52:11 today: the Italy fragment — Jev 0.76, Haiku unaddressed; strong (>= 0.6).
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
+    d = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.76), router)("He interrupted Filibuster"))
+    assert d.unaddressed is True and d.unaddressed_strong is True
+
+
+def test_voice_haiku_disagreeing_keeps_the_turn():
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.05)
+    d = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.55), router)("the sunroom"))
+    assert d.unaddressed is False and router.calls == 1
+
+
+def test_voice_below_join_floor_never_waits_for_haiku_on_chat():
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
+    d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("chat", 0.9, unaddressed=0.1), router)("what time is it"))
+    assert d.unaddressed is False
+    # the router was started (voice always starts it) but the decision did not wait on it
+    assert LAST_REFLEX.get().collect()["decided_by"] == "jev"
+
+
+def test_command_shaped_text_is_never_dropped_even_when_both_agree():
+    router = SlowRouter(RouteDecision(route="action", ack="ok", unaddressed=True), delay=0.05)
+    d = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("action", 0.95, p_action=.9, unaddressed=0.7), router)("turn off the office lights"))
+    assert d.unaddressed is False and d.unaddressed_strong is False
+
+
+def test_text_surfaces_keep_the_plain_floor():
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
+    token = REFLEX_SURFACE.set("discord")
+    try:
+        d = live_router_for(settings(reflex_router_sample=1.0), lambda t, c: jev_result("chat", 0.9, unaddressed=0.5), router)("hmm")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert d.unaddressed is False
+
+
+def test_option_b_context_rides_the_call_when_a_last_reply_exists():
+    from aerys_v2.reflex import REFLEX_LAST_REPLY
+    seen = {}
+
+    def jev(t, c):
+        seen.update(c); return jev_result("chat", 0.9)
+
+    token = REFLEX_LAST_REPLY.set("What was the question?")
+    try:
+        live_router_for(settings(), jev, lambda t: RouteDecision(route="chat", ack=""))("is the question I asked")
+    finally:
+        REFLEX_LAST_REPLY.reset(token)
+    assert seen["last_reply"] == "What was the question?"

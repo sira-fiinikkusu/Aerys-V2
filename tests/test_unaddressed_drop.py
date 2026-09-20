@@ -274,3 +274,34 @@ def test_typed_cancel_gets_one_word_back_and_runs_nothing():
     assert DROPPED_CANCELLED_MARKER in (rows[0]["degraded"] or [])
     state = graph.get_state({"configurable": {"thread_id": "person:person-1"}})
     assert not state.values.get("messages")
+
+
+# ---- Option A: a STRONG verdict drops even inside the conversation-in-flight window ----
+
+
+def strong_router(_text: str) -> RouteDecision:
+    return RouteDecision(route="chat", ack="", unaddressed=True, unaddressed_strong=True)
+
+
+def test_strong_unaddressed_drops_inside_the_grace_window():
+    rec = Recorder()
+    registry = {"person:person-1": time.monotonic()}          # she replied a moment ago
+    graph = build_graph(fake_model("hi there"), "SOUL")
+    action_graph = build_action_graph(fake_model("hi there"), "SOUL", tools=[])
+    reply = ask(graph, SIDE_CHATTER, identity={**CHRIS, "voice": True}, thread_id="person:person-1",
+                router=strong_router, action_graph=action_graph, record_turn=rec,
+                drop_unaddressed=True, activity_registry=registry)
+    assert reply == ""
+    rows = rec.wait_for_rows(1)
+    assert DROPPED_UNADDRESSED_MARKER in (rows[0]["degraded"] or [])
+
+
+def test_weak_unaddressed_still_respects_the_grace_window():
+    rec = Recorder()
+    registry = {"person:person-1": time.monotonic()}
+    graph = build_graph(fake_model("hi there"), "SOUL")
+    action_graph = build_action_graph(fake_model("hi there"), "SOUL", tools=[])
+    reply = ask(graph, SIDE_CHATTER, identity={**CHRIS, "voice": True}, thread_id="person:person-1",
+                router=unaddressed_router, action_graph=action_graph, record_turn=rec,
+                drop_unaddressed=True, activity_registry=registry)
+    assert reply == "hi there"                                 # inside the window, a weak verdict is a follow-up
