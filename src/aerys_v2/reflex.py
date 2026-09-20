@@ -10,7 +10,12 @@ import time
 from typing import Callable
 
 from aerys_v2.config import Settings
-from aerys_v2.router import FALLBACK_ACK, RouteDecision, fallback_decision, normalize_tier
+from aerys_v2.router import (FALLBACK_ACK, RouteDecision, fallback_decision, normalize_tier,
+                             plausibly_asks_for_action)
+
+# What Jev is shown of a message. Anything longer is judged on a prefix, and a
+# prefix verdict may never execute a write (see plain_device_command).
+STATE_MESSAGE_CHARS = 2000
 
 # Phase 2 plumbing (live mode). REFLEX_SURFACE is set by ask() before routing so a
 # (text) -> RouteDecision router can still tell Jev which surface it is on;
@@ -108,7 +113,11 @@ def device_questions(target_choices: dict[str, str]) -> dict:
     }
 
 
-_PCT_RE = re.compile(r'(\d{1,3})\s*(?:%|percent)')
+_PCT_RE = re.compile(r'(?<![-\d.])(\d{1,3})(?!\d)\s*(?:%|percent)')
+# Codex review 2026-09-20 #2: "dim by half" / "from 80% to 20%" / "-20%" / "1001%" are NOT
+# absolute levels. Any relative marker, more than one level, or a sign defers to the
+# specialist, which reads the current level first.
+_RELATIVE_RE = re.compile(r'\b(by|more|less|brighter|dimmer|increase|decrease|raise|lower|than)\b')
 # Absolute levels only. "dim"/"dimmer"/"brighter" are RELATIVE asks and must fall
 # through to the specialist, which reads the current level first.
 _PCT_WORDS = (('full', 100), ('max', 100), ('all the way up', 100), ('half', 50),
@@ -120,16 +129,35 @@ _HEX_RE = re.compile(r'#[0-9a-fA-F]{6}\b')
 
 
 def brightness_from_text(text: str) -> int | None:
-    """Numbers stay in code: the decision model does not do arithmetic."""
-    m = _PCT_RE.search(text)
-    if m:
-        n = int(m.group(1))
-        return n if 1 <= n <= 100 else None
+    """Numbers stay in code: the decision model does not do arithmetic.
+
+    Returns a level ONLY for one unambiguous absolute ask; anything relative,
+    signed, doubled or out of range returns None (the specialist handles it).
+    """
     low = text.lower()
-    for word, pct in _PCT_WORDS:
-        if re.search(r'\b' + re.escape(word) + r'\b', low):
-            return pct
-    return None
+    if _RELATIVE_RE.search(low):
+        return None
+    pcts = _PCT_RE.findall(text)
+    if len(pcts) > 1:
+        return None
+    if pcts:
+        n = int(pcts[0])
+        return n if 1 <= n <= 100 else None
+    hits = [pct for word, pct in _PCT_WORDS if re.search(r'\b' + re.escape(word) + r'\b', low)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _finite(value, unsure: float) -> float:
+    """Codex review 2026-09-20 #4: NaN compares false against every gate, so a
+    malformed score would pass them all. Non-finite or out-of-range → the value
+    that makes the gate REFUSE (`unsure`)."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return unsure
+    if f != f or f in (float('inf'), float('-inf')) or not 0.0 <= f <= 1.0:
+        return unsure
+    return f
 
 
 def color_from_text(text: str) -> str | None:
@@ -161,19 +189,23 @@ def plain_device_command(record: dict, text: str, settings: Settings, canary_ent
     try:
         if not settings.reflex_direct:
             return no('disabled')
+        if len(text) > STATE_MESSAGE_CHARS:
+            # Codex review 2026-09-20 #1: Jev judged only the first 2,000 chars; the
+            # part it never saw could say "do not". Never act on a partial reading.
+            return no('request longer than the classified excerpt')
         if record.get('decided', {}).get('route') != 'action' or record.get('decided_by') != 'jev':
             return no('not a jev action route')
-        if float(dev.get('is_device_command', 0)) < settings.reflex_direct_command_floor:
+        if _finite(dev.get('is_device_command', 0), 0.0) < settings.reflex_direct_command_floor:
             return no('not clearly a device command')
-        if float(dev.get('is_state_question', 0)) > 0.3:
+        if _finite(dev.get('is_state_question', 0), 1.0) > 0.3:
             return no('reads as a state question')
-        if float(dev.get('is_compound', 0)) > 0.3:
+        if _finite(dev.get('is_compound', 0), 1.0) > 0.3:
             return no('compound request')
         target = dev.get('device_target') or {}
         action = dev.get('device_action') or {}
-        if target.get('choice') in (None, NONE_TARGET) or float(target.get('confidence', 0)) < settings.reflex_direct_target_confidence:
+        if target.get('choice') in (None, NONE_TARGET) or _finite(target.get('confidence', 0), 0.0) < settings.reflex_direct_target_confidence:
             return no('target unsure')
-        if action.get('choice') in (None, 'other') or float(action.get('confidence', 0)) < settings.reflex_direct_target_confidence:
+        if action.get('choice') in (None, 'other') or _finite(action.get('confidence', 0), 0.0) < settings.reflex_direct_target_confidence:
             return no('action unsure')
         op = action['choice']
         command: dict = {'operation': op, 'entity_id': target['choice']}
@@ -199,6 +231,11 @@ def plain_device_command(record: dict, text: str, settings: Settings, canary_ent
         allowed = {d.strip() for d in settings.reflex_direct_domains.split(',') if d.strip()}
         if not domains <= allowed:
             return no(f'domain not direct: {sorted(domains - allowed)}')
+        # Codex review 2026-09-20 #3: a lock wired up as switch.front_door_lock passes the
+        # domain gate. When the owner names a direct-safe allowlist, only those go direct.
+        allow = {e.strip() for e in settings.reflex_direct_allow.split(',') if e.strip()}
+        if allow and not set(targets) <= allow:
+            return no(f'not on the direct allowlist: {sorted(set(targets) - allow)}')
         dev['direct'] = {'ok': True, 'reason': 'plain command', 'targets': targets}
         return command
     except Exception as exc:  # the direct path is an optimisation; never a crash
@@ -214,18 +251,22 @@ class ReflexClient:
 
     def __call__(self, text: str, context: dict) -> dict:
         started = time.monotonic()
-        result = {'error': 'timeout'}
-        completed_at = None
+        # Codex review 2026-09-20 #5: the worker used to share `result` with the caller,
+        # so an answer landing between the deadline check and the return became a
+        # late, authoritative verdict. Now the worker writes into its own box and the
+        # caller reads it ONLY if `done` was set before the deadline.
+        box: dict = {}
+        done = threading.Event()
+        result: dict = {'error': 'timeout'}
 
         def run():
-            nonlocal result, completed_at
             try:
                 questions = dict(QUESTIONS)
                 targets = context.get('device_targets')
                 if targets:
                     questions.update(device_questions(targets))
                 response = self.client.system_one(
-                    state={'message': text[:2000], 'surface': context.get('surface', 'unknown')},
+                    state={'message': text[:STATE_MESSAGE_CHARS], 'surface': context.get('surface', 'unknown')},
                     questions=questions,
                 )
                 route = response.answers['route']
@@ -242,7 +283,7 @@ class ReflexClient:
                         'device_action': {'choice': str(a['device_action'].choice),
                                           'confidence': float(a['device_action'].confidence)},
                     }
-                result = {
+                out = {
                     'route': str(route.choice),
                     'p_action': float(route.probabilities['action']),
                     'confidence': float(route.confidence),
@@ -254,11 +295,12 @@ class ReflexClient:
                     'input_tokens': int(response.usage.input_tokens),
                 }
                 if device:
-                    result['device'] = device
+                    out['device'] = device
+                box['result'] = out
             except Exception as exc:
-                result = error_result(exc)
+                box['result'] = error_result(exc)
             finally:
-                completed_at = time.monotonic()
+                done.set()
                 self._inflight.release()
 
         try:
@@ -270,9 +312,8 @@ class ReflexClient:
                 except Exception:
                     self._inflight.release()
                     raise
-                thread.join(max(0, self.timeout_s - (time.monotonic() - started)))
-            if completed_at is None or completed_at - started > self.timeout_s:
-                result = {'error': 'timeout'}
+                if done.wait(max(0, self.timeout_s - (time.monotonic() - started))):
+                    result = dict(box.get('result') or {'error': 'no result'})
         except Exception as exc:
             result = error_result(exc)
         return {**result, 'latency_ms': int((time.monotonic() - started) * 1000)}
@@ -358,7 +399,15 @@ def live_router_for(
                 box['error'] = error_result(exc)
 
         thread = threading.Thread(target=lambda: ctx.run(run_router), daemon=True)
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:  # Codex review 2026-09-20 #7: an unstartable thread must not escape
+            box['error'] = error_result(exc)
+            thread = None
+
+        def join_router() -> None:
+            if thread is not None:
+                thread.join()
 
         surface = REFLEX_SURFACE.get()
         context = {'surface': surface}
@@ -389,17 +438,21 @@ def live_router_for(
                 # The spoken ack is generated by the router (J2) and only VOICE
                 # consumes it (service._launch_background_action). Text and lens
                 # surfaces never speak it, so they no longer wait for Haiku.
-                thread.join()
+                join_router()
                 rd = box.get('decision')
                 record['router'] = _router_verdict(rd)
                 ack = rd.ack if rd is not None and rd.ack else FALLBACK_ACK
+            # Codex review 2026-09-20 #6: keep the router's command-preservation guard —
+            # a command-shaped message is never dropped as unaddressed, whatever Jev said.
+            unaddressed = (float(jev.get('unaddressed', 0)) >= unaddressed_floor
+                           and not plausibly_asks_for_action(text))
             decision = RouteDecision(
                 route=route, ack=ack, tier=normalize_tier(jev.get('tier')),
-                unaddressed=float(jev.get('unaddressed', 0)) >= unaddressed_floor,
+                unaddressed=unaddressed,
             )
             record['decided_by'] = 'jev'
         if decision is None:
-            thread.join()
+            join_router()
             rd = box.get('decision')
             if rd is None:
                 rd = fallback_decision(text)

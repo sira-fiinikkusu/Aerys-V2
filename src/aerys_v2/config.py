@@ -62,7 +62,13 @@ class Settings(BaseSettings):
     reflex_direct_domains: str = "light,switch,fan"
     # Substrings of entity ids that NEVER go direct (J3: lock, EV charging,
     # climate, alarm keep the specialist path and its confirmation semantics).
-    reflex_direct_deny: str = "lock.,alarm,climate,ev_charging"
+    # Codex review 2026-09-20 #3 widened the default: proxies of sensitive things
+    # (a lock on a switch, a heater, a charger, a garage door) never go direct.
+    reflex_direct_deny: str = ("lock.,alarm,climate,ev_charging,ev_,charger,heater,heat_,door,"
+                               "garage,gate,oven,stove,water,pump,valve,sprinkler,cover.")
+    # Optional explicit direct-safe allowlist (entity ids, comma-separated). Empty = the
+    # domain rule above decides; set = ONLY these may go direct.
+    reflex_direct_allow: str = ""
     # J8 (Chris 2026-09-19 17:51, watching it live): "the singular commands
     # don't need an ack — she is turning things on and off before she can even
     # speak her ack." When the plain-command verdict fires on a VOICE turn the
