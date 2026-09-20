@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     # below carve out the action path and voice separately. The separate Agent SDK
     # credit pool is paused (June 15) — this draws from the plan's normal limits.
     model_backend: str = "api"
+    # 2026-09-20: the SUBSCRIPTION path with tools is the extended oauth backend
+    # (warm CLI process, FRESH session per turn, tool calls deferred to our graph,
+    # results carried in the next prompt). Opt-in per path; voice stays metered
+    # until the --serve warm soak passes. `cli` (langchain-claude-cli) is BLOCKED:
+    # its session resume carried a previous turn's context into the next one.
+    oauth_tool_backend: Literal["oauth", "api"] = "api"    # text action/tool turns on the plan
+    oauth_voice_backend: Literal["oauth", "api"] = "api"   # voice on the plan (after the soak)
     cli_persistent: bool = True          # keep a warm CLI client per conversation (2 s warm vs 10 s cold)
     cli_prewarm: bool = True             # one tiny turn at boot so the first user turn is not the cold spawn
     cli_tool_backend: Literal["cli", "api"] = "cli"   # action/tool turns on the plan too

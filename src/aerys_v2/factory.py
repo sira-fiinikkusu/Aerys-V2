@@ -531,8 +531,16 @@ class LocalFailoverModel(BaseChatModel):
 CLI_MODEL_CLASS: type | None = None
 
 
+CLI_BLOCKED = ("MODEL_BACKEND=cli is blocked (2026-09-20 review): langchain-claude-cli resumes a CLI "
+               "session by prefix or thread_id and carries the previous turn's context into a turn "
+               "whose context changed. Use MODEL_BACKEND=oauth (+ OAUTH_TOOL_BACKEND=oauth for tools).")
+
+
 def _cli_model(settings: Settings, model_name: str, *, max_tokens: int, timeout_s: float):
     """A chat model on the Max subscription via the Claude Code CLI (langchain-claude-cli).
+
+    BLOCKED at every call site (CLI_BLOCKED) until upstream can run a fresh
+    session per turn on a warm client; kept so the wiring and tests survive.
 
     Tools bind normally (the package defers execution to LangChain). auth="oauth"
     (its default) strips ANTHROPIC_API_KEY from the subprocess, the same trap
@@ -588,9 +596,7 @@ def build_model(settings: Settings, *, timeout_s: float = 60.0) -> BaseChatModel
 
         return _maybe_failover(settings, ClaudeOAuthChatModel(model=settings.model), timeout_s)
     if settings.model_backend == "cli":
-        return _maybe_failover(
-            settings, _cli_model(settings, settings.model, max_tokens=4096, timeout_s=timeout_s), timeout_s
-        )
+        raise RuntimeError(CLI_BLOCKED)
     return _maybe_failover(
         settings,
         build_metered_model(
@@ -641,9 +647,8 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
         return {"fast": local, "standard": local, "deep": local}
 
     if settings.model_backend == "cli":
-        # The CLI client takes any model name, so every tier rides the plan with
-        # its own model (unlike the single-model oauth client). deep_gate_for
-        # still rations deep turns: it is quota now, not dollars.
+        raise RuntimeError(CLI_BLOCKED)
+    if False:  # pragma: no cover — kept for when upstream is safe to enable
         models = {
             tier: _maybe_failover(settings, _cli_model(settings, name, max_tokens=4096, timeout_s=timeout_s), timeout_s)
             for tier, name in (("fast", settings.tier_fast_model), ("standard", settings.tier_standard_model),
@@ -1511,12 +1516,15 @@ class LocalToolFailoverModel:
         # Same positional shape as a LangChain Runnable (Gemini re-review 9/05).
         if config is not None:
             kwargs["config"] = config
+        from aerys_v2.oauth_model import OAuthBackendError
+
         try:
             return self.primary.invoke(messages, **kwargs)
         except (
             anthropic.APIConnectionError, anthropic.APITimeoutError,
             anthropic.APIStatusError,
             httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+            OAuthBackendError,  # the subscription client died twice — same class as a connection failure
         ) as e:
             if isinstance(e, anthropic.APIStatusError) and (
                 isinstance(e, anthropic.RateLimitError) or e.status_code < 500
@@ -1609,9 +1617,13 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
     metered model while cli_voice_backend="api", selected per call by surface.
     local_fallback_url arms a local tool lifeboat for connection failures and 5xx.
     """
-    if settings.model_backend == "cli" and settings.cli_tool_backend == "cli":
-        text = _build_tool_model(settings, tools, timeout_s=timeout_s, backend="cli")
-        if settings.cli_voice_backend == "cli":
+    if settings.model_backend == "cli":
+        raise RuntimeError(CLI_BLOCKED)
+    if settings.model_backend == "oauth" and settings.oauth_tool_backend == "oauth":
+        # The subscription with tools (2026-09-20): warm CLI process, fresh session per
+        # turn, tool calls deferred to our ToolNode, results in the next prompt.
+        text = _build_tool_model(settings, tools, timeout_s=timeout_s, backend="oauth")
+        if settings.oauth_voice_backend == "oauth":
             return text
         voice = _build_tool_model(settings, tools, timeout_s=timeout_s, backend="api")
         return SurfaceSplitToolModel(text, voice)
@@ -1638,6 +1650,10 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
         return LocalToolFailoverModel(primary, lifeboat)
 
     def chat(model_name: str) -> object:
+        if backend == "oauth":
+            from aerys_v2.oauth_model import ClaudeOAuthChatModel
+
+            return ClaudeOAuthChatModel(model=model_name)
         if backend == "cli":
             return _cli_model(settings, model_name, max_tokens=1024, timeout_s=timeout_s)
         return build_metered_model(
