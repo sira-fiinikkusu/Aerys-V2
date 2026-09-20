@@ -35,6 +35,8 @@ class FakeHA:
         self.fail_services = fail_services
         self.empty_changed = empty_changed  # HA 200 but nothing changed (Tuya drop)
         self.states = states or []  # the GET /api/states listing (search tests)
+        # entity -> extra top-level fields for GET /api/states/<entity> (e.g. last_changed)
+        self.state_fields: dict[str, dict] = {}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append((request.method, request.url.path))
@@ -55,7 +57,8 @@ class FakeHA:
                 )
             return httpx.Response(
                 200,
-                json={"state": "off", "attributes": {"friendly_name": "Desk Lamp"}},
+                json={"state": "off", "attributes": {"friendly_name": "Desk Lamp"},
+                      **self.state_fields.get(entity, {})},
             )
         if self.fail_services:
             return httpx.Response(503, text="ha melted")
@@ -572,3 +575,38 @@ def test_get_state_reports_color_capability_and_current_color():
             return super().handler(request)
     out = json.loads(make_tool(ColorHA()).invoke({"operation": "get_state", "entity_id": "light.desk"}))
     assert out["color_capable"] is True and out["rgb_color"] == [255, 0, 0]
+
+
+# ---- the dressers (2026-09-20 11:58, Aerys's own report via message_kael) ----------
+# Zigbee plugs report their new state a beat AFTER HA answers the command, so HA's
+# changed-list is empty and the read-back finds them off. She said "already off"
+# after turning them off. last_changed decides whose doing the state is.
+
+def _iso(dt):
+    return dt.isoformat().replace("+00:00", "+00:00")
+
+
+def test_state_that_changed_after_the_command_is_done_not_already_there():
+    from datetime import datetime, timedelta, timezone
+    ha = FakeHA(empty_changed=True)
+    ha.state_fields["light.desk"] = {"last_changed": _iso(datetime.now(timezone.utc) + timedelta(seconds=5))}
+    out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.desk"})
+    assert out.startswith("Done:") and "light.desk" in out
+    assert "already" not in out
+
+
+def test_state_that_was_already_there_before_the_command_stays_already():
+    from datetime import datetime, timedelta, timezone
+    ha = FakeHA(empty_changed=True)
+    ha.state_fields["light.desk"] = {"last_changed": _iso(datetime.now(timezone.utc) - timedelta(minutes=10))}
+    out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.desk"})
+    assert out.startswith("OK (already there):") and "already off" in out
+
+
+def test_missing_or_bad_last_changed_falls_back_to_already_there():
+    ha = FakeHA(empty_changed=True)                    # FakeHA default: no last_changed field
+    out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.desk"})
+    assert out.startswith("OK (already there):")
+    ha.state_fields["light.desk"] = {"last_changed": "not-a-date"}
+    out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.desk"})
+    assert out.startswith("OK (already there):")

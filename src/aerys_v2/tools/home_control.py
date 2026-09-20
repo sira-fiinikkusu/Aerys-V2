@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 import uuid
 from typing import Any, Callable
 
@@ -358,6 +359,11 @@ def build_home_control_tool(
                 "state": data.get("state"),
                 "friendly_name": attrs.get("friendly_name"),
             }
+            if data.get("last_changed"):
+                # When the state last CHANGED (HA's clock). The write path uses it to tell
+                # "changed because of this command, a beat late" from "already there";
+                # the model may read it too ("changed 3 minutes ago").
+                out["last_changed"] = data["last_changed"]
             if str(data.get("state")) in DEAD_STATES:
                 out["note"] = "not reporting to Home Assistant right now — do not retry; tell the user"
             # Lights report brightness 0-255; the model (and Chris) think in
@@ -393,26 +399,42 @@ def build_home_control_tool(
         return "on"
 
     def _verify_after_write(
-        entities: list[str], op: str, pct: int | None
-    ) -> tuple[list[str], list[str]]:
-        """Read back entities HA reported no new state for: (already_there, not_applied).
+        entities: list[str], op: str, pct: int | None, since: datetime | None = None
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Read back entities HA reported no new state for: (already_there, not_applied, done_late).
 
         A verification that can FAIL: it reads the device, it does not trust the
-        command. toggle has no knowable target state, so it can never verify."""
-        if op == "toggle":
-            return [], list(entities)
+        command. toggle has no knowable target state, so it can never verify.
 
-        def matches(e: str) -> bool:
+        done_late (2026-09-20, the dressers): Zigbee/cloud devices report their new
+        state a beat AFTER HA answers the command, so HA's changed-list omits them
+        and the read-back finds them in the target state. That is NOT "already
+        there" — if the entity's last_changed is at or after the command was sent,
+        THIS command changed it. Aerys told Chris the dressers "were already off"
+        after turning them off; this is the fix."""
+        if op == "toggle":
+            return [], list(entities), []
+
+        def check(e: str) -> tuple[bool, bool]:
+            """(in target state, changed at/after `since`)."""
             st = _read_state(e)
             if not isinstance(st, dict):
-                return False
+                return False, False
             want_on = op != "turn_off"
             ok = (st.get("state") == "on") == want_on
             if ok and want_on and pct is not None:
                 ok = abs(int(st.get("brightness_pct") or 0) - pct) <= 2
-            return ok
+            late = False
+            if ok and since is not None and st.get("last_changed"):
+                try:
+                    changed_at = datetime.fromisoformat(str(st["last_changed"]).replace("Z", "+00:00"))
+                    late = changed_at >= since
+                except ValueError:
+                    late = False
+            return ok, late
 
         already: list[str] = []
+        done_late: list[str] = []
         pending = list(entities)
         for delay in _VERIFY_DELAYS_S:
             if not pending:
@@ -420,9 +442,15 @@ def build_home_control_tool(
             time.sleep(delay)
             still = []
             for e in pending:
-                (already if matches(e) else still).append(e)
+                ok, late = check(e)
+                if ok and late:
+                    done_late.append(e)
+                elif ok:
+                    already.append(e)
+                else:
+                    still.append(e)
             pending = still
-        return already, pending
+        return already, pending, done_late
 
     @tool
     def home_control(
@@ -613,6 +641,7 @@ def build_home_control_tool(
                 # HA REST: POST /api/services/<domain>/<service> — the same
                 # endpoint the V1 HTTP Request node hit, minus the workflow
                 # around it. ONE call per domain: HA takes an entity_id list.
+                sent_at = datetime.now(timezone.utc)  # a read-back changed at/after this = OUR doing
                 r = http.post(
                     f"{base}/api/services/{domain}/{service}",
                     headers=headers,
@@ -640,11 +669,12 @@ def build_home_control_tool(
             # light: "on at 30%" while it stayed dark). Instead of handing the
             # model a "go verify" note (a whole extra round-trip), READ THE
             # DEVICE BACK here and say which it was.
-            g_already, g_dropped = (
-                _verify_after_write(unverified, op, brightness_pct) if unverified else ([], [])
+            g_already, g_dropped, g_late = (
+                _verify_after_write(unverified, op, brightness_pct, since=sent_at) if unverified else ([], [], [])
             )
             already += g_already
             dropped += g_dropped
+            done += g_late  # changed a beat after HA answered — this command did it
             _outbox_close(
                 outbox_id, "succeeded",
                 receipt={
