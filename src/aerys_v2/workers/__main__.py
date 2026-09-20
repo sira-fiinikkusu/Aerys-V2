@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import sys
+from typing import Callable
 
 from ..config import BootConfigError, Settings, run_boot_assertions
 from ..services.memory import openrouter_embedder
@@ -115,6 +116,27 @@ STALL_PASSES = 3
 
 #: Module-level because the scheduler calls _run_once repeatedly in one process.
 _zero_insert_streak = 0
+#: Set by main() from KAEL_DESK_URL/TOKEN: the stall line ALSO goes to Kael's live
+#: session. 2026-09-20: the WARNING below fired for 11 hours into a log nobody
+#: reads while memory formation was stopped — a repeat of the 7/29 lesson at a
+#: smaller scale. A log line is not a voice.
+_stall_alarm: Callable[[str], None] | None = None
+
+
+def kael_desk_alarm_for(settings: Settings) -> Callable[[str], None] | None:
+    if not settings.kael_desk_url or settings.kael_desk_token is None:
+        return None
+    import httpx
+
+    url, token = settings.kael_desk_url, settings.kael_desk_token.get_secret_value()
+
+    def alarm(text: str) -> None:
+        try:
+            httpx.post(url, json={"message": text[:1800]}, headers={"Authorization": f"Bearer {token}"}, timeout=5.0)
+        except Exception:
+            log.warning("stall alarm delivery failed", exc_info=True)
+
+    return alarm
 
 
 def _check_stalled(summary: dict) -> None:
@@ -140,14 +162,17 @@ def _check_stalled(summary: dict) -> None:
     _zero_insert_streak += 1
     if _zero_insert_streak < STALL_PASSES:
         return
+    detail = json.dumps({
+        "consecutive_passes": _zero_insert_streak,
+        "rows_read": {n: (s or {}).get("rows") for n, s in sources.items()},
+        "parse_failures": {n: (s or {}).get("parse_failures") for n, s in sources.items()},
+        "watermarks": {n: (s or {}).get("watermark") for n, s in sources.items()},
+    })
+    if _stall_alarm is not None and _zero_insert_streak in (STALL_PASSES, STALL_PASSES * 4, STALL_PASSES * 8):
+        _stall_alarm(f"[aerys-extractor] extraction stalled: {detail}")  # first, then ~12 h and ~24 h in
     log.warning(
         "extraction stalled: %s",
-        json.dumps({
-            "consecutive_passes": _zero_insert_streak,
-            "rows_read": {n: (s or {}).get("rows") for n, s in sources.items()},
-            "parse_failures": {n: (s or {}).get("parse_failures") for n, s in sources.items()},
-            "watermarks": {n: (s or {}).get("watermark") for n, s in sources.items()},
-        }),
+        detail,
     )
 
 
@@ -545,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings()
 
     if args.worker == "extraction":
+        global _stall_alarm
+        _stall_alarm = kael_desk_alarm_for(settings)
         return _extraction_main(settings, args)
     if args.worker == "gaps-mine":
         return _gaps_mine_main(settings, args)

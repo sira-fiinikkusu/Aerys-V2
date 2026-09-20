@@ -123,8 +123,21 @@ class LlmReply(NamedTuple):
 
 
 # text in (system, user), LlmReply out — injectable so tests never touch the
-# network, same seam shape as services.memory.Embedder.
-Llm = Callable[[str, str], LlmReply]
+# network, same seam shape as services.memory.Embedder. The real seam also takes
+# `plain=True` (no response_format) for the schema-loop fallback below; a fake
+# that ignores keyword arguments still works (see _call_llm).
+Llm = Callable[..., LlmReply]
+
+
+def _call_llm(llm: Llm, system: str, user: str, *, plain: bool = False) -> LlmReply:
+    if not plain:
+        return llm(system, user)
+    try:
+        return llm(system, user, plain=True)
+    except TypeError as exc:
+        if "plain" not in str(exc):
+            raise
+        return llm(system, user)  # a seam without the knob: same call, still a retry
 
 BATCH_SIZE = 20          # messages per LLM call (Group Messages sliced at 20)
 DEFAULT_LOOKBACK_H = 2   # first run with no watermark: 2 hours ago (v1 default)
@@ -980,13 +993,30 @@ def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | Non
         "Extract observations from this conversation:\n\n"
         f"{build_transcript(messages)}"
     )
-    reply = llm(EXTRACTION_SYSTEM_PROMPT, prompt)
+    reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt)
     observations = parse_observations(reply.text)
-    if observations is not None or reply.truncated:
+    if observations is not None:
         return observations, reply
+    if reply.truncated:
+        # 2026-09-20 (found by Chris on the dashboard, 21 h stuck): with the
+        # schema-enforced response_format, Haiku 4.5 fell into a degenerate loop
+        # on one 15-message batch — a valid start, then `\n` escapes inside an
+        # open string until max_tokens, identical at temperature 0.1 and 0.7,
+        # every hourly pass. The SAME batch in plain mode came back complete
+        # (the real memory, in a code fence — parse_observations already reads
+        # that). So a truncated reply earns exactly one retry with the schema
+        # off. If THAT is also cut off, the watermark holds, as before: a real
+        # truncation may still hide observations.
+        stats["schema_fallbacks"] = stats.get("schema_fallbacks", 0) + 1
+        log.warning("extraction reply truncated under response_format — retrying plain (group of %d)",
+                    len(messages))
+        reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt, plain=True)
+        observations = parse_observations(reply.text)
+        if observations is not None or reply.truncated:
+            return observations, reply
 
     stats["format_retries"] += 1
-    reply = llm(EXTRACTION_SYSTEM_PROMPT, prompt + _FORMAT_CORRECTION)
+    reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt + _FORMAT_CORRECTION)
     observations = parse_observations(reply.text)
     if observations is not None or reply.truncated:
         return observations, reply
@@ -1044,7 +1074,7 @@ def run_extraction(
             # earned one corrective retry. format_empty: those that ignored it
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
-            "format_retries": 0, "format_empty": 0,
+            "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0,
         }
         summary["sources"][name] = stats
         if not rows:
@@ -1206,7 +1236,7 @@ def run_live_extraction(
             # earned one corrective retry. format_empty: those that ignored it
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
-            "format_retries": 0, "format_empty": 0,
+            "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0,
         }
         summary["sources"][name] = stats
         if not rows:
@@ -1331,21 +1361,21 @@ def openrouter_chat(api_key: str, *, model: str = LLM_MODEL,
     one — the distinction the old `-> str` signature made impossible.
     """
 
-    def llm(system: str, user: str) -> LlmReply:
+    def llm(system: str, user: str, *, plain: bool = False) -> LlmReply:
+        body = {
+            "model": model,
+            "temperature": 0.1,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if not plain:
+            body["response_format"] = _RESPONSE_FORMAT  # plain = the schema-loop fallback
         request = urllib.request.Request(
             f"{base_url}/chat/completions",
-            data=json.dumps(
-                {
-                    "model": model,
-                    "temperature": 0.1,
-                    "max_tokens": MAX_OUTPUT_TOKENS,
-                    "response_format": _RESPONSE_FORMAT,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                }
-            ).encode(),
+            data=json.dumps(body).encode(),
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=timeout_s) as resp:

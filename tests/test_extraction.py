@@ -10,6 +10,7 @@ lands in aerys_v2 staging, and an empty window is a true no-op.
 import json
 from datetime import datetime, timedelta, timezone
 
+from aerys_v2.config import Settings
 from aerys_v2.workers.extraction import (
     EXTRACTION_SYSTEM_PROMPT,
     LEASE_KIND,
@@ -96,8 +97,8 @@ class FakeLlm:
         self.replies = list(replies)
         self.calls = []
 
-    def __call__(self, system, user):
-        self.calls.append((system, user))
+    def __call__(self, system, user, *, plain=False):
+        self.calls.append((system, user) if not plain else (system, user, "plain"))
         reply = self.replies.pop(0) if self.replies else "[]"
         return reply if isinstance(reply, LlmReply) else LlmReply(reply, False)
 
@@ -242,7 +243,7 @@ def test_parse_failure_on_the_very_first_row_freezes_the_watermark():
         row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raw_chris),
     ])])
     staging = FakeConn([("last_processed_at", [(existing_wm,)])])
-    summary = run_extraction(prod, staging, FakeLlm([cut_off("not json at all -- truncated")]), fake_embedder)
+    summary = run_extraction(prod, staging, FakeLlm([cut_off("not json at all -- truncated"), cut_off("still cut off")]), fake_embedder)
 
     assert not any("v2_memories_staging" in s for s, _ in staging.calls)  # nothing staged
     saves = [(s, p) for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s]
@@ -265,7 +266,7 @@ def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
         row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS, cut_off("not json at all -- truncated")])
+    llm = FakeLlm([OBS, OBS, cut_off("not json at all -- truncated"), cut_off("still cut off")])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     # both successful groups still staged — one failure doesn't block the rest
@@ -284,7 +285,7 @@ def test_parse_failure_never_reaches_staging_but_success_in_same_source_still_la
             privacy="private", thread="voice:beta", raw="2026-07-03 09:00:00.5+00"),
     ])])
     prod = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm([cut_off("<<garbled, not json>>")]), fake_embedder)
+    summary = run_extraction(prod, staging, FakeLlm([cut_off("<<garbled, not json>>"), cut_off("<<still garbled")]), fake_embedder)
 
     assert not any("v2_memories_staging" in s for s, _ in staging.calls)
     assert summary["sources"]["v2_turns"]["parse_failures"] == 1
@@ -335,24 +336,46 @@ def test_corrective_retry_that_complies_stages_normally():
     assert any("v2_memories_staging" in s for s, _ in staging.calls)
 
 
-def test_truncated_reply_is_never_retried_and_still_holds_the_watermark():
+def test_truncated_twice_gets_no_format_retry_and_still_holds_the_watermark():
     """The invariant the recovery must not weaken: a cut-off reply may be hiding
-    real observations, so it gets NO retry, NO empty treatment, and the watermark
-    stays put."""
+    real observations. It earns ONE retry with the schema off (2026-09-20, the
+    Haiku response_format loop); cut off again, it gets NO format retry, NO empty
+    treatment, and the watermark stays put."""
     existing_wm = "2026-07-03 11:00:00+00"
     prod = FakeConn([("FROM n8n_chat_histories",
                       [row(CHRIS, "I drive a Dodge Ram", id="a", at=T0,
                            raw="2026-07-03 12:00:00.000001+00")])])
     staging = FakeConn([("last_processed_at", [(existing_wm,)])])
-    llm = FakeLlm([cut_off('[{"key_label": "basic.loc')])
+    llm = FakeLlm([cut_off('[{"key_label": "basic.loc'), cut_off('[{"key_label": "basic.lo')])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
-    assert len(llm.calls) == 1, "truncation earns no retry — it is not a format problem"
+    assert [c[2:] for c in llm.calls] == [(), ("plain",)], "one schema-off retry, nothing more"
     stats = summary["sources"]["prod_chat"]
-    assert stats["parse_failures"] == 1
+    assert stats["parse_failures"] == 1 and stats["schema_fallbacks"] == 1
     assert (stats["format_retries"], stats["format_empty"]) == (0, 0)
     save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
     assert save["raw"] == existing_wm, "frozen, not advanced"
+
+
+def test_schema_loop_truncation_is_recovered_by_the_plain_retry():
+    """2026-09-20: one batch drew a degenerate `\\n` loop under response_format
+    for 21 hours (77 turns queued). The same prompt with the schema off returned
+    the real observation in a code fence. The plain retry must land it and let
+    the watermark move."""
+    prod = FakeConn([("FROM n8n_chat_histories",
+                      [row(CHRIS, "Going forward the displays count as office lights", id="a", at=T0,
+                           raw="2026-07-03 12:00:00.000001+00")])])
+    staging = FakeConn([("last_processed_at", [("2026-07-03 11:00:00+00",)])])
+    looped = cut_off('{"observations":[{"key_label":"preference.office","value_text":"\\n\\n\\n\\n')
+    fenced = '```json\n[{"key_label": "preference.office_lights", "value_text": "The displays count as office lights", "context": "", "source_text": "Going forward the displays count as office lights", "event_date": ""}]\n```'
+    llm = FakeLlm([looped, fenced])
+    summary = run_extraction(prod, staging, llm, fake_embedder)
+
+    assert [c[2:] for c in llm.calls] == [(), ("plain",)]
+    stats = summary["sources"]["prod_chat"]
+    assert (stats["schema_fallbacks"], stats["parse_failures"], stats["observations"]) == (1, 0, 1)
+    save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
+    assert save["raw"] == "2026-07-03 12:00:00.000001+00", "advanced past the recovered group"
 
 
 def test_truncated_on_the_retry_also_holds_the_watermark():
@@ -362,7 +385,7 @@ def test_truncated_on_the_retry_also_holds_the_watermark():
     prod = FakeConn([("FROM n8n_chat_histories",
                       [row(CHRIS, "I enjoy ceramics", id="a", at=T0, raw="2026-07-03 12:00:00.1+00")])])
     staging = FakeConn([("last_processed_at", [(existing_wm,)])])
-    summary = run_extraction(prod, staging, FakeLlm([PROSE, cut_off("[{")]), fake_embedder)
+    summary = run_extraction(prod, staging, FakeLlm([PROSE, cut_off("[{"), cut_off("[")]), fake_embedder)
 
     stats = summary["sources"]["prod_chat"]
     assert stats["parse_failures"] == 1
@@ -972,3 +995,25 @@ def test_no_private_package_import_in_the_public_extractor():
     import inspect
     from aerys_v2.workers import extraction
     assert "aerys_portable" not in inspect.getsource(extraction)
+
+
+def test_stall_alarm_reaches_kael_desk_on_the_first_fire_and_then_sparsely(monkeypatch):
+    """2026-09-20: the stall WARNING fired for 11 hours into a log nobody reads.
+    The line now also goes to Kael's session — at the first fire, then only at
+    ~12 h and ~24 h in, never once an hour."""
+    from aerys_v2.workers import __main__ as wm
+
+    sent = []
+    monkeypatch.setattr(wm, "_stall_alarm", sent.append)
+    wm._zero_insert_streak = 0
+    stalled = {"inserted_total": 0, "sources": {"v2_turns": {"rows": 40, "parse_failures": 1, "watermark": "w"}}}
+    for _ in range(wm.STALL_PASSES * 8 + 2):
+        wm._check_stalled(stalled)
+    assert len(sent) == 3 and "extraction stalled" in sent[0] and '"w"' in sent[0]
+    wm._zero_insert_streak = 0
+
+
+def test_kael_desk_alarm_is_none_without_the_desk_settings():
+    from aerys_v2.workers.__main__ import kael_desk_alarm_for
+
+    assert kael_desk_alarm_for(Settings(_env_file=None, anthropic_api_key="x")) is None
