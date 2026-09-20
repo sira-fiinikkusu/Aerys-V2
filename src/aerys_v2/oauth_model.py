@@ -6,19 +6,26 @@ Claude Agent SDK runs the bundled Claude Code CLI under the hood; we use it as a
 PURE chat backend. LangGraph never knows the difference — build_model() returns
 "a chat model" either way.
 
-Warm-client design (v2 of this module — the first version spawned the CLI per turn,
-~3-4s of pure process boot on every reply):
-  - ONE ClaudeSDKClient is spawned lazily and kept warm on a dedicated event-loop
-    thread (the sync-facade-over-async-client pattern).
-  - EVERY turn uses a FRESH session_id. The warm client is stateful by design, but
-    two history owners (SDK session + LangGraph checkpointer) is the session-
-    contamination bug in a new hat — so the process is warm, the context is not.
-  - The full system prompt rides the head of each turn's prompt (per-turn caller
-    line means it can't be baked into connect-time options).
-  - If the warm process died, reconnect once and retry — then fail loudly.
+Spare-client design (v3 of this module, 2026-09-20 — Codex review of f7edf77,
+reproduced live): a connected ClaudeSDKClient is ONE conversation for the life of
+its process. The `session_id` passed to query() is only a field on the message; the
+bundled CLI keeps appending to the same conversation, so the v2 claim "warm process,
+cold context" was false — turn B could recall turn A. Real isolation is a NEW PROCESS
+per turn. To keep the latency of a warm client anyway:
+  - Each turn TAKES a pre-connected spare client, uses it for exactly one turn, and
+    discards it (disconnect in the background).
+  - The moment a turn starts, the NEXT spare begins connecting in the background, so
+    the following turn usually finds one ready (~2 s connect hidden behind the reply).
+  - Every process gets its own empty temp cwd: no project transcript, no auto-memory,
+    no CLAUDE.md can carry between turns (setting_sources=[] alone does not stop
+    memory — Codex #1).
+  - The full system prompt rides the head of each turn's prompt.
+  - A turn is bounded by turn_timeout_s; on timeout the in-flight task is CANCELLED
+    and its client dropped (Codex #2 — a timed-out reader must not survive).
 """
 
 import asyncio
+import logging
 import hashlib
 import json
 import re
@@ -31,6 +38,9 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
+
+
+log = logging.getLogger(__name__)
 
 
 class OAuthBackendError(RuntimeError):
@@ -51,8 +61,10 @@ class OAuthBackendError(RuntimeError):
 MCP_SERVER = "lc"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 _FORCE_TOOL_LINE = "[System instructions] You MUST call one of the provided tools before answering."
-_RESULTS_FINAL_LINE = ("[System instructions] The tool results above are final and already executed. "
-                       "Do not call those tools again for the same purpose; answer the user now.")
+_RESULTS_FINAL_LINE = ("[System instructions] The tool results above are final: those exact calls already ran, "
+                       "do not repeat an identical call. If the request needs a further, different tool call "
+                       "(for example reading a state before setting it), make it; otherwise answer the user now.")
+_FORCED_REFUSED_LINE = "I couldn't get the tool to run for that, so nothing was changed. Ask me again and I'll try once more."
 
 
 def _text(content: Any) -> str:
@@ -75,6 +87,21 @@ _LABEL_RE = re.compile(r"^(\s*)(User|Aerys|\[System instructions\]|\[Tool result
 
 def _neutralize(text: str) -> str:
     return _LABEL_RE.sub(lambda m: f"{m.group(1)}> {m.group(2)}{m.group(3)}", text)
+
+
+def _valid_tool_calls(calls: list[dict]) -> list[dict]:
+    """Codex #6: a call with no id, or a duplicate id, must never reach the ToolNode
+    (it executed a null-id call and ran duplicates twice). Drop and log, keep the rest."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for c in calls or []:
+        cid = c.get("id")
+        if not cid or cid in seen or not c.get("name"):
+            log.warning("oauth tool call dropped: malformed id/name %r", {k: c.get(k) for k in ("id", "name")})
+            continue
+        seen.add(cid)
+        out.append(c)
+    return out
 
 
 def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
@@ -118,48 +145,50 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
 
 
 class _WarmClient:
-    """Owns the event-loop thread + the connected ClaudeSDKClient (one per model + tool set)."""
+    """Owns the event-loop thread and a SPARE connected ClaudeSDKClient (one pool per model + tool set)."""
 
     def __init__(self, model: str, tool_schemas: list[dict] | None = None, turn_timeout_s: float = 60.0) -> None:
         self.model = model
         self.tool_schemas = list(tool_schemas or [])
-        # Gemini review 2026-09-20: a hung CLI used to hold the lock 120 s, then 120 s
-        # more on the retry. One bounded turn; a hang resets the client and raises.
         self.turn_timeout_s = turn_timeout_s
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True, name="oauth-model")
         self._thread.start()
-        self._client = None
-        self._lock = threading.Lock()  # one turn at a time — household-sized
+        self._spare = None            # a connected, never-used client (with its temp cwd)
+        self._spare_task = None       # the background connect in flight, if any
+        self._lock = threading.Lock()  # one turn at a time per pool — household-sized
+        self.spawns = 0               # audit: processes started
 
+    # ---- plumbing -------------------------------------------------------------
     def _run(self, coro, timeout: float | None = None):
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout or self.turn_timeout_s)
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return fut.result(timeout=timeout or self.turn_timeout_s)
+        except BaseException:
+            fut.cancel()  # Codex #2: never leave a reader alive past its deadline
+            raise
 
-    async def _connect(self):
-        from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+    def _options(self, cwd: str):
+        from claude_agent_sdk import ClaudeAgentOptions
 
         # AUTH PRECEDENCE TRAP (found 2026-07-03): if ANTHROPIC_API_KEY exists in
         # the process env, the spawned CLI prefers it over subscription auth — the
         # container would silently bill the API while claiming oauth. Neutralize it
         # for the subprocess; subscription login / CLAUDE_CODE_OAUTH_TOKEN remain.
         options = ClaudeAgentOptions(
-                model=self.model,
-                max_turns=1 if not self.tool_schemas else 2,
-                # TOOLS-OFF TRAP (root-caused 2026-07-03, live voice trace): these are
-                # TWO different knobs. `allowed_tools` only controls AUTO-PERMISSION;
-                # the CLI still exposes every built-in tool (Bash, Skill, ...) to the
-                # model. `tools=[]` is what actually removes them. Without it, an
-                # action-shaped prompt ("kill the office light" — reaches this chat
-                # backend via the voice parallel-start's speculative generation) makes
-                # the model CALL a tool; with max_turns=1 the turn then dies as
-                # ResultMessage(subtype='error_max_turns', result=None) — on every
-                # retry, deterministically, because it's the prompt, not a race.
-                tools=[],               # chat backend only — no built-in tools exist
-                allowed_tools=[],       # and nothing would be auto-permitted anyway
-                permission_mode="default",
-                env={"ANTHROPIC_API_KEY": ""},
-                # Never load the host's ~/.claude settings (hooks, CLAUDE.md) into her.
-                setting_sources=[],
+            model=self.model,
+            max_turns=1 if not self.tool_schemas else 2,
+            # TOOLS-OFF TRAP (root-caused 2026-07-03): `allowed_tools` only controls
+            # AUTO-PERMISSION; `tools=[]` is what actually removes the built-ins.
+            tools=[],
+            allowed_tools=[],
+            permission_mode="default",
+            env={"ANTHROPIC_API_KEY": ""},
+            # Never load the host's ~/.claude settings (hooks, CLAUDE.md) into her.
+            setting_sources=[],
+            # A private, empty working directory per PROCESS: no transcript or
+            # auto-memory of an earlier turn can be found, let alone loaded.
+            cwd=cwd,
         )
         if self.tool_schemas:
             from claude_agent_sdk import HookMatcher, create_sdk_mcp_server, tool as sdk_tool
@@ -177,64 +206,112 @@ class _WarmClient:
             options.mcp_servers = {MCP_SERVER: create_sdk_mcp_server(name=MCP_SERVER, version="1.0.0", tools=sdk_tools)}
             options.allowed_tools = [f"{MCP_PREFIX}{t['name']}" for t in self.tool_schemas]
             options.hooks = {"PreToolUse": [HookMatcher(matcher=f"{MCP_PREFIX}.*", hooks=[_defer])]}
-        client = ClaudeSDKClient(options=options)
-        await client.connect()
-        return client
+        return options
 
+    async def _connect(self):
+        """Spawn ONE fresh process in its own empty cwd. Returns (client, cwd)."""
+        import tempfile
+
+        from claude_agent_sdk import ClaudeSDKClient
+
+        cwd = tempfile.mkdtemp(prefix="aerys-oauth-")
+        client = ClaudeSDKClient(options=self._options(cwd))
+        await client.connect()
+        self.spawns += 1
+        return client, cwd
+
+    async def _discard(self, entry) -> None:
+        import shutil
+
+        client, cwd = entry
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=10)
+        except Exception:
+            pass
+        shutil.rmtree(cwd, ignore_errors=True)
+
+    def _prewarm(self) -> None:
+        """Start connecting the next spare on the loop (idempotent, fire-and-forget)."""
+        async def go():
+            try:
+                entry = await self._connect()
+            except Exception:
+                log.warning("oauth spare client failed to connect; next turn connects inline", exc_info=True)
+                return
+            if self._spare is None:
+                self._spare = entry
+            else:  # a spare already exists (race) — do not hold two processes
+                await self._discard(entry)
+
+        async def start():
+            if self._spare_task is None or self._spare_task.done():
+                self._spare_task = asyncio.ensure_future(go())
+
+        asyncio.run_coroutine_threadsafe(start(), self._loop)
+
+    async def _take(self):
+        """A fresh connected client for THIS turn: the spare if ready, else connect now."""
+        if self._spare_task is not None and not self._spare_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._spare_task), timeout=self.turn_timeout_s)
+            except Exception:
+                pass
+        entry = self._spare
+        self._spare = None
+        if entry is None:
+            entry = await self._connect()
+        return entry
+
+    # ---- one turn -------------------------------------------------------------
     async def _turn(self, prompt: str) -> tuple[str, list[dict], dict]:
         from claude_agent_sdk import AssistantMessage, ResultMessage
         from claude_agent_sdk.types import TextBlock, ToolUseBlock
 
-        if self._client is None:
-            self._client = await self._connect()
-        # Fresh session per turn: warm process, cold context (see module doc).
+        entry = await self._take()
+        client, _cwd = entry
+        # The next turn's process starts connecting NOW, behind this reply.
+        self._prewarm()
         session = uuid.uuid4().hex
-        await self._client.query(prompt, session_id=session)
         result_text: str | None = None
         assistant_text: list[str] = []
         tool_calls: list[dict] = []
-        meta: dict = {"session_id": session, "model": self.model}
-        async for message in self._client.receive_response():
-            if type(message).__name__ == "RateLimitEvent":
-                meta["rate_limit"] = {k: getattr(message, k, None) for k in ("status", "type", "utilization", "resets_at")}
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        # Text AFTER a deferred tool call is the model reacting to the
-                        # deferral, not an answer — drop it (same rule as upstream).
-                        if not tool_calls:
-                            assistant_text.append(block.text)
-                    elif isinstance(block, ToolUseBlock) and block.name.startswith(MCP_PREFIX):
-                        tool_calls.append({"name": block.name[len(MCP_PREFIX):], "args": dict(block.input or {}),
-                                           "id": block.id, "type": "tool_call"})
-            if isinstance(message, ResultMessage):
-                meta["stop_reason"] = getattr(message, "stop_reason", None)
-                meta["usage"] = getattr(message, "usage", None)
-                meta["total_cost_usd"] = getattr(message, "total_cost_usd", None)
-                if getattr(message, "is_error", False):
-                    # result is None on error subtypes — surface the fields that
-                    # actually diagnose it (a bare "error: None" left us blind on
-                    # the 2026-07-03 voice trace; never again).
-                    raise RuntimeError(
-                        "oauth backend error: "
-                        f"subtype={getattr(message, 'subtype', None)!r} "
-                        f"result={message.result!r} "
-                        f"num_turns={getattr(message, 'num_turns', None)!r} "
-                        f"stop_reason={getattr(message, 'stop_reason', None)!r} "
-                        f"permission_denials={getattr(message, 'permission_denials', None)!r}"
-                    )
-                result_text = message.result
+        meta: dict = {"model": self.model}
+        try:
+            await client.query(prompt, session_id=session)
+            async for message in client.receive_response():
+                if type(message).__name__ == "RateLimitEvent":
+                    meta["rate_limit"] = {k: getattr(message, k, None) for k in ("status", "type", "utilization", "resets_at")}
+                if isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if isinstance(block, TextBlock):
+                            # Text AFTER a deferred tool call is the model reacting to the
+                            # deferral, not an answer — drop it (same rule as upstream).
+                            if not tool_calls:
+                                assistant_text.append(block.text)
+                        elif isinstance(block, ToolUseBlock) and block.name.startswith(MCP_PREFIX):
+                            tool_calls.append({"name": block.name[len(MCP_PREFIX):], "args": dict(block.input or {}),
+                                               "id": block.id, "type": "tool_call"})
+                if isinstance(message, ResultMessage):
+                    meta["stop_reason"] = getattr(message, "stop_reason", None)
+                    meta["usage"] = getattr(message, "usage", None)
+                    meta["total_cost_usd"] = getattr(message, "total_cost_usd", None)
+                    meta["session_id"] = getattr(message, "session_id", None)  # the CLI's, not ours
+                    if getattr(message, "is_error", False):
+                        raise RuntimeError(
+                            "oauth backend error: "
+                            f"subtype={getattr(message, 'subtype', None)!r} "
+                            f"result={message.result!r} "
+                            f"num_turns={getattr(message, 'num_turns', None)!r} "
+                            f"stop_reason={getattr(message, 'stop_reason', None)!r} "
+                            f"permission_denials={getattr(message, 'permission_denials', None)!r}"
+                        )
+                    result_text = message.result
+        finally:
+            # Used once, gone: the conversation dies with the process.
+            asyncio.ensure_future(self._discard(entry))
         if tool_calls:
             return "".join(assistant_text), tool_calls, meta
         return result_text or "".join(assistant_text) or "", [], meta
-
-    async def _reset(self):
-        try:
-            if self._client is not None:
-                await self._client.disconnect()
-        except Exception:
-            pass
-        self._client = None
 
     def ask(self, prompt: str) -> tuple[str, list[dict], dict]:
         import concurrent.futures
@@ -243,19 +320,12 @@ class _WarmClient:
             try:
                 return self._run(self._turn(prompt))
             except concurrent.futures.TimeoutError as hung:
-                # A hang is not retried: drop the process so the next caller starts
-                # clean, and fail this turn now (the lifeboat/honest-failure path decides).
-                try:
-                    self._run(self._reset(), timeout=10)
-                except Exception:
-                    pass
-                self._client = None
-                raise OAuthBackendError(f"turn exceeded {self.turn_timeout_s:.0f}s; client reset") from hung
+                # Cancelled by _run; the process is discarded by _turn's finally when the
+                # cancellation lands. Fail this turn now; the next one takes a fresh spare.
+                raise OAuthBackendError(f"turn exceeded {self.turn_timeout_s:.0f}s; client dropped") from hung
             except Exception as first:
-                # Warm process may have died (idle timeout, OOM, upgrade) —
-                # reconnect once, then let a second failure surface loudly.
+                # A dead spare (idle timeout, OOM, upgrade) — one retry on a fresh process.
                 try:
-                    self._run(self._reset(), timeout=10)
                     return self._run(self._turn(prompt))
                 except Exception as second:
                     raise OAuthBackendError(f"{type(first).__name__}: {str(first)[:160]} / "
@@ -319,11 +389,22 @@ class ClaudeOAuthChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        out = self._query(_flatten(messages, force_tool=self.force_tool and bool(self.bound_tools)))
+        forced = self.force_tool and bool(self.bound_tools)
+        out = self._query(_flatten(messages, force_tool=forced))
         if isinstance(out, str):  # tests may stub _query with a bare string
             text, tool_calls, meta = out, [], {}
         else:
             text, tool_calls, meta = out
+        tool_calls = _valid_tool_calls(tool_calls)
+        if forced and not tool_calls:
+            # Codex #4: the must-call line is advisory; a text answer on the forced pass
+            # would read as a fabricated success ("the light is off" with nothing run).
+            # One more try, then a deterministic honest line the gate can mark.
+            out = self._query(_flatten(messages, force_tool=True) + "\n" + _FORCE_TOOL_LINE)
+            text, tool_calls, meta = (out, [], {}) if isinstance(out, str) else out
+            tool_calls = _valid_tool_calls(tool_calls)
+            if not tool_calls:
+                text, meta = _FORCED_REFUSED_LINE, {**(meta or {}), "forced_refused": True}
         usage = (meta or {}).get("usage") or {}
         usage_metadata = None
         if usage:

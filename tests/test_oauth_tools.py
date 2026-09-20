@@ -148,31 +148,88 @@ def test_untrusted_text_cannot_impersonate_a_speaker_or_the_system_block():
     assert _neutralize("plain line") == "plain line"
 
 
-def test_hung_turn_fails_fast_resets_the_client_and_is_not_retried(monkeypatch):
+def test_hung_turn_fails_fast_and_is_not_retried():
     import concurrent.futures
     import aerys_v2.oauth_model as om2
-    calls = {"turn": 0, "reset": 0}
+    calls = {"turn": 0}
 
-    class HungClient(om2._WarmClient):
+    class Hung(om2._WarmClient):
         def __init__(self):
             self.model, self.tool_schemas, self.turn_timeout_s = "m", [], 0.01
-            self._lock = __import__("threading").Lock(); self._client = object()
+            self._lock = __import__("threading").Lock()
 
         def _run(self, coro, timeout=None):
-            coro.close()
-            if "_reset" in getattr(coro, "__qualname__", "") or timeout == 10:
-                calls["reset"] += 1; return None
-            calls["turn"] += 1
+            coro.close(); calls["turn"] += 1
             raise concurrent.futures.TimeoutError()
 
-    c = HungClient()
     try:
-        c.ask("hello")
+        Hung().ask("hello")
     except OAuthBackendError as e:
         assert "exceeded" in str(e)
     else:
         raise AssertionError("expected OAuthBackendError")
-    assert calls["turn"] == 1 and calls["reset"] == 1 and c._client is None
+    assert calls["turn"] == 1                       # a hang is never retried
+
+
+def test_every_turn_takes_a_fresh_process_and_discards_it(monkeypatch):
+    """The v3 contract (Codex #1, reproduced live): a connected client is ONE
+    conversation, so each turn must run on a never-used process."""
+    import claude_agent_sdk
+    from types import SimpleNamespace
+    import aerys_v2.oauth_model as om2
+
+    made, gone = [], []
+
+    class FakeClient:
+        def __init__(self, options=None):
+            self.options = options; made.append(self)
+
+        async def connect(self): pass
+
+        async def disconnect(self): gone.append(self)
+
+        async def query(self, prompt, session_id="default"): self.prompt = prompt
+
+        async def receive_response(self):
+            yield claude_agent_sdk.AssistantMessage(content=[claude_agent_sdk.types.TextBlock(text="hi")], model="m")
+            yield SimpleNamespace(__class__=claude_agent_sdk.ResultMessage, result="hi", is_error=False, stop_reason="end_turn",
+                                  usage=None, total_cost_usd=None, session_id="cli-1", subtype="success")
+
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", FakeClient)
+    w = om2._WarmClient("claude-sonnet-5", turn_timeout_s=5)
+    text, calls, meta = w.ask("[System instructions] x\nUser: hello\nAerys:")
+    text2, _, _ = w.ask("[System instructions] x\nUser: again\nAerys:")
+    import time; time.sleep(0.2)
+    used = {id(c) for c in made if hasattr(c, "prompt")}
+    assert len(used) == 2                          # two turns, two distinct processes
+    assert all(c in gone for c in made if hasattr(c, "prompt"))   # both discarded after use
+    assert len({c.options.cwd for c in made}) == len(made)        # every process its own cwd
+
+
+def test_forced_pass_without_a_tool_call_becomes_a_deterministic_refusal(monkeypatch):
+    fresh(monkeypatch)
+    m = ClaudeOAuthChatModel(model="claude-sonnet-5").bind_tools([light_state], tool_choice="any")
+    m.invoke([HumanMessage(content="warm up")])
+    FakeWarm.made[0].reply = ("The light is off.", [], {"stop_reason": "end_turn"})
+    out = m.invoke([SystemMessage(content="S"), HumanMessage(content="is the office light on?")])
+    assert out.tool_calls == [] and "nothing was changed" in out.content
+    assert out.response_metadata.get("forced_refused") is True
+    assert len(FakeWarm.made[0].prompts) == 3                     # one retry, then the honest line
+
+
+def test_malformed_tool_call_ids_never_reach_the_tool_node(monkeypatch):
+    fresh(monkeypatch)
+    m = ClaudeOAuthChatModel(model="claude-sonnet-5").bind_tools([light_state])
+    m.invoke([HumanMessage(content="warm up")])
+    FakeWarm.made[0].reply = ("", [
+        {"name": "light_state", "args": {}, "id": None, "type": "tool_call"},
+        {"name": "light_state", "args": {"entity_id": "a"}, "id": "dup", "type": "tool_call"},
+        {"name": "light_state", "args": {"entity_id": "b"}, "id": "dup", "type": "tool_call"},
+        {"name": "", "args": {}, "id": "x", "type": "tool_call"},
+        {"name": "light_state", "args": {"entity_id": "c"}, "id": "ok1", "type": "tool_call"},
+    ], {"stop_reason": "tool_deferred"})
+    out = m.invoke([HumanMessage(content="check a, b and c")])
+    assert [c["id"] for c in out.tool_calls] == ["dup", "ok1"]
 
 
 def test_turn_timeout_comes_from_settings(monkeypatch):

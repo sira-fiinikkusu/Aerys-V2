@@ -77,9 +77,10 @@ def test_connect_disables_all_builtin_tools(monkeypatch):
     from aerys_v2.oauth_model import _WarmClient
 
     w = _WarmClient("claude-sonnet-5")
-    client = w._run(w._connect())
+    client, cwd = w._run(w._connect())          # v3: one fresh process, in its own empty cwd
     assert isinstance(client, FakeClient)
     opts = captured["options"]
+    assert opts.cwd == cwd and cwd.startswith("/tmp") and opts.setting_sources == []
     assert opts.tools == []          # no built-in tools EXIST for the chat backend
     assert opts.allowed_tools == []  # and none would be auto-permitted anyway
     assert opts.max_turns == 1
