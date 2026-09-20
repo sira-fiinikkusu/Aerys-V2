@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     # the turn — nothing spoken, nothing run, receipt row marked. Same reasoning
     # as unaddressed: a wrong "cancelled" ignores him, so the bar is higher still.
     reflex_cancel_floor: float = Field(default=0.9, ge=0, le=1)
+    # Phase 3 SHADOW (2026-09-20): Jev answers the content-privacy question beside the
+    # metered judge; both verdicts land in v2_privacy_shadow (no content). Evidence
+    # only — the judge still decides. `python -m aerys_v2.workers privacy-report`.
+    reflex_privacy_shadow: bool = True
     # Phase 4 (2026-09-19, "go for it"): plain single-target device commands
     # skip the specialist's tool-picking call. Jev answers the device questions
     # in the SAME call that routes the turn; the write still goes through the

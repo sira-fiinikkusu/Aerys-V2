@@ -61,6 +61,21 @@ QUESTIONS = {
 }
 
 
+# Phase 3 (shadow): the content-privacy question, asked of the turn + reply. Phrased
+# to match the metered judge's rubric (services.content_privacy / factory judge):
+# DEFAULT PUBLIC; private only for the sensitive categories and any secret.
+PRIVACY_QUESTION = {
+    'type': 'noul',
+    'instructions': (
+        "The content may be repeated in a shared, public room without harm: it contains NO health or medical "
+        "detail, NO financial specifics, NO relationship struggle or personal trauma, NO sexual orientation, "
+        "and NO secret or credential (password, passcode, PIN, door/garage/gate/alarm code, wifi password, "
+        "API or private key, seed phrase, account/card/routing number, exact home address). Names, jobs, "
+        "hobbies, opinions, plans, general facts and ordinary household talk ARE fine to repeat."
+    ),
+}
+
+
 def error_result(exc: Exception) -> dict:
     return {'error': f'{type(exc).__name__}: {str(exc)[:120]}'}
 
@@ -268,6 +283,18 @@ class ReflexClient:
         self.timeout_s = timeout_s
         # A broken transport must not leave an unbounded pile of abandoned calls.
         self._inflight = threading.BoundedSemaphore(32)
+
+    def judge_privacy(self, text: str) -> dict:
+        """Phase 3 shadow: p(public) for one piece of content. Never raises; bounded."""
+        started = time.monotonic()
+        try:
+            response = self.client.system_one(
+                state={'content': text[:STATE_MESSAGE_CHARS]}, questions={'public': PRIVACY_QUESTION},
+            )
+            result = {'p_public': float(response.answers['public'].noul), 'model': str(response.model)}
+        except Exception as exc:
+            result = error_result(exc)
+        return {**result, 'latency_ms': int((time.monotonic() - started) * 1000)}
 
     def __call__(self, text: str, context: dict) -> dict:
         started = time.monotonic()

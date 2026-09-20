@@ -396,6 +396,22 @@ def _reflex_report_main(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _privacy_report_main(settings: Settings, args: argparse.Namespace) -> int:
+    if not settings.database_url:
+        print("privacy-report needs: DATABASE_URL", file=sys.stderr)
+        return 2
+    import psycopg
+
+    from .privacy_report import format_report, read_rows
+
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
+        conn.read_only = True
+        conn.execute("SET statement_timeout = '30s'")
+        rows = read_rows(conn, args.window)
+    print(format_report(rows))
+    return 0
+
+
 def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
     """`signals [--window] [--quiet]` — invariants over the traffic that happened.
 
@@ -505,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     gaps.add_argument("--limit", type=int, default=50, help="max rows (default 50)")
 
+    privacy_report = sub.add_parser("privacy-report", help="Phase 3 shadow: Jev vs the metered privacy judge")
+    privacy_report.add_argument("--window", default="24 hours")
     reflex_report = sub.add_parser("reflex-report", help="read Jev shadow agreement")
     reflex_report.add_argument("--window", default="24 hours",
                                help="lookback as a Postgres interval (default 24 hours)")
@@ -536,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         return _gaps_read_main(settings, args)
     if args.worker == "reflex-report":
         return _reflex_report_main(settings, args)
+    if args.worker == "privacy-report":
+        return _privacy_report_main(settings, args)
     if args.worker == "signals":
         return _signals_main(settings, args)
     if args.worker == "gap-board":

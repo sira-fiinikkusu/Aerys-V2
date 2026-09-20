@@ -2,6 +2,7 @@ import logging, sys
 import signal, threading
 from pydantic import ValidationError
 from aerys_v2.config import BootConfigError, Settings, run_boot_assertions
+from aerys_v2.privacy_shadow import privacy_shadow_for
 from aerys_v2.reflex import live_router_for, reflex_for
 
 logging.basicConfig(
@@ -240,8 +241,8 @@ def main() -> None:
             # Board #12: her portable turns, read back into the house body, so
             # "1 identity, 1 memory" holds in BOTH directions.
             portable_context = portable_context_fn_for(settings)
-            content_privacy = content_privacy_fn_for(settings)
             reflex = reflex_for(settings)
+            content_privacy = privacy_shadow_for(settings, content_privacy_fn_for(settings), reflex)
             graph = build_graph(
                 build_model(settings),
                 soul=soul,
@@ -408,8 +409,8 @@ def main() -> None:
         # Board #12: her portable turns, read back into the house body, so
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
-        content_privacy = content_privacy_fn_for(settings)
         reflex = reflex_for(settings)
+        content_privacy = privacy_shadow_for(settings, content_privacy_fn_for(settings), reflex)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
@@ -554,8 +555,8 @@ def main() -> None:
         # Board #12: her portable turns, read back into the house body, so
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
-        content_privacy = content_privacy_fn_for(settings)
         reflex = reflex_for(settings)
+        content_privacy = privacy_shadow_for(settings, content_privacy_fn_for(settings), reflex)
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
