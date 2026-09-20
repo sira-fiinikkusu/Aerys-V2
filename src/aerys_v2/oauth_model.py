@@ -25,6 +25,8 @@ per turn. To keep the latency of a warm client anyway:
 """
 
 import asyncio
+import atexit
+import contextlib
 import logging
 import hashlib
 import json
@@ -65,6 +67,7 @@ _RESULTS_FINAL_LINE = ("[System instructions] The tool results above are final: 
                        "do not repeat an identical call. If the request needs a further, different tool call "
                        "(for example reading a state before setting it), make it; otherwise answer the user now.")
 _FORCED_REFUSED_LINE = "I couldn't get the tool to run for that, so nothing was changed. Ask me again and I'll try once more."
+_MALFORMED_CALL_LINE = "The tool call came back malformed, so I didn't run it and nothing was changed. Ask me again and I'll try once more."
 
 
 def _text(content: Any) -> str:
@@ -82,26 +85,46 @@ def _text(content: Any) -> str:
 # that came from a user, a tool or a web page could open a line with "User:", "Aerys:"
 # or "[System instructions]" and impersonate the transcript. Every such line inside
 # untrusted text gets a visible quote mark so it reads as content, never as a speaker.
-_LABEL_RE = re.compile(r"^(\s*)(User|Aerys|\[System instructions\]|\[Tool result[^\]]*\])(\s*:?)", re.M | re.I)
+_LABEL_RE = re.compile(r"^(\s*)(User|Aerys|Human|Assistant|System|\[System instructions\]|\[Tool result[^\]]*\])(\s*:?)", re.M | re.I)
+# Gemini 2nd pass: untrusted text could also forge "<called tool X with {...}>" — the marker
+# the model reads as ITS OWN past action — or the API's own role boundaries.
+_MARKER_RE = re.compile(r"<\s*called tool\b", re.I)
 
 
 def _neutralize(text: str) -> str:
-    return _LABEL_RE.sub(lambda m: f"{m.group(1)}> {m.group(2)}{m.group(3)}", text)
+    text = _LABEL_RE.sub(lambda m: f"{m.group(1)}> {m.group(2)}{m.group(3)}", text)
+    text = _MARKER_RE.sub("< called-tool", text)
+    return text.replace("\n\nHuman:", "\n\n> Human:").replace("\n\nAssistant:", "\n\n> Assistant:")
 
 
-def _valid_tool_calls(calls: list[dict]) -> list[dict]:
+def _valid_tool_calls(calls: list[dict]) -> tuple[list[dict], int]:
     """Codex #6: a call with no id, or a duplicate id, must never reach the ToolNode
-    (it executed a null-id call and ran duplicates twice). Drop and log, keep the rest."""
+    (it executed a null-id call and ran duplicates twice). Drop and log, keep the rest;
+    the count of dropped calls travels so a forced pass can tell "malformed" from "none"."""
     seen: set[str] = set()
     out: list[dict] = []
+    dropped = 0
     for c in calls or []:
         cid = c.get("id")
         if not cid or cid in seen or not c.get("name"):
             log.warning("oauth tool call dropped: malformed id/name %r", {k: c.get(k) for k in ("id", "name")})
+            dropped += 1
             continue
         seen.add(cid)
         out.append(c)
-    return out
+    return out, dropped
+
+
+def _sum_usage(*metas: dict) -> dict | None:
+    total = {"input_tokens": 0, "output_tokens": 0}
+    seen = False
+    for m in metas:
+        u = (m or {}).get("usage") or {}
+        if u:
+            seen = True
+            total["input_tokens"] += int(u.get("input_tokens", 0) or 0)
+            total["output_tokens"] += int(u.get("output_tokens", 0) or 0)
+    return total if seen else None
 
 
 def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
@@ -130,11 +153,12 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
             parts = []
             text = _text(m.content)
             if text:
-                parts.append(text)
+                parts.append(_neutralize(text))   # her own free text is neutralized like any text…
             for tc in m.tool_calls:
                 names[tc.get("id", "")] = tc["name"]
+                # …the marker is OURS (built from the structured tool_calls), never neutralized
                 parts.append(f"<called tool {tc['name']} with {json.dumps(tc.get('args', {}), sort_keys=True)}>")
-            lines.append("Aerys: " + _neutralize(" ".join(parts)))
+            lines.append("Aerys: " + " ".join(parts))
     head = ("[System instructions]\n" + "\n\n".join(system_parts) + "\n\n") if system_parts else ""
     tail = ""
     if messages and isinstance(messages[-1], ToolMessage):
@@ -158,6 +182,7 @@ class _WarmClient:
         self._spare_task = None       # the background connect in flight, if any
         self._lock = threading.Lock()  # one turn at a time per pool — household-sized
         self.spawns = 0               # audit: processes started
+        atexit.register(self.close)   # the pre-connected spare must not outlive the process
 
     # ---- plumbing -------------------------------------------------------------
     def _run(self, coro, timeout: float | None = None):
@@ -216,7 +241,16 @@ class _WarmClient:
 
         cwd = tempfile.mkdtemp(prefix="aerys-oauth-")
         client = ClaudeSDKClient(options=self._options(cwd))
-        await client.connect()
+        try:
+            await client.connect()
+        except BaseException:
+            # Gemini 2nd pass: a failed or cancelled connect must not leak its temp dir
+            # (or a half-started process).
+            import shutil
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(client.disconnect(), timeout=5)
+            shutil.rmtree(cwd, ignore_errors=True)
+            raise
         self.spawns += 1
         return client, cwd
 
@@ -229,6 +263,14 @@ class _WarmClient:
         except Exception:
             pass
         shutil.rmtree(cwd, ignore_errors=True)
+
+    def close(self) -> None:
+        """Discard the spare (and its temp dir) — atexit and tests."""
+        entry, self._spare = self._spare, None
+        if entry is None:
+            return
+        with contextlib.suppress(Exception):
+            asyncio.run_coroutine_threadsafe(self._discard(entry), self._loop).result(timeout=10)
 
     def _prewarm(self) -> None:
         """Start connecting the next spare on the loop (idempotent, fire-and-forget)."""
@@ -243,19 +285,18 @@ class _WarmClient:
             else:  # a spare already exists (race) — do not hold two processes
                 await self._discard(entry)
 
-        async def start():
-            if self._spare_task is None or self._spare_task.done():
-                self._spare_task = asyncio.ensure_future(go())
-
-        asyncio.run_coroutine_threadsafe(start(), self._loop)
+        if self._spare_task is None or self._spare_task.done():
+            self._spare_task = asyncio.ensure_future(go(), loop=self._loop)
 
     async def _take(self):
         """A fresh connected client for THIS turn: the spare if ready, else connect now."""
         if self._spare_task is not None and not self._spare_task.done():
             try:
-                await asyncio.wait_for(asyncio.shield(self._spare_task), timeout=self.turn_timeout_s)
+                await asyncio.wait_for(asyncio.shield(self._spare_task), timeout=self.turn_timeout_s / 2)
+            except asyncio.TimeoutError:
+                raise OAuthBackendError("spare client did not connect within half the turn budget")
             except Exception:
-                pass
+                pass  # the prewarm failed; connect inline below (still inside the budget)
         entry = self._spare
         self._spare = None
         if entry is None:
@@ -395,22 +436,28 @@ class ClaudeOAuthChatModel(BaseChatModel):
             text, tool_calls, meta = out, [], {}
         else:
             text, tool_calls, meta = out
-        tool_calls = _valid_tool_calls(tool_calls)
+        tool_calls, dropped = _valid_tool_calls(tool_calls)
+        metas = [meta]
         if forced and not tool_calls:
             # Codex #4: the must-call line is advisory; a text answer on the forced pass
             # would read as a fabricated success ("the light is off" with nothing run).
-            # One more try, then a deterministic honest line the gate can mark.
+            # One more try, then a deterministic honest line the gate can mark. A pass
+            # whose calls were all MALFORMED says so instead (Gemini 2nd pass).
             out = self._query(_flatten(messages, force_tool=True) + "\n" + _FORCE_TOOL_LINE)
             text, tool_calls, meta = (out, [], {}) if isinstance(out, str) else out
-            tool_calls = _valid_tool_calls(tool_calls)
+            metas.append(meta)
+            tool_calls, dropped2 = _valid_tool_calls(tool_calls)
             if not tool_calls:
-                text, meta = _FORCED_REFUSED_LINE, {**(meta or {}), "forced_refused": True}
-        usage = (meta or {}).get("usage") or {}
+                meta = {**(meta or {}), "forced_refused": True}
+                if dropped or dropped2:
+                    meta["malformed_tool_calls"] = dropped + dropped2
+                    text = _MALFORMED_CALL_LINE
+                else:
+                    text = _FORCED_REFUSED_LINE
+        total = _sum_usage(*metas)
         usage_metadata = None
-        if usage:
-            usage_metadata = {"input_tokens": int(usage.get("input_tokens", 0) or 0),
-                              "output_tokens": int(usage.get("output_tokens", 0) or 0),
-                              "total_tokens": int((usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0))}
+        if total:
+            usage_metadata = {**total, "total_tokens": total["input_tokens"] + total["output_tokens"]}
         msg = AIMessage(content=text, tool_calls=tool_calls, usage_metadata=usage_metadata,
                         response_metadata={k: v for k, v in (meta or {}).items() if k != "usage"})
         return ChatResult(generations=[ChatGeneration(message=msg)])
