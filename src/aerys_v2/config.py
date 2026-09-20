@@ -66,6 +66,11 @@ class Settings(BaseSettings):
     # metered judge; both verdicts land in v2_privacy_shadow (no content). Evidence
     # only — the judge still decides. `python -m aerys_v2.workers privacy-report`.
     reflex_privacy_shadow: bool = True
+    # Router sampling (Chris 2026-09-20 00:16, approved): in live mode the Haiku router
+    # no longer runs beside Jev on EVERY turn. It runs when its output is needed —
+    # voice (the spoken ack, J2) and any turn Jev is unsure about — plus this fraction
+    # of the rest, so the agreement report keeps a sample. 1.0 = the old always-on.
+    reflex_router_sample: float = Field(default=0.1, ge=0, le=1)
     # Phase 4 (2026-09-19, "go for it"): plain single-target device commands
     # skip the specialist's tool-picking call. Jev answers the device questions
     # in the SAME call that routes the turn; the write still goes through the

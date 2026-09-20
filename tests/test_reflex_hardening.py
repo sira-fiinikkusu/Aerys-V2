@@ -162,7 +162,8 @@ def test_router_thread_start_failure_falls_back(monkeypatch):
     rec = LAST_REFLEX.get().collect()
     assert rec["decided_by"] == "router" and "router_error" in rec
     # Codex second pass (#10): the start error is audited even when Jev decides the turn
+    # (with the router sampled in — at sample 0 a confident turn never starts it)
     confident = lambda t, c: {**jev(t, c), "confidence": .95}  # noqa: E731
-    live_router_for(settings(), confident, lambda t: RouteDecision(route="chat", ack=""))("hello there")
+    live_router_for(settings(reflex_router_sample=1.0), confident, lambda t: RouteDecision(route="chat", ack=""))("hello there")
     rec = LAST_REFLEX.get().collect()
     assert rec["decided_by"] == "jev" and "router_error" in rec

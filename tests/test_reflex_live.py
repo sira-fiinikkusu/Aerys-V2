@@ -35,7 +35,8 @@ class SlowRouter:
 
 def test_confident_chat_decides_without_waiting_for_router():
     router = SlowRouter(RouteDecision(route="action", ack="router ack", tier="deep"), delay=0.4)
-    decide = live_router_for(settings(), lambda t, c: jev_result("chat", 0.9), router)
+    # sample=1.0 keeps both verdicts on the row (the always-on shape the report was built on)
+    decide = live_router_for(settings(reflex_router_sample=1.0), lambda t, c: jev_result("chat", 0.9), router)
     t0 = time.monotonic()
     d = decide("what do you think about cats")
     assert time.monotonic() - t0 < 0.25          # did not wait 0.4 s for Haiku
@@ -170,7 +171,7 @@ class Recorder:
 def test_live_record_reaches_the_audit_row_without_a_shadow():
     rec = Recorder()
     router = SlowRouter(RouteDecision(route="action", ack="ack", tier="deep"), delay=0.05)
-    decide = live_router_for(settings(), lambda t, c: jev_result("chat", 0.95), router)
+    decide = live_router_for(settings(reflex_router_sample=1.0), lambda t, c: jev_result("chat", 0.95), router)
     reply = ask(Graph("chat answer"), "hello there", identity={"platform": "discord", "channel_kind": "dm"},
                 thread_id="person:x", router=decide, action_graph=Graph("action answer"),
                 reflex=None, record_turn=rec)
@@ -190,3 +191,52 @@ def test_off_mode_leaves_router_untouched(monkeypatch):
     assert (r, x) == (router, "reflex")
     r, x = _arm_live_reflex(settings(), lambda t, c: jev_result(), router)
     assert callable(r) and x is None
+
+
+# ---- router sampling (Chris 2026-09-20 00:16: approved; the Haiku line) ----
+
+
+def test_confident_text_turn_never_calls_the_router_when_not_sampled():
+    router = SlowRouter(RouteDecision(route="action", ack="router ack"), delay=0.01)
+    token = REFLEX_SURFACE.set("discord")
+    try:
+        d = live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("chat", 0.95), router)("hi there")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert d.route == "chat"
+    rec = LAST_REFLEX.get().collect()              # no thread to join, no router verdict
+    assert router.calls == 0 and rec["router"] is None and rec["router_sampled"] is False
+
+
+def test_unsure_jev_starts_the_router_lazily_and_the_router_decides():
+    router = SlowRouter(RouteDecision(route="action", ack="", tier="deep"), delay=0.01)
+    token = REFLEX_SURFACE.set("discord")
+    try:
+        d = live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("chat", 0.3), router)("hmm")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert (d.route, d.tier) == ("action", "deep") and router.calls == 1
+    rec = LAST_REFLEX.get().collect()
+    assert rec["decided_by"] == "router" and rec["router"]["route"] == "action"
+
+
+def test_voice_always_runs_the_router_for_the_spoken_ack():
+    router = SlowRouter(RouteDecision(route="action", ack="Getting it."), delay=0.01)
+    token = REFLEX_SURFACE.set("voice")
+    try:
+        d = live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("action", 0.95, p_action=.9), router)("lights off")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert d.ack == "Getting it." and router.calls == 1
+    assert LAST_REFLEX.get().collect()["router_sampled"] is True
+
+
+def test_sample_one_keeps_the_old_always_on_behaviour():
+    router = SlowRouter(RouteDecision(route="action", ack=""), delay=0.01)
+    token = REFLEX_SURFACE.set("discord")
+    try:
+        live_router_for(settings(reflex_router_sample=1.0), lambda t, c: jev_result("chat", 0.95), router)("hi")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    rec = LAST_REFLEX.get().collect()
+    assert router.calls == 1 and rec["router"]["route"] == "action" and rec["router_sampled"] is True

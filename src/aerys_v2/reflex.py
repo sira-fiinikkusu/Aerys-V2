@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextvars
+import random
 import re
 from dataclasses import replace
 import logging
@@ -438,11 +439,13 @@ def live_router_for(
     action_floor = settings.reflex_action_floor
     unaddressed_floor = settings.reflex_unaddressed_floor
     cancel_floor = settings.reflex_cancel_floor
+    router_sample = settings.reflex_router_sample
 
     def decide(text: str) -> RouteDecision:
         started = time.monotonic()
         box: dict = {}
         ctx = contextvars.copy_context()
+        state: dict = {'thread': None, 'started': False}
 
         def run_router():
             try:
@@ -450,18 +453,31 @@ def live_router_for(
             except Exception as exc:  # build_router already fails to heuristic; belt and braces
                 box['error'] = error_result(exc)
 
-        thread = threading.Thread(target=lambda: ctx.run(run_router), daemon=True)
-        try:
-            thread.start()
-        except Exception as exc:  # Codex review 2026-09-20 #7: an unstartable thread must not escape
-            box['error'] = error_result(exc)
-            thread = None
+        def start_router() -> None:
+            # Started at most once; a failed start is audited (Codex #7/#10) and the
+            # fallback path treats it as "no decision".
+            if state['started']:
+                return
+            state['started'] = True
+            t = threading.Thread(target=lambda: ctx.run(run_router), daemon=True)
+            try:
+                t.start()
+                state['thread'] = t
+            except Exception as exc:
+                box['error'] = error_result(exc)
 
         def join_router() -> None:
-            if thread is not None:
-                thread.join()
+            start_router()
+            if state['thread'] is not None:
+                state['thread'].join()
 
         surface = REFLEX_SURFACE.get()
+        # Router sampling (approved 2026-09-20): Haiku runs in parallel only when its
+        # output is likely needed — voice (spoken ack) — or on a sample for the
+        # agreement report. Otherwise it starts lazily, only if Jev turns out unsure.
+        sampled = surface == 'voice' or router_sample >= 1.0 or random.random() < router_sample
+        if sampled:
+            start_router()
         context = {'surface': surface}
         if device_targets:
             context['device_targets'] = device_targets
@@ -471,7 +487,8 @@ def live_router_for(
             jev = error_result(exc)
         if not isinstance(jev, dict):
             jev = {'error': 'no result'}
-        record = {'jev': jev, 'router': None, 'mode': 'live', 'decided_by': 'router'}
+        record = {'jev': jev, 'router': None, 'mode': 'live', 'decided_by': 'router',
+                  'router_sampled': sampled}
         if box.get('error'):
             record['router_error'] = box['error']  # Codex #10: audited even when Jev decides
         if isinstance(jev.get('device'), dict):
@@ -530,7 +547,7 @@ def live_router_for(
         # J8: a plain command on voice speaks no ack (the device is the feedback).
         record['silent_ack'] = bool(record['command']) and bool(settings.reflex_direct_silent_ack)
         record['latency_ms'] = int((time.monotonic() - started) * 1000)
-        LAST_REFLEX.set(LiveReflexRecord(record, thread, box))
+        LAST_REFLEX.set(LiveReflexRecord(record, state['thread'], box))
         return decision
 
     return decide
