@@ -228,6 +228,12 @@ def _fire_turn_record(
     """Build the audit row now (trace/tool/latency captured in-context), write it
     off the hot path. thread_id + identity are read from the per-call config — the
     same S2 channel the graph uses — so the row can never disagree with the turn."""
+    # Codex #4: this is the one seam every path ends on, so a capture still
+    # 'pending' here gets its terminal outcome: failed (the row carries an error)
+    # or answered. The drop/confusion paths set theirs earlier and are kept.
+    cap = CURRENT_CAPTURE.get()
+    if cap is not None and cap.get("outcome") == "pending":
+        cap["outcome"] = "the turn failed" if fields.get("error") else "answered normally"
     if record_turn is None:
         return
     if reflex is None:
@@ -598,23 +604,34 @@ _LAST_CAPTURE: dict[str, dict] = {}
 _CAPTURE_LOG: dict[str, deque] = {}
 _CAPTURE_LOCK = threading.Lock()  # asks on different threads share these maps
 _CAPTURE_WINDOW_S = 300
+_CAPTURE_THREAD_IDLE_S = 3600  # Codex #8: forget threads silent for an hour
+# Codex #3: the outcome must land on the capture that produced it, not on whichever
+# capture is newest. ask() sets this right after _note_capture; the drop/reply paths
+# read it. Background threads spawned with copy_context() inherit it.
+CURRENT_CAPTURE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("current_capture", default=None)
+_BACKGROUND_OUTCOMES = ("dropped as background speech", "assistant could not understand it")
 
 
 def _note_capture(thread_id: str, text: str) -> dict:
-    """Record this capture (outcome pending → 'answered normally' until told otherwise) and
-    return the reflex context derived from the captures BEFORE it."""
+    """Record this capture (outcome 'pending' until a terminal path says otherwise;
+    Codex #4) and return the reflex context derived from the captures BEFORE it."""
     now = time.monotonic()
     with _CAPTURE_LOCK:
+        for stale in [k for k, e in _LAST_CAPTURE.items() if now - e["at"] > _CAPTURE_THREAD_IDLE_S]:
+            _LAST_CAPTURE.pop(stale, None)
+            _CAPTURE_LOG.pop(stale, None)
         log_ = _CAPTURE_LOG.setdefault(thread_id, deque(maxlen=50))
         while log_ and now - log_[0]["at"] > _CAPTURE_WINDOW_S:
             log_.popleft()
         prev = _LAST_CAPTURE.get(thread_id)
-        ctx = {"background_captures_5m": sum(1 for e in log_ if e["outcome"] != "answered normally")}
+        ctx = {"background_captures_5m": sum(1 for e in log_ if e["outcome"] in _BACKGROUND_OUTCOMES)}
         if prev:
-            ctx["previous_capture"] = {"text": prev["text"], "seconds_ago": round(now - prev["at"], 1), "outcome": prev["outcome"]}
-        entry = {"text": str(text)[:200], "at": now, "outcome": "answered normally"}
+            ctx["previous_capture"] = {"text": prev["text"], "seconds_ago": round(now - prev["at"], 1),
+                                       "outcome": prev["outcome"] if prev["outcome"] != "pending" else "still being handled"}
+        entry = {"text": str(text)[:200], "at": now, "outcome": "pending"}
         _LAST_CAPTURE[thread_id] = entry
         log_.append(entry)
+    CURRENT_CAPTURE.set(entry)
     return ctx
 _DEVICE_LABELS = {
     "185bd720dd074d798a6094ad4f22e525": "office satellite (Chris's desk; he works and takes calls here)",
@@ -639,7 +656,7 @@ _CONFUSION_RE = re.compile(r"(didn.t (quite )?(come through|catch|get that)|garb
 def _note_outcome(thread_id: str, outcome: str) -> None:
     _LAST_OUTCOME[thread_id] = outcome
     with _CAPTURE_LOCK:
-        cur = _LAST_CAPTURE.get(thread_id)
+        cur = CURRENT_CAPTURE.get() or _LAST_CAPTURE.get(thread_id)  # this turn's capture, else newest
         if cur is not None:
             cur["outcome"] = outcome
 
@@ -670,7 +687,9 @@ def _recent_exchanges(graph: object, configurable: dict, n: int = 8) -> list[dic
                     cur["seconds_before_this"] = int(now - ts)
                 pairs.append(cur)
             elif t == "ai" and cur is not None and not getattr(m, "tool_calls", None):
-                cur["assistant"] = _reply_text(m)[:240]
+                full = _reply_text(m)
+                cur["assistant"] = full[:240]
+                cur["assistant_full"] = full[:2000]  # the question flag must see the END of a long reply
         return [p for p in pairs if p["assistant"]][-n:]
     except Exception:
         log.debug("recent-exchanges read failed — no context for the unaddressed question", exc_info=True)
@@ -1180,7 +1199,7 @@ def ask(
         LAST_REFLEX.set(None)
         recent = _recent_exchanges(graph, config["configurable"]) if router is not None else []
         REFLEX_RECENT.set(recent)
-        REFLEX_LAST_REPLY.set(recent[-1]["assistant"] if recent else "")
+        REFLEX_LAST_REPLY.set((recent[-1].get("assistant_full") or recent[-1]["assistant"]) if recent else "")
         registry_for_since = _THREAD_ACTIVITY if activity_registry is None else activity_registry
         last_spoke = registry_for_since.get(thread_id)
         REFLEX_SINCE_S.set(round(time.monotonic() - last_spoke, 1) if last_spoke is not None else None)

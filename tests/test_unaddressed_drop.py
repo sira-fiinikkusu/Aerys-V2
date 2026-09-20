@@ -327,3 +327,52 @@ def test_round6_capture_log_feeds_the_next_turn(monkeypatch):
     svc._note_reply_outcome("t", "Good, steady day.")
     now[0] += 400  # the two bad captures age out of the window
     assert svc._note_capture("t", "turn off the lights")["background_captures_5m"] == 0
+
+
+def test_codex_capture_outcomes_land_on_their_own_capture_and_threads_expire(monkeypatch):
+    # Round-6 review #3/#4/#8: A captures, B captures, then A's outcome arrives — A
+    # gets it, B stays pending; an untouched capture is finalized by the audit seam
+    # (failed when the row carries an error); idle threads are evicted after an hour.
+    import contextvars
+    from aerys_v2 import service as svc
+
+    svc._LAST_CAPTURE.clear(); svc._CAPTURE_LOG.clear()
+    now = [5000.0]
+    monkeypatch.setattr(svc.time, "monotonic", lambda: now[0])
+    ctx_a = contextvars.copy_context(); ctx_b = contextvars.copy_context()
+    ctx_a.run(svc._note_capture, "t", "A: so I told Megan")
+    now[0] += 2
+    ctx_b.run(svc._note_capture, "t", "B: turn off the lights")
+    ctx_a.run(svc._note_outcome, "t", "dropped as background speech")
+    a, b = list(svc._CAPTURE_LOG["t"])
+    assert a["outcome"] == "dropped as background speech" and b["outcome"] == "pending"
+    # the audit seam finalizes B: failed if the row carries an error, else answered
+    ctx_b.run(svc._fire_turn_record, None, {"configurable": {}}, "B", 10, error="boom")
+    assert b["outcome"] == "the turn failed"
+    now[0] += 3
+    ctx_c = contextvars.copy_context(); ctx_c.run(svc._note_capture, "t", "C: hey")
+    c = list(svc._CAPTURE_LOG["t"])[-1]
+    ctx_c.run(svc._fire_turn_record, None, {"configurable": {}}, "C", 10)
+    assert c["outcome"] == "answered normally"
+    # a still-pending previous capture is described as in flight, not as answered
+    ctx_d = contextvars.copy_context(); ctx_d.run(svc._note_capture, "t", "D")
+    ctx_e = contextvars.copy_context()
+    assert ctx_e.run(svc._note_capture, "t", "E")["previous_capture"]["outcome"] == "still being handled"
+    # eviction: another thread, an hour later, forgets 't'
+    now[0] += 3601
+    svc._note_capture("other", "x")
+    assert "t" not in svc._LAST_CAPTURE and "t" not in svc._CAPTURE_LOG and "other" in svc._LAST_CAPTURE
+
+
+def test_codex_question_flag_sees_the_end_of_a_long_reply():
+    # Round-6 review #5: the exchanges list truncates her reply to 240 chars for Jev,
+    # but the "did she just ask a question?" flag must see the END of the reply.
+    from types import SimpleNamespace
+    from aerys_v2 import service as svc
+
+    long_reply = ("Here is what I found about the sunroom lights and the office lights and why they " * 4) + "Which ones did you mean?"
+    msgs = [SimpleNamespace(type="human", content="the lights", additional_kwargs={}),
+            SimpleNamespace(type="ai", content=long_reply, additional_kwargs={}, tool_calls=None)]
+    graph = SimpleNamespace(get_state=lambda cfg: SimpleNamespace(values={"messages": msgs}))
+    ex = svc._recent_exchanges(graph, {"thread_id": "t"})
+    assert len(ex[-1]["assistant"]) == 240 and ex[-1]["assistant_full"].endswith("Which ones did you mean?")

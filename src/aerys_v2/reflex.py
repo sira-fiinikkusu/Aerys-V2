@@ -652,6 +652,18 @@ def live_router_for(
             record['device'] = dict(jev['device'])
 
         decision = None
+        # Codex 2026-09-20 (round-6 review, blocker 1): the SELECTED unaddressed score
+        # and the code bypasses are computed here, independent of route confidence, so
+        # a low-confidence turn that falls to the router keeps the same protection.
+        jev_u = float(jev.get('unaddressed', 0)) if 'error' not in jev else 0.0
+        if unaddressed_source == 'ctx' and jev.get('unaddressed_ctx') is not None:
+            jev_u = float(jev['unaddressed_ctx'])  # the fuller picture, when the thread has one
+        elif unaddressed_source == 'addressee' and isinstance(jev.get('addressee'), dict):
+            jev_u = float(jev['addressee'].get('background', 0))  # round 6: P(for someone/something else)
+        record['unaddressed_score'] = jev_u
+        bypass = unaddressed_bypass(text, context) if surface == 'voice' else None
+        if bypass:
+            record['unaddressed_bypass'] = bypass
         confident = (
             'error' not in jev
             and jev.get('route') in registered_routes
@@ -672,17 +684,9 @@ def live_router_for(
                 ack = rd.ack if rd is not None and rd.ack else FALLBACK_ACK
             # Codex review 2026-09-20 #6: keep the router's command-preservation guard —
             # a command-shaped message is never dropped as unaddressed, whatever Jev said.
-            jev_u = float(jev.get('unaddressed', 0))
-            if unaddressed_source == 'ctx' and jev.get('unaddressed_ctx') is not None:
-                jev_u = float(jev['unaddressed_ctx'])  # the fuller picture, when the thread has one
-            elif unaddressed_source == 'addressee' and isinstance(jev.get('addressee'), dict):
-                jev_u = float(jev['addressee'].get('background', 0))  # round 6: P(for someone/something else)
-            record['unaddressed_score'] = jev_u
             unaddressed = jev_u >= unaddressed_floor
             strong = jev_u >= strong_floor
-            bypass = unaddressed_bypass(text, context) if surface == 'voice' else None
             if bypass:
-                record['unaddressed_bypass'] = bypass
                 unaddressed, strong = False, False
             if surface == 'voice' and not unaddressed and not bypass and jev_u >= join_floor:
                 # Option A (Chris 2026-09-20 12:55, "A is a yes"): a suspicious fragment on
@@ -711,8 +715,12 @@ def live_router_for(
                 record['router_error'] = box.get('error', {'error': 'no decision'})
             record['router'] = _router_verdict(rd)
             decision = rd
-            if decision.unaddressed and float(jev.get('unaddressed', 0)) >= strong_floor:
-                decision = replace(decision, unaddressed_strong=True)  # both agree
+            if decision.unaddressed and (bypass or plausibly_asks_for_action(text)):
+                # Same protection as the confident branch (Codex blocker 1): a reply to
+                # her question / a short follow-up / a command shape is never dropped.
+                decision = replace(decision, unaddressed=False, unaddressed_strong=False)
+            elif decision.unaddressed and jev_u >= strong_floor:
+                decision = replace(decision, unaddressed_strong=True)  # both agree, on the SELECTED score
         # J10: a withdrawn request is dropped whoever decided the route. The
         # cancel Noul rides the same call, so it costs nothing extra and does
         # not depend on route confidence; the floor is high because a wrong

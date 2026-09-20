@@ -391,3 +391,33 @@ def test_context_carries_the_round6_room_facts_to_jev():
     finally:
         REFLEX_ROOM.reset(t)
     assert seen["previous_capture"]["text"] == "hey" and seen["background_captures_5m"] == 1 and seen["unaddressed_source"] == "addressee"
+
+
+def test_codex_blocker1_low_confidence_fallback_keeps_the_bypass_and_selected_score():
+    # Round-6 review blocker 1: "yes please" 5 s after "Which lights?" with route
+    # confidence .3 (falls to Haiku), plain unaddressed .95, addressee background .01,
+    # Haiku says unaddressed → used to be a STRONG drop. Now: bypass wins on the
+    # fallback branch too, and 'strong' reads the SELECTED score, not the plain Noul.
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
+    low = lambda t, c: {**jev_result("chat", 0.3, unaddressed=0.95), "addressee": _addr(0.01, "reply_to_assistant")}  # noqa: E731
+    t1 = REFLEX_LAST_REPLY.set("Which lights?"); t2 = REFLEX_SINCE_S.set(5.0)
+    try:
+        d = _voice(lambda: live_router_for(settings(), low, router)("yes please"))
+        rec = LAST_REFLEX.get().collect()
+        assert d.unaddressed is False and d.unaddressed_strong is False
+        assert rec["decided_by"] == "router" and rec["unaddressed_bypass"] == "question" and rec["unaddressed_score"] == 0.01
+    finally:
+        REFLEX_LAST_REPLY.reset(t1); REFLEX_SINCE_S.reset(t2)
+    # no bypass: Haiku's drop stands, and strong follows the addressee score (0.3 < 0.9)
+    router2 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
+    low2 = lambda t, c: {**jev_result("chat", 0.3, unaddressed=0.95), "addressee": _addr(0.3, "fragment_nobody")}  # noqa: E731
+    d = _voice(lambda: live_router_for(settings(), low2, router2)("and then he just left it there"))
+    assert d.unaddressed is True and d.unaddressed_strong is False
+    router3 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
+    low3 = lambda t, c: {**jev_result("chat", 0.3, unaddressed=0.2), "addressee": _addr(0.95, "another_person")}  # noqa: E731
+    d = _voice(lambda: live_router_for(settings(), low3, router3)("so I told Megan we would leave at nine"))
+    assert d.unaddressed is True and d.unaddressed_strong is True
+    # a command shape is never dropped on the fallback branch either
+    router4 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
+    d = _voice(lambda: live_router_for(settings(), low3, router4)("turn off the office lights"))
+    assert d.unaddressed is False
