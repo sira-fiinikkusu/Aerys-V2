@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+import time
+
 import aiohttp
 
 from homeassistant.components import conversation
@@ -26,6 +28,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import CONF_API_TOKEN, CONF_BASE_URL
+
+# Speaker ID (2026-09-20): the aerys_speaker_stt wrapper leaves its verdict in
+# hass.data; a fresh one rides the /ask body as `speaker` so the Brain can key the
+# turn to the person who spoke. Absent/stale = untagged (the Brain treats that as
+# the owner, exactly as before speaker ID existed).
+SPEAKER_DOMAIN = "aerys_speaker_stt"
+SPEAKER_LAST_KEY = "last_result"
+SPEAKER_TTL_S = 15.0
 
 # One shared voice thread for the beta pipeline (owner decision: voice rides the
 # owner thread) — matches the thread_id the OpenAI shim used, so history is
@@ -64,6 +74,12 @@ class AerysConversationAgent(ConversationEntity, conversation.AbstractConversati
     def supported_languages(self) -> list[str] | Literal["*"]:
         return MATCH_ALL
 
+    def _fresh_speaker(self) -> dict | None:
+        last = (self.hass.data.get(SPEAKER_DOMAIN) or {}).get(SPEAKER_LAST_KEY)
+        if not last or time.monotonic() - float(last.get("at", 0)) > SPEAKER_TTL_S:
+            return None
+        return {"id": last.get("user_id"), "confidence": last.get("confidence")}
+
     async def _async_handle_message(
         self, user_input: ConversationInput, chat_log
     ) -> ConversationResult:
@@ -84,6 +100,7 @@ class AerysConversationAgent(ConversationEntity, conversation.AbstractConversati
                     "display_name": DISPLAY_NAME,
                     # The load-bearing field: which satellite started this turn.
                     "device_id": user_input.device_id,
+                    "speaker": self._fresh_speaker(),
                 },
                 headers={"Authorization": f"Bearer {self._api_token}"},
                 timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S),

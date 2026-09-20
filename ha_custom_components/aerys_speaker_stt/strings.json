@@ -1,0 +1,16 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Aerys Speaker STT",
+        "description": "Wrap an STT entity and tag each turn with who spoke (aerys-voice-id on the Jetson).",
+        "data": {
+          "source_stt_entity": "STT entity to wrap",
+          "recognizer_url": "Recognizer URL",
+          "recognizer_timeout": "Recognizer timeout (seconds)"
+        }
+      }
+    },
+    "abort": { "already_configured": "This STT entity is already wrapped." }
+  }
+}

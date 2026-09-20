@@ -21,6 +21,11 @@ from aerys_v2.state import Identity
 log = logging.getLogger(__name__)
 
 
+class SpeakerTag(BaseModel):
+    id: str = "unknown"
+    confidence: float = 0.0
+
+
 class AskRequest(BaseModel):
     text: str = Field(min_length=1)
     # Callers name their conversation; curl defaults to a shared scratch thread.
@@ -43,6 +48,10 @@ class AskRequest(BaseModel):
     # summarizer stays a fallback instead of a paraphrase layer (owner ask
     # 2026-08-26). Absent/None = no surface styling, byte-for-byte old behavior.
     surface: str | None = None
+    # Speaker ID (2026-09-20): set by HA's aerys_conversation from the
+    # aerys_speaker_stt wrapper's verdict — {"id": "chris"|"megan"|"unknown",
+    # "confidence": 0.71}. Absent = untagged = the owner (pre-speaker-ID behavior).
+    speaker: SpeakerTag | None = None
 
 
 class AskReply(BaseModel):
@@ -70,7 +79,7 @@ class KaelNoteReply(BaseModel):
 
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
-              a2a_memory_fn=None) -> FastAPI:
+              a2a_memory_fn=None, settings=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -99,6 +108,31 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
     # dependency (this is the general HTTP door), while reusing the ONE canonical
     # person-thread key builder the text gateways use — no drift on the format.
     from aerys_v2.transports.discord_gateway import person_thread_key
+    from aerys_v2.config import speaker_person_map
+
+    speaker_persons = speaker_person_map(settings) if settings is not None else {}
+
+    def resolve_speaker(speaker_id: str, confidence: float) -> tuple[str, str] | None:
+        """(user_id, display_name) for a tagged voice turn, or None = leave it the owner's.
+
+        Enrolled name -> that person (the owner's own name -> unchanged). "unknown", an
+        unlisted name, or a confidence under the floor -> the guest identity when
+        voice_unknown_speaker=guest (its own thread; ask()'s allowlist keeps house
+        control away from it), else unchanged. Untagged never reaches here.
+        """
+        if settings is None:
+            return None
+        name = (speaker_id or "unknown").strip().lower()
+        if confidence < settings.voice_speaker_min_confidence:
+            name = "unknown"
+        person = speaker_persons.get(name)
+        if person is not None:
+            if person == owner_person_id:
+                return None
+            return person, f"{name.capitalize()} (Voice)"
+        if settings.voice_unknown_speaker == "guest":
+            return "voice-guest", "Guest (Voice)"
+        return None
 
     def voice_thread() -> str:
         """The checkpointer thread a voice turn rides. When an owner is configured (the
@@ -240,6 +274,14 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if body.voice or str(body.thread_id or "").startswith("voice"):
             identity["voice"] = True
             thread_id = voice_thread()
+            if body.speaker is not None:
+                # Who spoke decides WHOSE turn this is. The Bearer proved the owner's
+                # infrastructure is calling; the voice decides the person.
+                identity["speaker"] = {"id": body.speaker.id, "confidence": body.speaker.confidence}
+                who = resolve_speaker(body.speaker.id, body.speaker.confidence)
+                if who is not None:
+                    identity["user_id"], identity["display_name"] = who
+                    thread_id = person_thread_key(who[0])
         else:
             thread_id = body.thread_id
         reply = ask_fn(body.text, identity, thread_id)

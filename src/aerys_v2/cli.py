@@ -328,6 +328,7 @@ def main() -> None:
                 # Gap #37: kael:* exchanges leave a durable memory (family
                 # memory door 1 — the only door approved to build solo).
                 a2a_memory_fn=a2a_memory_writer_for(settings),
+                settings=settings,  # speaker ID: voice_speaker_persons / unknown policy
             )
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;

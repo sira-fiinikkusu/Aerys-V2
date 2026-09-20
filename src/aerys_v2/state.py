@@ -55,6 +55,12 @@ class Identity(TypedDict, total=False):
     # names 'voice' in the thread_id. Per-call only (rides config, never checkpointed),
     # so the SAME person thread is a voice turn or a text turn purely by this flag.
     voice: bool
+    # Speaker ID (2026-09-20): the voice recognizer's verdict for THIS turn —
+    # {"id": "chris"|"megan"|"unknown"|..., "confidence": float}. Set by /ask from
+    # the HA wrapper's tag; absent = untagged. Per-call only, like `voice`. The /ask
+    # door has ALREADY turned it into user_id/display_name; this is for audit and
+    # for anything that wants to know how sure the voice match was.
+    speaker: dict
     # Which PHYSICAL SURFACE renders this turn, when the transport knows and it
     # changes how she should write. Today's only value: 'lens' (the G2 glasses
     # text display, set by the g2-bridge on /ask) — a tiny screen where her reply

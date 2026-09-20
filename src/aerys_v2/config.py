@@ -261,6 +261,14 @@ class Settings(BaseSettings):
     # Megan's person_id lands once her identity is solutioned (identical house
     # access to Chris). Empty = owner only.
     house_control_person_ids: str = ""
+    # Speaker ID (2026-09-20): `name=person_uuid,...` — who each enrolled voice IS.
+    # The owner's own name may be listed or not (it maps to owner_person_id). A voice
+    # turn tagged with an unlisted or "unknown" speaker becomes a GUEST turn
+    # (voice_unknown_speaker=guest): its own thread, no house control unless that
+    # person is in house_control_person_ids. Untagged turns stay the owner's.
+    voice_speaker_persons: str = ""
+    voice_unknown_speaker: Literal["guest", "owner"] = "guest"
+    voice_speaker_min_confidence: float = Field(default=0.0, ge=0, le=1)
 
     # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
     # Chat turns stay on whatever model_backend says (oauth = free daily driver);
@@ -526,6 +534,25 @@ _ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 class BootConfigError(RuntimeError):
     """Fatal misconfiguration found at startup — refuse to serve, say why."""
+
+
+def speaker_person_map(settings: "Settings") -> dict[str, str]:
+    """voice_speaker_persons ('chris=<uuid>,megan=<uuid>') -> {name: person_id}, names
+    lower-cased. Malformed entries are skipped with a warning, never fatal — a bad
+    line must not take the voice door down. The owner's name, when listed, must map
+    to owner_person_id (anything else is a config error worth shouting about)."""
+    out: dict[str, str] = {}
+    for item in (settings.voice_speaker_persons or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, person = item.partition("=")
+        name, person = name.strip().lower(), person.strip()
+        if not sep or not name or not person:
+            log.warning("voice_speaker_persons: skipping malformed entry %r", item)
+            continue
+        out[name] = person
+    return out
 
 
 def database_name(url: str) -> str:

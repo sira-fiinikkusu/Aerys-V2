@@ -161,3 +161,61 @@ def test_gaps_without_reader_is_honest_not_error():
     r = client().get("/gaps", headers={"Authorization": "Bearer sekrit"})
     assert r.status_code == 200
     assert "isn't enabled" in r.json()["text"]
+
+
+# --- speaker ID (2026-09-20): who spoke decides whose turn it is -----------------
+
+def _settings_with_speakers(**kw):
+    from aerys_v2.config import Settings
+    return Settings(_env_file=None, anthropic_api_key="x", owner_person_id="11111111-1111-1111-1111-111111111111",
+                    voice_speaker_persons="chris=11111111-1111-1111-1111-111111111111,megan=22222222-2222-2222-2222-222222222222", **kw)
+
+
+def _speaker_app(**kw):
+    return TestClient(build_app(fake_ask, "sekrit", owner_person_id="11111111-1111-1111-1111-111111111111",
+                                settings=_settings_with_speakers(**kw)))
+
+
+def _ask(c, speaker):
+    body = {"text": "hi", "thread_id": "voice:beta", "voice": True, "display_name": "Chris (Voice)"}
+    if speaker is not None:
+        body["speaker"] = speaker
+    return c.post("/ask", json=body, headers={"Authorization": "Bearer sekrit"}).json()
+
+
+def test_untagged_voice_turn_stays_the_owners():
+    r = _ask(_speaker_app(), None)
+    assert r["thread_id"] == "person:11111111-1111-1111-1111-111111111111" and "|Chris (Voice)|" in r["reply"]
+
+
+def test_owner_tag_is_a_no_op_and_enrolled_family_gets_their_own_person_thread():
+    r = _ask(_speaker_app(), {"id": "chris", "confidence": 0.8})
+    assert r["thread_id"] == "person:11111111-1111-1111-1111-111111111111" and "|Chris (Voice)|" in r["reply"]
+    r = _ask(_speaker_app(), {"id": "Megan", "confidence": 0.7})
+    assert r["thread_id"] == "person:22222222-2222-2222-2222-222222222222" and "|Megan (Voice)|" in r["reply"]
+
+
+def test_unknown_or_unlisted_or_low_confidence_speaker_is_a_guest_turn():
+    for tag in ({"id": "unknown", "confidence": 0.3}, {"id": "dimitri", "confidence": 0.9}):
+        r = _ask(_speaker_app(), tag)
+        assert r["thread_id"] == "person:voice-guest" and "|Guest (Voice)|" in r["reply"], tag
+    r = _ask(_speaker_app(voice_speaker_min_confidence=0.75), {"id": "megan", "confidence": 0.6})
+    assert r["thread_id"] == "person:voice-guest"
+
+
+def test_unknown_speaker_stays_the_owner_when_configured_so():
+    r = _ask(_speaker_app(voice_unknown_speaker="owner"), {"id": "unknown", "confidence": 0.2})
+    assert r["thread_id"] == "person:11111111-1111-1111-1111-111111111111"
+
+
+def test_speaker_tag_never_moves_a_text_turn():
+    c = _speaker_app()
+    r = c.post("/ask", json={"text": "hi", "thread_id": "http:default", "speaker": {"id": "megan", "confidence": 0.9}},
+               headers={"Authorization": "Bearer sekrit"}).json()
+    assert r["thread_id"] == "http:default"
+
+
+def test_speaker_person_map_parses_and_skips_junk():
+    from aerys_v2.config import Settings, speaker_person_map
+    s = Settings(_env_file=None, anthropic_api_key="x", voice_speaker_persons=" Chris = a , megan=b, broken, =c, d= ")
+    assert speaker_person_map(s) == {"chris": "a", "megan": "b"}
