@@ -113,7 +113,8 @@ def device_questions(target_choices: dict[str, str]) -> dict:
     }
 
 
-_PCT_RE = re.compile(r'(?<![-\d.])(\d{1,3})(?!\d)\s*(?:%|percent)')
+_PCT_RE = re.compile(r'(\d+)\s*(?:%|percent)')
+_SIGNED_PCT_RE = re.compile(r'[+\-]\s*\d+\s*(?:%|percent)')
 # Codex review 2026-09-20 #2: "dim by half" / "from 80% to 20%" / "-20%" / "1001%" are NOT
 # absolute levels. Any relative marker, more than one level, or a sign defers to the
 # specialist, which reads the current level first.
@@ -135,28 +136,30 @@ def brightness_from_text(text: str) -> int | None:
     signed, doubled or out of range returns None (the specialist handles it).
     """
     low = text.lower()
-    if _RELATIVE_RE.search(low):
+    if _RELATIVE_RE.search(low) or _SIGNED_PCT_RE.search(low):
         return None
-    pcts = _PCT_RE.findall(text)
-    if len(pcts) > 1:
+    pcts = _PCT_RE.findall(low)
+    words = [pct for word, pct in _PCT_WORDS if re.search(r'\b' + re.escape(word) + r'\b', low)]
+    # Exactly ONE candidate across numbers and words, and every number in range:
+    # "20% or half", "1001% or 40%", "half, no quarter" all defer.
+    if len(pcts) + len(words) != 1:
         return None
     if pcts:
         n = int(pcts[0])
         return n if 1 <= n <= 100 else None
-    hits = [pct for word, pct in _PCT_WORDS if re.search(r'\b' + re.escape(word) + r'\b', low)]
-    return hits[0] if len(hits) == 1 else None
+    return words[0]
 
 
-def _finite(value, unsure: float) -> float:
-    """Codex review 2026-09-20 #4: NaN compares false against every gate, so a
-    malformed score would pass them all. Non-finite or out-of-range → the value
-    that makes the gate REFUSE (`unsure`)."""
+def _finite(value) -> float | None:
+    """Codex review 2026-09-20 #4/#9: NaN compares false against every gate and a
+    zero threshold admits a substituted zero. A malformed score is None, and the
+    caller refuses outright instead of comparing it."""
     try:
         f = float(value)
     except (TypeError, ValueError):
-        return unsure
+        return None
     if f != f or f in (float('inf'), float('-inf')) or not 0.0 <= f <= 1.0:
-        return unsure
+        return None
     return f
 
 
@@ -195,17 +198,27 @@ def plain_device_command(record: dict, text: str, settings: Settings, canary_ent
             return no('request longer than the classified excerpt')
         if record.get('decided', {}).get('route') != 'action' or record.get('decided_by') != 'jev':
             return no('not a jev action route')
-        if _finite(dev.get('is_device_command', 0), 0.0) < settings.reflex_direct_command_floor:
-            return no('not clearly a device command')
-        if _finite(dev.get('is_state_question', 0), 1.0) > 0.3:
-            return no('reads as a state question')
-        if _finite(dev.get('is_compound', 0), 1.0) > 0.3:
-            return no('compound request')
         target = dev.get('device_target') or {}
         action = dev.get('device_action') or {}
-        if target.get('choice') in (None, NONE_TARGET) or _finite(target.get('confidence', 0), 0.0) < settings.reflex_direct_target_confidence:
+        scores = {name: _finite(value) for name, value in (
+            ('is_device_command', dev.get('is_device_command', 0)),
+            ('is_state_question', dev.get('is_state_question', 0)),
+            ('is_compound', dev.get('is_compound', 0)),
+            ('target_confidence', target.get('confidence', 0)),
+            ('action_confidence', action.get('confidence', 0)),
+        )}
+        bad = [name for name, value in scores.items() if value is None]
+        if bad:
+            return no(f'malformed score: {bad}')
+        if scores['is_device_command'] < settings.reflex_direct_command_floor:
+            return no('not clearly a device command')
+        if scores['is_state_question'] > 0.3:
+            return no('reads as a state question')
+        if scores['is_compound'] > 0.3:
+            return no('compound request')
+        if target.get('choice') in (None, NONE_TARGET) or scores['target_confidence'] < settings.reflex_direct_target_confidence:
             return no('target unsure')
-        if action.get('choice') in (None, 'other') or _finite(action.get('confidence', 0), 0.0) < settings.reflex_direct_target_confidence:
+        if action.get('choice') in (None, 'other') or scores['action_confidence'] < settings.reflex_direct_target_confidence:
             return no('action unsure')
         op = action['choice']
         command: dict = {'operation': op, 'entity_id': target['choice']}
@@ -222,20 +235,27 @@ def plain_device_command(record: dict, text: str, settings: Settings, canary_ent
         targets, problem = resolve_targets(target['choice'], op, frozenset(canary_entities or ()), aliases)
         if problem or not targets:
             return no('target does not resolve')
-        # The explicit owner ruling (J3) first, then the domain gate.
-        deny = [d.strip() for d in settings.reflex_direct_deny.split(',') if d.strip()]
-        hit = [e for e in targets if any(d in e for d in deny)]
-        if hit:
-            return no(f'deny-listed: {hit}')
+        # Precedence (Codex review 2026-09-20 #6): (1) the owner ruling J3 — sensitive
+        # DOMAINS never go direct, not even by allowlist; (2) the domain gate; (3) the
+        # explicit allowlist, which WINS over the token deny list because the owner
+        # named the entity; (4) the token deny list, matched on whole id tokens so
+        # "door" does not catch switch.outdoor_lights and "gate" not switch.gateway_plug.
         domains = {e.split('.', 1)[0] for e in targets}
+        hard = {d.strip().rstrip('.') for d in settings.reflex_direct_deny_domains.split(',') if d.strip()}
+        if domains & hard:
+            return no(f'sensitive domain: {sorted(domains & hard)}')
         allowed = {d.strip() for d in settings.reflex_direct_domains.split(',') if d.strip()}
         if not domains <= allowed:
             return no(f'domain not direct: {sorted(domains - allowed)}')
-        # Codex review 2026-09-20 #3: a lock wired up as switch.front_door_lock passes the
-        # domain gate. When the owner names a direct-safe allowlist, only those go direct.
         allow = {e.strip() for e in settings.reflex_direct_allow.split(',') if e.strip()}
-        if allow and not set(targets) <= allow:
-            return no(f'not on the direct allowlist: {sorted(set(targets) - allow)}')
+        if allow:
+            if not set(targets) <= allow:
+                return no(f'not on the direct allowlist: {sorted(set(targets) - allow)}')
+        else:
+            deny = {d.strip().lower() for d in settings.reflex_direct_deny.split(',') if d.strip()}
+            hit = [e for e in targets if deny & set(re.split(r'[._\-\s]+', e.lower()))]
+            if hit:
+                return no(f'deny-listed: {hit}')
         dev['direct'] = {'ok': True, 'reason': 'plain command', 'targets': targets}
         return command
     except Exception as exc:  # the direct path is an optimisation; never a crash
@@ -300,6 +320,7 @@ class ReflexClient:
             except Exception as exc:
                 box['result'] = error_result(exc)
             finally:
+                box['completed_at'] = time.monotonic()
                 done.set()
                 self._inflight.release()
 
@@ -312,8 +333,12 @@ class ReflexClient:
                 except Exception:
                     self._inflight.release()
                     raise
+                # Codex review 2026-09-20 #8: a descheduled caller waking late must not
+                # accept an answer that landed after the deadline (wait(0) still
+                # returns True) — the completion time decides, not the wake time.
                 if done.wait(max(0, self.timeout_s - (time.monotonic() - started))):
-                    result = dict(box.get('result') or {'error': 'no result'})
+                    if box.get('completed_at', float('inf')) - started <= self.timeout_s:
+                        result = dict(box.get('result') or {'error': 'no result'})
         except Exception as exc:
             result = error_result(exc)
         return {**result, 'latency_ms': int((time.monotonic() - started) * 1000)}
@@ -420,6 +445,8 @@ def live_router_for(
         if not isinstance(jev, dict):
             jev = {'error': 'no result'}
         record = {'jev': jev, 'router': None, 'mode': 'live', 'decided_by': 'router'}
+        if box.get('error'):
+            record['router_error'] = box['error']  # Codex #10: audited even when Jev decides
         if isinstance(jev.get('device'), dict):
             record['device'] = dict(jev['device'])
 

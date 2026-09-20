@@ -46,14 +46,31 @@ def test_brightness_accepts_only_one_unambiguous_absolute_level():
     assert brightness_from_text("set it to 1001%") is None
     assert brightness_from_text("a bit brighter, 60%") is None
     assert brightness_from_text("dim the lights") is None
+    # Codex second pass (#7): signs with spaces, mixed candidates, any oversize number
+    assert brightness_from_text("set it to +20%") is None
+    assert brightness_from_text("set it to - 20%") is None
+    assert brightness_from_text("20% or half") is None
+    assert brightness_from_text("1001% or 40%") is None
+    assert brightness_from_text("half, no quarter") is None
 
 
 # 3. sensitive proxies on the switch domain
 def test_sensitive_switch_proxies_are_denied_by_default_and_by_allowlist():
-    for proxy in ("switch.front_door_lock", "switch.ev_charger", "switch.heater"):
+    for proxy in ("switch.front_door_lock", "switch.ev_charger", "switch.heater", "switch.front_lock",
+                  "switch.deadbolt"):
         rec = record(target=proxy)
-        assert plain_device_command(rec, "turn it on", settings(), CANARY) is None
+        assert plain_device_command(rec, "turn it on", settings(), CANARY + (proxy,)) is None
         assert "deny" in rec["device"]["direct"]["reason"]
+    # token match: harmless ids that merely CONTAIN a deny word still go direct (#6)
+    for harmless in ("switch.outdoor_lights", "switch.gateway_plug"):
+        rec = record(target=harmless)
+        assert plain_device_command(rec, "turn it on", settings(), CANARY + (harmless,)) is not None
+    # precedence: the explicit allowlist beats the token deny list, never the domain rule
+    rec = record(target="switch.heater")
+    assert plain_device_command(rec, "turn it on", settings(reflex_direct_allow="switch.heater"), CANARY) is not None
+    rec = record(target="lock.front")
+    assert plain_device_command(rec, "unlock it", settings(reflex_direct_allow="lock.front", reflex_direct_domains="lock,switch"), CANARY + ("lock.front",)) is None
+    assert "sensitive domain" in rec["device"]["direct"]["reason"]
     # an explicit allowlist refuses everything it does not name, even a plain light
     rec = record()
     assert plain_device_command(rec, "turn off the office light", settings(reflex_direct_allow="switch.other"), CANARY) is None
@@ -68,6 +85,10 @@ def test_non_finite_scores_refuse_instead_of_passing_every_gate():
                 record(aconf=math.inf), record(cmd=1.7)):
         assert plain_device_command(rec, "turn off the office light", settings(), CANARY) is None
         assert rec["device"]["direct"]["ok"] is False
+        assert "malformed" in rec["device"]["direct"]["reason"]
+    # Codex second pass (#9): a zero threshold must not admit a malformed score either
+    rec = record(cmd=nan)
+    assert plain_device_command(rec, "turn off the office light", settings(reflex_direct_command_floor=0.0), CANARY) is None
 
 
 # 5. a late Jev answer can no longer overwrite a timeout
@@ -87,6 +108,31 @@ def test_late_answer_after_deadline_stays_a_timeout():
     release.set()
     time.sleep(0.05)
     assert out["error"] == "timeout" and "route" not in out
+
+
+def test_answer_completed_after_the_deadline_is_refused_even_if_the_caller_woke_late():
+    # Codex second pass (#8): wait(0) returns True once done — completion time decides.
+    class Fast:
+        def system_one(self, **kw):
+            time.sleep(0.08)
+            return SimpleNamespace(answers={
+                "route": SimpleNamespace(choice="action", probabilities={"action": .9, "chat": .1}, confidence=.95),
+                "tier": SimpleNamespace(score=1.0), "unaddressed": SimpleNamespace(noul=.0),
+                "cancelled": SimpleNamespace(noul=.0)}, model="jev", usage=SimpleNamespace(input_tokens=1))
+
+    client = ReflexClient(client=Fast(), timeout_s=0.02)
+    real_wait = threading.Event.wait
+
+    def slow_wait(self, timeout=None):  # the caller gets descheduled past the deadline
+        time.sleep(0.12)
+        return real_wait(self, 0)
+
+    threading.Event.wait = slow_wait
+    try:
+        out = client("turn off the light", {})
+    finally:
+        threading.Event.wait = real_wait
+    assert out["error"] == "timeout"
 
 
 # 6. command-shaped text is never dropped as unaddressed, whatever Jev said
@@ -115,3 +161,8 @@ def test_router_thread_start_failure_falls_back(monkeypatch):
     assert d.route in ("chat", "action")
     rec = LAST_REFLEX.get().collect()
     assert rec["decided_by"] == "router" and "router_error" in rec
+    # Codex second pass (#10): the start error is audited even when Jev decides the turn
+    confident = lambda t, c: {**jev(t, c), "confidence": .95}  # noqa: E731
+    live_router_for(settings(), confident, lambda t: RouteDecision(route="chat", ack=""))("hello there")
+    rec = LAST_REFLEX.get().collect()
+    assert rec["decided_by"] == "jev" and "router_error" in rec

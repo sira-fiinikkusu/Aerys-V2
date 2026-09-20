@@ -66,7 +66,7 @@ def test_plain_command_happy_path_and_reason_on_the_row():
     (dict(aconf=0.4), "action unsure"),
     (dict(route="chat"), "not a jev action route"),
     (dict(by="router"), "not a jev action route"),
-    (dict(target="jolteon door lock"), "deny-listed"),
+    (dict(target="jolteon door lock"), "sensitive domain"),
     (dict(target="jolteon ev charging"), "deny-listed"),
     (dict(target="jolteon climate"), "deny-listed"),
 ])

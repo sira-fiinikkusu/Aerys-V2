@@ -73,8 +73,14 @@ class Settings(BaseSettings):
     # climate, alarm keep the specialist path and its confirmation semantics).
     # Codex review 2026-09-20 #3 widened the default: proxies of sensitive things
     # (a lock on a switch, a heater, a charger, a garage door) never go direct.
-    reflex_direct_deny: str = ("lock.,alarm,climate,ev_charging,ev_,charger,heater,heat_,door,"
-                               "garage,gate,oven,stove,water,pump,valve,sprinkler,cover.")
+    # Whole-token match on the entity id (Codex #6): "door" no longer catches
+    # switch.outdoor_lights. An explicit REFLEX_DIRECT_ALLOW overrides this list;
+    # nothing overrides reflex_direct_deny_domains.
+    reflex_direct_deny: str = ("lock,deadbolt,latch,bolt,alarm,siren,climate,thermostat,ev,charger,"
+                               "charging,heater,heat,furnace,boiler,door,garage,gate,oven,stove,"
+                               "cooktop,water,pump,valve,sprinkler,irrigation,cover,blind,shade")
+    # J3, owner ruling: these DOMAINS never execute directly, allowlist or not.
+    reflex_direct_deny_domains: str = "lock,alarm_control_panel,climate,cover,water_heater"
     # Optional explicit direct-safe allowlist (entity ids, comma-separated). Empty = the
     # domain rule above decides; set = ONLY these may go direct.
     reflex_direct_allow: str = ""

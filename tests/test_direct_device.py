@@ -121,7 +121,7 @@ def test_deny_listed_and_unsure_turns_take_the_old_path():
     assert ha.bodies == []                      # nothing written by the code path
     assert action.seeds[0][-1].type == "human"  # the specialist got the plain request
     assert rec.done.wait(3)
-    assert "deny-listed" in json.loads(rec.rows[0]["reflex"])["device"]["direct"]["reason"]
+    assert "sensitive domain" in json.loads(rec.rows[0]["reflex"])["device"]["direct"]["reason"]
 
 
 def test_kill_switch_keeps_live_routing_but_not_direct_writes():
