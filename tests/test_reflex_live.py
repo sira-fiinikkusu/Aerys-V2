@@ -7,7 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from aerys_v2.config import Settings
-from aerys_v2.reflex import LAST_REFLEX, REFLEX_SURFACE, live_router_for
+from aerys_v2.reflex import LAST_REFLEX, REFLEX_LAST_REPLY, REFLEX_ROOM, REFLEX_SINCE_S, REFLEX_SURFACE, live_router_for
 from aerys_v2.router import RouteDecision
 from aerys_v2.service import ask
 
@@ -16,7 +16,7 @@ from aerys_v2.service import ask
 def _clean_reflex_context():
     """ask() sets thread-local reflex context (recent exchanges, room, timing); a later
     test that calls the decider directly must not see another test's leftovers."""
-    from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_ROOM, REFLEX_SINCE_S
+    from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_ROOM, REFLEX_RECENT, REFLEX_ROOM, REFLEX_SINCE_S
     tokens = [REFLEX_LAST_REPLY.set(""), REFLEX_RECENT.set([]), REFLEX_ROOM.set({}), REFLEX_SINCE_S.set(None)]
     yield
     for var, tok in zip((REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_ROOM, REFLEX_SINCE_S), tokens):
@@ -151,7 +151,7 @@ def test_decider_sees_the_surface_from_context():
     router = SlowRouter(RouteDecision(route="chat", ack=""), delay=0.01)
     REFLEX_SURFACE.set("voice")
     live_router_for(settings(), reflex, router)("hi")
-    assert seen == {"surface": "voice"}
+    assert seen == {"surface": "voice", "unaddressed_source": "addressee"}
 
 
 # ---- end to end through ask(): the live record lands on the audit row ----
@@ -276,7 +276,7 @@ def test_voice_suspicious_fragment_waits_for_haiku_and_drops_when_both_agree():
 def test_voice_strong_agreement_marks_strong():
     # 12:52:11 today: the Italy fragment — Jev 0.76, Haiku unaddressed; strong (>= 0.6).
     router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
-    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.8), lambda t, c: jev_result("chat", 0.9, unaddressed=0.76), router)("He interrupted Filibuster"))
+    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.8, reflex_unaddressed_strong_floor=0.65), lambda t, c: jev_result("chat", 0.9, unaddressed=0.76), router)("He interrupted Filibuster"))
     assert d.unaddressed is True and d.unaddressed_strong is True
 
 
@@ -328,27 +328,66 @@ def test_option_b_context_rides_the_call_when_a_last_reply_exists():
 def test_fuller_picture_score_gates_when_present_and_source_is_ctx():
     router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
     jev_ctx = lambda t, c: {**jev_result("chat", 0.9, unaddressed=0.2), "unaddressed_ctx": 0.85}  # noqa: E731
-    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7), jev_ctx, router)("Which is tomorrow."))
+    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7, reflex_unaddressed_source="ctx"), jev_ctx, router)("Which is tomorrow."))
     assert d.unaddressed is True and LAST_REFLEX.get().collect()["unaddressed_score"] == 0.85
     d2 = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7, reflex_unaddressed_source="plain"), jev_ctx, router)("Which is tomorrow."))
     assert d2.unaddressed is False
-    d3 = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7), lambda t, c: jev_result("chat", 0.9, unaddressed=0.2), router)("x"))
+    d3 = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.7, reflex_unaddressed_source="ctx"), lambda t, c: jev_result("chat", 0.9, unaddressed=0.2), router)("x"))
     assert d3.unaddressed is False                               # no context yet → plain score
 
 
-def test_round3_defaults_jev_alone_above_075_band_to_haiku_below_055_alone():
+def _addr(bg, choice="another_person"):
+    return {"choice": choice, "confidence": 0.8, "background": bg}
+
+
+def test_round6_defaults_addressee_alone_above_085_band_to_haiku_below_06_alone():
+    # Round 6 (2026-09-20): the default source is the addressee Choice; its background
+    # mass gates. >= 0.85 Jev alone; [0.6, 0.85) Haiku decides; < 0.6 addressed.
     router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
-    # >= 0.75: Jev alone, strong
-    d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("chat", 0.9, unaddressed=0.8), router)("so I told Megan we would leave at nine"))
-    assert d.unaddressed is True and d.unaddressed_strong is False or d.unaddressed is True
-    # band [0.55, 0.75): Haiku decides
+    d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: {**jev_result("chat", 0.9, unaddressed=0.2), "addressee": _addr(0.96)}, router)("so I told Megan we would leave at nine"))
+    assert d.unaddressed is True and d.unaddressed_strong is True and LAST_REFLEX.get().collect()["unaddressed_score"] == 0.96
     router2 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
-    d2 = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.66), router2)("Which is tomorrow."))
-    assert d2.unaddressed is True and d2.unaddressed_strong is True and router2.calls == 1
+    d2 = _voice(lambda: live_router_for(settings(), lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.7)}, router2)("Which is tomorrow."))
+    assert d2.unaddressed is True and router2.calls == 1 and LAST_REFLEX.get().collect()["ensemble"] == "router+jev"
     router3 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
-    d3 = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.66), router3)("the office lights"))
+    d3 = _voice(lambda: live_router_for(settings(), lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.7)}, router3)("the office lights"))
     assert d3.unaddressed is False and router3.calls == 1
-    # < 0.55: addressed, Haiku not consulted on the verdict
     router4 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
-    d4 = _voice(lambda: live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.4), router4)("okay thanks"))
+    d4 = _voice(lambda: live_router_for(settings(), lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.4, "reply_to_assistant")}, router4)("okay thanks"))
     assert d4.unaddressed is False and LAST_REFLEX.get().collect()["decided_by"] == "jev"
+    # the plain Noul still gates when Jev sent no addressee answer (no voice context)
+    d5 = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("chat", 0.9, unaddressed=0.9), router)("x"))
+    assert d5.unaddressed is True
+
+
+def test_round6_bypass_rules_never_drop_a_reply_to_her():
+    # A few words within 30 s of her line, or anything within 20 s of her question, is
+    # addressed whatever Jev scored — and Haiku is not consulted for the band.
+    jev = lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.97, "fragment_nobody")}  # noqa: E731
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
+    t1 = REFLEX_LAST_REPLY.set("Turning off the office light now."); t2 = REFLEX_SINCE_S.set(17.0)
+    try:
+        d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), jev, router)("In all of the office."))
+        assert d.unaddressed is False and LAST_REFLEX.get().collect()["unaddressed_bypass"] == "short_followup"
+        REFLEX_LAST_REPLY.set("Which lights?"); REFLEX_SINCE_S.set(9.0)
+        d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), jev, router)("all of them, and the displays too"))
+        assert d.unaddressed is False and LAST_REFLEX.get().collect()["unaddressed_bypass"] == "question"
+        # a long fragment seconds after a plain statement of hers is NOT bypassed
+        REFLEX_LAST_REPLY.set("Turning it off."); REFLEX_SINCE_S.set(5.0)
+        d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), jev, router)("and then he just left it in the driveway all weekend"))
+        assert d.unaddressed is True and "unaddressed_bypass" not in LAST_REFLEX.get().collect()
+    finally:
+        REFLEX_LAST_REPLY.reset(t1); REFLEX_SINCE_S.reset(t2)
+
+
+def test_context_carries_the_round6_room_facts_to_jev():
+    seen = {}
+    def jev(t, c):
+        seen.update(c); return jev_result("chat", 0.9)
+    t = REFLEX_ROOM.set({"device": "office satellite", "local_time": "Sunday 13:00", "previous_capture_outcome": "answered normally",
+                         "previous_capture": {"text": "hey", "seconds_ago": 40.0, "outcome": "answered normally"}, "background_captures_5m": 1})
+    try:
+        live_router_for(settings(), jev, lambda t: RouteDecision(route="chat", ack=""))("x")
+    finally:
+        REFLEX_ROOM.reset(t)
+    assert seen["previous_capture"]["text"] == "hey" and seen["background_captures_5m"] == 1 and seen["unaddressed_source"] == "addressee"

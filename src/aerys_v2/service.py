@@ -31,6 +31,7 @@ import contextvars
 import json
 import logging
 import re
+from collections import deque
 import threading
 import time
 import uuid
@@ -590,6 +591,29 @@ def _remember_window_for(seed: list, text: str, config: dict) -> str:
 # Round 3 context: which satellite, and how the previous capture on this thread went
 # (answered / could not understand / dropped as background) — fragments come in runs.
 _LAST_OUTCOME: dict[str, str] = {}
+# Round 6: per thread, the last capture (text, when, how it went) and a short log of
+# captures for "background captures in the last 5 minutes" — computed here, handed to
+# Jev as words (see reflex.addressee_state).
+_LAST_CAPTURE: dict[str, dict] = {}
+_CAPTURE_LOG: dict[str, deque] = {}
+_CAPTURE_WINDOW_S = 300
+
+
+def _note_capture(thread_id: str, text: str) -> dict:
+    """Record this capture (outcome pending → 'answered normally' until told otherwise) and
+    return the reflex context derived from the captures BEFORE it."""
+    now = time.monotonic()
+    log_ = _CAPTURE_LOG.setdefault(thread_id, deque(maxlen=50))
+    while log_ and now - log_[0]["at"] > _CAPTURE_WINDOW_S:
+        log_.popleft()
+    prev = _LAST_CAPTURE.get(thread_id)
+    ctx = {"background_captures_5m": sum(1 for e in log_ if e["outcome"] != "answered normally")}
+    if prev:
+        ctx["previous_capture"] = {"text": prev["text"], "seconds_ago": round(now - prev["at"], 1), "outcome": prev["outcome"]}
+    entry = {"text": str(text)[:200], "at": now, "outcome": "answered normally"}
+    _LAST_CAPTURE[thread_id] = entry
+    log_.append(entry)
+    return ctx
 _DEVICE_LABELS = {
     "185bd720dd074d798a6094ad4f22e525": "office satellite (Chris's desk; he works and takes calls here)",
     "4f23e5d4672b5a56da3566d3522ccae7": "bedroom satellite (TV often on)",
@@ -612,6 +636,9 @@ _CONFUSION_RE = re.compile(r"(didn.t (quite )?(come through|catch|get that)|garb
 
 def _note_outcome(thread_id: str, outcome: str) -> None:
     _LAST_OUTCOME[thread_id] = outcome
+    cur = _LAST_CAPTURE.get(thread_id)
+    if cur is not None:
+        cur["outcome"] = outcome
 
 
 def _note_reply_outcome(thread_id: str, reply: str | None) -> None:
@@ -1158,6 +1185,7 @@ def ask(
             "device": _device_label(identity),
             "local_time": datetime.now(EASTERN).strftime("%A %H:%M"),
             "previous_capture_outcome": _LAST_OUTCOME.get(thread_id),
+            **_note_capture(thread_id, text),
         })
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
         if router is None or not specialists:

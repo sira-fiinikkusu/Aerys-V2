@@ -135,6 +135,53 @@ def test_option_b_context_adds_the_ctx_question_and_score():
             r.answers['unaddressed_ctx'] = SimpleNamespace(noul=.91)
             return r
     ctx = Ctx()
-    result = ReflexClient(client=ctx)('is the question I asked', {'surface': 'voice', 'last_reply': 'What was the question?'})
+    result = ReflexClient(client=ctx)('is the question I asked', {'surface': 'voice', 'last_reply': 'What was the question?',
+                                                                  'unaddressed_source': 'ctx'})
     assert ctx.seen['state']['assistant_previous_reply'] == 'What was the question?'
     assert 'unaddressed_ctx' in ctx.seen['questions'] and result['unaddressed_ctx'] == .91
+
+
+def test_round6_addressee_choice_on_a_trimmed_state():
+    # Chris 2026-09-20 13:19 ("6 of 16 is not acceptable"): the default voice gate is a
+    # Choice over WHO the capture is for, on a trimmed state — the 8-exchange history is
+    # NOT sent (jev-1.13 jaggedness #5), time arrives as words, and the sum of the
+    # background classes is the score.
+    class Addr(FakeClient):
+        def system_one(self, **kwargs):
+            r = super().system_one(**kwargs)
+            r.answers['addressee'] = SimpleNamespace(
+                choice='another_person', confidence=.8,
+                probabilities={'request_to_assistant': .02, 'reply_to_assistant': .03, 'correction_to_assistant': .01,
+                               'another_person': .8, 'media_speech': .04, 'work_meeting_talk': .05, 'fragment_nobody': .05})
+            return r
+    fake = Addr()
+    result = ReflexClient(client=fake)('so I told Megan we would probably leave around nine', {
+        'surface': 'voice', 'last_reply': 'Turning on the sunroom lights.', 'seconds_since_assistant_spoke': 400.0,
+        'device': 'office satellite', 'local_time': 'Sunday 13:00',
+        'previous_capture': {'text': 'hey how are you', 'seconds_ago': 400.0, 'outcome': 'answered normally'},
+        'background_captures_5m': 2,
+        'recent_exchanges': [{'user': 'never send', 'assistant': 'never send'}] * 8})
+    st = fake.seen['state']
+    assert 'recent_exchanges' not in st and 'never send' not in str(st)
+    assert st['assistant_previous_line'] == 'Turning on the sunroom lights.'
+    assert st['assistant_last_spoke'] == 'a few minutes ago'
+    assert st['previous_capture'] == {'how_long_ago': 'a few minutes ago', 'text': 'hey how are you', 'outcome': 'answered normally'}
+    assert st['background_captures_in_last_5_minutes'] == 'several'
+    assert 'unaddressed_ctx' not in fake.seen['questions'] and fake.seen['questions']['addressee']['type'] == 'choice'
+    assert result['addressee'] == {'choice': 'another_person', 'confidence': .8, 'background': pytest.approx(.94)}
+
+
+def test_round6_time_buckets_and_bypass_rules():
+    from aerys_v2.reflex import time_bucket, unaddressed_bypass
+
+    assert [time_bucket(v) for v in (None, 3, 15, 16, 120, 121, 600, 601)] == [
+        'never', 'just now (within 15 seconds)', 'just now (within 15 seconds)', 'a moment ago (within 2 minutes)',
+        'a moment ago (within 2 minutes)', 'a few minutes ago', 'a few minutes ago', 'not recently (over 10 minutes ago)']
+    # a reply within 20 s of her question, or a few words within 30 s of any line of hers, is never background
+    assert unaddressed_bypass('the office lights', {'last_reply': 'Which lights?', 'seconds_since_assistant_spoke': 12}) == 'question'
+    assert unaddressed_bypass('In all of the office.', {'last_reply': 'Turning off the office light now.', 'seconds_since_assistant_spoke': 17}) == 'short_followup'
+    assert unaddressed_bypass('and then he just left it in the driveway all weekend', {'last_reply': 'Turning it off.', 'seconds_since_assistant_spoke': 5}) is None
+    # her question + a STORY 5 s later is not a reply to it (11 words; round-6 row at 0.99)
+    assert unaddressed_bypass('and then he just left it in the driveway all weekend', {'last_reply': 'How about you?', 'seconds_since_assistant_spoke': 5}) is None
+    assert unaddressed_bypass('the office lights', {'last_reply': 'Which lights?', 'seconds_since_assistant_spoke': 35}) is None
+    assert unaddressed_bypass('yes', {'last_reply': 'Which lights?'}) is None

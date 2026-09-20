@@ -305,3 +305,25 @@ def test_weak_unaddressed_still_respects_the_grace_window():
                 router=unaddressed_router, action_graph=action_graph, record_turn=rec,
                 drop_unaddressed=True, activity_registry=registry)
     assert reply == "hi there"                                 # inside the window, a weak verdict is a follow-up
+
+
+def test_round6_capture_log_feeds_the_next_turn(monkeypatch):
+    # service._note_capture: the previous capture (text, age, outcome) and the count of
+    # background captures in the last 5 minutes are computed in code for Jev.
+    from aerys_v2 import service as svc
+
+    svc._LAST_CAPTURE.clear(); svc._CAPTURE_LOG.clear()
+    now = [1000.0]
+    monkeypatch.setattr(svc.time, "monotonic", lambda: now[0])
+    assert svc._note_capture("t", "so I told Megan") == {"background_captures_5m": 0}
+    svc._note_outcome("t", "dropped as background speech")
+    now[0] += 11
+    ctx = svc._note_capture("t", "and then he left it in the driveway")
+    assert ctx == {"background_captures_5m": 1,
+                   "previous_capture": {"text": "so I told Megan", "seconds_ago": 11.0, "outcome": "dropped as background speech"}}
+    svc._note_reply_outcome("t", "That one didn't come through, what was the question?")
+    now[0] += 5
+    assert svc._note_capture("t", "hey Aerys how are you")["background_captures_5m"] == 2
+    svc._note_reply_outcome("t", "Good, steady day.")
+    now[0] += 400  # the two bad captures age out of the window
+    assert svc._note_capture("t", "turn off the lights")["background_captures_5m"] == 0

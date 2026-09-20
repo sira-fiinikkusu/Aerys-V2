@@ -98,6 +98,85 @@ UNADDRESSED_CTX_QUESTION = {
 }
 
 
+# Round 6 (2026-09-20 13:19, Chris: "6 of 16 is not acceptable… this is what Jev is designed
+# to do"): the voice gate asks WHO the capture is for, on a TRIMMED state. jev-1.13's own
+# jaggedness page (#5, context rot) and rounds 4–6 on 124 real turns agree: the 8-exchange
+# history HURT (background median 0.49 with it, 0.96 without). Time is handed over as words
+# computed in code (jaggedness #3), never as raw seconds.
+VOICE_BACKGROUND_SHORT = ("The microphone sometimes triggers on background speech (Chris on a work call, talking to his "
+                          "wife Megan, TV or a video) and captures a fragment nobody said to the assistant Aerys.")
+ADDRESSEE_QUESTION = {
+    'type': 'choice',
+    'instructions': 'Who is this message for?',
+    'criteria': {
+        'request_to_assistant': ('a request, question, command or greeting to the assistant Aerys, including asking '
+                                 'her to pass a message to Kael'),
+        'reply_to_assistant': ("a short answer, confirmation or follow-up to the assistant's previous line, or "
+                               "something that adds to, narrows or corrects her previous action (naming a room or "
+                               "more devices, 'the displays too', 'meant the other one')"),
+        'correction_to_assistant': 'telling the assistant an earlier message was not meant for her or that she misheard',
+        'another_person': 'speech to another person in the room or on a phone/video call',
+        'media_speech': 'television, video, radio or music audio picked up by the microphone',
+        'work_meeting_talk': ('explaining or discussing work systems, tickets, outages, code or meetings to '
+                              'colleagues; asks the assistant nothing'),
+        'fragment_nobody': ("a fragment cut from the middle of someone's sentence that neither asks nor tells the "
+                            'assistant anything'),
+    },
+}
+ADDRESSEE_BACKGROUND = ('another_person', 'media_speech', 'work_meeting_talk', 'fragment_nobody')
+
+
+def time_bucket(seconds: float | None) -> str:
+    """Elapsed time as words for the model: jev-1.13 reads numbers as text (jaggedness #3)."""
+    if seconds is None:
+        return 'never'
+    if seconds <= 15:
+        return 'just now (within 15 seconds)'
+    if seconds <= 120:
+        return 'a moment ago (within 2 minutes)'
+    if seconds <= 600:
+        return 'a few minutes ago'
+    return 'not recently (over 10 minutes ago)'
+
+
+def addressee_state(text: str, context: dict) -> dict:
+    """The trimmed voice state (round 6): her last line, when she last spoke, the previous
+    capture and how it went, how many background captures lately — all as words."""
+    state = {'message': text[:STATE_MESSAGE_CHARS], 'background': VOICE_BACKGROUND_SHORT}
+    for k in ('device', 'local_time'):
+        if context.get(k):
+            state[k] = context[k]
+    last_reply = (context.get('last_reply') or '')[:300]
+    state['assistant_previous_line'] = last_reply or None
+    state['assistant_last_spoke'] = time_bucket(context.get('seconds_since_assistant_spoke'))
+    prev = context.get('previous_capture')
+    if isinstance(prev, dict) and prev.get('text'):
+        state['previous_capture'] = {'how_long_ago': time_bucket(prev.get('seconds_ago')),
+                                     'text': str(prev['text'])[:200], 'outcome': prev.get('outcome') or 'answered normally'}
+    elif context.get('previous_capture_outcome'):
+        state['previous_capture'] = {'outcome': context['previous_capture_outcome']}
+    n = int(context.get('background_captures_5m') or 0)
+    state['background_captures_in_last_5_minutes'] = 'none' if n == 0 else ('one' if n == 1 else 'several')
+    return state
+
+
+def unaddressed_bypass(text: str, context: dict) -> str | None:
+    """Identities enforced in code (jaggedness #8): a reply given right after she asked a
+    question, or a few words right after any line of hers, is never dropped as background."""
+    since = context.get('seconds_since_assistant_spoke')
+    if since is None:
+        return None
+    last_reply = (context.get('last_reply') or '').rstrip()
+    words = len(text.split())
+    # Round 6 data: an 11-word background fragment landed 5 s after she asked "how about
+    # you?" at P(background)=0.99 — a reply to her question is short; a story is not.
+    if last_reply.endswith('?') and since <= 20 and words <= 10:
+        return 'question'
+    if since <= 30 and words <= 6:
+        return 'short_followup'
+    return None
+
+
 # Phase 3 (shadow): the content-privacy question, asked of the turn + reply. Phrased
 # to match the metered judge's rubric (services.content_privacy / factory judge):
 # DEFAULT PUBLIC; private only for the sensitive categories and any secret.
@@ -352,7 +431,13 @@ class ReflexClient:
                 state = {'message': text[:STATE_MESSAGE_CHARS], 'surface': context.get('surface', 'unknown')}
                 exchanges = context.get('recent_exchanges') or []
                 last_reply = (context.get('last_reply') or '')[:600]
-                if exchanges or last_reply:
+                source = context.get('unaddressed_source', 'addressee')
+                voice_ctx = bool(exchanges or last_reply or context.get('device') or context.get('previous_capture'))
+                if voice_ctx and source == 'addressee':
+                    # Round 6: the trimmed state, one Choice — see addressee_state().
+                    state.update(addressee_state(text, context))
+                    questions['addressee'] = ADDRESSEE_QUESTION
+                elif (exchanges or last_reply) and source == 'ctx':
                     # Round 3 (2026-09-20 13:30, Chris: "hit it with data"): the richest
                     # picture — up to 8 prior exchanges with their age, which device, the
                     # local time, how the previous capture went, the household names.
@@ -394,6 +479,11 @@ class ReflexClient:
                 }
                 if 'unaddressed_ctx' in questions:
                     out['unaddressed_ctx'] = float(response.answers['unaddressed_ctx'].noul)
+                if 'addressee' in questions:
+                    ans = response.answers['addressee']
+                    probs = ans.probabilities
+                    out['addressee'] = {'choice': str(ans.choice), 'confidence': float(ans.confidence),
+                                        'background': float(sum(float(probs[k]) for k in ADDRESSEE_BACKGROUND))}
                 if device:
                     out['device'] = device
                 box['result'] = out
@@ -547,6 +637,7 @@ def live_router_for(
         if since is not None:
             context['seconds_since_assistant_spoke'] = since
         context.update({k: v for k, v in (REFLEX_ROOM.get() or {}).items() if v})
+        context['unaddressed_source'] = unaddressed_source
         try:
             jev = reflex(text, context)
         except Exception as exc:
@@ -584,10 +675,16 @@ def live_router_for(
             jev_u = float(jev.get('unaddressed', 0))
             if unaddressed_source == 'ctx' and jev.get('unaddressed_ctx') is not None:
                 jev_u = float(jev['unaddressed_ctx'])  # the fuller picture, when the thread has one
+            elif unaddressed_source == 'addressee' and isinstance(jev.get('addressee'), dict):
+                jev_u = float(jev['addressee'].get('background', 0))  # round 6: P(for someone/something else)
             record['unaddressed_score'] = jev_u
             unaddressed = jev_u >= unaddressed_floor
-            strong = jev_u >= 0.9
-            if surface == 'voice' and not unaddressed and jev_u >= join_floor:
+            strong = jev_u >= strong_floor
+            bypass = unaddressed_bypass(text, context) if surface == 'voice' else None
+            if bypass:
+                record['unaddressed_bypass'] = bypass
+                unaddressed, strong = False, False
+            if surface == 'voice' and not unaddressed and not bypass and jev_u >= join_floor:
                 # Option A (Chris 2026-09-20 12:55, "A is a yes"): a suspicious fragment on
                 # voice waits for Haiku's verdict; both agreeing is what drops it. Two TV
                 # fragments reached her at 12:51/12:52 with Jev at 0.36 and 0.76 while
