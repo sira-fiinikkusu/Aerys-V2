@@ -367,6 +367,10 @@ class RouteDecision:
     # voice/lens turns (typed text is intentional by definition) and ONLY when
     # the drop feature is armed — everywhere else it is inert metadata.
     unaddressed: bool = False
+    # J10 (2026-09-19): the speaker withdrew the request ("cancel", "never
+    # mind"). Only the live reflex decider sets it; the Haiku router never does.
+    # Voice drops the turn silently; typed surfaces answer with one word.
+    cancelled: bool = False
 
 
 def plausibly_commands_device(text: str) -> bool:

@@ -24,6 +24,7 @@ class FakeClient:
                 'route': SimpleNamespace(choice='action', probabilities={'action': .8, 'chat': .2}, confidence=.7),
                 'tier': SimpleNamespace(score=self.score, confidence=.8),
                 'unaddressed': SimpleNamespace(noul=.1),
+                'cancelled': SimpleNamespace(noul=.05),
             }, model='jev-1.13.0', usage=SimpleNamespace(input_tokens=123))
 
 
@@ -33,10 +34,10 @@ def test_result_shape_and_state_boundary():
         'surface': 'guild', 'thread': 'never send', 'memories': ['never send'],
         'room_context': 'never send', 'portable': 'never send'})
     assert fake.seen['state'] == {'message': 'x' * 2000, 'surface': 'guild'}
-    assert set(fake.seen['questions']) == {'route', 'tier', 'unaddressed'}
+    assert set(fake.seen['questions']) == {'route', 'tier', 'unaddressed', 'cancelled'}
     assert result == {
         'route': 'action', 'p_action': .8, 'confidence': .7, 'tier': 'standard',
-        'tier_score': 1.2, 'unaddressed': .1, 'latency_ms': result['latency_ms'],
+        'tier_score': 1.2, 'unaddressed': .1, 'cancelled': .05, 'latency_ms': result['latency_ms'],
         'model': 'jev-1.13.0', 'input_tokens': 123}
     assert isinstance(result['latency_ms'], int)
 

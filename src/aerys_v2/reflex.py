@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextvars
 import re
+from dataclasses import replace
 import logging
 import threading
 import time
@@ -45,6 +46,12 @@ QUESTIONS = {
     'unaddressed': {
         'type': 'noul',
         'instructions': 'The message is clearly NOT directed at the assistant at all (overheard speech, a wake word landing mid-sentence, talk to another person). Short acknowledgments and follow-ups ARE addressed.',
+    },
+    # J10 (Chris 2026-09-19, ruled "silent on voice"): the speaker withdraws the
+    # request mid-turn. Asked in the same call; consumed only above a high floor.
+    'cancelled': {
+        'type': 'noul',
+        'instructions': "The speaker is WITHDRAWING the request: says cancel, never mind, forget it, scratch that, or breaks off ('actually no', 'nothing', 'ignore that'). A message that asks for something new, or says never mind about one thing and then asks another, is NOT withdrawn.",
     },
 }
 
@@ -242,6 +249,7 @@ class ReflexClient:
                     'tier': ('fast', 'standard', 'deep')[max(0, min(2, round(score)))],
                     'tier_score': score,
                     'unaddressed': float(response.answers['unaddressed'].noul),
+                    'cancelled': float(response.answers['cancelled'].noul),
                     'model': str(response.model),
                     'input_tokens': int(response.usage.input_tokens),
                 }
@@ -289,7 +297,7 @@ def _router_verdict(decision: RouteDecision | None) -> dict | None:
     if decision is None:
         return None
     return {'route': decision.route, 'tier': decision.tier, 'unaddressed': decision.unaddressed,
-            'ack': decision.ack}
+            'cancelled': decision.cancelled, 'ack': decision.ack}
 
 
 class LiveReflexRecord:
@@ -336,6 +344,7 @@ def live_router_for(
     conf_bar = settings.reflex_route_confidence
     action_floor = settings.reflex_action_floor
     unaddressed_floor = settings.reflex_unaddressed_floor
+    cancel_floor = settings.reflex_cancel_floor
 
     def decide(text: str) -> RouteDecision:
         started = time.monotonic()
@@ -397,8 +406,15 @@ def live_router_for(
                 record['router_error'] = box.get('error', {'error': 'no decision'})
             record['router'] = _router_verdict(rd)
             decision = rd
+        # J10: a withdrawn request is dropped whoever decided the route. The
+        # cancel Noul rides the same call, so it costs nothing extra and does
+        # not depend on route confidence; the floor is high because a wrong
+        # "cancelled" IGNORES the user exactly like a wrong "unaddressed".
+        if 'error' not in jev and float(jev.get('cancelled', 0)) >= cancel_floor:
+            decision = replace(decision, cancelled=True)
         record['decided'] = {'route': decision.route, 'tier': decision.tier,
-                             'unaddressed': decision.unaddressed}
+                             'unaddressed': decision.unaddressed,
+                             'cancelled': decision.cancelled}
         # Phase 4: is this one plain device command the code may carry out itself?
         record['command'] = (
             plain_device_command(record, text, settings, canary_entities, aliases)

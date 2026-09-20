@@ -17,10 +17,10 @@ def settings(**kw):
                     typesafe_api_key="k", **kw)
 
 
-def jev_result(route="chat", conf=0.95, p_action=0.05, tier="fast", unaddressed=0.1):
+def jev_result(route="chat", conf=0.95, p_action=0.05, tier="fast", unaddressed=0.1, cancelled=0.05):
     return {"route": route, "p_action": p_action, "confidence": conf, "tier": tier,
-            "tier_score": 0.2, "unaddressed": unaddressed, "model": "jev-1.13.0",
-            "input_tokens": 500, "latency_ms": 200}
+            "tier_score": 0.2, "unaddressed": unaddressed, "cancelled": cancelled,
+            "model": "jev-1.13.0", "input_tokens": 500, "latency_ms": 200}
 
 
 class SlowRouter:
@@ -43,7 +43,7 @@ def test_confident_chat_decides_without_waiting_for_router():
     rec = LAST_REFLEX.get().collect()            # audit writer gives the router time to land
     assert rec["decided_by"] == "jev" and rec["mode"] == "live"
     assert rec["router"]["route"] == "action"     # both verdicts still on the row
-    assert rec["decided"] == {"route": "chat", "tier": "fast", "unaddressed": False}
+    assert rec["decided"] == {"route": "chat", "tier": "fast", "unaddressed": False, "cancelled": False}
 
 
 def test_confident_action_waits_for_the_generated_ack_on_voice_only():
@@ -107,6 +107,23 @@ def test_unaddressed_needs_the_higher_bar():
     low = live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.7), router)("overheard")
     high = live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, unaddressed=0.85), router)("overheard")
     assert low.unaddressed is False and high.unaddressed is True
+
+
+def test_cancel_needs_the_high_floor_and_rides_any_decider():
+    # J10 (Chris 2026-09-19, "silent on voice"): the cancel Noul is consumed at
+    # >= 0.9 whoever decided the route — Jev confident, or the router because
+    # Jev was unsure. Below the floor it is inert metadata.
+    router = SlowRouter(RouteDecision(route="chat", ack=""), delay=0.01)
+    low = live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, cancelled=0.85), router)("never mind")
+    high = live_router_for(settings(), lambda t, c: jev_result("chat", 0.9, cancelled=0.95), router)("never mind")
+    unsure = live_router_for(settings(), lambda t, c: jev_result("chat", 0.3, cancelled=0.97), router)("cancel that")
+    assert low.cancelled is False and high.cancelled is True and unsure.cancelled is True
+    rec = LAST_REFLEX.get().collect()
+    assert rec["decided_by"] == "router" and rec["decided"]["cancelled"] is True
+    floor = live_router_for(settings(reflex_cancel_floor=0.99), lambda t, c: jev_result("chat", 0.9, cancelled=0.95), router)("never mind")
+    assert floor.cancelled is False
+    broken = live_router_for(settings(), lambda t, c: {"error": "timeout"}, router)("never mind")
+    assert broken.cancelled is False               # no Jev answer, no drop
 
 
 def test_thresholds_come_from_settings():

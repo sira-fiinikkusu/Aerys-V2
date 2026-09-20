@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     reflex_action_floor: float = Field(default=0.35, ge=0, le=1)
     # A wrong "unaddressed" IGNORES the user, so Jev must be much surer to say it.
     reflex_unaddressed_floor: float = Field(default=0.8, ge=0, le=1)
+    # J10 (2026-09-19, Chris: "silent on voice"): "cancel" / "never mind" drops
+    # the turn — nothing spoken, nothing run, receipt row marked. Same reasoning
+    # as unaddressed: a wrong "cancelled" ignores him, so the bar is higher still.
+    reflex_cancel_floor: float = Field(default=0.9, ge=0, le=1)
     # Phase 4 (2026-09-19, "go for it"): plain single-target device commands
     # skip the specialist's tool-picking call. Jev answers the device questions
     # in the SAME call that routes the turn; the write still goes through the

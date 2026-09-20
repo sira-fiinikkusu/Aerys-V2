@@ -51,6 +51,10 @@ def summarize(rows: list[dict]) -> dict:
         'confident_route_agreement': _agreement(pairs, 'route', confident=True),
         'tier_agreement': _agreement(pairs, 'tier'),
         'unaddressed_agreement': _agreement(pairs, 'unaddressed'),
+        # J10: how often the cancel Noul fired (>= 0.9 is the live floor) and
+        # how often a turn was actually dropped for it.
+        'cancel_flagged': sum(float(j.get('cancelled', 0)) >= .9 for j, _ in pairs),
+        'cancel_dropped': sum(bool((s.get('decided') or {}).get('cancelled')) for s in shadows),
     }
 
 
@@ -95,6 +99,7 @@ def format_report(rows: list[dict]) -> str:
         f"route agreement (confidence >= 0.6)={pct(report['confident_route_agreement'])}",
         f"tier agreement={pct(report['tier_agreement'])}",
         f"unaddressed agreement (noul >= 0.5)={pct(report['unaddressed_agreement'])}",
+        f"cancel (J10): flagged={report['cancel_flagged']} dropped={report['cancel_dropped']}",
     ]
     d = direct_summary(rows)
     lines.append(

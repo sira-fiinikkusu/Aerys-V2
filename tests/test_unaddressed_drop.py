@@ -30,7 +30,7 @@ from langchain_core.messages import AIMessage
 
 from aerys_v2.factory import build_action_graph, build_graph
 from aerys_v2.router import RouteDecision, parse_route_reply
-from aerys_v2.service import DROPPED_UNADDRESSED_MARKER, ask
+from aerys_v2.service import CANCEL_ACK, DROPPED_CANCELLED_MARKER, DROPPED_UNADDRESSED_MARKER, ask
 
 CHRIS = {"user_id": "person-1", "display_name": "Chris"}
 # v2 rule (live failure 2026-08-27): only DIRECT second-person address to
@@ -50,6 +50,12 @@ def unaddressed_router(_text: str) -> RouteDecision:
 
 def chat_router(_text: str) -> RouteDecision:
     return RouteDecision(route="chat", ack="")
+
+
+def cancelled_router(_text: str) -> RouteDecision:
+    # J10: only the live reflex decider ever sets this; the flag is what the
+    # service consumes, so the test speaks the flag directly.
+    return RouteDecision(route="action", ack="On it.", cancelled=True)
 
 
 class Recorder:
@@ -235,3 +241,36 @@ def test_cold_capture_still_drops_and_expired_window_reopens_the_gate():
         activity_registry=registry,
     )
     assert reply == ""
+
+
+# ---- J10: cancel / never mind (Chris 2026-09-19: "silent on voice") ----
+
+
+def test_voice_cancelled_turn_is_dropped_silently_with_a_receipt():
+    rec = Recorder()
+    reply, graph = voice_ask(cancelled_router, drop=False, recorder=rec)
+    assert reply == ""                              # no ack, even though the router had one
+    rows = rec.wait_for_rows(1)
+    assert len(rows) == 1
+    assert rows[0]["classifier_intent"] == "cancelled"
+    assert DROPPED_CANCELLED_MARKER in (rows[0]["degraded"] or [])
+    assert rows[0]["emitted_reply"] == ""
+    state = graph.get_state({"configurable": {"thread_id": "person:person-1"}})
+    assert not state.values.get("messages")         # the withdrawn ask never enters history
+
+
+def test_typed_cancel_gets_one_word_back_and_runs_nothing():
+    rec = Recorder()
+    graph = build_graph(fake_model("should not be called"), "SOUL")
+    action_graph = build_action_graph(fake_model("should not run"), "SOUL", tools=[])
+    reply = ask(
+        graph, "never mind", identity={**CHRIS, "platform": "discord", "channel_kind": "dm"},
+        thread_id="person:person-1", router=cancelled_router, action_graph=action_graph,
+        record_turn=rec, drop_unaddressed=False, activity_registry={},
+    )
+    assert reply == CANCEL_ACK
+    rows = rec.wait_for_rows(1)
+    assert rows[0]["classifier_intent"] == "cancelled"
+    assert DROPPED_CANCELLED_MARKER in (rows[0]["degraded"] or [])
+    state = graph.get_state({"configurable": {"thread_id": "person:person-1"}})
+    assert not state.values.get("messages")

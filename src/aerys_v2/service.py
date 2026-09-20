@@ -663,6 +663,11 @@ CLAIM_GATE_MARKER = "claim_gate_escalated"
 # judgment gets audited and tuned). By-design telemetry, skipped by the gaps
 # miner like the handoff pair.
 DROPPED_UNADDRESSED_MARKER = "dropped_unaddressed"
+# J10 (Chris 2026-09-19, "silent on voice"): the speaker withdrew the request.
+# Voice: dropped like a false wake (no ack, no action, no history write, always
+# this receipt). Typed/lens: one word back so the withdrawal is acknowledged.
+DROPPED_CANCELLED_MARKER = "dropped_cancelled"
+CANCEL_ACK = "Okay."
 
 # Conversation-in-flight registry for the drop gate (owner design 2026-08-27):
 # thread_id -> monotonic time of the last turn that produced a real reply.
@@ -1148,6 +1153,21 @@ def ask(
         if shadow is not None:
             shadow.observe_router(decision)
         registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
+        if decision.cancelled:
+            # J10 on a typed/lens surface: the withdrawal gets one word back and
+            # the turn is not written into the thread (nothing was asked).
+            log.info(
+                "route decision | thread=%s CANCELLED by the sender", thread_id,
+            )
+            _fire_turn_record(
+                record_turn, config, text,
+                int((time.monotonic() - started) * 1000),
+                reflex=shadow,
+                classifier_intent="cancelled",
+                raw_reply=CANCEL_ACK, emitted_reply=CANCEL_ACK,
+                extra_degraded=[DROPPED_CANCELLED_MARKER],
+            )
+            return CANCEL_ACK
         if (
             drop_unaddressed
             and decision.unaddressed
@@ -2041,6 +2061,21 @@ def _voice_parallel_start(
         reflex.observe_router(decision)
     registry = _THREAD_ACTIVITY if activity_registry is None else activity_registry
     thread_key = str(real_configurable.get("thread_id", ""))
+    if decision.cancelled:
+        # J10: "cancel" / "never mind" on voice — silence is the ruling.
+        log.info(
+            "voice route decision | thread=%s DROPPED (cancelled by the speaker)",
+            real_configurable.get("thread_id"),
+        )
+        _fire_turn_record(
+            record_turn, config, text,
+            int((time.monotonic() - started) * 1000),
+            reflex=reflex,
+            classifier_intent="cancelled",
+            raw_reply="", emitted_reply="",
+            extra_degraded=[DROPPED_CANCELLED_MARKER],
+        )
+        return ""
     if (
         drop_unaddressed
         and decision.unaddressed
