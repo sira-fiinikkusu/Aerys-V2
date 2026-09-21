@@ -6,6 +6,7 @@ built ONCE at startup into objects the rest of the app calls. The graph is the w
 canvas; each node function is a Code node that receives state instead of $json.
 """
 
+import contextvars
 import logging
 from contextvars import ContextVar
 from datetime import datetime, timezone
@@ -33,6 +34,10 @@ from aerys_v2.turns import channel_enum
 from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
+
+#: Who the owner is, for the owner-only ambient blocks (presence). Set from Settings
+#: when the graph is built; unset means "no owner configured" and those blocks stay off.
+_OWNER_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("factory_owner_id", default=None)
 
 
 #: Pooled connections for the checkpointer. Small on purpose — turns are
@@ -2360,6 +2365,63 @@ def _untag_own_replies(messages):
                 continue
         out.append(message)
     return out if changed else messages
+
+
+def presence_fn_for(settings: Settings):
+    """Read the configured rooms' occupancy from Home Assistant, or None when unarmed.
+
+    Same posture as every other HA read here: short timeout, fail-open. A dark or slow
+    HA returns [] and the block simply does not appear — presence is ambient colour,
+    never something a turn may block on.
+    """
+    if not settings.presence_context or settings.ha_token is None:
+        return None
+    import httpx
+
+    from aerys_v2.services.presence import parse_rooms
+
+    rooms = parse_rooms(settings.presence_rooms)
+    base = settings.ha_base_url.rstrip("/")
+    token = settings.ha_token.get_secret_value()
+
+    def occupied() -> list[str]:
+        out: list[str] = []
+        try:
+            with httpx.Client(timeout=2.0) as http:
+                for room, entity in rooms.items():
+                    r = http.get(f"{base}/api/states/{entity}",
+                                 headers={"Authorization": f"Bearer {token}"})
+                    if r.status_code == 200 and (r.json() or {}).get("state") == "on":
+                        out.append(room)
+        except Exception:
+            log.debug("presence read failed — no presence block this turn", exc_info=True)
+            return []
+        return out
+
+    return occupied
+
+
+def presence_block(identity: dict, presence_fn, spoken_from: str | None = None) -> str:
+    """The ambient house-presence block, or ''.
+
+    THE GATE LIVES HERE, not at the call sites. Presence disclosure is one of the
+    surfaces ask()'s action_allowlist protects; an ambient block that rode every turn
+    would hand a guild member the answer the presence TOOL refuses them. So: the
+    owner's PRIVATE turns only. Degrade-safe by contract, like room_block.
+    """
+    if presence_fn is None:
+        return ""
+    if identity.get("privacy_context") == "public":
+        return ""
+    if not identity.get("user_id") or identity.get("user_id") != _OWNER_ID.get():
+        return ""
+    try:
+        from aerys_v2.services.presence import format_presence
+
+        return format_presence(presence_fn(), spoken_from)
+    except Exception:
+        log.debug("presence block failed — omitted", exc_info=True)
+        return ""
 
 
 def room_block(identity: dict, room_context_fn, sink: dict | None = None) -> str:

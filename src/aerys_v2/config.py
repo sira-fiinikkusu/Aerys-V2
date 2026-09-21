@@ -296,6 +296,14 @@ class Settings(BaseSettings):
     # not something she has to remember turn by turn. Entities must still be on
     # the allowlist to be written.
     ha_room_aliases: str = ""
+    # Her gap #101, passive half (Chris 2026-09-21 "3 is fine"): which rooms show
+    # occupancy, as ambient context on the OWNER's private turns only. Ships DARK —
+    # an always-on prompt block is a geometry change, and 2026-09-19 taught that those
+    # get evaluated before they go live (the trailing-context regression). Presence
+    # disclosure is an allowlisted surface, so presence_block gates it; this flag only
+    # says whether the block exists at all.
+    presence_context: bool = False
+    presence_rooms: str = ""  # 'office=binary_sensor.x,...'; empty = presence.DEFAULT_ROOMS
     # The house alarm panel entity (e.g. "alarm_control_panel.panel"). Empty =
     # the control_alarm tool doesn't exist — same arming pattern as ha_token.
     # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and
