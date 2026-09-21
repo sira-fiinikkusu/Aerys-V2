@@ -185,3 +185,13 @@ def test_round6_time_buckets_and_bypass_rules():
     assert unaddressed_bypass('and then he just left it in the driveway all weekend', {'last_reply': 'How about you?', 'seconds_since_assistant_spoke': 5}) is None
     assert unaddressed_bypass('the office lights', {'last_reply': 'Which lights?', 'seconds_since_assistant_spoke': 35}) is None
     assert unaddressed_bypass('yes', {'last_reply': 'Which lights?'}) is None
+
+
+def test_addressee_state_names_whether_the_voice_is_enrolled():
+    from aerys_v2.reflex import addressee_state, speaker_is_unknown
+
+    st = addressee_state("hi", {"speaker": {"id": "unknown", "confidence": 0.07}})
+    assert st["speaker"] == "not an enrolled household voice (matched no one)" and speaker_is_unknown({"speaker": {"id": "unknown"}})
+    st = addressee_state("hi", {"speaker": {"id": "Chris", "confidence": 0.7}})
+    assert st["speaker"] == "an enrolled household voice: chris" and not speaker_is_unknown({"speaker": {"id": "chris"}})
+    assert "speaker" not in addressee_state("hi", {}) and not speaker_is_unknown({})

@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     reflex_unaddressed_join_floor: float = Field(default=0.6, ge=0, le=1)
     reflex_unaddressed_agree_floor: float = Field(default=0.6, ge=0, le=1)
     reflex_unaddressed_strong_floor: float = Field(default=0.9, ge=0, le=1)
+    # Speaker ID: a capture whose voice matched NO enrolled print ("unknown") drops at
+    # this lower floor, alone, no Haiku band — a TV voice is not the household. 20:04–
+    # 20:16 on 9/20: four show captures scored 0.07–0.17 against Chris's print; two got
+    # through at background 0.61 and 0.09. (Megan is 'unknown' until enrolled: her real
+    # requests score ~0.1 background, far under this.)
+    reflex_unaddressed_guest_floor: float = Field(default=0.5, ge=0, le=1)
     # J10 (2026-09-19, Chris: "silent on voice"): "cancel" / "never mind" drops
     # the turn — nothing spoken, nothing run, receipt row marked. Same reasoning
     # as unaddressed: a wrong "cancelled" ignores him, so the bar is higher still.

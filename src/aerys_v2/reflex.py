@@ -157,7 +157,17 @@ def addressee_state(text: str, context: dict) -> dict:
         state['previous_capture'] = {'outcome': context['previous_capture_outcome']}
     n = int(context.get('background_captures_5m') or 0)
     state['background_captures_in_last_5_minutes'] = 'none' if n == 0 else ('one' if n == 1 else 'several')
+    spk = context.get('speaker')
+    if isinstance(spk, dict) and spk.get('id'):
+        sid = str(spk['id']).lower()
+        state['speaker'] = ('not an enrolled household voice (matched no one)' if sid == 'unknown'
+                            else f'an enrolled household voice: {sid}')
     return state
+
+
+def speaker_is_unknown(context: dict) -> bool:
+    spk = context.get('speaker')
+    return isinstance(spk, dict) and str(spk.get('id') or '').lower() == 'unknown'
 
 
 def unaddressed_bypass(text: str, context: dict) -> str | None:
@@ -586,6 +596,7 @@ def live_router_for(
     join_floor = settings.reflex_unaddressed_join_floor
     agree_floor = settings.reflex_unaddressed_agree_floor
     strong_floor = settings.reflex_unaddressed_strong_floor
+    guest_floor = settings.reflex_unaddressed_guest_floor
 
     def decide(text: str) -> RouteDecision:
         started = time.monotonic()
@@ -664,6 +675,12 @@ def live_router_for(
         bypass = unaddressed_bypass(text, context) if surface == 'voice' else None
         if bypass:
             record['unaddressed_bypass'] = bypass
+        # Speaker ID: a voice matching no enrolled print is judged on the guest floor,
+        # alone (no Haiku band), and its drop is strong (the grace window is for the
+        # household's own follow-ups, not a show).
+        guest_voice = surface == 'voice' and speaker_is_unknown(context)
+        if guest_voice:
+            record['guest_voice'] = True
         confident = (
             'error' not in jev
             and jev.get('route') in registered_routes
@@ -684,11 +701,14 @@ def live_router_for(
                 ack = rd.ack if rd is not None and rd.ack else FALLBACK_ACK
             # Codex review 2026-09-20 #6: keep the router's command-preservation guard —
             # a command-shaped message is never dropped as unaddressed, whatever Jev said.
-            unaddressed = jev_u >= unaddressed_floor
-            strong = jev_u >= strong_floor
+            if guest_voice:
+                unaddressed = strong = jev_u >= guest_floor
+            else:
+                unaddressed = jev_u >= unaddressed_floor
+                strong = jev_u >= strong_floor
             if bypass:
                 unaddressed, strong = False, False
-            if surface == 'voice' and not unaddressed and not bypass and jev_u >= join_floor:
+            if surface == 'voice' and not guest_voice and not unaddressed and not bypass and jev_u >= join_floor:
                 # Option A (Chris 2026-09-20 12:55, "A is a yes"): a suspicious fragment on
                 # voice waits for Haiku's verdict; both agreeing is what drops it. Two TV
                 # fragments reached her at 12:51/12:52 with Jev at 0.36 and 0.76 while
@@ -719,6 +739,8 @@ def live_router_for(
                 # Same protection as the confident branch (Codex blocker 1): a reply to
                 # her question / a short follow-up / a command shape is never dropped.
                 decision = replace(decision, unaddressed=False, unaddressed_strong=False)
+            elif guest_voice and jev_u >= guest_floor:
+                decision = replace(decision, unaddressed=True, unaddressed_strong=True)  # a non-household voice, Jev sure enough
             elif decision.unaddressed and jev_u >= strong_floor:
                 decision = replace(decision, unaddressed_strong=True)  # both agree, on the SELECTED score
         # J10: a withdrawn request is dropped whoever decided the route. The

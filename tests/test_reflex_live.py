@@ -421,3 +421,31 @@ def test_codex_blocker1_low_confidence_fallback_keeps_the_bypass_and_selected_sc
     router4 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
     d = _voice(lambda: live_router_for(settings(), low3, router4)("turn off the office lights"))
     assert d.unaddressed is False
+
+
+def test_guest_voice_drops_on_the_guest_floor_alone_and_strong():
+    # 2026-09-20 20:15: a show fragment scored 0.07 against Chris's print (speaker
+    # 'unknown' → guest) and background 0.61 — inside the Haiku band, and Haiku let it
+    # through. A non-household voice is judged on the guest floor, alone, strong.
+    router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
+    jev = lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.61, "fragment_nobody")}  # noqa: E731
+    tok = REFLEX_ROOM.set({"speaker": {"id": "unknown", "confidence": 0.07}})
+    try:
+        d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), jev, router)("Should have seen this coming"))
+        rec = LAST_REFLEX.get().collect()
+        assert d.unaddressed is True and d.unaddressed_strong is True and rec["guest_voice"] is True and "ensemble" not in rec
+        # a real guest request stays a request
+        d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.1, "request_to_assistant")}, router)("can you turn on the lights"))
+        assert d.unaddressed is False
+        # the household's own voice keeps the normal floor and the band
+        REFLEX_ROOM.set({"speaker": {"id": "chris", "confidence": 0.7}})
+        router2 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
+        d = _voice(lambda: live_router_for(settings(), jev, router2)("Should have seen this coming"))
+        assert d.unaddressed is False and router2.calls == 1
+        # fallback branch (low route confidence): the guest floor still drops it
+        REFLEX_ROOM.set({"speaker": {"id": "unknown", "confidence": 0.1}})
+        router3 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=False), delay=0.01)
+        d = _voice(lambda: live_router_for(settings(), lambda t, c: {**jev_result("chat", 0.3), "addressee": _addr(0.61, "fragment_nobody")}, router3)("Should have seen this coming"))
+        assert d.unaddressed is True and d.unaddressed_strong is True
+    finally:
+        REFLEX_ROOM.reset(tok)

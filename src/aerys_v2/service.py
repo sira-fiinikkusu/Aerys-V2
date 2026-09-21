@@ -1207,6 +1207,10 @@ def ask(
             "device": _device_label(identity),
             "local_time": datetime.now(EASTERN).strftime("%A %H:%M"),
             "previous_capture_outcome": _LAST_OUTCOME.get(thread_id),
+            # Speaker ID (2026-09-20 20:16, a show got through): the recognizer's verdict
+            # rides into the gate — a voice that matches no enrolled print is judged
+            # on the stricter guest floor and Jev is told so.
+            "speaker": (identity or {}).get("speaker"),
             **_note_capture(thread_id, text),
         })
         shadow = _ReflexShadow(reflex, text, identity, thread_id) if reflex else None
