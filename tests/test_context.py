@@ -390,3 +390,19 @@ def test_openapi_schema_not_served():
     # openapi_url=None: the schema must not leak endpoint shapes to unauthed probers.
     client = TestClient(build_app(lambda t, i, th: "ok", "sekrit", OWNER))
     assert client.get("/openapi.json").status_code == 404
+
+
+# --- claim expiry (2026-09-21) -------------------------------------------------
+
+def test_an_expired_claim_is_not_who_he_is():
+    """`core_claim.ttl_ts` shipped with the table and was honored by NOTHING until
+    2026-09-21, so a claim approved on 2026-04-10 — "Dad is visiting, arrived last
+    night" — was still being injected as a standing fact five months later. The
+    query must exclude a claim whose expiry has passed, and must keep the ones with
+    no expiry: age alone is not the discriminator ("married Megan in April" is
+    permanent, "arrived last night" is not)."""
+    from aerys_v2.services.profile import PROFILE_SQL
+
+    assert "ttl_ts IS NULL OR cc.ttl_ts > NOW()" in PROFILE_SQL
+    where = PROFILE_SQL.split("WHERE", 1)[1]
+    assert "status IN ('approved', 'provisional')" in where, "expiry is ADDED to the gates, not swapped in"

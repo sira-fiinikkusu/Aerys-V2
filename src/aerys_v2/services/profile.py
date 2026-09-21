@@ -71,6 +71,13 @@ SELECT cc.core_id, cc.key_label, cc.claim_text, cc.status, cc.locked,
 FROM core_claim cc
 WHERE cc.speaker_id = %(pid)s::uuid
   AND cc.status IN ('approved', 'provisional')
+  -- A claim may be given an expiry; once it passes, it stops being who he IS.
+  -- The column shipped with the table and was read by NOTHING until 2026-09-21,
+  -- so "Dad is visiting, arrived last night" (approved 2026-04-10) was still
+  -- being injected into every turn five months later as a standing fact. NULL
+  -- stays permanent — most identity claims should be, and age alone is not the
+  -- discriminator ("married Megan in April" must never expire).
+  AND (cc.ttl_ts IS NULL OR cc.ttl_ts > NOW())
   AND cc.sensitivity IN ('P2', 'P3')
   AND (cc.visibility = 'all'
     OR (cc.visibility = 'server' AND %(pctx)s = 'public')
