@@ -35,9 +35,16 @@ from contextlib import contextmanager
 
 log = logging.getLogger(__name__)
 
-#: Who the owner is, for the owner-only ambient blocks (presence). Set from Settings
-#: when the graph is built; unset means "no owner configured" and those blocks stay off.
-_OWNER_ID: contextvars.ContextVar[str | None] = contextvars.ContextVar("factory_owner_id", default=None)
+#: Who the owner is, for the owner-only ambient blocks (presence). A process-wide
+#: constant set when the stack is built — deliberately NOT a contextvar: graph nodes
+#: run on worker threads that need not inherit the builder's context, and a fence that
+#: silently reads None on some threads is a fence that does not hold.
+_OWNER_ID: str | None = None
+
+
+def set_owner_id(owner_person_id: str | None) -> None:
+    global _OWNER_ID
+    _OWNER_ID = owner_person_id
 
 
 #: Pooled connections for the checkpointer. Small on purpose — turns are
@@ -1713,6 +1720,7 @@ def build_action_graph(
     family_notes_fn=None,
     room_context_fn: RoomContextFn | None = None,
     portable_context_fn: PortableContextFn | None = None,
+    presence_fn=None,
     shared_surface_ids: dict | None = None,
     charter: str = SPECIALIST_CHARTER,
     checkpointer=None,
@@ -1825,6 +1833,9 @@ def build_action_graph(
         # Her other bodies, on her hands too: a job asked here may continue one begun
         # on the stick, and "do the thing I asked you about last night" has to resolve.
         portable = portable_block(identity, portable_context_fn)
+        # Ambient house presence (her gap #101, passive half). The helper owns the
+        # owner-and-private fence — presence disclosure is a gated surface.
+        presence = presence_block(identity, presence_fn)
         # act runs once per model pass; context is computed once per node call,
         # then attached to a fresh copy, never accumulated in the tool-loop state.
         # The spoken-ack overlay quotes THIS turn's generated ack, so it is
@@ -1836,13 +1847,13 @@ def build_action_graph(
         if context_trailing:
             prompt = prompt_with_context(
                 f"{persona}\n\n{overlay}{static_ack}", state["messages"],
-                f"{dynamic_ack}{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}",
+                f"{dynamic_ack}{caller_line}{knowledge}{where_when}{presence}{room}{portable}{family}{shared}",
             )
         else:
             # The pre-2026-09-19 layout, byte for byte: every block in the
             # system prompt, ahead of the history.
             system = SystemMessage(
-                content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{shared}"
+                content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{presence}{room}{portable}{family}{shared}"
             )
             prompt = [system, *state["messages"]]
         if isinstance(api_model_with_tools, ToolModelPair):
@@ -2198,6 +2209,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         shared_surface_ids=_parse_shared_surfaces(settings.ha_shared_surface_ids),
         # Same room seam the chat graph gets, same public-only fence inside it.
         room_context_fn=room_context_fn,
+        presence_fn=presence_fn_for(settings),   # off unless presence_context + ha_token
         portable_context_fn=portable_context_fn,
         context_trailing=settings.prompt_context_trailing,
     )
@@ -2238,6 +2250,7 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
         # A guest in a PUBLIC room holds that room too; the fence inside the helper
         # is what keeps a DM out, not the caller's status.
         room_context_fn=room_context_fn,
+        presence_fn=presence_fn_for(settings),   # off unless presence_context + ha_token
         # NO portable seam here, on purpose. The portable block is keyed on the
         # caller's own person_id, so a guest would only ever read their OWN portable
         # turns — and a guest has no portable body. Wiring it would buy nothing and
@@ -2376,6 +2389,7 @@ def presence_fn_for(settings: Settings):
     """
     if not settings.presence_context or settings.ha_token is None:
         return None
+    set_owner_id(settings.owner_person_id)   # the fence needs to know who he is
     import httpx
 
     from aerys_v2.services.presence import parse_rooms
@@ -2384,19 +2398,27 @@ def presence_fn_for(settings: Settings):
     base = settings.ha_base_url.rstrip("/")
     token = settings.ha_token.get_secret_value()
 
+    # ONE request, not one per room: a per-entity loop is N sequential round trips and
+    # N timeouts, so a slow-but-alive HA would add seconds to EVERY turn. The template
+    # endpoint answers all of them in a single small call, and /api/states is not used
+    # because it ships the whole house (hundreds of entities) to pick six booleans.
+    template = "{{ [" + ",".join(
+        f"('{room}' if is_state('{entity}','on') else '')" for room, entity in rooms.items()
+    ) + "] | select | list | join(',') }}"
+
     def occupied() -> list[str]:
-        out: list[str] = []
         try:
             with httpx.Client(timeout=2.0) as http:
-                for room, entity in rooms.items():
-                    r = http.get(f"{base}/api/states/{entity}",
-                                 headers={"Authorization": f"Bearer {token}"})
-                    if r.status_code == 200 and (r.json() or {}).get("state") == "on":
-                        out.append(room)
+                r = http.post(f"{base}/api/template",
+                              headers={"Authorization": f"Bearer {token}"},
+                              json={"template": template})
+            if r.status_code != 200:
+                log.debug("presence read: HA returned %s — no presence block this turn", r.status_code)
+                return []
+            return [room for room in r.text.strip().split(",") if room]
         except Exception:
             log.debug("presence read failed — no presence block this turn", exc_info=True)
             return []
-        return out
 
     return occupied
 
@@ -2413,7 +2435,7 @@ def presence_block(identity: dict, presence_fn, spoken_from: str | None = None) 
         return ""
     if identity.get("privacy_context") == "public":
         return ""
-    if not identity.get("user_id") or identity.get("user_id") != _OWNER_ID.get():
+    if not _OWNER_ID or identity.get("user_id") != _OWNER_ID:
         return ""
     try:
         from aerys_v2.services.presence import format_presence
@@ -2566,6 +2588,7 @@ def build_graph(
     tier_models: dict[str, BaseChatModel] | None = None,
     room_context_fn: RoomContextFn | None = None,
     portable_context_fn: PortableContextFn | None = None,
+    presence_fn=None,
     family_notes_fn=None,
     history_window_messages: int = 200,
     context_trailing: bool = False,
@@ -2763,6 +2786,7 @@ def build_graph(
         # that fence: the stick is where he talks to her alone, so its history must
         # not walk into a room around the content-privacy judge.
         portable = portable_block(identity, portable_context_fn)
+        presence = presence_block(identity, presence_fn)   # owner+private fence inside
         # Family splice (task #66, owner-designed): on the OWNER's threads only,
         # the last few family_visible notes from Kael's line — what he chose to
         # share with the household. The fn itself enforces the owner gate and
@@ -2782,12 +2806,12 @@ def build_graph(
         if context_trailing:
             prompt = prompt_with_context(
                 f"{soul}\n\n{capability}{voice_style}", messages,
-                f"{caller_line}{knowledge}{where_when}{room}{portable}{family}",
+                f"{caller_line}{knowledge}{where_when}{presence}{room}{portable}{family}",
             )
         else:
             # The pre-2026-09-19 layout, byte for byte (see Settings.prompt_context_trailing).
             system = SystemMessage(
-                content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{room}{portable}{family}{voice_style}"
+                content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{presence}{room}{portable}{family}{voice_style}"
             )
             prompt = [system, *messages]
         # Tier -> model, resolved per turn (normalize_tier at the node too, not

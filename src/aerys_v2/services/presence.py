@@ -81,4 +81,6 @@ def format_presence(occupied: list[str], spoken_from: str | None = None) -> str:
                      "Use this as ambient awareness; never assert where someone is.")
     else:
         lines.append("No room is showing occupancy right now.")
-    return "[House presence]\n" + "\n".join(lines)
+    # Leading-separated like room_block/portable_block — the prompt f-strings
+    # concatenate blocks with no separator of their own.
+    return "\n\n[House presence]\n" + "\n".join(lines)
