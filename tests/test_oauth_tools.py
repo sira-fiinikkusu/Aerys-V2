@@ -287,3 +287,29 @@ def test_turn_timeout_comes_from_settings(monkeypatch):
     m = f.build_model(s)
     inner = getattr(m, "primary", m)
     assert getattr(inner, "turn_timeout_s", None) == 42
+
+
+def test_the_four_isolation_guarantees_reach_the_sdk_options():
+    """The money line and the three isolation lines, asserted where they are SET.
+
+    2026-09-21 (Kael's own review before flipping Discord/Telegram to the
+    subscription): `env={"ANTHROPIC_API_KEY": ""}` is the single line deciding
+    whether a turn bills the metered API or Chris's plan — the auth-precedence trap
+    found 2026-07-03, where a key in the process env silently wins over subscription
+    auth. It had no test. Nor did the three isolation lines a per-turn process
+    depends on. A refactor that drops any of them must fail here, not on a bill.
+    """
+    w = om._WarmClient.__new__(om._WarmClient)          # no event loop, no subprocess
+    w.model, w.tool_schemas = "claude-sonnet-5", []
+    o = w._options("/tmp/aerys-oauth-test")
+
+    assert o.env == {"ANTHROPIC_API_KEY": ""}, "a key in the env silently bills the API"
+    assert o.setting_sources == [], "the host's ~/.claude settings must never load into her"
+    assert o.tools == [], "tools=[] is what removes the built-ins; allowed_tools alone does not"
+    assert o.cwd == "/tmp/aerys-oauth-test", "each process needs its own empty cwd (no transcript carry-over)"
+
+    w.tool_schemas = [{"name": "light_state", "description": "d", "parameters": {"type": "object", "properties": {}}}]
+    o = w._options("/tmp/aerys-oauth-test")
+    assert o.env == {"ANTHROPIC_API_KEY": ""} and o.setting_sources == [] and o.tools == []
+    assert o.allowed_tools == [f"{om.MCP_PREFIX}light_state"], "only our MCP tools are callable"
+    assert list(o.mcp_servers) == [om.MCP_SERVER] and o.max_turns == 2
