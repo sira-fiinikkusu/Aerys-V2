@@ -196,7 +196,9 @@ def test_owner_tag_is_a_no_op_and_enrolled_family_gets_their_own_person_thread()
 
 
 def test_unknown_or_unlisted_or_low_confidence_speaker_is_a_guest_turn():
-    for tag in ({"id": "unknown", "confidence": 0.3}, {"id": "dimitri", "confidence": 0.9}):
+    # 0.1 is stranger territory: TV voices measured 0.07–0.17 against Chris's print,
+    # while his own worst live turn was 0.44 (see the uncertainty-band test below).
+    for tag in ({"id": "unknown", "confidence": 0.1}, {"id": "dimitri", "confidence": 0.9}):
         r = _ask(_speaker_app(), tag)
         assert r["thread_id"] == "person:voice-guest" and "|Guest (Voice)|" in r["reply"], tag
     r = _ask(_speaker_app(voice_speaker_min_confidence=0.75), {"id": "megan", "confidence": 0.6})
@@ -219,3 +221,37 @@ def test_speaker_person_map_parses_and_skips_junk():
     from aerys_v2.config import Settings, speaker_person_map
     s = Settings(_env_file=None, anthropic_api_key="x", voice_speaker_persons=" Chris = a , megan=b, broken, =c, d= ")
     assert speaker_person_map(s) == {"chris": "a", "megan": "b"}
+
+
+def test_an_uncertain_match_does_not_demote_the_owner_to_a_guest():
+    """2026-09-22 08:15: a plain "Thank you." scored just under the recognizer's match
+    floor, was tagged unknown, and Aerys answered Chris as a stranger in his own house.
+
+    He was enrolled from a clean phone clip; satellite audio across a room scores far
+    lower (0.62 / 0.77 / 0.44 live) while TV voices measured 0.07–0.17. That gap is
+    where the uncertainty band lives: below it a voice is a stranger, inside it the
+    turn is merely unsure and stays the owner's."""
+    c = _speaker_app()
+    r = _ask(c, {"id": "unknown", "confidence": 0.31})          # unsure → still his turn
+    assert r["thread_id"] == "person:11111111-1111-1111-1111-111111111111"
+    r = _ask(c, {"id": "unknown", "confidence": 0.12})          # a TV voice → guest
+    assert r["thread_id"] == "person:voice-guest"
+    # The setting reads literally — "demote below X" — so 1.0 demotes every unknown
+    # and closes the band entirely, which is the old behaviour.
+    strict = TestClient(build_app(fake_ask, "sekrit", owner_person_id="11111111-1111-1111-1111-111111111111",
+                                  settings=_settings_with_speakers(voice_guest_demote_below=1.0)))
+    assert _ask(strict, {"id": "unknown", "confidence": 0.31})["thread_id"] == "person:voice-guest"
+
+
+def test_the_gate_reads_the_doors_demotion_flag_not_the_raw_id():
+    """The stricter guest floor in the engage gate must not fire on a turn the door
+    already decided was only uncertain — one decision, two consumers."""
+    from aerys_v2.reflex import speaker_is_unknown
+
+    assert speaker_is_unknown({"speaker": {"id": "unknown", "confidence": 0.1, "demoted": True}})
+    assert not speaker_is_unknown({"speaker": {"id": "unknown", "confidence": 0.31, "demoted": False}})
+    assert not speaker_is_unknown({"speaker": {"id": "chris", "confidence": 0.8, "demoted": False}})
+    assert not speaker_is_unknown({})
+    # a verdict from before the flag existed still counts as a demotion (fail-closed
+    # on the GATE, which only ever makes it quieter)
+    assert speaker_is_unknown({"speaker": {"id": "unknown", "confidence": 0.1}})

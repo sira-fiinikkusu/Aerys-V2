@@ -275,6 +275,15 @@ class Settings(BaseSettings):
     voice_speaker_persons: str = ""
     voice_unknown_speaker: Literal["guest", "owner"] = "guest"
     voice_speaker_min_confidence: float = Field(default=0.0, ge=0, le=1)
+    # 2026-09-22: an UNCERTAIN match must not demote the owner to a guest. Chris was
+    # enrolled from a clean phone clip; satellite audio across a room scores far lower
+    # (his live turns: 0.62 / 0.77 / 0.44 against a 0.40 cutoff), and on 9/22 08:15 a
+    # plain "Thank you." dipped under and was answered as a stranger. Measured room to
+    # work with: TV voices scored 0.07–0.17, his worst real turn 0.44. So a verdict of
+    # "unknown" only becomes a GUEST below this; between here and the recognizer's own
+    # match floor the turn is merely uncertain and stays the owner's — fail-open on
+    # identity, the same posture the STT wrapper takes when the recognizer is down.
+    voice_guest_demote_below: float = Field(default=0.25, ge=0, le=1)
 
     # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
     # Chat turns stay on whatever model_backend says (oauth = free daily driver);

@@ -166,8 +166,17 @@ def addressee_state(text: str, context: dict) -> dict:
 
 
 def speaker_is_unknown(context: dict) -> bool:
+    """Is this capture from a voice that matched NO enrolled print?
+
+    Reads the DOOR's `demoted` flag rather than re-deciding from the id: an
+    "unknown" verdict that was merely uncertain (see voice_guest_demote_below)
+    keeps the owner's turn, and the stricter guest floor must not then fire on
+    it. One decision, two consumers.
+    """
     spk = context.get('speaker')
-    return isinstance(spk, dict) and str(spk.get('id') or '').lower() == 'unknown'
+    if not isinstance(spk, dict) or str(spk.get('id') or '').lower() != 'unknown':
+        return False
+    return bool(spk.get('demoted', True))
 
 
 def unaddressed_bypass(text: str, context: dict) -> str | None:

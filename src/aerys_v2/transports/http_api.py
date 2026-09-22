@@ -21,6 +21,11 @@ from aerys_v2.state import Identity
 log = logging.getLogger(__name__)
 
 
+#: The identity an unrecognized voice lands on. Named once so the door and the
+#: engage gate cannot drift on what "a stranger spoke" means.
+GUEST_VOICE_ID = "voice-guest"
+
+
 class SpeakerTag(BaseModel):
     id: str = "unknown"
     confidence: float = 0.0
@@ -123,15 +128,23 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if settings is None:
             return None
         name = (speaker_id or "unknown").strip().lower()
+        said_unknown = name == "unknown"   # what the RECOGNIZER said, before our floor
         if confidence < settings.voice_speaker_min_confidence:
             name = "unknown"
+        if said_unknown and confidence >= settings.voice_guest_demote_below:
+            # Not a match, but not a stranger either — too close to call. The owner
+            # keeps his own turn rather than being answered as a guest in his house.
+            # Only when the RECOGNIZER itself was unsure: a NAMED match knocked down
+            # by voice_speaker_min_confidence must never land on the owner — that
+            # would hand Megan's uncertain turn to Chris, which is the worse error.
+            return None
         person = speaker_persons.get(name)
         if person is not None:
             if person == owner_person_id:
                 return None
             return person, f"{name.capitalize()} (Voice)"
         if settings.voice_unknown_speaker == "guest":
-            return "voice-guest", "Guest (Voice)"
+            return GUEST_VOICE_ID, "Guest (Voice)"
         return None
 
     def voice_thread() -> str:
@@ -277,8 +290,12 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             if body.speaker is not None:
                 # Who spoke decides WHOSE turn this is. The Bearer proved the owner's
                 # infrastructure is calling; the voice decides the person.
-                identity["speaker"] = {"id": body.speaker.id, "confidence": body.speaker.confidence}
                 who = resolve_speaker(body.speaker.id, body.speaker.confidence)
+                # The DOOR decides whether a verdict demotes; the gate obeys that flag
+                # rather than re-reading the id, so the two can never disagree.
+                demoted = who is not None and who[0] == GUEST_VOICE_ID
+                identity["speaker"] = {"id": body.speaker.id, "confidence": body.speaker.confidence,
+                                       "demoted": demoted}
                 if who is not None:
                     identity["user_id"], identity["display_name"] = who
                     thread_id = person_thread_key(who[0])
