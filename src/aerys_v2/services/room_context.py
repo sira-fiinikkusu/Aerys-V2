@@ -46,6 +46,27 @@ ORDER BY created_at DESC
 LIMIT %(limit)s
 """
 
+#: The same idea for the room she LISTENS in (Chris, 2026-09-22): "if the voice is me
+#: she should be able to recall what the room said in general for the last number of
+#: turns... I dont want guests to be able to poke her memory in that way."
+#:
+#: Why voice needs its own query: every voice turn is filed under whoever SPOKE, so a
+#: turn the recognizer misread landed on the guest thread and vanished from his — "I
+#: have no memory of this", in his words. This selects by SATELLITE rather than by
+#: thread, so a misrecognized turn is still in front of her on his next one. The
+#: dropped-as-background captures are excluded: they were never said to her, and
+#: replaying them would undo the engage gate's whole point.
+VOICE_ROOM_TURNS_SQL = """\
+SELECT display_name, person_id, input_text, emitted_reply, created_at
+FROM v2_turns
+WHERE channel_id = %(channel_id)s AND channel = 'voice'
+  AND input_text IS NOT NULL AND input_text <> ''
+  AND NOT (degraded @> '["dropped_unaddressed"]'::jsonb)
+  AND created_at > NOW() - make_interval(mins => %(minutes)s)
+ORDER BY created_at DESC
+LIMIT %(limit)s
+"""
+
 # Cap each rendered field so a wall-of-text message can't blow the room block past a
 # sane prompt budget. 300 chars matches CLAUDE.md's thread_context lesson (V1 capped
 # snippets at 80 and starved sub-agents of context; 300 is the tuned value).

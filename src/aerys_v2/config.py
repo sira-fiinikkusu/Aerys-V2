@@ -284,6 +284,13 @@ class Settings(BaseSettings):
     # match floor the turn is merely uncertain and stays the owner's — fail-open on
     # identity, the same posture the STT wrapper takes when the recognizer is down.
     voice_guest_demote_below: float = Field(default=0.25, ge=0, le=1)
+    # Chris 2026-09-22: "if the voice is me she should be able to recall what the room
+    # said in general for the last number of turns... I dont want guests to be able to
+    # poke her memory in that way." The room she LISTENS in, by satellite rather than by
+    # thread — so a turn the recognizer misread (which lands on the guest thread) is
+    # still in front of her on his next one. 0 turns = off.
+    voice_room_context_turns: int = Field(default=8, ge=0, le=40)
+    voice_room_context_minutes: int = Field(default=45, ge=1, le=1440)
 
     # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
     # Chat turns stay on whatever model_backend says (oauth = free daily driver);
