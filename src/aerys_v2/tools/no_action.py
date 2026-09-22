@@ -21,6 +21,17 @@ def build_no_action_tool():
         it is a question you must ask the user back (which room? which one?),
         it is outside every tool you have, or there is genuinely nothing to do.
 
+        NEVER call this because you believe a room or device does not exist.
+        You do not hold the list — home_control does, and it matches names
+        loosely: spacing, plurals and word order all resolve, so "sun room",
+        "the sunroom" and "sunroom lights" all reach the same four bulbs. If
+        the user names something to turn on, off, dim or check, CALL
+        home_control and let it answer. When a name really matches nothing it
+        says so, and that answer is worth far more than your guess.
+        (2026-09-21: "Turn off the sun room, please." was declined here with
+        "I don't actually have control over a sun room device" while four
+        sunroom lights sat on the allowlist — and stayed on.)
+
         reason: the one plain sentence you will say to the user — the question
         itself, or what you cannot do and why. Never call this AFTER another
         tool already did the work; never use it to skip a tool that applies.

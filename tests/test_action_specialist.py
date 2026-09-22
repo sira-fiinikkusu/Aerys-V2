@@ -496,3 +496,23 @@ def test_skipped_switches_are_audited_in_the_outbox_payload():
     )
     tool.invoke({"operation": "set_brightness", "entity_id": "sunroom", "brightness_pct": 40})
     assert rec.payloads and rec.payloads[0]["skipped"] == ["switch.sunroom_fan"]
+
+
+def test_no_action_forbids_declining_on_a_guess_that_a_room_does_not_exist():
+    """2026-09-21, reported by Aerys herself: "Turn off the sun room, please." was
+    answered with "I don't actually have control over a sun room device in my system"
+    and no_action — while four sunroom lights sat on the allowlist and stayed on.
+
+    resolve_targets handles every one of those phrasings (asserted below), so the
+    tool was never the problem: the model declined without calling it. The exit's
+    own description has to say that non-existence is not its call to make."""
+    from aerys_v2.tools.home_control import resolve_targets
+
+    doc = build_no_action_tool().description
+    assert "NEVER call this because you believe a room or device does not exist" in doc
+    assert "home_control" in doc, "it must name the tool that DOES hold the list"
+
+    canary = frozenset({f"light.sunroom_light_{i}" for i in (1, 2, 3, 4)} | {"switch.office_light_1"})
+    for phrasing in ("sun room", "sunroom", "the sun room", "sun room lights", "sunroom lights"):
+        targets, problem = resolve_targets(phrasing, "turn_off", canary, None)
+        assert problem is None and len(targets) == 4, f"{phrasing!r} -> {targets} / {problem}"
