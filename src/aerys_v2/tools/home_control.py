@@ -130,6 +130,33 @@ STATE_WORDS: dict[str, str] = {
     "closed": "off", "shut": "off", "close": "off",
 }
 
+# Entities that carry an opening-ish device_class but are NOT openings.
+# Chris's eMotion Air presence sensors expose their FACE BUTTON on an "opening"
+# channel: each press flips the contact, either direction counts, and only the
+# TRANSITION means anything — the state itself is meaningless. Home Assistant has no
+# device class for "button", and twelve of his automations trigger on these, so the
+# label stays correct-for-him in HA and the correction lives here (his call, 9/24:
+# "i dont want to mess with them much since they are working pretty well").
+#
+# They are excluded from CLASS-based matching only. Asked for by name they still come
+# back — this stops them answering "what is open?", it does not hide them.
+# Words that ask about openings rather than name a thing. A deny-listed entity must not
+# answer these BY NAME either — "open" is a substring of "…_opening", which is exactly how
+# a face button would sneak back into "what is open?" through the name path.
+OPENING_WORDS: frozenset[str] = frozenset(
+    set(CLASS_SYNONYMS) | set(NAME_SYNONYMS) | set(STATE_WORDS)
+)
+
+NOT_OPENINGS_PREFIX_SUFFIX: tuple[tuple[str, str], ...] = (
+    ("binary_sensor.emotion_air_", "_opening"),
+)
+
+
+def _is_not_really_an_opening(entity: str) -> bool:
+    return any(entity.startswith(p) and entity.endswith(sfx)
+               for p, sfx in NOT_OPENINGS_PREFIX_SUFFIX)
+
+
 RETIRED_GROUP = "group.adt_retired_contacts"
 RETIRED_NOTE = " (retired sensor — reads open because the hardware is gone, NOT a real open)"
 
@@ -859,9 +886,14 @@ def build_search_entities_tool(
             haystack = f"{entity} {friendly}".lower()
             dev_class = str(attrs.get("device_class") or "").lower()
             hits = 0
-            for classes, words in zip(term_classes, term_words):
+            counts = not _is_not_really_an_opening(entity)
+            for t, classes, words in zip(terms, term_classes, term_words):
+                # A button on an opening channel answers to its own name, never to a
+                # question about openings — by class OR by an unlucky substring.
+                if not counts and _term_variants(t) <= OPENING_WORDS:
+                    continue
                 by_name = any(w in haystack for w in words)
-                by_class = bool(dev_class) and dev_class in classes
+                by_class = counts and bool(dev_class) and dev_class in classes
                 if by_name or by_class:
                     hits += 1
             if hits:

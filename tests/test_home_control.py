@@ -726,3 +726,18 @@ def test_asking_what_is_open_floats_the_open_things_above_the_shut_ones():
 def test_state_word_boosts_but_never_hides():
     tool, _ = make_search(_house_states())
     assert "binary_sensor.front_door" in _entities(tool.invoke({"query": "open"}))
+
+
+def test_a_button_on_an_opening_channel_never_answers_what_is_open():
+    """eMotion Air face buttons advertise as device_class opening; they are not openings."""
+    states = _house_states() + [
+        ha_state("binary_sensor.emotion_air_living_room_opening", "on",
+                 friendly="eMotion Air Living Room Opening", device_class="opening"),
+    ]
+    tool, _ = make_search(states)
+    for q in ("open", "door", "window"):
+        assert "binary_sensor.emotion_air_living_room_opening" not in _entities(
+            tool.invoke({"query": q})), q
+    # but asked for BY NAME it is still findable — excluded from class matching, not hidden
+    assert "binary_sensor.emotion_air_living_room_opening" in _entities(
+        tool.invoke({"query": "emotion air living room"}))
