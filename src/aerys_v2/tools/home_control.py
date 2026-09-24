@@ -74,6 +74,46 @@ STATE_TRUNCATE_AT = 60
 # they're literally all we found (then honesty beats tidiness: show them).
 DEAD_STATES = frozenset({"unavailable", "unknown"})
 
+# --- search_entities: finding a thing by what it IS, not only what it is CALLED ---
+# 2026-09-24, observed live: asked whether anything was open, she answered "everything
+# is shut except Kitchen Window 2" while three sliding doors stood open. The matcher was
+# pure substring, so "door"/"window" scored ZERO against `binary_sensor.kitchen_slider`
+# — the sliders were structurally unfindable — and "doors"/"windows" scored zero against
+# everything, because the plural is not a substring of the singular. Worse, the one thing
+# she DID name is a retired sensor that reads permanently-open. Wrong in both directions.
+#
+# So a term may now also hit on the entity's device_class. The map is deliberately small
+# and house-shaped; it is not a thesaurus.
+CLASS_SYNONYMS: dict[str, frozenset[str]] = {
+    "door": frozenset({"door", "garage_door", "opening"}),
+    "slider": frozenset({"door", "opening"}),
+    "sliding": frozenset({"door", "opening"}),
+    "window": frozenset({"window", "opening"}),
+    "opening": frozenset({"door", "window", "opening", "garage_door"}),
+    "entry": frozenset({"door", "opening"}),
+    # "is anything open?" names no entity at all — it names a STATE of a kind of thing.
+    "open": frozenset({"door", "window", "opening", "garage_door"}),
+    "opened": frozenset({"door", "window", "opening", "garage_door"}),
+    "closed": frozenset({"door", "window", "opening", "garage_door"}),
+    "shut": frozenset({"door", "window", "opening", "garage_door"}),
+}
+
+# Hardware that is down or removed reads PERMANENTLY OPEN. Home Assistant holds the one
+# authoritative list (configuration.yaml), so this tool reads it rather than keeping a
+# second copy that would drift. Absent group = no exclusions, behaviour unchanged.
+RETIRED_GROUP = "group.adt_retired_contacts"
+RETIRED_NOTE = " (retired sensor — reads open because the hardware is gone, NOT a real open)"
+
+
+def _term_variants(term: str) -> set[str]:
+    """The term plus a naive singular, so "doors" reaches "door"."""
+    out = {term}
+    if term.endswith("es") and len(term) > 3:
+        out.add(term[:-2])
+    if term.endswith("s") and len(term) > 2:
+        out.add(term[:-1])
+    return out
+
 # A transient transport failure (connection refused / DNS / timeout — a network
 # blip or HA mid-restart) gets ONE quick retry after a short backoff before we
 # fall back to the honest "unreachable" message. httpx.TransportError is the
@@ -734,8 +774,13 @@ def build_search_entities_tool(
         a nickname. NEVER guess an entity id — guesses 404; searching works.
 
         query: one or more words to match, e.g. "jolteon battery" or
-        "office lamp". Matches entity ids and friendly names,
-        case-insensitive. Returns up to 30 matches, one per line:
+        "office lamp". Matches entity ids and friendly names, case-insensitive,
+        and ALSO matches what a thing IS: "door", "window", "open" and their
+        plurals find anything Home Assistant classes as a door/window/opening,
+        whatever it happens to be named (a sliding door called "Kitchen Slider"
+        is found by "door"). A line ending in "(retired sensor ...)" is dead
+        hardware stuck reading open — never report it as something being open.
+        Returns up to 30 matches, one per line:
         "entity_id | friendly_name | state" (units included when known).
         Then call home_control get_state with the exact entity_id you picked,
         or answer directly from the state shown here.
@@ -752,13 +797,35 @@ def build_search_entities_tool(
             # as home_control (an exception kills the whole action turn).
             return f"Home Assistant is unreachable right now ({e})."
 
+        # The one authoritative retired list, read from the same payload — no second call.
+        retired: frozenset[str] = frozenset()
+        for item in states:
+            if item.get("entity_id") == RETIRED_GROUP:
+                members = (item.get("attributes") or {}).get("entity_id") or ()
+                retired = frozenset(str(m) for m in members)
+                break
+
+        # Precompute, per term, the device_classes it is willing to match.
+        term_classes: list[frozenset[str]] = []
+        for t in terms:
+            classes: set[str] = set()
+            for v in _term_variants(t):
+                classes |= CLASS_SYNONYMS.get(v, frozenset())
+            term_classes.append(frozenset(classes))
+
         scored: list[tuple[int, str, str, dict]] = []
         for item in states:
             entity = item.get("entity_id") or ""
             attrs = item.get("attributes") or {}
             friendly = str(attrs.get("friendly_name") or "")
             haystack = f"{entity} {friendly}".lower()
-            hits = sum(1 for t in terms if t in haystack)
+            dev_class = str(attrs.get("device_class") or "").lower()
+            hits = 0
+            for t, classes in zip(terms, term_classes):
+                by_name = any(v in haystack for v in _term_variants(t))
+                by_class = bool(dev_class) and dev_class in classes
+                if by_name or by_class:
+                    hits += 1
             if hits:
                 scored.append((hits, entity, friendly, item))
         if not scored:
@@ -787,6 +854,8 @@ def build_search_entities_tool(
             unit = (item.get("attributes") or {}).get("unit_of_measurement")
             if unit:
                 state = f"{state} {unit}"
+            if entity in retired:
+                state = f"{state}{RETIRED_NOTE}"
             lines.append(f"{entity} | {friendly or '(no name)'} | {state}")
         return "\n".join(lines)
 

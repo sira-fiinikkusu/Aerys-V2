@@ -267,12 +267,14 @@ def test_no_conn_factory_means_no_outbox_but_write_works():
 
 # ---- search_entities: read-only discovery ---------------------------------------
 
-def ha_state(entity_id, state="on", friendly=None, unit=None):
+def ha_state(entity_id, state="on", friendly=None, unit=None, device_class=None):
     attrs = {}
     if friendly is not None:
         attrs["friendly_name"] = friendly
     if unit is not None:
         attrs["unit_of_measurement"] = unit
+    if device_class is not None:
+        attrs["device_class"] = device_class
     return {"entity_id": entity_id, "state": state, "attributes": attrs}
 
 
@@ -610,3 +612,86 @@ def test_missing_or_bad_last_changed_falls_back_to_already_there():
     ha.state_fields["light.desk"] = {"last_changed": "not-a-date"}
     out = make_tool(ha).invoke({"operation": "turn_off", "entity_id": "light.desk"})
     assert out.startswith("OK (already there):")
+
+
+# ---- search_entities: found by what it IS, not only what it is called ----------
+# Regression cover for 2026-09-24: asked what was open, she answered "everything is
+# shut except Kitchen Window 2" while three sliding doors stood open and that window
+# is dead hardware. Substring matching could not reach a door named "Slider", could
+# not reach a singular from a plural, and happily quoted a retired sensor as open.
+
+def _house_states():
+    return [
+        ha_state("binary_sensor.kitchen_slider", "on", friendly="Kitchen Slider",
+                 device_class="door"),
+        ha_state("binary_sensor.office_window", "on", friendly="Office Window",
+                 device_class="window"),
+        ha_state("binary_sensor.front_door", "off", friendly="Front Door",
+                 device_class="door"),
+        ha_state("sensor.office_temperature", "78", friendly="Office Temperature",
+                 unit="°F"),
+    ]
+
+
+def _retired_group(members):
+    return {
+        "entity_id": "group.adt_retired_contacts",
+        "state": "on",
+        "attributes": {"friendly_name": "ADT Retired Contacts",
+                       "entity_id": list(members)},
+    }
+
+
+def _entities(out: str) -> set:
+    return {line.split(" | ")[0] for line in out.splitlines()}
+
+
+def test_search_finds_a_sliding_door_from_the_word_door():
+    """The name holds neither "door" nor "window" — the device_class does."""
+    tool, _ = make_search(_house_states())
+    out = tool.invoke({"query": "door"})
+    assert "binary_sensor.kitchen_slider" in _entities(out)
+
+
+def test_search_plurals_reach_the_singular():
+    tool, _ = make_search(_house_states())
+    singular = _entities(tool.invoke({"query": "door window"}))
+    plural = _entities(tool.invoke({"query": "doors windows"}))
+    assert plural == singular
+    assert "binary_sensor.kitchen_slider" in plural
+
+
+def test_search_open_names_a_state_not_an_entity():
+    """"is anything open?" names no entity; it names a kind of thing."""
+    tool, _ = make_search(_house_states())
+    found = _entities(tool.invoke({"query": "open"}))
+    assert {"binary_sensor.kitchen_slider", "binary_sensor.office_window",
+            "binary_sensor.front_door"} <= found
+    assert "sensor.office_temperature" not in found
+
+
+def test_retired_sensor_is_flagged_and_never_reads_as_a_plain_open():
+    states = _house_states() + [_retired_group(["binary_sensor.office_window"])]
+    tool, _ = make_search(states)
+    out = tool.invoke({"query": "window"})
+    line = [ln for ln in out.splitlines()
+            if ln.startswith("binary_sensor.office_window")][0]
+    assert "retired sensor" in line
+    assert "hardware is gone" in line
+    # the live one is untouched
+    other = tool.invoke({"query": "door"})
+    assert "retired sensor" not in other
+
+
+def test_retired_group_absent_changes_nothing():
+    with_group = make_search(_house_states() + [_retired_group([])])[0]
+    without = make_search(_house_states())[0]
+    assert without.invoke({"query": "window"}) == with_group.invoke({"query": "window"})
+    assert "retired sensor" not in without.invoke({"query": "window"})
+
+
+def test_retired_lookup_adds_no_second_request():
+    states = _house_states() + [_retired_group(["binary_sensor.office_window"])]
+    tool, ha = make_search(states)
+    tool.invoke({"query": "window"})
+    assert ha.requests == [("GET", "/api/states")]
