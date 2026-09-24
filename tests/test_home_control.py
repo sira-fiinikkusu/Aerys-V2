@@ -622,8 +622,10 @@ def test_missing_or_bad_last_changed_falls_back_to_already_there():
 
 def _house_states():
     return [
-        ha_state("binary_sensor.kitchen_slider", "on", friendly="Kitchen Slider",
-                 device_class="door"),
+        # ⚠️ The real sliders carry device_class None — only the NAME says what they
+        # are. The first version of this fix passed because the test invented a
+        # device_class the house does not have. Keep this shape.
+        ha_state("binary_sensor.kitchen_slider", "on", friendly="Kitchen Slider"),
         ha_state("binary_sensor.office_window", "on", friendly="Office Window",
                  device_class="window"),
         ha_state("binary_sensor.front_door", "off", friendly="Front Door",
@@ -695,3 +697,16 @@ def test_retired_lookup_adds_no_second_request():
     tool, ha = make_search(states)
     tool.invoke({"query": "window"})
     assert ha.requests == [("GET", "/api/states")]
+
+
+def test_an_unclassified_slider_is_still_found_by_door():
+    """device_class None, name says "Slider" — the house's real shape."""
+    tool, _ = make_search(_house_states())
+    for q in ("door", "doors", "open"):
+        assert "binary_sensor.kitchen_slider" in _entities(tool.invoke({"query": q})), q
+
+
+def test_a_word_still_matches_its_own_name():
+    tool, _ = make_search(_house_states())
+    assert "binary_sensor.kitchen_slider" in _entities(tool.invoke({"query": "slider"}))
+    assert "sensor.office_temperature" in _entities(tool.invoke({"query": "temperature"}))

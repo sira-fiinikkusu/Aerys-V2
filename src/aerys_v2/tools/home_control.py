@@ -101,6 +101,25 @@ CLASS_SYNONYMS: dict[str, frozenset[str]] = {
 # Hardware that is down or removed reads PERMANENTLY OPEN. Home Assistant holds the one
 # authoritative list (configuration.yaml), so this tool reads it rather than keeping a
 # second copy that would drift. Absent group = no exclusions, behaviour unchanged.
+# The class map above only reaches things Home Assistant has CLASSIFIED. Chris's three
+# sliding doors carry device_class None — they are named "Kitchen Slider" and nothing
+# else — so a class-only fix still could not find them. (I shipped exactly that half-fix
+# first, because my test invented a slider WITH device_class="door" instead of using the
+# shape the house actually has. Test against the real thing.) So a query word also
+# expands to the OTHER WORDS a house calls that thing.
+NAME_SYNONYMS: dict[str, frozenset[str]] = {
+    "door": frozenset({"door", "slider", "sliding", "slide"}),
+    "slider": frozenset({"slider", "sliding", "door"}),
+    "sliding": frozenset({"slider", "sliding", "door"}),
+    "window": frozenset({"window"}),
+    # "open"/"shut" name no object, so they lean entirely on CLASS_SYNONYMS — except
+    # for the sliders, which have no class at all and would otherwise stay invisible.
+    "open": frozenset({"slider", "sliding"}),
+    "opened": frozenset({"slider", "sliding"}),
+    "closed": frozenset({"slider", "sliding"}),
+    "shut": frozenset({"slider", "sliding"}),
+}
+
 RETIRED_GROUP = "group.adt_retired_contacts"
 RETIRED_NOTE = " (retired sensor — reads open because the hardware is gone, NOT a real open)"
 
@@ -805,13 +824,18 @@ def build_search_entities_tool(
                 retired = frozenset(str(m) for m in members)
                 break
 
-        # Precompute, per term, the device_classes it is willing to match.
+        # Precompute, per term, the device_classes AND the alternative names it matches.
         term_classes: list[frozenset[str]] = []
+        term_words: list[frozenset[str]] = []
         for t in terms:
             classes: set[str] = set()
+            words: set[str] = set()
             for v in _term_variants(t):
                 classes |= CLASS_SYNONYMS.get(v, frozenset())
+                words |= NAME_SYNONYMS.get(v, frozenset())
+                words.add(v)
             term_classes.append(frozenset(classes))
+            term_words.append(frozenset(words))
 
         scored: list[tuple[int, str, str, dict]] = []
         for item in states:
@@ -821,8 +845,8 @@ def build_search_entities_tool(
             haystack = f"{entity} {friendly}".lower()
             dev_class = str(attrs.get("device_class") or "").lower()
             hits = 0
-            for t, classes in zip(terms, term_classes):
-                by_name = any(v in haystack for v in _term_variants(t))
+            for classes, words in zip(term_classes, term_words):
+                by_name = any(w in haystack for w in words)
                 by_class = bool(dev_class) and dev_class in classes
                 if by_name or by_class:
                     hits += 1
