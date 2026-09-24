@@ -471,7 +471,10 @@ def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
                 memories_conn.read_only = True
             results = run_signals(
                 turns_conn=turns_conn, memories_conn=memories_conn,
-                person_id=settings.owner_person_id, aliases=aliases, window=args.window)
+                person_id=settings.owner_person_id, aliases=aliases, window=args.window,
+                retired_openings=[r.strip() for r
+                                  in (settings.signal_retired_openings or "").split(",")
+                                  if r.strip()])
         finally:
             if memories_conn is not None:
                 memories_conn.close()

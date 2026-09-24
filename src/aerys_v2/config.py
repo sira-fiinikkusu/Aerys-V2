@@ -292,6 +292,15 @@ class Settings(BaseSettings):
     voice_room_context_turns: int = Field(default=8, ge=0, le=40)
     voice_room_context_minutes: int = Field(default=45, ge=1, le=1440)
 
+    # 2026-09-24: contact sensors whose hardware is gone read PERMANENTLY OPEN. Home
+    # Assistant holds the one authoritative list (group.adt_retired_contacts) and the
+    # tool reads it live; this is the SIGNAL's copy, used only to check afterwards that
+    # she never presented one as a real opening. It mirrors that group and does not own
+    # it — a replaced sensor is caught on the house side by the alive-again automation,
+    # which is the backstop for this drifting. Friendly names, comma-separated, because
+    # the check reads her prose rather than her entity ids.
+    signal_retired_openings: str = Field(default="")
+
     # ---- TOOLS block (Option C hybrid, owner-ratified) -----------------------
     # Chat turns stay on whatever model_backend says (oauth = free daily driver);
     # TOOL turns always run on the metered API backend — the SDK backend is

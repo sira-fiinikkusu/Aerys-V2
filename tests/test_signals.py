@@ -223,3 +223,76 @@ def test_the_time_is_shown_in_HIS_clock_not_the_database_s():
 def test_undated_rows_simply_omit_the_when():
     result = signals.room_on_public_turns([{'id': 7, 'channel': 'guild', 'room_context': None}])
     assert result.failed and 'newest' not in result.detail
+
+
+# ---- house-state claims must be read, not recalled --------------------------------
+# 2026-09-24: "everything's shut except Kitchen Window 2" — three sliders open, and that
+# window is retired hardware. Every signal passed that morning; this is the one that
+# would not have.
+
+def _turn(i, *, ask, reply, tool_calls=None, created_at=None):
+    return {'id': i, 'channel': 'voice', 'display_name': 'Sira',
+            'input_text': ask, 'emitted_reply': reply,
+            'tool_calls': tool_calls, 'room_context': '', 'created_at': created_at}
+
+
+RETIRED = ('Kitchen Window 2', 'Master Bedroom Window', 'Office Window')
+
+
+def test_naming_a_retired_sensor_as_open_is_a_failure():
+    turns = [_turn(1, ask='Is anything open in the house right now?',
+                   reply="Everything's shut except Kitchen Window 2.",
+                   tool_calls=[{'name': 'search_entities'}])]
+    sig = signals.house_state_claims_are_grounded(turns, retired_openings=RETIRED)
+    assert sig.status == signals.FAIL
+    assert 'Kitchen Window 2' in sig.detail
+
+
+def test_naming_a_retired_sensor_AND_saying_it_is_retired_is_fine():
+    turns = [_turn(2, ask='anything open?',
+                   reply=("The three sliders are open. Kitchen Window 2 also reads open "
+                          "but that is retired hardware, so it does not count."),
+                   tool_calls=[{'name': 'search_entities'}])]
+    assert signals.house_state_claims_are_grounded(
+        turns, retired_openings=RETIRED).status == signals.PASS
+
+
+def test_settling_the_whole_house_with_no_tool_call_is_a_failure():
+    turns = [_turn(3, ask='are all the doors and windows closed?',
+                   reply='Everything is closed.', tool_calls=None)]
+    sig = signals.house_state_claims_are_grounded(turns, retired_openings=RETIRED)
+    assert sig.status == signals.FAIL
+    assert 'no tool call' in sig.detail
+
+
+def test_the_same_claim_backed_by_a_read_passes():
+    turns = [_turn(4, ask='are all the doors and windows closed?',
+                   reply='Everything is closed.',
+                   tool_calls=[{'name': 'search_entities', 'args': {'query': 'open'}}])]
+    assert signals.house_state_claims_are_grounded(
+        turns, retired_openings=RETIRED).status == signals.PASS
+
+
+def test_a_named_device_answer_is_not_a_house_claim():
+    """She may say one door is shut without having swept the house."""
+    turns = [_turn(5, ask='is the front door closed?', reply='Yes, the front door is closed.',
+                   tool_calls=None)]
+    assert signals.house_state_claims_are_grounded(
+        turns, retired_openings=RETIRED).status == signals.PASS
+
+
+def test_turns_that_were_never_about_openings_are_not_checked():
+    turns = [_turn(6, ask='what is the temperature?', reply='Everything is closed.',
+                   tool_calls=None)]
+    assert signals.house_state_claims_are_grounded(
+        turns, retired_openings=RETIRED).status == signals.SKIP
+
+
+def test_no_retired_list_still_catches_the_ungrounded_sweep():
+    turns = [_turn(7, ask='anything open?', reply='Nothing is open.', tool_calls=None)]
+    assert signals.house_state_claims_are_grounded(turns).status == signals.FAIL
+
+
+def test_skip_is_not_a_pass_here_either():
+    assert signals.house_state_claims_are_grounded([], retired_openings=RETIRED).status \
+        == signals.SKIP

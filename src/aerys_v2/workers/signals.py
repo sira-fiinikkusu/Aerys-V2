@@ -43,6 +43,24 @@ TAGGED = re.compile(r'^\s*\[[a-z][a-z ]*\]', re.I)
 #: into holding her own engineering reports (2026-09-13: five for five false).
 EXPECTED_HOLD_REASONS = ('judge:', 'non-owner transcript', 'future observation')
 
+#: A reply that settles the state of the whole house rather than one device. 2026-09-24:
+#: asked what was open she said "everything's shut except Kitchen Window 2" — three
+#: sliding doors stood open and that window is dead hardware. Confident, specific, wrong
+#: in both directions, and every existing signal passed that day.
+HOUSE_SETTLED = re.compile(
+    r"\b(?:everything|everything\s+else|all\s+(?:the\s+)?(?:doors|windows|others?))\b"
+    r"[^.!?\n]{0,40}?\b(?:closed|shut|locked)\b"
+    r"|\bnothing(?:\s+else)?\s+is\s+open\b"
+    r"|\bno(?:thing)?\s+(?:doors?|windows?)\s+(?:are\s+)?open\b",
+    re.I)
+
+#: The question that provokes it. Both sides must be present: she is allowed to say a
+#: named door is shut without having swept the house.
+ASKED_ABOUT_OPENINGS = re.compile(
+    r"\b(?:open|opened|shut|closed|locked)\b.{0,60}?\b(?:house|anything|everything|doors?|windows?)\b"
+    r"|\b(?:house|anything|everything|doors?|windows?)\b.{0,60}?\b(?:open|opened|shut|closed|locked)\b",
+    re.I)
+
 
 @dataclass(frozen=True)
 class Signal:
@@ -163,6 +181,52 @@ def quarantine_not_noisy(held) -> Signal:
                                + ', '.join(f"{h.get('id')} ({h.get('reason')})" for h in bad[:3]))
 
 
+def house_state_claims_are_grounded(turns, *, retired_openings=()) -> Signal:
+    """When she settles the state of the house, the claim must be read, not recalled.
+
+    2026-09-24. Asked "is anything open?", she answered that everything was shut except
+    Kitchen Window 2. Three sliding doors were open, and Kitchen Window 2 is retired
+    hardware that reads permanently-open. The tool could not find a door named "Slider"
+    and happily quoted a sensor Chris had already written off. Every signal that morning
+    passed, because none of them looks at whether what she SAID matches what she READ.
+
+    Two things are checkable from the row alone and both were true that day:
+
+    1. She named a retired sensor as though it were a real opening. That list is Home
+       Assistant's `group.adt_retired_contacts`; this mirrors it rather than owns it, and
+       the alive-again automation on the house side covers a sensor coming back.
+    2. She settled the whole house without reading it — a sweeping "everything else is
+       closed" on a turn that made no tool call at all is recall, not observation.
+
+    What this deliberately does NOT cover: the tool returning an incomplete picture while
+    she reports it faithfully. That is a tool bug, it lives in the tool's own tests, and
+    pretending a signal over replies can see it would be the comfort blanket this module
+    was written to avoid.
+    """
+    retired = [r for r in (retired_openings or ()) if r and str(r).strip()]
+    relevant = [t for t in turns
+                if (t.get('emitted_reply') or '').strip()
+                and ASKED_ABOUT_OPENINGS.search(t.get('input_text') or '')]
+    offenders = []
+    for turn in relevant:
+        reply = turn['emitted_reply']
+        named = [r for r in retired if re.search(re.escape(str(r)), reply, re.I)]
+        if named and not re.search(r'\bretired|dead|stuck|not\s+(?:a\s+)?real|ignore\b',
+                                   reply, re.I):
+            offenders.append((turn.get('id'), f"named retired {named[0]!r} as open",
+                              turn.get('created_at')))
+            continue
+        if HOUSE_SETTLED.search(reply) and not turn.get('tool_calls'):
+            offenders.append((turn.get('id'), 'settled the whole house with no tool call',
+                              turn.get('created_at')))
+    return _result(
+        'house_state_claims_are_grounded', offenders, len(relevant),
+        ok_detail='every house-state answer was read, and no retired sensor was called open',
+        bad_detail=lambda bad: f"{len(bad)} house-state answer(s) ungrounded: "
+                               + '; '.join(f'{i} ({why})' for i, why, _ in bad[:3])
+                               + newest_when([{'created_at': w} for *_, w in bad if w]))
+
+
 def portable_reaches_house(*, newest_portable_id, visible_ids) -> Signal:
     """The newest portable turn should be readable by the house body (board #12)."""
     if newest_portable_id is None:
@@ -194,7 +258,8 @@ def format_report(results) -> str:
 # ── reading the traffic (SELECT only; the worker holds a read-only connection) ──
 
 WINDOW_TURNS_SQL = """\
-SELECT id, channel, display_name, emitted_reply, room_context, created_at
+SELECT id, channel, display_name, emitted_reply, room_context, created_at,
+       input_text, tool_calls
 FROM v2_turns
 WHERE created_at > now() - %(window)s::interval
 """
@@ -228,7 +293,7 @@ LIMIT %(limit)s
 
 
 def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
-                window='24 hours', portable_limit=100):
+                window='24 hours', portable_limit=100, retired_openings=()):
     """Every signal, over one window. Returns the results; never writes anything.
 
     memories_conn is separate because the memories live in the prod database while
@@ -236,7 +301,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
     worker here observes.
     """
     turns = [dict(zip(('id', 'channel', 'display_name', 'emitted_reply', 'room_context',
-                      'created_at'), row))
+                      'created_at', 'input_text', 'tool_calls'), row))
              for row in turns_conn.execute(WINDOW_TURNS_SQL, {'window': window}).fetchall()]
     held = [dict(zip(('id', 'reason'), row))
             for row in turns_conn.execute(HELD_SQL).fetchall()]
@@ -246,6 +311,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
         owner_named_in_room(turns, aliases=aliases),
         typed_replies_untagged(turns),
         quarantine_not_noisy(held),
+        house_state_claims_are_grounded(turns, retired_openings=retired_openings),
     ]
 
     if memories_conn is not None:
