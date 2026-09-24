@@ -120,6 +120,16 @@ NAME_SYNONYMS: dict[str, frozenset[str]] = {
     "shut": frozenset({"slider", "sliding"}),
 }
 
+# Asking "what is open?" matches ~100 entities in this house, and SEARCH_LIMIT cuts at
+# 30 ranked by term-hits then entity_id — i.e. ALPHABETICALLY. Live check: she named the
+# kitchen slider and missed the living-room and office ones purely because k sorts before
+# l and o. A state word in the query is therefore a ranking signal: if you asked what is
+# OPEN, the things that ARE open outrank the things that are not.
+STATE_WORDS: dict[str, str] = {
+    "open": "on", "opened": "on",
+    "closed": "off", "shut": "off", "close": "off",
+}
+
 RETIRED_GROUP = "group.adt_retired_contacts"
 RETIRED_NOTE = " (retired sensor — reads open because the hardware is gone, NOT a real open)"
 
@@ -837,6 +847,10 @@ def build_search_entities_tool(
             term_classes.append(frozenset(classes))
             term_words.append(frozenset(words))
 
+        # A state word in the query ("open"/"shut") says which side to float to the top.
+        wanted_states = {STATE_WORDS[v] for t in terms for v in _term_variants(t)
+                         if v in STATE_WORDS}
+
         scored: list[tuple[int, str, str, dict]] = []
         for item in states:
             entity = item.get("entity_id") or ""
@@ -851,6 +865,10 @@ def build_search_entities_tool(
                 if by_name or by_class:
                     hits += 1
             if hits:
+                # Rank boost, never a filter: asking what is open must not hide a
+                # closed door you named directly.
+                if wanted_states and str(item.get("state")) in wanted_states:
+                    hits += 1
                 scored.append((hits, entity, friendly, item))
         if not scored:
             return f"No Home Assistant entities match '{query}'."

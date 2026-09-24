@@ -710,3 +710,19 @@ def test_a_word_still_matches_its_own_name():
     tool, _ = make_search(_house_states())
     assert "binary_sensor.kitchen_slider" in _entities(tool.invoke({"query": "slider"}))
     assert "sensor.office_temperature" in _entities(tool.invoke({"query": "temperature"}))
+
+
+def test_asking_what_is_open_floats_the_open_things_above_the_shut_ones():
+    """SEARCH_LIMIT cuts alphabetically; a state word says which side matters."""
+    tool, _ = make_search(_house_states())
+    out = tool.invoke({"query": "open"}).splitlines()
+    order = [ln.split(" | ")[0] for ln in out]
+    # front_door is closed and sorts FIRST alphabetically; it must not outrank
+    # the two that are actually open.
+    assert order.index("binary_sensor.kitchen_slider") < order.index("binary_sensor.front_door")
+    assert order.index("binary_sensor.office_window") < order.index("binary_sensor.front_door")
+
+
+def test_state_word_boosts_but_never_hides():
+    tool, _ = make_search(_house_states())
+    assert "binary_sensor.front_door" in _entities(tool.invoke({"query": "open"}))
