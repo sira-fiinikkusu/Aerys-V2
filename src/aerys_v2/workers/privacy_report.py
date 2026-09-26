@@ -4,11 +4,12 @@ from __future__ import annotations
 
 def read_rows(conn, window: str = '24 hours') -> list[dict]:
     cur = conn.execute(
-        "SELECT judge, keyword_hit, jev_p_public, jev_error, jev_latency_ms, sample_len "
+        "SELECT judge, keyword_hit, jev_p_public, jev_error, jev_latency_ms, sample_len, jev_category, jev_p_ordinary "
         "FROM v2_privacy_shadow WHERE created_at > now() - %s::interval ORDER BY created_at",
         (window,),
     )
-    return [dict(zip(('judge', 'keyword_hit', 'jev_p_public', 'jev_error', 'jev_latency_ms', 'sample_len'), r))
+    return [dict(zip(('judge', 'keyword_hit', 'jev_p_public', 'jev_error', 'jev_latency_ms', 'sample_len',
+                      'jev_category', 'jev_p_ordinary'), r))
             for r in cur.fetchall()]
 
 
@@ -29,6 +30,24 @@ def summarize(rows: list[dict], public_floor: float = 0.9) -> dict:
         'jev_private_but_judge_public': jev_private_judge_public,   # the conservative direction
         'keyword_hits': sum(1 for r in rows if r.get('keyword_hit')),
         'p50_ms': p50,
+        **_category_summary(rows),
+    }
+
+
+def _category_summary(rows: list[dict], ordinary_floor: float = 0.5) -> dict:
+    """The 9/26 candidate: private when p(ordinary) < 0.5. Counts by category, and both
+    disagreement directions against the metered judge. Rows before migration 013 have none."""
+    scored = [r for r in rows if r.get('jev_p_ordinary') is not None]
+    private = lambda r: float(r['jev_p_ordinary']) < ordinary_floor  # noqa: E731
+    by_category: dict[str, int] = {}
+    for r in scored:
+        if private(r):
+            by_category[r.get('jev_category') or '?'] = by_category.get(r.get('jev_category') or '?', 0) + 1
+    return {
+        'category_scored': len(scored),
+        'category_public_but_judge_private': sum(not private(r) and r['judge'] == 'private' for r in scored),
+        'category_private_but_judge_public': sum(private(r) and r['judge'] == 'public' for r in scored),
+        'category_private_by_kind': dict(sorted(by_category.items())),
     }
 
 
@@ -40,4 +59,7 @@ def format_report(rows: list[dict]) -> str:
         f"agreement (jev public at p>=0.9)={pct(s['agreement'])} | jev p50={s['p50_ms']} ms",
         f"jev PUBLIC but judge PRIVATE (would leak) = {s['jev_public_but_judge_private']}",
         f"jev private but judge public (would over-hide) = {s['jev_private_but_judge_public']}",
+        f"category candidate (private at p(ordinary)<0.5): scored={s['category_scored']} "
+        f"public-but-judge-private={s['category_public_but_judge_private']} "
+        f"private-but-judge-public={s['category_private_but_judge_public']} by kind={s['category_private_by_kind']}",
     ])

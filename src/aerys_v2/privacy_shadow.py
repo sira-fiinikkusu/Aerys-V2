@@ -21,8 +21,8 @@ from aerys_v2.services.content_privacy import PRIVATE, PUBLIC, keyword_verdict
 log = logging.getLogger(__name__)
 
 INSERT = (
-    "INSERT INTO v2_privacy_shadow (judge, keyword_hit, jev_p_public, jev_error, jev_latency_ms, sample_len) "
-    "VALUES (%s, %s, %s, %s, %s, %s)"
+    "INSERT INTO v2_privacy_shadow (judge, keyword_hit, jev_p_public, jev_error, jev_latency_ms, sample_len, "
+    "jev_category, jev_p_ordinary) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
 )
 
 
@@ -36,7 +36,8 @@ def db_sink_for(database_url: str | None) -> Callable[[dict], None] | None:
         try:
             with psycopg.connect(database_url, connect_timeout=5) as conn:
                 conn.execute(INSERT, (row["judge"], row["keyword_hit"], row.get("jev_p_public"),
-                                      row.get("jev_error"), row.get("jev_latency_ms"), row["sample_len"]))
+                                      row.get("jev_error"), row.get("jev_latency_ms"), row["sample_len"],
+                                      row.get("jev_category"), row.get("jev_p_ordinary")))
         except Exception:  # audit only — never touch the turn or the judge's verdict
             log.warning("privacy shadow row not written", exc_info=True)
 
@@ -64,6 +65,8 @@ def shadow_privacy_fn(judge: Callable[[str], str], reflex, sink: Callable[[dict]
                 "jev_error": jev.get("error"),
                 "jev_latency_ms": jev.get("latency_ms"),
                 "sample_len": len(text or ""),
+                "jev_category": jev.get("category"),     # a label from a fixed list, never content
+                "jev_p_ordinary": jev.get("p_ordinary"),
             }
             if sink is not None:
                 sink(row)

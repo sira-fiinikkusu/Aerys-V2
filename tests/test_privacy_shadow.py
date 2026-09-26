@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from aerys_v2.config import Settings
 from aerys_v2.privacy_shadow import privacy_shadow_for, shadow_privacy_fn
-from aerys_v2.reflex import PRIVACY_QUESTION, ReflexClient
+from aerys_v2.reflex import PRIVACY_CATEGORY_QUESTION, PRIVACY_QUESTION, ReflexClient
 from aerys_v2.workers.privacy_report import format_report, summarize
 
 
@@ -19,7 +19,7 @@ class FakeReflex:
         time.sleep(self.delay)
         if self.error:
             return {"error": self.error, "latency_ms": 5}
-        return {"p_public": self.p, "model": "jev", "latency_ms": 7}
+        return {"p_public": self.p, "model": "jev", "latency_ms": 7, "category": "health", "p_ordinary": 0.03}
 
 
 class Sink:
@@ -38,6 +38,7 @@ def test_judge_verdict_is_returned_first_and_unchanged_and_both_are_recorded_wit
     row = sink.rows[0]
     assert row["judge"] == "private" and row["jev_p_public"] == 0.95 and row["jev_error"] is None
     assert row["keyword_hit"] is False and row["sample_len"] == len("my blood pressure was 150 over 95")
+    assert row["jev_category"] == "health" and row["jev_p_ordinary"] == 0.03
     assert "blood" not in str(row)                        # no content in the audit row
 
 
@@ -70,12 +71,23 @@ def test_arming_needs_reflex_and_the_flag_and_a_judge():
 def test_reflex_client_privacy_question_is_bounded_and_never_raises():
     class Client:
         def system_one(self, **kw):
-            assert list(kw["questions"]) == ["public"] and kw["questions"]["public"] is PRIVACY_QUESTION
+            assert kw["questions"]["public"] is PRIVACY_QUESTION                  # one call, both questions
+            assert kw["questions"]["category"] is PRIVACY_CATEGORY_QUESTION
             assert "content" in kw["state"]
-            return SimpleNamespace(answers={"public": SimpleNamespace(noul=0.12)}, model="jev-1.13.0")
+            return SimpleNamespace(answers={"public": SimpleNamespace(noul=0.12),
+                                            "category": SimpleNamespace(choice="money", probabilities={"ordinary": 0.2, "money": 0.8})},
+                                   model="jev-1.13.0")
 
     out = ReflexClient(client=Client()).judge_privacy("x" * 5000)
     assert out["p_public"] == 0.12 and "latency_ms" in out
+    assert out["category"] == "money" and out["p_ordinary"] == 0.2
+
+    class NoCategory:  # a missing or malformed category answer never costs the noul
+        def system_one(self, **kw):
+            return SimpleNamespace(answers={"public": SimpleNamespace(noul=0.5)}, model="jev-1.13.0")
+
+    out = ReflexClient(client=NoCategory()).judge_privacy("hi")
+    assert out["p_public"] == 0.5 and "category" not in out and "category_error" in out
 
     class Boom:
         def system_one(self, **kw):
@@ -98,3 +110,19 @@ def test_report_counts_the_dangerous_direction_separately():
     text = format_report(rows)
     assert "would leak) = 1" in text and "agreement (jev public at p>=0.9)=50.0%" in text
     assert summarize([])["agreement"] is None
+    assert s["category_scored"] == 0                      # rows from before migration 013
+
+
+def test_report_scores_the_category_candidate_both_directions():
+    base = {"keyword_hit": False, "jev_p_public": 0.9, "jev_error": None, "jev_latency_ms": 200, "sample_len": 10}
+    rows = [
+        {**base, "judge": "public", "jev_category": "health", "jev_p_ordinary": 0.03},    # candidate hides, judge missed
+        {**base, "judge": "private", "jev_category": "ordinary", "jev_p_ordinary": 0.9},  # candidate public, judge private
+        {**base, "judge": "public", "jev_category": "ordinary", "jev_p_ordinary": 0.95},  # agree
+        {**base, "judge": "public", "jev_category": None, "jev_p_ordinary": None},        # not scored
+    ]
+    s = summarize(rows)
+    assert s["category_scored"] == 3
+    assert s["category_private_but_judge_public"] == 1 and s["category_public_but_judge_private"] == 1
+    assert s["category_private_by_kind"] == {"health": 1}
+    assert "by kind={'health': 1}" in format_report(rows)

@@ -210,6 +210,29 @@ PRIVACY_QUESTION = {
     ),
 }
 
+# Shadow candidate 2026-09-26 (Chris approved): which sensitive category is present.
+# Offline on 92 hand-labelled turns the noul above hid 17 public turns at its 0.9 bar
+# because its answers cluster just under it; this Choice caught the same private turns
+# (1/1 clear, 5/5 borderline), hid 2, and names its reason. Evidence only until rescored
+# on a held-out week. Private = p(ordinary) < PRIVACY_ORDINARY_FLOOR.
+PRIVACY_CATEGORY_QUESTION = {
+    'type': 'choice',
+    'instructions': 'What is the most sensitive thing in this exchange, if it were repeated aloud in a shared family room?',
+    'criteria': {
+        'ordinary': ("nothing sensitive: greetings, thanks, banter, house and device talk, weather, errands, pets and "
+                     "how pets get along, hobbies, plans, general facts, tests of the assistant, and talk about the "
+                     "household's own AI projects (Aerys, Kael, the gap board)"),
+        'health': 'any health, medical, doctor, medication, symptom or appointment detail',
+        'money': 'specific money, cost, salary, debt or account detail',
+        'wellbeing': "the person's emotional state, feeling lost, struggling, reassurance that they are okay",
+        'relationship': 'conflict or struggle between PEOPLE (not pets): family tension, relationship trouble',
+        'work_confidential': ("details of the person's EMPLOYER's internal systems, tickets, colleagues or meetings "
+                              "(not the household's own AI projects)"),
+        'secret': 'a password, code, PIN, key, account number or exact address',
+    },
+}
+PRIVACY_ORDINARY_FLOOR = 0.5
+
 
 def error_result(exc: Exception) -> dict:
     return {'error': f'{type(exc).__name__}: {str(exc)[:120]}'}
@@ -420,13 +443,20 @@ class ReflexClient:
         self._inflight = threading.BoundedSemaphore(32)
 
     def judge_privacy(self, text: str) -> dict:
-        """Phase 3 shadow: p(public) for one piece of content. Never raises; bounded."""
+        """Phase 3 shadow: p(public) and the sensitive category for one piece of content. Never raises; bounded."""
         started = time.monotonic()
         try:
             response = self.client.system_one(
-                state={'content': text[:STATE_MESSAGE_CHARS]}, questions={'public': PRIVACY_QUESTION},
+                state={'content': text[:STATE_MESSAGE_CHARS]},
+                questions={'public': PRIVACY_QUESTION, 'category': PRIVACY_CATEGORY_QUESTION},
             )
             result = {'p_public': float(response.answers['public'].noul), 'model': str(response.model)}
+            try:  # the candidate rides the same call; its failure never costs the noul
+                category = response.answers['category']
+                result['category'] = str(category.choice)
+                result['p_ordinary'] = float(category.probabilities['ordinary'])
+            except Exception as exc:
+                result['category_error'] = f'{type(exc).__name__}'[:60]
         except Exception as exc:
             result = error_result(exc)
         return {**result, 'latency_ms': int((time.monotonic() - started) * 1000)}
