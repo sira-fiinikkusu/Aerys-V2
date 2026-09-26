@@ -73,6 +73,31 @@ WAKE_HEALTH_POLL_S = 10.0
 SLEEP_DEBOUNCE_TICKS = 3
 WAKE_DWELL_S = 300.0
 
+#: Her worlds (owner ask 2026-09-26: "all 4 of these are amazing"). The panel
+#: holds the current world and plays "<world>__<state>" clips when they exist,
+#: plain clips otherwise, so this watcher is the ONLY place a world is chosen —
+#: the three face pushers keep pushing plain states. Chris's mapping:
+#: raining -> rain window, around sunset -> gulf dusk, late night -> starfield,
+#: otherwise -> rack glow.
+RAIN_CONDITIONS = frozenset({"rainy", "pouring", "lightning-rainy", "snowy-rainy", "hail"})
+NIGHT_BELOW_DEG = -8.0      # ~35 min after sunset here: the sky is dark enough for stars
+DUSK_BELOW_DEG = 6.0        # evening golden hour down to night
+WORLD_CHECK_S = 60.0        # HA reads for the world, at most once a minute
+WORLD_REPUSH_S = 600.0      # re-assert even if unchanged: a rebooted panel forgets its world
+
+
+def pick_world(elevation: float | None, rising: bool | None, weather: str | None) -> str:
+    """Which world she lives in right now. Pure — every input comes from HA."""
+    if weather in RAIN_CONDITIONS:
+        return "rain_window"
+    if elevation is None:
+        return "rack_glow"
+    if elevation < NIGHT_BELOW_DEG:
+        return "starfield"
+    if elevation <= DUSK_BELOW_DEG and rising is False:
+        return "gulf_dusk"
+    return "rack_glow"
+
 
 class PanelPresenceWatcher:
     def __init__(
@@ -84,6 +109,8 @@ class PanelPresenceWatcher:
         occupancy_entity: str,
         light_entities: list[str],
         wake_entities: list[str] | None = None,
+        world_weather_entity: str | None = None,
+        world_sun_entity: str = "sun.sun",
         client=None,
         poll_s: float = 20.0,
         emote_s: float = 2.5,
@@ -100,6 +127,13 @@ class PanelPresenceWatcher:
         self._panel_display = f"{base}/display"
         self._panel_health = f"{base}/health"
         self._panel_reboot = f"{base}/reboot"
+        self._panel_world = f"{base}/world"
+        # Worlds are opt-in: no weather entity = no world pushes at all.
+        self._world_weather = world_weather_entity
+        self._world_sun = world_sun_entity
+        self._world_pushed: str | None = None
+        self._world_pushed_at: float | None = None
+        self._world_checked_at: float | None = None
         self._ha_base = ha_base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {ha_token}"}
         self._occupancy = occupancy_entity
@@ -147,6 +181,49 @@ class PanelPresenceWatcher:
         except Exception:
             log.debug("presence read failed for %s (harmless)", entity_id, exc_info=True)
             return "unknown"
+
+    def _entity(self, entity_id: str) -> dict | None:
+        try:
+            r = self._client.get(f"{self._ha_base}/api/states/{entity_id}", headers=self._headers)
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            log.debug("entity read failed for %s (harmless)", entity_id, exc_info=True)
+            return None
+
+    def _maybe_push_world(self) -> None:
+        """Choose her world from the sun and the weather; push it when it changes
+        (and every WORLD_REPUSH_S regardless). Fail-open: an unreadable HA keeps
+        whatever world she has; a dark panel just retries next minute."""
+        if not self._world_weather:
+            return
+        now = time.monotonic()
+        if self._world_checked_at is not None and now - self._world_checked_at < WORLD_CHECK_S:
+            return
+        self._world_checked_at = now
+        sun = self._entity(self._world_sun)
+        weather = self._entity(self._world_weather)
+        if sun is None and weather is None:
+            return
+        attrs = (sun or {}).get("attributes", {})
+        elevation = attrs.get("elevation")
+        world = pick_world(
+            float(elevation) if isinstance(elevation, (int, float)) else None,
+            attrs.get("rising") if isinstance(attrs.get("rising"), bool) else None,
+            (weather or {}).get("state"),
+        )
+        stale = self._world_pushed_at is None or now - self._world_pushed_at >= WORLD_REPUSH_S
+        if world == self._world_pushed and not stale:
+            return
+        try:
+            r = self._client.post(self._panel_world, json={"world": world})
+            r.raise_for_status()
+        except Exception:
+            log.debug("panel world push failed (harmless)", exc_info=True)
+            return
+        if world != self._world_pushed:
+            log.info("her world -> %s", world)
+        self._world_pushed, self._world_pushed_at = world, now
 
     # -- panel writes (fail-open) -----------------------------------------
     def _push_state(self, state: str) -> None:
@@ -371,6 +448,7 @@ class PanelPresenceWatcher:
 
     def tick(self) -> None:
         """One poll cycle — separated from the loop so tests drive it directly."""
+        self._maybe_push_world()
         occupied = self._entity_state(self._occupancy)
         if self.asleep:
             if occupied == "on" and self._wake_gate_open():
@@ -456,6 +534,7 @@ def start_panel_presence(settings) -> threading.Thread | None:
         occupancy_entity=settings.panel_presence_entity,
         light_entities=lights,
         wake_entities=wake,
+        world_weather_entity=settings.ha_weather_entity if getattr(settings, "panel_worlds", False) else None,
         notify_fn=notify_fn,
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")

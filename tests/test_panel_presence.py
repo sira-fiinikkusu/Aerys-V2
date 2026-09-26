@@ -531,3 +531,98 @@ def test_no_wake_entities_keeps_legacy_wake_on_occupancy():
     w.asleep = True
     w.tick()
     assert w.asleep is False
+
+
+# ---- her worlds (owner ask 2026-09-26) ---------------------------------------------------------
+import json as _json
+
+import aerys_v2.panel_presence as _pp
+from aerys_v2.panel_presence import pick_world
+
+
+def test_pick_world_follows_chris_mapping():
+    assert pick_world(40.0, False, "rainy") == "rain_window"          # rain beats everything
+    assert pick_world(-30.0, False, "pouring") == "rain_window"
+    assert pick_world(-20.0, False, "clear-night") == "starfield"     # full night
+    assert pick_world(-20.0, True, "clear-night") == "starfield"      # still night before dawn
+    assert pick_world(3.0, False, "sunny") == "gulf_dusk"             # sunset
+    assert pick_world(-5.0, False, "partlycloudy") == "gulf_dusk"     # dusk, not yet dark
+    assert pick_world(3.0, True, "sunny") == "rack_glow"              # morning twilight is not dusk
+    assert pick_world(45.0, False, "sunny") == "rack_glow"            # daytime
+    assert pick_world(None, None, None) == "rack_glow"                # HA told us nothing useful
+
+
+class WorldHA(FakeWorld):
+    def __init__(self, elevation, rising, weather):
+        super().__init__({OCC: "on", L1: "on", L2: "on"})
+        self.sun = {"state": "x", "attributes": {"elevation": elevation, "rising": rising}}
+        self.weather = weather
+        self.worlds: list[str] = []
+        self.ha_down = False
+
+    def handle(self, request):
+        path = request.url.path
+        if self.ha_down and path.startswith("/api/states/"):
+            return httpx.Response(500)
+        if path == "/api/states/sun.sun":
+            return httpx.Response(200, json=self.sun)
+        if path == "/api/states/weather.home":
+            return httpx.Response(200, json={"state": self.weather})
+        if path == "/world":
+            self.worlds.append(_json.loads(request.content)["world"])
+            return httpx.Response(200, json={})
+        return super().handle(request)
+
+
+def test_world_is_pushed_on_change_and_only_then(monkeypatch):
+    ha = WorldHA(-20.0, False, "clear-night")
+    clock = [1000.0]
+    monkeypatch.setattr(_pp.time, "monotonic", lambda: clock[0])
+    w = watcher(ha, world_weather_entity="weather.home")
+    w.tick()
+    assert ha.worlds == ["starfield"]
+    clock[0] += 30; w.tick()                       # inside the 60 s check window: no HA reads
+    clock[0] += 60; w.tick()                       # checked, unchanged, not stale: no push
+    assert ha.worlds == ["starfield"]
+    ha.weather = "rainy"
+    clock[0] += 61; w.tick()
+    assert ha.worlds == ["starfield", "rain_window"]
+
+
+def test_world_is_reasserted_after_the_repush_interval(monkeypatch):
+    ha = WorldHA(45.0, False, "sunny")
+    clock = [1000.0]
+    monkeypatch.setattr(_pp.time, "monotonic", lambda: clock[0])
+    w = watcher(ha, world_weather_entity="weather.home")
+    w.tick()
+    clock[0] += _pp.WORLD_REPUSH_S + 1; w.tick()   # a rebooted panel forgot it: say it again
+    assert ha.worlds == ["rack_glow", "rack_glow"]
+
+
+def test_worlds_are_opt_in_and_fail_open(monkeypatch):
+    ha = WorldHA(-20.0, False, "clear-night")
+    watcher(ha).tick()                             # no weather entity -> never touches /world
+    assert ha.worlds == []
+    ha.ha_down = True
+    watcher(ha, world_weather_entity="weather.home").tick()
+    assert ha.worlds == []                         # HA unreadable -> keep whatever world she has
+
+
+def test_arming_passes_the_weather_entity_only_when_worlds_are_on(monkeypatch):
+    from aerys_v2.config import Settings
+    seen = {}
+
+    class Spy:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        def run_forever(self):
+            pass
+
+    monkeypatch.setattr(_pp, "PanelPresenceWatcher", Spy)
+    base = dict(_env_file=None, anthropic_api_key="t", panel_state_url="http://p:8300/state",
+                ha_token="t", panel_presence_entity=OCC, ha_weather_entity="weather.home")
+    _pp.start_panel_presence(Settings(**base))
+    assert seen["world_weather_entity"] is None
+    _pp.start_panel_presence(Settings(**base, panel_worlds=True))
+    assert seen["world_weather_entity"] == "weather.home"

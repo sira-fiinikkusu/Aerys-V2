@@ -412,6 +412,10 @@ class Settings(BaseSettings):
     # these entities reading "on" (with occupancy on) is required to WAKE her,
     # while the group alone may keep her awake. Empty = legacy wake-on-occupancy.
     panel_wake_entities: str = ""
+    # Her worlds (owner ask 2026-09-26): the presence watcher picks a world from
+    # the sun and ha_weather_entity and POSTs it to the panel's /world; the panel
+    # plays "<world>__<state>" clips where they exist. False = plain clips only.
+    panel_worlds: bool = False
 
     # ---- STORM WATCH (owner ask 2026-08-17) -----------------------------------
     # Gulf-coast hurricane season, tiered so awareness beats the prep crowds:
