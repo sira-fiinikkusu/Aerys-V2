@@ -55,7 +55,10 @@ _SPEAKING = {
     "laughing": "laughing",
     "unimpressed": "unimpressed_dead",
 }
-WORKING_STATE = "working"
+# Owner ask 2026-09-26: the landscape coffee clip ("working") was so unlike her other
+# faces that it was unsettling when it popped up. Tool time now wears her own portrait
+# "thinking" loop (finger on chin, eyes up), which also has world versions.
+WORKING_STATE = "thinking"
 
 # ElevenLabs v3 emotion tags -> mood. First recognized tag in the text wins —
 # the polisher leads with the dominant emotion, so first is most representative.

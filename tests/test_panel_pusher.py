@@ -85,7 +85,7 @@ def test_phases_map_to_panel_states():
     p("working")
     p("idle", "[warmly] all set!")
     p("idle", "plain text")
-    assert client.states == ["working", "happy_idle", "neutral_idle"]
+    assert client.states == ["thinking", "happy_idle", "neutral_idle"]
 
 
 def test_moods_without_speaking_variants_fall_back():
@@ -123,7 +123,7 @@ def test_working_defers_until_the_ack_finishes(monkeypatch):
     # the ack is still 'playing': the working face must NOT preempt it
     assert client.states == ["neutral_speaking"]
     time.sleep(0.3)
-    assert client.states == ["neutral_speaking", "working"]
+    assert client.states == ["neutral_speaking", "thinking"]
 
 
 def test_newer_push_cancels_the_pending_flip(monkeypatch):
