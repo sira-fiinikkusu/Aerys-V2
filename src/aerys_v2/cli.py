@@ -3,6 +3,7 @@ import signal, threading
 from pydantic import ValidationError
 from aerys_v2.config import BootConfigError, Settings, run_boot_assertions
 from aerys_v2.privacy_shadow import privacy_shadow_for
+from aerys_v2.speaker_redirect import speaker_redirect_for
 from aerys_v2.reflex import live_router_for, reflex_for
 
 logging.basicConfig(
@@ -328,6 +329,8 @@ def main() -> None:
                 # Gap #37: kael:* exchanges leave a durable memory (family
                 # memory door 1 — the only door approved to build solo).
                 a2a_memory_fn=a2a_memory_writer_for(settings),
+                # Office satellite speaks through Leviathan (owner ask 2026-09-26).
+                speaker_redirect=speaker_redirect_for(settings),
                 settings=settings,  # speaker ID: voice_speaker_persons / unknown policy
             )
             # Her circadian rhythm: ONE watcher, in --serve only (the other

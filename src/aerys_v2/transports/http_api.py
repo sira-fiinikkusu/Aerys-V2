@@ -84,7 +84,7 @@ class KaelNoteReply(BaseModel):
 
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
-              a2a_memory_fn=None, settings=None) -> FastAPI:
+              a2a_memory_fn=None, settings=None, speaker_redirect=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -260,9 +260,9 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    from ..speaker_redirect import speaker_redirect_for
-
-    speaker_redirect = speaker_redirect_for(settings) if settings is not None else None
+    # speaker_redirect is injected on its own (cli.py): deriving it from `settings` would
+    # need settings passed, which ALSO arms speaker-ID guest logic on this door — a
+    # separate behaviour change that is the owner's call (flagged 2026-09-26).
 
     @app.post("/ask", response_model=AskReply)
     def ask_route(body: AskRequest, _: None = Depends(require_token)) -> AskReply:

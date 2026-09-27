@@ -255,3 +255,19 @@ def test_the_gate_reads_the_doors_demotion_flag_not_the_raw_id():
     # a verdict from before the flag existed still counts as a demotion (fail-closed
     # on the GATE, which only ever makes it quieter)
     assert speaker_is_unknown({"speaker": {"id": "unknown", "confidence": 0.1}})
+
+
+def test_voice_reply_from_a_redirected_satellite_is_also_played_on_the_desk():
+    """2026-09-26: the redirect must be wired on the REAL /ask path (the first cut built
+    it from `settings`, which cli.py never passes, so it never fired)."""
+    said = []
+
+    class Redirect:
+        def say(self, device_id, text):
+            said.append((device_id, text))
+
+    c = TestClient(build_app(fake_ask, "sekrit", owner_person_id="owner-uuid", speaker_redirect=Redirect()))
+    auth = {"Authorization": "Bearer sekrit"}
+    c.post("/ask", json={"text": "what time is it", "thread_id": "voice:beta", "device_id": "office-dev"}, headers=auth)
+    c.post("/ask", json={"text": "typed, not spoken", "thread_id": "t1", "device_id": "office-dev"}, headers=auth)
+    assert len(said) == 1 and said[0][0] == "office-dev"      # voice turns only
