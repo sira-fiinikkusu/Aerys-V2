@@ -354,12 +354,20 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
         return None
     import httpx
 
+    from .speaker_redirect import speaker_redirect_for
+
     base = settings.ha_base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
     satellite_map = satellite_map_from(settings.ha_satellite_map)
     display_map = satellite_map_from(settings.ha_display_followups)
+    redirect = speaker_redirect_for(settings)
 
     def route(text: str, device_id: str | None) -> None:
+        if redirect is not None and redirect.handles(device_id):
+            # Speakerless-by-accident satellite (office, 2026-09-26): its follow-up
+            # plays on the redirect target instead of a dead speaker.
+            redirect.say(device_id, text)
+            return
         if device_id and device_id in satellite_map:
             # Mapped satellite -> announce locally. preannounce=False: no chime
             # before the follow-up (owner ask 2026-07-04), matching speak_fn_for.

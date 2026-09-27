@@ -416,6 +416,15 @@ class Settings(BaseSettings):
     # the sun and ha_weather_entity and POSTs it to the panel's /world; the panel
     # plays "<world>__<state>" clips where they exist. False = plain clips only.
     panel_worlds: bool = False
+    # Speaker redirect (owner ask 2026-09-26): csv "device_id=http://host:port" — a
+    # satellite whose speaker is gone speaks through a player service on another
+    # machine (aerys-speaker on Leviathan). Replies are rendered by HA in the Assist
+    # pipeline's voice (engine/voice below) and the audio URL is sent there.
+    voice_speaker_redirect: str = ""
+    voice_speaker_token: SecretStr | None = None
+    ha_tts_engine: str = "tts.elevenlabs_text_to_speech"
+    ha_tts_voice: str = ""
+    ha_tts_language: str = "en"
 
     # ---- STORM WATCH (owner ask 2026-08-17) -----------------------------------
     # Gulf-coast hurricane season, tiered so awareness beats the prep crowds:

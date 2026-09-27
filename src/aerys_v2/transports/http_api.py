@@ -260,6 +260,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
+    from ..speaker_redirect import speaker_redirect_for
+
+    speaker_redirect = speaker_redirect_for(settings) if settings is not None else None
+
     @app.post("/ask", response_model=AskReply)
     def ask_route(body: AskRequest, _: None = Depends(require_token)) -> AskReply:
         identity: Identity = {
@@ -302,6 +306,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         else:
             thread_id = body.thread_id
         reply = ask_fn(body.text, identity, thread_id)
+        # Speaker redirect (2026-09-26): a voice turn from a satellite whose speaker
+        # is gone is also spoken on the redirect target (Leviathan's desk speakers).
+        if identity.get("voice") and speaker_redirect is not None:
+            speaker_redirect.say(body.device_id, reply)
         # Gap #37: an exchange on Kael's line becomes a durable memory, so the
         # her on any OTHER thread can know it happened. Fires on the FINAL
         # thread_id — a voice turn was already remapped off kael:* above, so
