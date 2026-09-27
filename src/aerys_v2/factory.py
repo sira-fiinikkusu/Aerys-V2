@@ -277,7 +277,11 @@ def face_pusher_for(settings: Settings) -> Callable[[str, str], None] | None:
     if not settings.panel_state_url:
         return None
     from .panel import build_face_pusher
+    from .panel_corner import CornerStatus, corner_base, set_activity_sink
 
+    # Her status line (owner ask 2026-09-26) rides the same arming: the action graph
+    # reports the TOOLS she calls, the corner shows a phrase for them, then clears.
+    set_activity_sink(CornerStatus(corner_base(settings.panel_state_url) + "/corner/status").report)
     return build_face_pusher(settings.panel_state_url)
 
 
@@ -1869,7 +1873,13 @@ def build_action_graph(
     def after_act(state: ChatState) -> str:
         # tool_calls present -> execute them; plain text -> the turn is done.
         last = state["messages"][-1]
-        return "tools" if getattr(last, "tool_calls", None) else END
+        calls = getattr(last, "tool_calls", None)
+        if calls:
+            # her panel status line names what she is about to do (tool names only)
+            from .panel_corner import report_activity
+
+            report_activity([c.get("name", "") for c in calls if isinstance(c, dict)])
+        return "tools" if calls else END
 
     graph = StateGraph(ChatState)
     graph.add_node("act", act)

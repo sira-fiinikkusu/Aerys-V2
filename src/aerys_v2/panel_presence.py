@@ -134,6 +134,9 @@ class PanelPresenceWatcher:
         self._world_pushed: str | None = None
         self._world_pushed_at: float | None = None
         self._world_checked_at: float | None = None
+        self._panel_glyph = f"{base}/corner/glyph"
+        self._glyph_key: str | None = None
+        self._glyph_pushed_at: float | None = None
         self._ha_base = ha_base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {ha_token}"}
         self._occupancy = occupancy_entity
@@ -207,11 +210,11 @@ class PanelPresenceWatcher:
             return
         attrs = (sun or {}).get("attributes", {})
         elevation = attrs.get("elevation")
-        world = pick_world(
-            float(elevation) if isinstance(elevation, (int, float)) else None,
-            attrs.get("rising") if isinstance(attrs.get("rising"), bool) else None,
-            (weather or {}).get("state"),
-        )
+        elev = float(elevation) if isinstance(elevation, (int, float)) else None
+        rising = attrs.get("rising") if isinstance(attrs.get("rising"), bool) else None
+        condition = (weather or {}).get("state")
+        world = pick_world(elev, rising, condition)
+        self._maybe_push_glyph(world, elev, rising, condition, now)
         stale = self._world_pushed_at is None or now - self._world_pushed_at >= WORLD_REPUSH_S
         if world == self._world_pushed and not stale:
             return
@@ -224,6 +227,32 @@ class PanelPresenceWatcher:
         if world != self._world_pushed:
             log.info("her world -> %s", world)
         self._world_pushed, self._world_pushed_at = world, now
+
+    def _maybe_push_glyph(self, world: str, elevation, rising, condition, now: float) -> None:
+        """The corner's sky glyph (owner ask 2026-09-26): drawn only when it would change
+        (moon phase ~daily, sun/dusk/moon, weather overlay, world tint) or went stale."""
+        import datetime as _dt
+
+        from .panel_corner import SIZE, glyph_key, moon_phase, render_glyph, sky_kind, weather_overlay
+
+        kind = sky_kind(elevation, rising)
+        overlay = weather_overlay(condition)
+        phase = moon_phase(_dt.datetime.now(_dt.timezone.utc))
+        key = glyph_key(kind, overlay, phase, world)
+        stale = self._glyph_pushed_at is None or now - self._glyph_pushed_at >= WORLD_REPUSH_S
+        if key == self._glyph_key and not stale:
+            return
+        try:
+            body = render_glyph(kind, overlay, phase, world)
+            r = self._client.post(f"{self._panel_glyph}?w={SIZE}&h={SIZE}", content=body,
+                                  headers={"Content-Type": "application/octet-stream"})
+            r.raise_for_status()
+        except Exception:
+            log.debug("panel glyph push failed (harmless)", exc_info=True)
+            return
+        if key != self._glyph_key:
+            log.info("her sky -> %s", key)
+        self._glyph_key, self._glyph_pushed_at = key, now
 
     # -- panel writes (fail-open) -----------------------------------------
     def _push_state(self, state: str) -> None:
