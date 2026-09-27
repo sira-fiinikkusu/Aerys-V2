@@ -228,6 +228,15 @@ class PanelPresenceWatcher:
             log.info("her world -> %s", world)
         self._world_pushed, self._world_pushed_at = world, now
 
+    def _forget_panel_state(self) -> None:
+        """The panel restarted (we rebooted it, or it rebooted itself): it booted with no
+        world and an empty corner. Forget what we last sent so the next tick re-sends both
+        at once, instead of her sitting on the plain dark clips until the 10-minute
+        re-assert (Chris, 2026-09-26 22:54: "her screen reset to the old view")."""
+        self._world_pushed = None
+        self._glyph_key = None
+        self._world_checked_at = None
+
     def _maybe_push_glyph(self, world: str, elevation, rising, condition, now: float) -> None:
         """The corner's sky glyph (owner ask 2026-09-26): drawn only when it would change
         (moon phase ~daily, sun/dusk/moon, weather overlay, world tint) or went stale."""
@@ -309,6 +318,7 @@ class PanelPresenceWatcher:
         except Exception:
             log.warning("panel /reboot unreachable", exc_info=True)
             return False
+        self._forget_panel_state()
         for _ in range(24):  # ~2 min at 5s — boot takes ~30s
             self._sleep(5.0)
             if self._health() is not None:
@@ -347,6 +357,7 @@ class PanelPresenceWatcher:
         self._wake_unknowable = 0
         if not self._escalated:
             return
+        self._forget_panel_state()   # a long silence may have been a reboot
         self._escalated = False
         msg = "PANEL RECOVERED: health endpoint answering again."
         log.info(msg)
@@ -432,6 +443,9 @@ class PanelPresenceWatcher:
             self._stall_strikes = 0
             return
         frames = h.get("frames", 0)
+        if self._last_frames is not None and frames < self._last_frames:
+            log.info("panel frame counter went backwards — she rebooted; re-sending world + corner")
+            self._forget_panel_state()
         if self._last_frames is not None and frames == self._last_frames:
             self._stall_strikes += 1
         else:

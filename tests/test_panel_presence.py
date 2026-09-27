@@ -626,3 +626,27 @@ def test_arming_passes_the_weather_entity_only_when_worlds_are_on(monkeypatch):
     assert seen["world_weather_entity"] is None
     _pp.start_panel_presence(Settings(**base, panel_worlds=True))
     assert seen["world_weather_entity"] == "weather.home"
+
+
+def test_a_panel_reboot_makes_world_and_glyph_resend_on_the_next_tick(monkeypatch):
+    ha = WorldHA(-20.0, False, "clear-night")
+    clock = [1000.0]
+    monkeypatch.setattr(_pp.time, "monotonic", lambda: clock[0])
+    w = watcher(ha, world_weather_entity="weather.home")
+    w.tick()
+    assert ha.worlds == ["starfield"]
+    clock[0] += 70; w.tick()                       # unchanged: nothing re-sent
+    assert ha.worlds == ["starfield"]
+    w._forget_panel_state()                        # what every reboot path calls
+    clock[0] += 5; w.tick()                        # well inside the 60 s check window
+    assert ha.worlds == ["starfield", "starfield"]
+
+
+def test_frame_counter_going_backwards_counts_as_a_reboot():
+    ha = WorldHA(-20.0, False, "clear-night")
+    w = watcher(ha, world_weather_entity="weather.home")
+    w._world_pushed, w._glyph_key, w._world_checked_at = "starfield", "k", 1.0
+    w._last_frames = 5000
+    w._health = lambda: {"player": "playing", "display": True, "frames": 120}
+    w._check_daytime_wedge()
+    assert w._world_pushed is None and w._glyph_key is None and w._world_checked_at is None
