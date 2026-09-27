@@ -260,9 +260,9 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    # speaker_redirect is injected on its own (cli.py): deriving it from `settings` would
-    # need settings passed, which ALSO arms speaker-ID guest logic on this door — a
-    # separate behaviour change that is the owner's call (flagged 2026-09-26).
+    # speaker_redirect is injected on its own by cli.py (explicit beats derived; tests can
+    # pass a fake). Correction to a20bc2f's message: cli.py DOES pass settings here — the
+    # first office test failed on mpv's keep-open, not on missing wiring.
 
     @app.post("/ask", response_model=AskReply)
     def ask_route(body: AskRequest, _: None = Depends(require_token)) -> AskReply:
