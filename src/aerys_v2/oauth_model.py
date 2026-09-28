@@ -127,6 +127,20 @@ def _sum_usage(*metas: dict) -> dict | None:
     return total if seen else None
 
 
+def _rate_limit(event: Any) -> dict:
+    """The plan's meter from a RateLimitEvent. The fields live on the event's
+    rate_limit_info (read off the top-level event, every one was None; found
+    2026-09-28 while porting this to Portable)."""
+    info = getattr(event, "rate_limit_info", None) or event
+    return {
+        "status": getattr(info, "status", None),
+        "type": getattr(info, "rate_limit_type", None) or getattr(info, "type", None),
+        "utilization": getattr(info, "utilization", None),
+        "resets_at": getattr(info, "resets_at", None),
+        "overage_status": getattr(info, "overage_status", None),
+    }
+
+
 def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
     """Serialize LangChain messages into one speaker-labeled prompt.
 
@@ -321,7 +335,7 @@ class _WarmClient:
             await client.query(prompt, session_id=session)
             async for message in client.receive_response():
                 if type(message).__name__ == "RateLimitEvent":
-                    meta["rate_limit"] = {k: getattr(message, k, None) for k in ("status", "type", "utilization", "resets_at")}
+                    meta["rate_limit"] = _rate_limit(message)
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
                         if isinstance(block, TextBlock):

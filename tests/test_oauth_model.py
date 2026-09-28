@@ -84,3 +84,18 @@ def test_connect_disables_all_builtin_tools(monkeypatch):
     assert opts.tools == []          # no built-in tools EXIST for the chat backend
     assert opts.allowed_tools == []  # and none would be auto-permitted anyway
     assert opts.max_turns == 1
+
+
+def test_rate_limit_reads_the_events_info():
+    """2026-09-28: the fields live on rate_limit_info; read off the event itself, the
+    meter was all None on every call."""
+    from claude_agent_sdk.types import RateLimitEvent, RateLimitInfo
+
+    from aerys_v2.oauth_model import _rate_limit
+
+    event = RateLimitEvent(rate_limit_info=RateLimitInfo(status="allowed_warning", resets_at=1790000000,
+                                                         rate_limit_type="five_hour", utilization=0.82,
+                                                         overage_status="rejected"),
+                           uuid="u", session_id="s")
+    assert _rate_limit(event) == {"status": "allowed_warning", "type": "five_hour", "utilization": 0.82,
+                                  "resets_at": 1790000000, "overage_status": "rejected"}
