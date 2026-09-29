@@ -546,7 +546,9 @@ class LocalFailoverModel(BaseChatModel):
             receipt = _LOCAL_TOOL_FALLBACK.get()
             if receipt is not None:
                 receipt.append(True)
-            msg = self.lifeboat.invoke(messages, stop=stop)
+            from aerys_v2.images import without_images
+
+            msg = self.lifeboat.invoke(without_images(messages), stop=stop)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
 
@@ -657,12 +659,13 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
     Sonnet/Opus/Gemini sub-workflows, collapsed to one dict lookup (the
     sub-workflow split only ever existed because of the n8n task-runner hang).
 
-    Backend rule (the June credit-pool decision, extended): the oauth/SDK
-    client is SINGLE-MODEL — it serves whatever the subscription serves — so
-    only the STANDARD tier may ride it. fast and deep are always metered
-    ChatAnthropic: fast is haiku (pennies), deep is opus (rationed by
-    deep_gate_for below). standard = build_model(settings), so it keeps
-    honoring model_backend exactly as before tiers existed.
+    Backend rule: standard = build_model(settings), so it keeps honoring
+    model_backend exactly as before tiers existed. fast stays metered: it is
+    haiku (pennies) and it must answer in about a second, which a fresh CLI
+    process per call can't. deep rides the plan when oauth_deep_backend says so
+    (Chris, 2026-09-28: the June credit-pool reason for metering it is gone --
+    the pool is paused and plan use comes out of the normal limits); it is still
+    rationed by deep_gate_for below either way.
     """
 
     if settings.model_backend == "local":
@@ -699,6 +702,13 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
             timeout_s,
         )
 
+    def plan_model(name: str) -> BaseChatModel:
+        from aerys_v2.oauth_model import ClaudeOAuthChatModel
+
+        return _maybe_failover(
+            settings, ClaudeOAuthChatModel(model=name, turn_timeout_s=settings.oauth_turn_timeout_s), timeout_s
+        )
+
     return {
         "fast": api_model(settings.tier_fast_model),
         "standard": (
@@ -706,7 +716,11 @@ def tier_models_for(settings: Settings, *, timeout_s: float = 60.0) -> dict[str,
             if settings.model_backend == "oauth"
             else api_model(settings.tier_standard_model)
         ),
-        "deep": api_model(settings.tier_deep_model),
+        "deep": (
+            plan_model(settings.tier_deep_model)
+            if settings.model_backend == "oauth" and settings.oauth_deep_backend == "oauth"
+            else api_model(settings.tier_deep_model)
+        ),
     }
 
 
@@ -2904,6 +2918,12 @@ def build_graph(
                 content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{voice_style}"
             )
             prompt = [system, *messages]
+        # Her own eyes (2026-09-28): the current turn's Discord images are fetched and
+        # inlined for THIS call, so the model answering him is the one looking. The
+        # stored message keeps its URL; nothing else about the prompt changes.
+        from aerys_v2.images import inline_current_images
+
+        prompt = inline_current_images(prompt)
         # Tier -> model, resolved per turn (normalize_tier at the node too, not
         # just ask() — belt-and-braces: whatever garbage reaches config,
         # the node answers with a REAL model and the trace shows which).

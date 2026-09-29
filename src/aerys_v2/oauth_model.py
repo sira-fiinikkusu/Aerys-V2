@@ -53,6 +53,12 @@ class OAuthBackendError(RuntimeError):
     """
 
 
+class CacheMarkRefused(OAuthBackendError):
+    """The API refused a cache_control breakpoint (a 400 naming it). Deterministic: a
+    fresh process would be refused the same way, so ask() never retries it; the model
+    asks once more without our mark instead (_query_blocks). Codex review 2026-09-29."""
+
+
 # Tools are exposed to the CLI as an in-process MCP server under this prefix; the
 # model calls them as mcp__lc__<name>. We NEVER let the SDK run one: the
 # PreToolUse hook defers every call, the run ends with stop_reason
@@ -152,8 +158,10 @@ def _rate_limit(event: Any) -> dict:
 
 
 def _flatten_parts(messages: list[BaseMessage], *, force_tool: bool = False):
-    """_flatten's pieces: (head, lines, tail, last_human), last_human being the index in
-    `lines` of the last user line (None without one).
+    """_flatten's pieces: (head, lines, tail, last_human, images), last_human being the
+    index in `lines` of the last user line (None without one) and images the image blocks
+    of each user line ({line index: [blocks]}: images.inline_current_images puts them on
+    the current turn so she sees them; only _prompt_blocks can carry them).
 
     Serialize LangChain messages into one speaker-labeled prompt.
 
@@ -168,11 +176,16 @@ def _flatten_parts(messages: list[BaseMessage], *, force_tool: bool = False):
     lines: list[str] = []
     names: dict[str, str] = {}
     last_human = None
+    images: dict[int, list[dict]] = {}
     for m in messages:
         if isinstance(m, SystemMessage):
             system_parts.append(str(m.content))
         elif isinstance(m, HumanMessage):
             last_human = len(lines)
+            if isinstance(m.content, list):
+                pictures = [b for b in m.content if isinstance(b, dict) and b.get("type") == "image"]
+                if pictures:
+                    images[len(lines)] = pictures
             lines.append(f"User: {_neutralize(_text(m.content))}")
         elif isinstance(m, ToolMessage):
             name = names.get(m.tool_call_id, "tool")
@@ -194,12 +207,12 @@ def _flatten_parts(messages: list[BaseMessage], *, force_tool: bool = False):
         tail += "\n" + _RESULTS_FINAL_LINE
     if force_tool:
         tail += "\n" + _FORCE_TOOL_LINE
-    return head, lines, tail + "\nAerys:", last_human
+    return head, lines, tail + "\nAerys:", last_human, images
 
 
 def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
     """The whole prompt as one string (what _prompt_blocks sends, joined)."""
-    head, lines, tail, _ = _flatten_parts(messages, force_tool=force_tool)
+    head, lines, tail, _, _ = _flatten_parts(messages, force_tool=force_tool)
     return head + "\n".join(lines) + tail
 
 
@@ -217,13 +230,18 @@ def _prompt_blocks(messages: list[BaseMessage], *, force_tool: bool = False, ext
     The mark sits before the last user line because prompt_with_context puts this
     turn's context on THAT line's copy only; the stored thread keeps it plain, so
     everything before it is exactly the start of the next turn's prompt."""
-    head, lines, tail, last_human = _flatten_parts(messages, force_tool=force_tool)
+    head, lines, tail, last_human, images = _flatten_parts(messages, force_tool=force_tool)
     offset = 1 if head else 0
     texts = ([head] if head else []) + [("\n" if i else "") + line for i, line in enumerate(lines)]
     blocks = [{"type": "text", "text": text} for text in texts]
     mark = offset + last_human - 1 if last_human is not None else len(blocks) - 1
     if 0 <= mark < len(blocks):
         blocks[mark]["cache_control"] = dict(_CACHE_MARK)
+    # Her images ride right after the line they came with (the current turn's, after
+    # the mark, so they never enter the cached prefix).
+    for index in sorted(images, reverse=True):
+        at = offset + index + 1
+        blocks[at:at] = [dict(picture) for picture in images[index]]
     blocks.append({"type": "text", "text": tail + extra})
     return blocks
 
@@ -235,7 +253,7 @@ def _without_marks(blocks: list[dict]) -> list[dict]:
 
 def _prompt_text(prompt) -> str:
     """A prompt's text, whether a string or blocks."""
-    return prompt if isinstance(prompt, str) else "".join(block["text"] for block in prompt)
+    return prompt if isinstance(prompt, str) else "".join(block.get("text", "") for block in prompt)
 
 
 async def _one_message(blocks: list[dict], session_id: str):
@@ -415,6 +433,9 @@ class _WarmClient:
                     meta["total_cost_usd"] = getattr(message, "total_cost_usd", None)
                     meta["session_id"] = getattr(message, "session_id", None)  # the CLI's, not ours
                     if getattr(message, "is_error", False):
+                        refusal = str(getattr(message, "result", "") or "")
+                        if "API Error: 400" in refusal and "cache_control" in refusal:
+                            raise CacheMarkRefused(f"the API refused a cache breakpoint: {refusal[:300]}")
                         raise RuntimeError(
                             "oauth backend error: "
                             f"subtype={getattr(message, 'subtype', None)!r} "
@@ -441,6 +462,8 @@ class _WarmClient:
                 # Cancelled by _run; the process is discarded by _turn's finally when the
                 # cancellation lands. Fail this turn now; the next one takes a fresh spare.
                 raise OAuthBackendError(f"turn exceeded {self.turn_timeout_s:.0f}s; client dropped") from hung
+            except CacheMarkRefused:
+                raise              # deterministic: a fresh process would be refused the same way
             except Exception as first:
                 # A dead spare (idle timeout, OOM, upgrade) — one retry on a fresh process.
                 try:
@@ -545,11 +568,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
         more without ours: the same text, just uncached (Gemini review, 2026-09-28)."""
         try:
             return self._query(blocks)
-        except Exception as exc:  # noqa: BLE001 -- only the cache refusal is retried
-            # Only the API's own refusal of a breakpoint: a 400 that names cache_control
-            # (live: "API Error: 400 A maximum of 4 blocks with cache_control ...").
-            if not re.search(r'API Error: 400\b[^"]*cache_control', str(exc)):
-                raise
+        except CacheMarkRefused:
             log.warning("oauth: the API refused our cache breakpoint; asking again without it")
             return self._query(_without_marks(blocks))
 

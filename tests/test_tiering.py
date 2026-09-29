@@ -107,11 +107,13 @@ def test_fallback_decision_never_spends_deep():
 
 # ---- media routing: attachments fail toward the action path ----------------------
 
-def test_cdn_url_fails_toward_action_in_heuristic():
-    decision = fallback_decision(
-        "https://cdn.discordapp.com/attachments/1/2/photo.png?ex=a&is=b&hm=c"
-    )
-    assert decision.route == "action"
+def test_an_image_goes_to_chat_but_other_attachments_fail_toward_action():
+    """2026-09-28: an attached image rides to the chat model, which sees it (images.py);
+    documents and other attachments still need the media tools."""
+    assert fallback_decision("https://cdn.discordapp.com/attachments/1/2/photo.png?ex=a&is=b&hm=c").route == "chat"
+    assert fallback_decision("Selyra's reply\nhttps://cdn.discordapp.com/attachments/1/2/image.png?ex=a").route == "chat"
+    assert fallback_decision("https://cdn.discordapp.com/attachments/1/2/report.pdf?ex=a&is=b&hm=c").route == "action"
+    assert fallback_decision("https://cdn.discordapp.com/attachments/1/2/p.png what's in this pdf?").route == "action"
 
 
 def test_media_phrases_fail_toward_action():
@@ -127,7 +129,8 @@ def test_router_prompt_teaches_media_and_tiers():
     from aerys_v2.router import _ROUTER_INSTRUCTIONS
 
     text = _ROUTER_INSTRUCTIONS.lower()
-    assert "cdn.discordapp.com/attachments" in text
+    assert "discord cdn link" in text and "you can see it" in text          # images: chat (2026-09-28)
+    assert "quoted words are not requests" in text                          # the 22:15 misroute
     assert "youtu" in text
     assert ".pdf" in text
     assert '"tier"' in text
@@ -428,3 +431,30 @@ def test_search_overlay_names_search_web_and_only_when_armed():
     assert "search_web" in search_only and "home_control" not in search_only
     home_only = action_overlay_for(settings_with(ha_token="ha-token"))
     assert "search_web" not in home_only
+
+
+def test_the_deep_tier_rides_the_plan_only_when_asked():
+    """Chris 2026-09-28: deep (Opus) on the plan, still capped by the deep gate. Fast
+    stays metered; the default stays metered too."""
+    from langchain_anthropic import ChatAnthropic
+
+    from aerys_v2.oauth_model import ClaudeOAuthChatModel
+
+    models = tier_models_for(settings_with(model_backend="oauth", oauth_deep_backend="oauth"))
+    assert isinstance(models["deep"], ClaudeOAuthChatModel) and models["deep"].model == "claude-opus-4-8"
+    assert isinstance(models["standard"], ClaudeOAuthChatModel) and isinstance(models["fast"], ChatAnthropic)
+    assert isinstance(tier_models_for(settings_with(oauth_deep_backend="oauth"))["deep"], ChatAnthropic), \
+        "the api backend never puts deep on the plan"
+
+
+def test_a_message_that_is_only_an_image_goes_to_chat_without_asking_the_model():
+    """2026-09-28 replay: the model router still sent a bare image to the action path."""
+    from aerys_v2.router import build_router
+
+    class Boom:
+        def invoke(self, messages):
+            raise AssertionError("the model router must not be asked")
+
+    route = build_router(Boom(), "soul")
+    url = "https://cdn.discordapp.com/attachments/1/2/image.png?ex=6abc703e&is=6abb1ebe&hm=78cb93"
+    assert route(url).route == "chat" and route(f"{url}\n{url}").route == "chat"

@@ -119,6 +119,14 @@ _MEDIA_MARKERS = (
     "this video", "this pdf", "this document", "this attachment",
 )
 
+# What still needs the media tools when an image is attached: other attachments,
+# video links, documents, and explicit document/video asks.
+_NON_IMAGE_MEDIA_MARKERS = (
+    "cdn.discordapp.com/attachments", "media.discordapp.net",
+    "youtube.com/watch", "youtu.be/", ".pdf", ".docx",
+    "read this file", "this video", "this pdf", "this document",
+)
+
 # Web-lookup shapes for the degraded path: current-events / "search for" / weather
 # asks need the action path's search_web tool — a chat answer to "what's the
 # weather this weekend?" is a guess from stale training data (the same
@@ -238,12 +246,16 @@ decide which path handles it:
   "I wonder if the office light is still on", "would Jolteon be able to make
   it there and back?" are ALL "action" — the answer depends on a reading only
   the tools can take.
-  MEDIA is "action" too: whenever an attachment or CDN URL appears in the
-  message (https://cdn.discordapp.com/attachments/..., media.discordapp.net,
-  a .pdf/.docx link, a youtube.com or youtu.be link), or the user asks you to
-  look at / read / describe / summarize an image, photo, screenshot, PDF,
-  document, or video — you have ZERO eyes without the media tools, and only
-  the action path carries them.
+  MEDIA: an IMAGE attached to the message (a Discord CDN link ending .png,
+  .jpg, .jpeg, .gif or .webp) comes WITH the message now — you can see it
+  yourself in conversation. When he is sharing an image with you or talking
+  about it (a screenshot of someone's words, a photo, a meme, "look at this"),
+  that is "chat". An image is "action" only when his words also ask for a tool
+  (search the web about it, set something up from it, save it somewhere).
+  Every OTHER attachment or media link is "action": a .pdf/.docx link, any
+  other CDN attachment, a youtube.com or youtu.be link, or a request to read or
+  summarize a document or video — you have no eyes for those without the media
+  tools, and only the action path carries them.
   LIVE WEB LOOKUP is "action" too: current events, breaking news, today's
   weather or forecast, sports scores, prices, stock quotes, exchange rates —
   or any "search for / look up / google / find out / what's the latest"
@@ -287,9 +299,16 @@ decide which path handles it:
   Speech-to-text mangles his name constantly — "kayle", "cale", "kale",
   "kail", "cael" are all KAEL when they appear where a person's name belongs
   ("tell kale I'm running late" is a message for Kael, not about a vegetable).
+  QUOTED WORDS are not requests: when he pastes or forwards someone else's
+  words ("Selyra said this: …", the text of a screenshot, a quoted message), a
+  "tell her …" / "tell him …" INSIDE those words is part of what he is sharing
+  with you, not an ask to deliver anything. Route it "chat" unless HIS own
+  words ask you to pass something on. Example: "Selyra said this: I didn't
+  miss. Tell her this from me: …" is "chat" — the "her" there is YOU; he is
+  showing you what someone said to you.
 - "chat": pure conversation — feelings, memories, opinions about the world,
   timeless general knowledge, planning that needs no device reading, no
-  attachment, and no live lookup. "Do you think cats love us?" is chat; "do you
+  document or video, and no live lookup (an image he shares is chat too). "Do you think cats love us?" is chat; "do you
   think the bedroom is too warm?" is action.
 
 If you are unsure whether live state is needed, choose "action" — that path can
@@ -392,9 +411,15 @@ def plausibly_references_media(text: str) -> bool:
     """Degraded-path heuristic: does this text carry an attachment or media ask?
 
     Same over-trigger bias as the device heuristic: a needless hop through the
-    action path costs one tool refusal; a chat route on an image is the model
-    describing a picture it never saw.
+    action path costs one tool refusal. An attached IMAGE is the exception since
+    2026-09-28: it rides to the chat model, which sees it (images.py), so only
+    what is left once the image links are gone decides.
     """
+    from aerys_v2.images import IMAGE_URL_RE
+
+    if IMAGE_URL_RE.search(text):
+        rest = IMAGE_URL_RE.sub(" ", text).lower()
+        return any(marker in rest for marker in _NON_IMAGE_MEDIA_MARKERS)
     lowered = text.lower()
     return any(marker in lowered for marker in _MEDIA_MARKERS)
 
@@ -552,6 +577,14 @@ def build_router(
     system = SystemMessage(content=f"{soul}\n\n{instructions}")
 
     def route(text: str) -> RouteDecision:
+        # A message that is only images (no words at all) has nothing that could ask
+        # for a tool: it is him showing her something, and the chat model sees it
+        # (images.py). Deterministic, because the model router sent a bare image to
+        # the action path in the 2026-09-28 replay even with the rule in its prompt.
+        from aerys_v2.images import IMAGE_URL_RE
+
+        if IMAGE_URL_RE.search(text) and not IMAGE_URL_RE.sub(" ", text).strip():
+            return RouteDecision(route="chat", ack="")
         try:
             reply = model.invoke([system, HumanMessage(content=text)])
         except Exception:

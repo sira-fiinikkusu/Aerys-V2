@@ -146,27 +146,43 @@ def test_usage_counts_what_the_plan_cached():
 
 
 def test_a_refused_cache_mark_is_retried_once_without_it(monkeypatch):
-    """Gemini review 2026-09-28: past the API's four breakpoints, every turn would 400.
-    The retry is the same text, uncached."""
-    model = ClaudeOAuthChatModel()
-    seen = []
+    """Codex review 2026-09-29: through the WHOLE path (model -> blocks -> warm client ->
+    process), a refused mark costs exactly one more call, unmarked -- never a same-prompt
+    retry on a fresh process -- and a quoted variant of the error still counts."""
+    import claude_agent_sdk
 
-    def fake_query(prompt):
-        seen.append(prompt)
-        if len(seen) == 1:
-            raise RuntimeError("oauth backend error: result='API Error: 400 messages.0.content.2.cache_control: "
-                               "A maximum of 4 blocks with cache_control may be provided'")
-        return "pong"
+    from aerys_v2 import oauth_model as om2
 
-    monkeypatch.setattr(model, "_query", fake_query)
-    assert model.invoke([SystemMessage(content="s"), HumanMessage(content="hi"), AIMessage(content="hey"),
-                         HumanMessage(content="ping")]).content == "pong"
-    assert any("cache_control" in b for b in seen[0]) and not any("cache_control" in b for b in seen[1])
-    assert _prompt_text(seen[0]) == _prompt_text(seen[1])
+    sent = []
 
-    def other_error(prompt):
-        raise RuntimeError("oauth backend error: result='overloaded'")
+    class FakeClient:
+        def __init__(self, options=None):
+            self.options = options
 
-    monkeypatch.setattr(model, "_query", other_error)
-    with pytest.raises(RuntimeError, match="overloaded"):
-        model.invoke([HumanMessage(content="x")])
+        async def connect(self):
+            pass
+
+        async def disconnect(self):
+            pass
+
+        async def query(self, prompt, session_id="default"):
+            self.blocks = [m async for m in prompt][0]["message"]["content"]
+            sent.append(self.blocks)
+
+        async def receive_response(self):
+            marked = any("cache_control" in b for b in self.blocks)
+            refusal = 'API Error: 400 A maximum of 4 blocks with "cache_control" may be provided. Found 5.'
+            # A REAL ResultMessage: SimpleNamespace(__class__=...) does not pass isinstance.
+            yield claude_agent_sdk.ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=marked,
+                                                 num_turns=1, session_id="cli", result=refusal if marked else "pong")
+
+    monkeypatch.setattr(claude_agent_sdk, "ClaudeSDKClient", FakeClient)
+    om2._CLIENTS.clear()
+    model = om2.ClaudeOAuthChatModel(model="claude-sonnet-5", turn_timeout_s=5)
+    reply = model.invoke([SystemMessage(content="s"), HumanMessage(content="hi"), AIMessage(content="hey"),
+                          HumanMessage(content="ping")])
+    assert reply.content == "pong"
+    assert len(sent) == 2, [any("cache_control" in b for b in s) for s in sent]
+    assert any("cache_control" in b for b in sent[0]) and not any("cache_control" in b for b in sent[1])
+    assert _prompt_text(sent[0]) == _prompt_text(sent[1])
+    om2._CLIENTS.clear()
