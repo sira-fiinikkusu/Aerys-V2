@@ -157,3 +157,29 @@ def test_the_photo_marker_counts_only_where_the_gateway_puts_it():
     assert carries_image(f"{PHOTO_MARKER} look") and not carries_image(f"she said {PHOTO_MARKER} was missing")
     prompt = [HumanMessage(content=f"she said {PHOTO_MARKER} was missing")]
     assert inline_current_images(prompt, fetch=fetched) == prompt
+
+
+def test_her_chat_capability_says_she_sees_images_he_attaches():
+    """Live 2026-09-29 (plan, Sonnet 5): with "no eyes on attachments" still in her chat
+    capability, "can you actually see this image?" handed the turn to the vision tool and
+    "do you have eyes on images now?" got "No -- not in this mode". Images come with his
+    message since a5aafe2; the capability must say so."""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+    from aerys_v2.factory import build_graph
+    from aerys_v2.router import RouteDecision
+    from aerys_v2.service import ask
+
+    seen = []
+
+    class Capture(FakeMessagesListChatModel):
+        def _generate(self, messages, *a, **k):
+            seen.append(messages)
+            return super()._generate(messages, *a, **k)
+
+    identity = {"user_id": "u1", "display_name": "Chris", "privacy_context": "private", "platform": "discord",
+                "trust": "owner"}
+    ask(build_graph(Capture(responses=[AIMessage(content="x")]), soul="s"), "hi", identity=identity,
+        thread_id="person:u1", router=lambda _t: RouteDecision("chat", ""))
+    system = seen[0][0].content
+    assert "no eyes on attachments" not in system and "IMAGE he attaches" in system and "you see it yourself" in system
