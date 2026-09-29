@@ -107,7 +107,7 @@ def _result(name, offenders, checked, *, ok_detail, bad_detail):
     return Signal(name, PASS, ok_detail, checked)
 
 
-# ── the six ────────────────────────────────────────────────────────────────
+# ── the checks ────────────────────────────────────────────────────────────────
 
 def room_on_public_turns(turns) -> Signal:
     """A public turn should carry the room it was answered in (board #17)."""
@@ -227,6 +227,48 @@ def house_state_claims_are_grounded(turns, *, retired_openings=()) -> Signal:
                                + newest_when([{'created_at': w} for *_, w in bad if w]))
 
 
+#: A reply that opens by relaying what an image or a quoted message SAYS, instead of
+#: answering it (9/28 22:13 "That image reads: ...", 22:20 "Here's what she sent back:").
+COURIER_OPENING = re.compile(
+    r"^\s*(?:(?:that|this|the)\s+(?:image|screenshot|picture|photo)\s+(?:reads|says)\b"
+    r"|here'?s what (?:she|he|they|it) (?:sent|wrote|said)\b)", re.I)
+#: An offer to carry his words to someone (9/28 22:15: "I can't reach Selyra directly ...
+#: Do you want me to pass this message to him to relay").
+RELAY_OFFER = re.compile(
+    r"\b(?:want|like) me to (?:pass|relay|send|forward|carry)\b"
+    r"|\bcan'?t reach \w+ directly\b|\bshould I (?:pass|relay|forward|send) (?:this|that|it)\b", re.I)
+#: His words asking for a relay: then an offer to relay is the right answer, not a courier slip.
+ASKED_TO_RELAY = re.compile(
+    r"^\s*(?:@?\w+[,:]?\s+)?(?:please\s+)?(?:tell|let|ask|pass|send|forward|message|remind)\b", re.I)
+
+
+def answers_not_relays(turns) -> Signal:
+    """She answers what he shows her; she does not carry it (board #30).
+
+    9/28: Selyra's words, shown to Aerys as a screenshot and as quoted text, came back
+    as a transcript ("That image reads: ...") and as an offer to relay them, three times
+    in ten minutes, while every signal passed. The fixes (a5aafe2, e481bf2, d6e4fd0) let
+    her see an image herself and read quoted words as meant for her; this keeps a
+    regression from hiding. It checks the reply's shape only: a relay offer is fine when
+    his own words asked for one.
+    """
+    typed = [t for t in turns if t.get('channel') != 'voice' and (t.get('emitted_reply') or '').strip()]
+    offenders = []
+    for turn in typed:
+        reply, said = turn['emitted_reply'], turn.get('input_text') or ''
+        if COURIER_OPENING.search(reply):
+            offenders.append((turn.get('id'), 'relayed what it says instead of answering', turn.get('created_at')))
+        elif RELAY_OFFER.search(reply) and not ASKED_TO_RELAY.search(said):
+            offenders.append((turn.get('id'), 'offered to relay words he did not ask her to pass on',
+                              turn.get('created_at')))
+    return _result(
+        'answers_not_relays', offenders, len(typed),
+        ok_detail='she answered what she was shown; no transcript and no unasked relay',
+        bad_detail=lambda bad: f"{len(bad)} courier repl(y/ies): "
+                               + '; '.join(f'{i} ({why})' for i, why, _ in bad[:3])
+                               + newest_when([{'created_at': w} for *_, w in bad if w]))
+
+
 def portable_reaches_house(*, newest_portable_id, visible_ids) -> Signal:
     """The newest portable turn should be readable by the house body (board #12)."""
     if newest_portable_id is None:
@@ -312,6 +354,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
         typed_replies_untagged(turns),
         quarantine_not_noisy(held),
         house_state_claims_are_grounded(turns, retired_openings=retired_openings),
+        answers_not_relays(turns),
     ]
 
     if memories_conn is not None:

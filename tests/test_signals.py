@@ -296,3 +296,32 @@ def test_no_retired_list_still_catches_the_ungrounded_sweep():
 def test_skip_is_not_a_pass_here_either():
     assert signals.house_state_claims_are_grounded([], retired_openings=RETIRED).status \
         == signals.SKIP
+
+
+def test_answers_not_relays_catches_the_nine_twenty_eight_courier_replies():
+    """9/28 22:13-22:20, verbatim openings: a transcript twice and an unasked relay once."""
+    from aerys_v2.workers.signals import answers_not_relays
+    turns = [
+        dict(id=1, channel='dm', input_text='https://cdn.discordapp.com/attachments/1/2/image.png',
+             emitted_reply='That image reads:\n\n"And I did hear the message she sent back."'),
+        dict(id=2, channel='dm', input_text='Selyra said this: And I did hear the message she sent back.\nTell her this from me:',
+             emitted_reply="I'm back to the same wall: I can't reach Selyra directly, only Kael. Do you want me to pass this message to him to relay"),
+        dict(id=3, channel='dm', input_text='haha last game of telephone, she sent this back for you to see',
+             emitted_reply="Here's what she sent back:\n\n\"That one landed clean.\""),
+    ]
+    result = answers_not_relays(turns)
+    assert result.failed and result.checked == 3 and all(f'{i} (' in result.detail for i in (1, 2, 3))
+
+
+def test_answers_not_relays_passes_a_real_answer_and_an_asked_for_relay():
+    from aerys_v2.workers.signals import answers_not_relays
+    turns = [
+        dict(id=4, channel='dm', input_text='[a photo] look what Megan made',
+             emitted_reply="Oh, she made that? The glaze on the rim is gorgeous."),
+        dict(id=5, channel='dm', input_text='tell Kael the deploy is done',
+             emitted_reply="Want me to pass that to Kael now, or hold it for his next check-in?"),
+        dict(id=6, channel='voice', input_text='what did the screen say',
+             emitted_reply='That image says the washer finished.'),        # voice is out of scope
+    ]
+    result = answers_not_relays(turns)
+    assert not result.failed and result.checked == 2
