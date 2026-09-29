@@ -367,3 +367,22 @@ def test_real_graph_stamps_fallback_on_chat_turns(monkeypatch, first_reply, loca
     assert recorded.wait(3), "chat recovery audit row never arrived"
     assert "local_model_fallback" not in (rows[0].get("degraded") or [])
     assert len(local_calls) == 1
+
+
+def test_the_tool_lifeboat_gets_the_text_and_is_told_it_cannot_see_the_image():
+    """Board #28: the action path now inlines the turn's image; the local tool model is a
+    text model that would error on it."""
+    from unittest.mock import Mock
+    from aerys_v2.images import UNSEEN
+
+    primary = Mock()
+    primary.invoke.side_effect = connection_error()
+    model = LocalToolFailoverModel(primary, Mock())
+    prompt = [SystemMessage(content="charter"),
+              HumanMessage(content=[{"type": "text", "text": "[image attached] find this lamp"},
+                                    {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                                 "data": "iVBORw0KGgo="}}])]
+    model.invoke(prompt)
+    forwarded = model.lifeboat.invoke.call_args.args[0]
+    human = [m for m in forwarded if isinstance(m, HumanMessage)][0]
+    assert human.content == [{"type": "text", "text": f"{UNSEEN} find this lamp"}]

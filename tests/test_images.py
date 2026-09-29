@@ -183,3 +183,28 @@ def test_her_chat_capability_says_she_sees_images_he_attaches():
         thread_id="person:u1", router=lambda _t: RouteDecision("chat", ""))
     system = seen[0][0].content
     assert "no eyes on attachments" not in system and "IMAGE he attaches" in system and "you see it yourself" in system
+
+
+def test_the_action_path_sees_a_telegram_photo_too():
+    """Board #28: a photo whose words ask for a tool routes to action, which had no URL
+    to hand analyze_image. Her tool-using side now gets the same inlined image."""
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from aerys_v2.factory import build_action_graph
+    from aerys_v2.images import PHOTO_MARKER, with_turn_images
+
+    seen = []
+
+    class Capture(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kw):
+            return self
+
+        def _generate(self, messages, *a, **k):
+            seen.append(messages)
+            return super()._generate(messages, *a, **k)
+
+    graph = build_action_graph(Capture(responses=[AIMessage(content="Here are three shops.")]), "soul", [])
+    with_turn_images([("image/png", PNG)], graph.invoke,
+                     {"messages": [HumanMessage(content=f"{PHOTO_MARKER} search where to buy this lamp")]},
+                     {"configurable": {"thread_id": "t1"}})
+    last = [m for m in seen[0] if isinstance(m, HumanMessage)][-1]
+    assert any(isinstance(b, dict) and b.get("type") == "image" for b in last.content)

@@ -1578,7 +1578,9 @@ class LocalToolFailoverModel:
             receipt = _LOCAL_TOOL_FALLBACK.get()
             if receipt is not None:
                 receipt.append(True)
-            prompt = list(messages)
+            from aerys_v2.images import without_images
+
+            prompt = without_images(list(messages))    # a text model errors on an image
             for i in range(len(prompt) - 1, -1, -1):
                 if isinstance(prompt[i], SystemMessage):
                     content = prompt[i].content
@@ -1886,6 +1888,12 @@ def build_action_graph(
                 content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}"
             )
             prompt = [system, *state["messages"]]
+        # The current turn's image, for her tool-using side too (board #28, 2026-09-29):
+        # a Telegram photo has no URL for analyze_image, so a photo whose words ask for
+        # a tool ("search where to buy this") was invisible here. Same inlining as chat.
+        from aerys_v2.images import inline_current_images
+
+        prompt = inline_current_images(prompt)
         if isinstance(api_model_with_tools, ToolModelPair):
             reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
         else:
