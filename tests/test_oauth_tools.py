@@ -34,7 +34,7 @@ class FakeWarm:
                                                                     "rate_limit": {"type": "five_hour"}})
 
     def ask(self, prompt):
-        self.prompts.append(prompt)
+        self.prompts.append(om._prompt_text(prompt))
         return self.reply
 
 

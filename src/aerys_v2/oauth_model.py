@@ -116,15 +116,25 @@ def _valid_tool_calls(calls: list[dict]) -> tuple[list[dict], int]:
 
 
 def _sum_usage(*metas: dict) -> dict | None:
+    """Tokens as LangChain counts them: input INCLUDES what the plan read from or wrote to
+    its cache. Only the uncached remainder was counted before (2026-09-28: ~2 tokens a
+    call), so traces showed her plan chat as nearly free."""
     total = {"input_tokens": 0, "output_tokens": 0}
+    read = written = 0
     seen = False
     for m in metas:
         u = (m or {}).get("usage") or {}
         if u:
             seen = True
+            read += int(u.get("cache_read_input_tokens", 0) or 0)
+            written += int(u.get("cache_creation_input_tokens", 0) or 0)
             total["input_tokens"] += int(u.get("input_tokens", 0) or 0)
             total["output_tokens"] += int(u.get("output_tokens", 0) or 0)
-    return total if seen else None
+    if not seen:
+        return None
+    total["input_tokens"] += read + written
+    total["input_token_details"] = {"cache_read": read, "cache_creation": written}
+    return total
 
 
 def _rate_limit(event: Any) -> dict:
@@ -141,8 +151,11 @@ def _rate_limit(event: Any) -> dict:
     }
 
 
-def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
-    """Serialize LangChain messages into one speaker-labeled prompt.
+def _flatten_parts(messages: list[BaseMessage], *, force_tool: bool = False):
+    """_flatten's pieces: (head, lines, tail, last_human), last_human being the index in
+    `lines` of the last user line (None without one).
+
+    Serialize LangChain messages into one speaker-labeled prompt.
 
     System content leads, history follows labeled (same shape as thread_context
     snippets in n8n — the model reads attribution, it doesn't infer it). Tool
@@ -154,10 +167,12 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
     system_parts: list[str] = []
     lines: list[str] = []
     names: dict[str, str] = {}
+    last_human = None
     for m in messages:
         if isinstance(m, SystemMessage):
             system_parts.append(str(m.content))
         elif isinstance(m, HumanMessage):
+            last_human = len(lines)
             lines.append(f"User: {_neutralize(_text(m.content))}")
         elif isinstance(m, ToolMessage):
             name = names.get(m.tool_call_id, "tool")
@@ -179,7 +194,54 @@ def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
         tail += "\n" + _RESULTS_FINAL_LINE
     if force_tool:
         tail += "\n" + _FORCE_TOOL_LINE
-    return head + "\n".join(lines) + tail + "\nAerys:"
+    return head, lines, tail + "\nAerys:", last_human
+
+
+def _flatten(messages: list[BaseMessage], *, force_tool: bool = False) -> str:
+    """The whole prompt as one string (what _prompt_blocks sends, joined)."""
+    head, lines, tail, _ = _flatten_parts(messages, force_tool=force_tool)
+    return head + "\n".join(lines) + tail
+
+
+# Our cache breakpoint: 1h, like the CLI's own (a 5m one before a 1h one is a 400).
+_CACHE_MARK = {"type": "ephemeral", "ttl": "1h"}
+
+
+def _prompt_blocks(messages: list[BaseMessage], *, force_tool: bool = False, extra: str = "") -> list[dict]:
+    """The prompt as content blocks: _flatten's exact text (plus `extra`), cut at message
+    boundaries, with our cache breakpoint on the last block BEFORE her last user line.
+
+    As one string there was no block boundary where the previous call's cache entry
+    ended, so every call re-wrote nearly all of it at the CLI's 1h rate (measured in
+    Portable, 2026-09-28: 0 read / 11,083 written; as blocks 10,848 read / 236 written).
+    The mark sits before the last user line because prompt_with_context puts this
+    turn's context on THAT line's copy only; the stored thread keeps it plain, so
+    everything before it is exactly the start of the next turn's prompt."""
+    head, lines, tail, last_human = _flatten_parts(messages, force_tool=force_tool)
+    offset = 1 if head else 0
+    texts = ([head] if head else []) + [("\n" if i else "") + line for i, line in enumerate(lines)]
+    blocks = [{"type": "text", "text": text} for text in texts]
+    mark = offset + last_human - 1 if last_human is not None else len(blocks) - 1
+    if 0 <= mark < len(blocks):
+        blocks[mark]["cache_control"] = dict(_CACHE_MARK)
+    blocks.append({"type": "text", "text": tail + extra})
+    return blocks
+
+
+def _without_marks(blocks: list[dict]) -> list[dict]:
+    """The same blocks without our cache breakpoint: the text is unchanged."""
+    return [{k: v for k, v in block.items() if k != "cache_control"} for block in blocks]
+
+
+def _prompt_text(prompt) -> str:
+    """A prompt's text, whether a string or blocks."""
+    return prompt if isinstance(prompt, str) else "".join(block["text"] for block in prompt)
+
+
+async def _one_message(blocks: list[dict], session_id: str):
+    """Blocks as the SDK's streamed input: one user message."""
+    yield {"type": "user", "message": {"role": "user", "content": blocks},
+           "parent_tool_use_id": None, "session_id": session_id}
 
 
 class _WarmClient:
@@ -318,7 +380,7 @@ class _WarmClient:
         return entry
 
     # ---- one turn -------------------------------------------------------------
-    async def _turn(self, prompt: str) -> tuple[str, list[dict], dict]:
+    async def _turn(self, prompt) -> tuple[str, list[dict], dict]:
         from claude_agent_sdk import AssistantMessage, ResultMessage
         from claude_agent_sdk.types import TextBlock, ToolUseBlock
 
@@ -332,7 +394,8 @@ class _WarmClient:
         tool_calls: list[dict] = []
         meta: dict = {"model": self.model}
         try:
-            await client.query(prompt, session_id=session)
+            await client.query(prompt if isinstance(prompt, str) else _one_message(prompt, session),
+                               session_id=session)
             async for message in client.receive_response():
                 if type(message).__name__ == "RateLimitEvent":
                     meta["rate_limit"] = _rate_limit(message)
@@ -368,7 +431,7 @@ class _WarmClient:
             return "".join(assistant_text), tool_calls, meta
         return result_text or "".join(assistant_text) or "", [], meta
 
-    def ask(self, prompt: str) -> tuple[str, list[dict], dict]:
+    def ask(self, prompt) -> tuple[str, list[dict], dict]:
         import concurrent.futures
 
         with self._lock:
@@ -445,7 +508,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         forced = self.force_tool and bool(self.bound_tools)
-        out = self._query(_flatten(messages, force_tool=forced))
+        out = self._query_blocks(_prompt_blocks(messages, force_tool=forced))
         if isinstance(out, str):  # tests may stub _query with a bare string
             text, tool_calls, meta = out, [], {}
         else:
@@ -457,7 +520,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
             # would read as a fabricated success ("the light is off" with nothing run).
             # One more try, then a deterministic honest line the gate can mark. A pass
             # whose calls were all MALFORMED says so instead (Gemini 2nd pass).
-            out = self._query(_flatten(messages, force_tool=True) + "\n" + _FORCE_TOOL_LINE)
+            out = self._query_blocks(_prompt_blocks(messages, force_tool=True, extra="\n" + _FORCE_TOOL_LINE))
             text, tool_calls, meta = (out, [], {}) if isinstance(out, str) else out
             metas.append(meta)
             tool_calls, dropped2 = _valid_tool_calls(tool_calls)
@@ -476,7 +539,21 @@ class ClaudeOAuthChatModel(BaseChatModel):
                         response_metadata={k: v for k, v in (meta or {}).items() if k != "usage"})
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
-    def _query(self, prompt: str):
+    def _query_blocks(self, blocks: list[dict]):
+        """Ask with our cache breakpoint. If the API refuses a cache_control (a CLI that
+        adds breakpoints of its own could push a request past the API's four), ask once
+        more without ours: the same text, just uncached (Gemini review, 2026-09-28)."""
+        try:
+            return self._query(blocks)
+        except Exception as exc:  # noqa: BLE001 -- only the cache refusal is retried
+            # Only the API's own refusal of a breakpoint: a 400 that names cache_control
+            # (live: "API Error: 400 A maximum of 4 blocks with cache_control ...").
+            if not re.search(r'API Error: 400\b[^"]*cache_control', str(exc)):
+                raise
+            log.warning("oauth: the API refused our cache breakpoint; asking again without it")
+            return self._query(_without_marks(blocks))
+
+    def _query(self, prompt):
         if self._warm is None:
             object.__setattr__(self, "_warm", warm_client_for(self.model, self.bound_tools, self.turn_timeout_s))
         return self._warm.ask(prompt)
