@@ -449,3 +449,21 @@ def test_guest_voice_drops_on_the_guest_floor_alone_and_strong():
         assert d.unaddressed is True and d.unaddressed_strong is True
     finally:
         REFLEX_ROOM.reset(tok)
+
+
+def test_an_image_goes_to_the_router_even_when_jev_is_sure():
+    """9/28 22:13: Jev sent Selyra's screenshot to the action path at 0.78 (it learned
+    "image -> vision tool"); she sees images in her own chat turn now, and the router knows."""
+    router = SlowRouter(RouteDecision(route="chat", ack=""), delay=0.01)
+    url = "https://cdn.discordapp.com/attachments/1/2/image.png?ex=6abc703e&is=6abb1ebe&hm=78cb93"
+    token = REFLEX_SURFACE.set("discord")
+    try:
+        decide = live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("action", 0.78), router)
+        d = decide(url)
+        rec = LAST_REFLEX.get().collect()
+        text_only = decide("turn off the office lights")
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert d.route == "chat" and rec["decided_by"] == "router" and rec["image_to_router"] is True
+    assert rec["jev"]["route"] == "action"                       # Jev's verdict stays on the row
+    assert text_only.route == "action" and router.calls == 1     # without an image Jev still decides
