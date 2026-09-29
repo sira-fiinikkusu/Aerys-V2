@@ -113,3 +113,16 @@ def test_normalize_display_name_falls_back_to_username():
 
 def test_thread_keys_are_distinct_namespaces():
     assert telegram_thread_key("dm", "1", "9") != telegram_thread_key("group", "1", "9")
+
+
+def test_a_photo_keeps_its_caption_and_rides_as_a_marker_never_a_url():
+    """9/29: a Telegram photo reached her as an empty ping and its caption was dropped.
+    Its words are the caption; the photo is PHOTO_MARKER (a file URL carries the bot token)."""
+    from aerys_v2.images import PHOTO_MARKER
+    photo = SimpleNamespace(text=None, caption=f"look at this @{BOT_USERNAME}",
+                            photo=[SimpleNamespace(file_id="small", file_size=900)],
+                            chat=SimpleNamespace(id=555, type="private"), from_user=fake_user(user_id=123))
+    assert normalize(photo, bot_username=BOT_USERNAME).text == f"{PHOTO_MARKER} look at this"
+    bare = SimpleNamespace(text=None, caption=None, photo=[SimpleNamespace(file_id="x", file_size=1)],
+                           chat=SimpleNamespace(id=555, type="private"), from_user=fake_user(user_id=123))
+    assert normalize(bare, bot_username=BOT_USERNAME).text == PHOTO_MARKER

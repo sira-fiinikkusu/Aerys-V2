@@ -467,3 +467,16 @@ def test_an_image_goes_to_the_router_even_when_jev_is_sure():
     assert d.route == "chat" and rec["decided_by"] == "router" and rec["image_to_router"] is True
     assert rec["jev"]["route"] == "action"                       # Jev's verdict stays on the row
     assert text_only.route == "action" and router.calls == 1     # without an image Jev still decides
+
+
+def test_a_telegram_photo_goes_to_the_router_even_when_jev_is_sure():
+    from aerys_v2.images import PHOTO_MARKER
+    router = SlowRouter(RouteDecision(route="chat", ack=""), delay=0.01)
+    token = REFLEX_SURFACE.set("telegram")
+    try:
+        d = live_router_for(settings(reflex_router_sample=0.0), lambda t, c: jev_result("action", 0.9), router)(
+            f"{PHOTO_MARKER} what do you think")
+        rec = LAST_REFLEX.get().collect()
+    finally:
+        REFLEX_SURFACE.reset(token)
+    assert d.route == "chat" and rec["decided_by"] == "router" and rec["image_to_router"] is True

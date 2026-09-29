@@ -97,3 +97,63 @@ def test_the_local_lifeboat_gets_the_text_and_is_told_it_cannot_see_the_image():
     (last,) = [m for m in seen[0] if isinstance(m, HumanMessage)]
     assert last.content == [{"type": "text", "text": f"look {UNSEEN}"}]
     assert any(b.get("type") == "image" for b in prompt[-1].content)   # the primary's prompt is untouched
+
+
+def test_a_telegram_photo_is_seen_from_the_bytes_that_came_with_this_turn():
+    """9/29: the gateway hands the photo's bytes to the turn (TURN_IMAGES); no URL exists."""
+    from aerys_v2.images import PHOTO_MARKER, with_turn_images
+
+    def boom(url):
+        raise AssertionError("a Telegram photo is never fetched by URL")
+
+    prompt = [SystemMessage(content="soul"), HumanMessage(content=f"{PHOTO_MARKER} earlier one"),
+              AIMessage(content="nice"), HumanMessage(content=f"{PHOTO_MARKER} what do you think")]
+    seen = with_turn_images([("image/png", PNG)], inline_current_images, prompt, fetch=boom)
+    blocks = seen[-1].content
+    assert blocks[0]["text"] == f"{ATTACHED} what do you think" and blocks[1]["type"] == "image"
+    assert seen[1].content == f"{EARLIER} earlier one"
+    assert prompt[-1].content == f"{PHOTO_MARKER} what do you think"          # the stored message is untouched
+    failed = inline_current_images(prompt, fetch=boom)                       # the download failed: no bytes
+    assert failed[-1].content == [{"type": "text", "text": f"{NOT_LOADED} what do you think"}]
+
+
+def test_the_photo_bytes_reach_the_chat_node_through_the_real_graph_and_executor():
+    """Gemini 2026-09-29 doubted a ContextVar set in the transport's executor thread is
+    visible inside LangGraph's chat node. Through build_graph + ask() + run_in_executor: it is."""
+    import asyncio
+
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from aerys_v2.factory import build_graph
+    from aerys_v2.images import PHOTO_MARKER, with_turn_images
+    from aerys_v2.service import ask
+
+    seen = []
+
+    class Recorder(FakeMessagesListChatModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen.append(list(messages))
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    graph = build_graph(Recorder(responses=[AIMessage(content="lovely")]), soul="s", checkpointer=InMemorySaver())
+    identity = {"user_id": "u1", "display_name": "Chris", "privacy_context": "private", "platform": "telegram",
+                "trust": "owner"}
+
+    async def transport():
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: with_turn_images(
+            [("image/png", PNG)], ask, graph, f"{PHOTO_MARKER} look", identity=identity, thread_id="person:u1",
+            router=lambda _t: __import__("aerys_v2.router", fromlist=["RouteDecision"]).RouteDecision("chat", "")))
+
+    asyncio.run(transport())
+    last = [m for m in seen[-1] if isinstance(m, HumanMessage)][-1]
+    assert any(isinstance(b, dict) and b.get("type") == "image" for b in last.content), last.content
+
+
+def test_the_photo_marker_counts_only_where_the_gateway_puts_it():
+    """Gemini 2026-09-29: someone typing the marker words mid-message must not become a photo."""
+    from aerys_v2.images import PHOTO_MARKER, carries_image
+    assert carries_image(f"{PHOTO_MARKER} look") and not carries_image(f"she said {PHOTO_MARKER} was missing")
+    prompt = [HumanMessage(content=f"she said {PHOTO_MARKER} was missing")]
+    assert inline_current_images(prompt, fetch=fetched) == prompt

@@ -458,3 +458,15 @@ def test_a_message_that_is_only_an_image_goes_to_chat_without_asking_the_model()
     route = build_router(Boom(), "soul")
     url = "https://cdn.discordapp.com/attachments/1/2/image.png?ex=6abc703e&is=6abb1ebe&hm=78cb93"
     assert route(url).route == "chat" and route(f"{url}\n{url}").route == "chat"
+
+
+def test_a_telegram_photo_goes_to_chat_like_a_discord_image():
+    from aerys_v2.images import PHOTO_MARKER
+    from aerys_v2.router import build_router, plausibly_references_media
+
+    class Boom:
+        def invoke(self, messages):
+            raise AssertionError("the model router must not be asked")
+
+    assert build_router(Boom(), "soul")(PHOTO_MARKER).route == "chat"
+    assert not plausibly_references_media(f"{PHOTO_MARKER} haha look")

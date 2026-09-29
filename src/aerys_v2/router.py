@@ -247,7 +247,7 @@ decide which path handles it:
   it there and back?" are ALL "action" — the answer depends on a reading only
   the tools can take.
   MEDIA: an IMAGE attached to the message (a Discord CDN link ending .png,
-  .jpg, .jpeg, .gif or .webp) comes WITH the message now — you can see it
+  .jpg, .jpeg, .gif or .webp, or "[a photo]" from Telegram) comes WITH the message now — you can see it
   yourself in conversation. When he is sharing an image with you or talking
   about it (a screenshot of someone's words, a photo, a meme, "look at this"),
   that is "chat". An image is "action" only when his words also ask for a tool
@@ -415,10 +415,10 @@ def plausibly_references_media(text: str) -> bool:
     2026-09-28: it rides to the chat model, which sees it (images.py), so only
     what is left once the image links are gone decides.
     """
-    from aerys_v2.images import IMAGE_URL_RE
+    from aerys_v2.images import carries_image, without_image_refs
 
-    if IMAGE_URL_RE.search(text):
-        rest = IMAGE_URL_RE.sub(" ", text).lower()
+    if carries_image(text):
+        rest = without_image_refs(text).lower()
         return any(marker in rest for marker in _NON_IMAGE_MEDIA_MARKERS)
     lowered = text.lower()
     return any(marker in lowered for marker in _MEDIA_MARKERS)
@@ -581,9 +581,9 @@ def build_router(
         # for a tool: it is him showing her something, and the chat model sees it
         # (images.py). Deterministic, because the model router sent a bare image to
         # the action path in the 2026-09-28 replay even with the rule in its prompt.
-        from aerys_v2.images import IMAGE_URL_RE
+        from aerys_v2.images import carries_image, without_image_refs
 
-        if IMAGE_URL_RE.search(text) and not IMAGE_URL_RE.sub(" ", text).strip():
+        if carries_image(text) and not without_image_refs(text).strip():
             return RouteDecision(route="chat", ack="")
         try:
             reply = model.invoke([system, HumanMessage(content=text)])

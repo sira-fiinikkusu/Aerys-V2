@@ -14,7 +14,7 @@ decide which path handles it:
   it there and back?" are ALL "action" — the answer depends on a reading only
   the tools can take.
   MEDIA: an IMAGE attached to the message (a Discord CDN link ending .png,
-  .jpg, .jpeg, .gif or .webp) comes WITH the message now — you can see it
+  .jpg, .jpeg, .gif or .webp, or "[a photo]" from Telegram) comes WITH the message now — you can see it
   yourself in conversation. When he is sharing an image with you or talking
   about it (a screenshot of someone's words, a photo, a meme, "look at this"),
   that is "chat". An image is "action" only when his words also ask for a tool

@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from contextvars import ContextVar
 from typing import Callable
 
 import httpx
@@ -39,6 +40,38 @@ FETCH_TIMEOUT_S = 10.0
 ATTACHED = "[image attached]"
 EARLIER = "[an image shared earlier]"
 NOT_LOADED = "[an image was attached but didn't load]"
+#: A Telegram photo in the stored text (2026-09-29). Never its URL: a Telegram file URL
+#: carries the bot token. The gateway downloads the bytes and hands them to THIS turn
+#: through TURN_IMAGES, so the chat node can inline them like a Discord image.
+PHOTO_MARKER = "[a photo]"
+#: ((media_type, bytes), ...) for the current turn only (telegram_gateway sets it).
+TURN_IMAGES: ContextVar[tuple] = ContextVar("aerys_turn_images", default=())
+
+
+def has_photo(text: str) -> bool:
+    """A Telegram photo: the gateway always puts PHOTO_MARKER FIRST, so the same words
+    typed mid-message are just words (Gemini review, 2026-09-29)."""
+    return text.lstrip().startswith(PHOTO_MARKER)
+
+
+def carries_image(text: str) -> bool:
+    """Does TEXT carry an image she can see (a Discord CDN image link or a Telegram photo)?"""
+    return bool(IMAGE_URL_RE.search(text)) or has_photo(text)
+
+
+def without_image_refs(text: str) -> str:
+    """TEXT with its image links and its leading photo marker taken out (what his words say)."""
+    text = IMAGE_URL_RE.sub(" ", text)
+    return text.lstrip()[len(PHOTO_MARKER):] if has_photo(text) else text
+
+
+def with_turn_images(images, fn, *args, **kwargs):
+    """Run FN with IMAGES as this turn's images (a transport's executor thread)."""
+    token = TURN_IMAGES.set(tuple(images))
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        TURN_IMAGES.reset(token)
 UNSEEN = "[an image was attached, but this model can't see it]"
 
 _MAGIC = (
@@ -83,6 +116,16 @@ def fetch_image(url: str) -> tuple[str, bytes] | None:
     return kind, data
 
 
+def _swap_marker(content, replacement: str):
+    """CONTENT with its leading PHOTO_MARKER replaced (a string, or its first text block)."""
+    def swap(text):
+        return text.replace(PHOTO_MARKER, replacement, 1) if has_photo(text) else text
+    if isinstance(content, str):
+        return swap(content)
+    first = next((i for i, b in enumerate(content) if isinstance(b, dict) and b.get("type") == "text"), None)
+    return [{**b, "text": swap(b.get("text", ""))} if i == first else b for i, b in enumerate(content)]
+
+
 def _texts(content) -> list[str]:
     if isinstance(content, str):
         return [content]
@@ -109,12 +152,24 @@ def inline_current_images(prompt: list[BaseMessage], *, fetch: Callable[[str], t
         return prompt
     out = list(prompt)
     for i in range(last):
-        if isinstance(out[i], HumanMessage) and any(IMAGE_URL_RE.search(t) for t in _texts(out[i].content)):
-            out[i] = out[i].model_copy(update={"content": _replace_urls(out[i].content, lambda _m: EARLIER)})
+        if isinstance(out[i], HumanMessage) and any(carries_image(t) for t in _texts(out[i].content)):
+            content = _replace_urls(out[i].content, lambda _m: EARLIER)
+            out[i] = out[i].model_copy(update={"content": _swap_marker(content, EARLIER)})
     urls = [m.group(0) for t in _texts(out[last].content) for m in IMAGE_URL_RE.finditer(t)][:MAX_IMAGES]
-    if not urls:
+    photo = any(has_photo(t) for t in _texts(out[last].content)[:1])
+    if not urls and not photo:
         return out
     images, loaded = [], set()
+    if photo:
+        # A Telegram photo: its bytes came with this turn (never a URL). Missing bytes
+        # (a failed download) say so, like a Discord image that didn't load.
+        sent = [(kind, data) for kind, data in TURN_IMAGES.get() if media_type_of(data) == kind][:MAX_IMAGES]
+        for kind, data in sent:
+            images.append({"type": "image", "source": {"type": "base64", "media_type": kind,
+                                                       "data": base64.b64encode(data).decode("ascii")}})
+        out[last] = out[last].model_copy(update={"content": _swap_marker(out[last].content,
+                                                                         ATTACHED if sent else NOT_LOADED)})
+        urls = urls[:max(0, MAX_IMAGES - len(images))]
     for url in urls:
         got = fetch(url)
         if got is None:

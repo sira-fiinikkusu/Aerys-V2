@@ -11,7 +11,7 @@ import time
 from typing import Callable
 
 from aerys_v2.config import Settings
-from aerys_v2.images import IMAGE_URL_RE
+from aerys_v2.images import carries_image
 from aerys_v2.router import (FALLBACK_ACK, RouteDecision, fallback_decision, normalize_tier,
                              plausibly_asks_for_action)
 
@@ -725,7 +725,7 @@ def live_router_for(
         # vision tool" and decided both of Selyra's screenshots that way on 9/28 (action
         # 0.78 and 0.64), but she now sees images in her own chat turn and the router
         # knows it (images.py, router MEDIA). Jev's verdict stays on the row.
-        image = bool(IMAGE_URL_RE.search(text))
+        image = carries_image(text)
         if image:
             record['image_to_router'] = True
         confident = (

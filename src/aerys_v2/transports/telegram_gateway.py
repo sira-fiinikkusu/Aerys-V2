@@ -21,12 +21,14 @@ once a third transport needs the same contract.
 """
 
 import asyncio
+import io
 import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
 from aerys_v2.channels.splitter import split_message
+from aerys_v2.images import MAX_BYTES, PHOTO_MARKER, media_type_of, with_turn_images
 from aerys_v2.state import Identity
 from aerys_v2.transports.discord_gateway import (
     EMPTY_PING,
@@ -99,7 +101,12 @@ def normalize(message: object, *, bot_username: str) -> NormalizedEvent:
     """
     is_dm = message.chat.type == "private"
     channel_kind = "dm" if is_dm else "group"
-    text = (message.text or "").replace(f"@{bot_username}", "")
+    # A photo's words are its caption (dropped until 2026-09-29), and the photo itself
+    # rides as PHOTO_MARKER: its bytes reach the chat turn through TURN_IMAGES, never a
+    # file URL (a Telegram file URL carries the bot token).
+    text = (message.text or getattr(message, "caption", None) or "").replace(f"@{bot_username}", "")
+    if getattr(message, "photo", None):
+        text = f"{PHOTO_MARKER} {text}"
     user = message.from_user
     platform_user_id = str(user.id)
     channel_id = str(message.chat.id)
@@ -151,7 +158,7 @@ class AerysTelegramClient:
         mention-strip already makes, and reply-to-bot needs no entity parsing
         at all — just comparing the replied-to message's author id.
         """
-        text = message.text or ""
+        text = message.text or message.caption or ""
         if self._bot_username and f"@{self._bot_username}" in text:
             return True
         reply = message.reply_to_message
@@ -181,10 +188,11 @@ class AerysTelegramClient:
         # ask() is sync (same seam and same caveat as discord_gateway: fine for
         # a one-user spike, the soak test will tell us whether it needs more);
         # run_in_executor keeps a slow LLM turn from blocking aiogram's loop.
+        images = await self._photo(message, bot)
         loop = asyncio.get_running_loop()
         try:
             reply = await loop.run_in_executor(
-                None, lambda: self._ask(turn_text, identity, thread_id)
+                None, lambda: with_turn_images(images, self._ask, turn_text, identity, thread_id)
             )
         except Exception:
             # Any failure inside the turn becomes a short apology, never dead air.
@@ -196,6 +204,24 @@ class AerysTelegramClient:
         # Telegram's hard limit is 4096 chars — NOT Discord's 2000.
         for chunk in split_message(reply, TELEGRAM_MESSAGE_LIMIT):
             await message.answer(chunk)
+
+    async def _photo(self, message: Message, bot: Bot) -> list[tuple[str, bytes]]:  # pragma: no cover - live only
+        """The message's photo as [(media_type, bytes)], or [] (no photo, or it would not
+        load: the chat turn then says so). The largest size within MAX_BYTES, fetched in
+        memory; nothing is written to disk and no file URL leaves this function."""
+        # An unknown size is tried: Telegram photos are compressed and getFile serves at
+        # most 20 MB, and the bytes are checked against MAX_BYTES after the download.
+        sizes = [p for p in (message.photo or []) if (p.file_size or 0) <= MAX_BYTES]
+        if not sizes:
+            return []
+        try:
+            buffer = await bot.download(sizes[-1].file_id, destination=io.BytesIO(), timeout=20)
+        except Exception as exc:  # noqa: BLE001 -- a failed download becomes "didn't load"
+            log.warning("telegram photo download failed (%s)", type(exc).__name__)
+            return []
+        data = buffer.getvalue() if buffer is not None else b""
+        kind = media_type_of(data)
+        return [(kind, data)] if kind and len(data) <= MAX_BYTES else []
 
     async def run(self, token: str) -> None:  # pragma: no cover - live only
         """Starts long-polling. No webhook — matches discord_gateway's gateway-session
