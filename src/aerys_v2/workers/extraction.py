@@ -252,7 +252,10 @@ LIMIT %(limit)s
 
 # Her own conversations — the v2 audit spine. Lives in the SAME aerys_v2 database
 # the staging tables do. No persons table on this side (identity is prod data),
-# so speaker stays 'Unknown' — the transcript prompt tolerates it. Guild turns are
+# so speaker stays 'Unknown' — the transcript prompt tolerates it. Sentinel rows are
+# the synthetic health probe ("sentinel heartbeat — reply with one short word"): never
+# a memory, and on a quiet night they kept the stall alarm's streak alive (10/02 01:11,
+# a false "extraction stalled" over light commands, a goodnight and a heartbeat). Guild turns are
 # public context, everything else (DM/voice/cli) is private — same rule the v1
 # adapters applied per channel.
 V2_TURNS_SQL = """\
@@ -288,6 +291,7 @@ SELECT
 FROM v2_turns t
 WHERE t.person_id IS NOT NULL
   AND t.guard_verdict IS DISTINCT FROM 'portable_untrusted'
+  AND t.channel IS DISTINCT FROM 'sentinel'
   AND t.input_text != ''
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC

@@ -976,6 +976,8 @@ def test_soft_delete_memory_tombstones_live_row_only_and_skips_blank_key():
 
 def test_turn_sql_dates_portable_rows_by_observation_and_skips_untrusted():
     assert "guard_verdict IS DISTINCT FROM 'portable_untrusted'" in V2_TURNS_SQL
+    # the synthetic health probe is never a memory, and must not feed the stall streak
+    assert "t.channel IS DISTINCT FROM 'sentinel'" in V2_TURNS_SQL
     assert "portable_observed_at:" in V2_TURNS_SQL
     # the DATE the extractor reasons from comes from the marker; the watermark from the column
     assert "::timestamptz" in V2_TURNS_SQL and "t.created_at > %(after)s::timestamptz" in V2_TURNS_SQL
