@@ -448,6 +448,15 @@ class Settings(BaseSettings):
     # changing IS the feedback. Slow actions and FAILURES are always spoken.
     # The follow-up lands in thread history either way (silent record).
     voice_followup_skip_s: float = 6.0
+    # Owner ruling 2026-10-01 (Chris, by voice: "When I ask you to turn off the
+    # lights, you don't reply at all. I don't get a message from you saying that
+    # you've actually turned them off or turned them on."): a successful device
+    # write ALWAYS gets its spoken confirmation, fast or slow. This overrides the
+    # skip above for clean writes. His 2026-09-19 ask (no ack on plain device
+    # commands, REFLEX_DIRECT_SILENT_ACK) still stands: the confirmation comes
+    # AFTER the write, the ack before it stays gone. VOICE_CONFIRM_WRITES=false
+    # restores the 2026-07-03 silent-success rule.
+    voice_confirm_writes: bool = True
     # False-wake grace (owner ask 2026-08-27): when the router judges a
     # voice/lens capture was never directed at Aerys, drop it silently instead
     # of answering into someone else's conversation. Kill-switch: set

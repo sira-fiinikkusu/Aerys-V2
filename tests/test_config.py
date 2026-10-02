@@ -74,3 +74,11 @@ def test_valid_owner_person_id_boots_clean(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("OWNER_PERSON_ID", "6e6bcbed-03ef-4d17-95d2-89c467414335")
     run_boot_assertions(Settings(_env_file=None), env_file=None)  # no raise
+
+
+def test_voice_confirm_writes_defaults_on_and_can_be_turned_off(monkeypatch):
+    # Owner ruling 2026-10-01: device writes are confirmed aloud by default.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    assert Settings(_env_file=None).voice_confirm_writes is True
+    monkeypatch.setenv("VOICE_CONFIRM_WRITES", "false")
+    assert Settings(_env_file=None).voice_confirm_writes is False

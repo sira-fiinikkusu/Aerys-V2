@@ -158,6 +158,8 @@ def test_refusal_reaches_the_specialist_and_a_raise_becomes_an_honest_failure():
     LAST_REFLEX.set(LiveReflexRecord({"command": {"operation": "turn_off", "entity_id": "sunroom"}, "device": {}}, None, {}))
     ok_seed = _direct_device_seed(ActionGraph(tool), ["seed"])
     assert _needs_spoken_followup(ok_seed, 0.5, 5.0) is False
+    # ...unless the owner's 2026-10-01 ruling is on: every write is confirmed aloud
+    assert _needs_spoken_followup(ok_seed, 0.5, 5.0, confirm_writes=True) is True
 
 
 def test_voice_plain_command_speaks_no_ack_and_still_acts():

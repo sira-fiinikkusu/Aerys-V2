@@ -293,6 +293,24 @@ def test_voice_fast_clean_write_skips_spoken_followup():
     assert calls == []  # the light changing IS the feedback — say nothing
 
 
+def test_voice_fast_clean_write_speaks_when_confirm_writes_is_on():
+    # Owner ruling 2026-10-01: "I don't get a message from you saying that you've
+    # actually turned them off or turned them on." -> a fast clean write SPEAKS.
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph(
+        ["Done: turn_off sent to light.desk (HA responded 200)."], final="Light's off."
+    )
+    ask(graph, "turn off the desk light", identity=CHRIS, thread_id="voice:confirm",
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_skip_s=6.0, confirm_writes=True)
+    wait_for_messages(graph, "voice:confirm", 2)
+    deadline = time.monotonic() + 2.0
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls == ["Light's off."]  # spoken once, the outcome itself
+
+
 def test_voice_slow_action_speaks_followup():
     calls, speak = recording_speaker()
     graph = build_graph(fake_model("speculative chat"), soul="s")

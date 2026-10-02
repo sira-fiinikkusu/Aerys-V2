@@ -296,9 +296,9 @@ def main() -> None:
                 if speak_fn is not None else None
             )
             if speak_fn is not None:
-                log.info("spoken follow-ups armed | default_entity=%s satellites=%d skip<=%.1fs",
+                log.info("spoken follow-ups armed | default_entity=%s satellites=%d skip<=%.1fs confirm_writes=%s",
                          settings.ha_announce_entity, len(satellite_map),
-                         settings.voice_followup_skip_s)
+                         settings.voice_followup_skip_s, settings.voice_confirm_writes)
             app = build_app(
                 lambda text, identity, thread: ask(
                     graph, text, identity=identity, thread_id=thread,
@@ -307,6 +307,7 @@ def main() -> None:
                     followup_router=followup_router,
                     display_push=display_push,
                     followup_skip_s=settings.voice_followup_skip_s,
+                    confirm_writes=settings.voice_confirm_writes,
                     deep_allowed=deep_gate,
                     action_allowlist=action_allow,
                     record_turn=record_turn,

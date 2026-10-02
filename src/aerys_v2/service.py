@@ -1083,6 +1083,7 @@ def ask(
     followup_router: Callable[[str, str | None], None] | None = None,
     display_push: Callable[[str, str | None], None] | None = None,
     followup_skip_s: float = 6.0,
+    confirm_writes: bool = False,
     deep_allowed: Callable[[], bool] | None = None,
     action_allowlist: frozenset[str] | None = None,
     record_turn: Callable[[dict], None] | None = None,
@@ -1261,7 +1262,7 @@ def ask(
             voice_reply = _voice_parallel_start(
                 graph, text, config, rails, started, router, action_graph,
                 speak_fn, satellite_for, followup_skip_s, record_turn=record_turn, reflex=shadow,
-                followup_router=followup_router,
+                followup_router=followup_router, confirm_writes=confirm_writes,
                 display_push=display_push,
                 content_privacy_classifier=content_privacy_classifier,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
@@ -1875,7 +1876,9 @@ def _action_turn(
     return final
 
 
-def _needs_spoken_followup(result_messages: list, elapsed_s: float, skip_s: float) -> bool:
+def _needs_spoken_followup(
+    result_messages: list, elapsed_s: float, skip_s: float, confirm_writes: bool = False
+) -> bool:
     """The SILENT-SUCCESS RULE (owner requirement, 2026-07-03).
 
     A fast, successful device write needs no spoken follow-up — the light
@@ -1891,7 +1894,13 @@ def _needs_spoken_followup(result_messages: list, elapsed_s: float, skip_s: floa
 
     Failures raised as exceptions never reach this helper — the caller speaks
     those unconditionally.
+
+    confirm_writes (owner ruling 2026-10-01, settings.voice_confirm_writes):
+    the owner wants to HEAR that the light actually changed, so every action
+    turn speaks its outcome. The rule above then only matters with it off.
     """
+    if confirm_writes:
+        return True
     if elapsed_s > skip_s:
         return True
     from aerys_v2.tools.home_control import WRITE_OK_PREFIX
@@ -2031,6 +2040,7 @@ def _voice_parallel_start(
     followup_skip_s: float,
     record_turn: Callable[[dict], None] | None = None,
     followup_router: Callable[[str, str | None], None] | None = None,
+    confirm_writes: bool = False,
     display_push: Callable[[str, str | None], None] | None = None,
     content_privacy_classifier: Callable[[str], str] | None = None,
     human_privacy: str = PRIVATE,
@@ -2138,13 +2148,13 @@ def _voice_parallel_start(
                 final = _honest_reply_for_failure(e) or f"(The action didn't complete — {e})"
                 failed = True
 
-            # Spoken follow-up: failures ALWAYS speak; otherwise the
-            # silent-success rule decides (fast clean write = the device is
-            # the feedback, say nothing).
+            # Spoken follow-up: failures ALWAYS speak; with confirm_writes
+            # (owner ruling 2026-10-01) every outcome speaks; otherwise the
+            # silent-success rule decides (fast clean write = say nothing).
             elapsed = time.monotonic() - ack_at
             device_id = real_configurable.get("identity", {}).get("device_id")
             spoke_followup = failed or _needs_spoken_followup(
-                result_messages, elapsed, followup_skip_s
+                result_messages, elapsed, followup_skip_s, confirm_writes
             )
             if spoke_followup:
                 _deliver_followup(
