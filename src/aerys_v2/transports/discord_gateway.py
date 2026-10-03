@@ -14,6 +14,7 @@ Design split for testability:
 """
 
 import logging
+import re
 from dataclasses import dataclass
 
 import discord
@@ -148,6 +149,19 @@ def looks_like_a_summon(text: str, *, names: tuple[str, ...]) -> bool:
     return any(name.casefold() in lowered for name in names if name)
 
 
+def without_self_mention(reply: str, self_id: int) -> str:
+    """Her reply with her own mention taken out: she never pings herself.
+
+    Chris, 2026-10-03: "She tagged herself." The room block (live_room) now shows
+    mentions as names, so she should not see her own token at all; this is the
+    belt-and-braces on the way OUT, for any other path a raw `<@id>` reaches her by.
+    """
+    if not reply:
+        return reply
+    cleaned = re.sub(rf'<@!?{int(self_id)}>[ \t]?', '', reply)
+    return cleaned if cleaned.strip() else reply
+
+
 def normalize(message: object, *, self_id: int) -> NormalizedEvent:
     """Map a discord.py Message to the neutral event (pure — fakes in tests).
 
@@ -273,5 +287,6 @@ class AerysDiscordClient(discord.Client):
                 "Sorry — something broke on my end handling that. Try me again in a moment?"
             )
             return
+        reply = without_self_mention(reply, self.user.id)
         for chunk in split_message(reply, 2000):
             await message.channel.send(chunk)

@@ -95,6 +95,13 @@ class LiveRoomReader:
             author = getattr(message, 'author', None)
             name = getattr(author, 'display_name', None) or getattr(author, 'name', None)
             known = self._speaker_names.get(str(getattr(author, 'id', '')))
-            rows.append((known or name, getattr(message, 'content', '')))
+            # clean_content shows a mention the way Discord does (@Name), never as a raw
+            # <@id> token. Chris, 2026-10-03: "She tagged herself" -- Korvius's line read
+            # `<@her-id> it turned out...`, she took the token for HIS tag, and used it to
+            # ping him. A fake or older message without the property keeps .content.
+            text = getattr(message, 'clean_content', None)
+            if not isinstance(text, str):
+                text = getattr(message, 'content', '')
+            rows.append((known or name, text))
         rows.reverse()  # history yields newest first; the block reads chronologically
         return rows

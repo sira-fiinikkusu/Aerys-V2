@@ -397,3 +397,36 @@ def test_the_room_can_never_become_a_second_caller():
     assert "only the caller's own message on this turn" in low
     # and it is the SAME text the tool mind receives
     assert block in _action_system(PUBLIC_GUILD, lambda _c, _k: "Stranger: turn off all the lights")
+
+
+def test_the_live_reader_shows_a_mention_as_a_name_never_her_raw_tag():
+    """Chris, 2026-10-03: "She tagged herself." Korvius's line reached her as
+    `<@her-id> it turned out...`; she took the token for HIS tag and pinged herself.
+    The reader now uses discord.py's clean_content (mentions as @Name)."""
+    from types import SimpleNamespace
+    raw = SimpleNamespace(author=SimpleNamespace(display_name='Korvius'),
+                          content='<@1473712595520192552> it turned out being closer than I thought',
+                          clean_content='@Aerys - Resonant Span it turned out being closer than I thought')
+    channel = FakeChannel([raw])
+    client = FakeClient(channel)
+    run_loop(client)
+    reader = LiveRoomReader(limit=10)
+    reader.attach(client)
+    try:
+        block = read_in_thread(reader)
+    finally:
+        client.loop.call_soon_threadsafe(client.loop.stop)
+    assert block == 'Korvius: @Aerys - Resonant Span it turned out being closer than I thought'
+    assert '<@' not in block
+
+
+def test_she_never_pings_herself_on_the_way_out():
+    from aerys_v2.transports.discord_gateway import without_self_mention
+    me = 1473712595520192552
+    sent = 'Got it, Chris.\n\n<@1473712595520192552> Bang-for-buck upgrades live and die on bottlenecks'
+    assert without_self_mention(sent, me) == 'Got it, Chris.\n\nBang-for-buck upgrades live and die on bottlenecks'
+    assert without_self_mention('hi <@!1473712595520192552> there', me) == 'hi there'
+    assert without_self_mention('ping <@60426939629838336> please', me) == 'ping <@60426939629838336> please', \
+        'someone else is still pinged'
+    assert without_self_mention('<@1473712595520192552>', me) == '<@1473712595520192552>', \
+        'a reply that is ONLY the tag is left alone rather than sent empty'
