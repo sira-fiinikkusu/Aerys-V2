@@ -51,6 +51,82 @@ def test_a_slow_or_dead_jev_never_delays_or_changes_the_verdict():
     assert sink.event.wait(2) and sink.rows[0]["jev_error"] == "timeout"
 
 
+class CategoryReflex(FakeReflex):
+    """A Jev whose category answer is set per test (p_ordinary=None: the category failed)."""
+    def __init__(self, p_ordinary=0.9, error=None):
+        super().__init__(error=error)
+        self.p_ordinary = p_ordinary
+
+    def judge_privacy(self, text):
+        self.seen.append(text)
+        if self.error:
+            return {"error": self.error, "latency_ms": 5}
+        out = {"p_public": 0.5, "model": "jev", "latency_ms": 7}
+        if self.p_ordinary is None:
+            out["category_error"] = "KeyError"
+        else:
+            out.update(category="wellbeing" if self.p_ordinary < 0.5 else "ordinary", p_ordinary=self.p_ordinary)
+        return out
+
+
+def test_vote_jev_category_is_a_second_private_vote_never_a_public_one():
+    """Option B (Chris 10/03): either says private -> private. Judge private stays private
+    whatever Jev says; judge public turns private when p(ordinary) < 0.3."""
+    for judge, p_ord, want in (("private", 0.99, "private"),
+                               ("public", 0.29, "private"),
+                               ("public", 0.0, "private"),
+                               ("public", 0.3, "public"),       # the bar is strict
+                               ("public", 0.97, "public")):
+        reflex, sink = CategoryReflex(p_ordinary=p_ord), Sink()
+        classify = shadow_privacy_fn(lambda t, j=judge: j, reflex, sink, vote_below=0.3)
+        assert classify("I can do this, just give me a minute") == want, (judge, p_ord)
+        assert sink.event.wait(2) and len(sink.rows) == 1
+        row = sink.rows[0]
+        assert row["judge"] == judge and row["jev_p_ordinary"] == p_ord   # the JUDGE's verdict is what's recorded
+
+
+def test_vote_fails_closed_when_jev_cannot_answer():
+    for reflex in (CategoryReflex(error="timeout"), CategoryReflex(p_ordinary=None)):
+        sink = Sink()
+        classify = shadow_privacy_fn(lambda t: "public", reflex, sink, vote_below=0.3)
+        assert classify("we should grab tacos thursday") == "private"
+        assert sink.event.wait(2)
+
+
+def test_vote_never_asks_jev_twice_and_a_private_judge_never_waits_for_jev():
+    reflex, sink = CategoryReflex(p_ordinary=0.99), Sink()
+    assert shadow_privacy_fn(lambda t: "public", reflex, sink, vote_below=0.3)("hello there") == "public"
+    assert sink.event.wait(2) and len(reflex.seen) == 1                  # one Jev call for verdict + row
+    slow = FakeReflex(delay=0.3)
+    classify = shadow_privacy_fn(lambda t: "private", slow, Sink(), vote_below=0.3)
+    t0 = time.monotonic()
+    assert classify("my blood pressure was 150 over 95") == "private"
+    assert time.monotonic() - t0 < 0.2                                   # private needs no second vote
+
+
+def test_vote_off_is_the_old_shadow():
+    reflex, sink = CategoryReflex(p_ordinary=0.0), Sink()
+    assert shadow_privacy_fn(lambda t: "public", reflex, sink)("a very sad day") == "public"
+    assert shadow_privacy_fn(lambda t: "public", reflex, sink, vote_below=0)("a very sad day") == "public"
+
+
+def test_arming_passes_the_vote_bar_from_settings():
+    judge = lambda t: "public"  # noqa: E731
+    reflex = CategoryReflex(p_ordinary=0.1)
+    on = Settings(_env_file=None, anthropic_api_key="t", reflex_mode="live", typesafe_api_key="k")
+    off = Settings(_env_file=None, anthropic_api_key="t", reflex_mode="live", typesafe_api_key="k",
+                   reflex_privacy_vote_below=0)
+    assert on.reflex_privacy_vote_below == 0.3
+    import aerys_v2.privacy_shadow as ps
+    orig = ps.db_sink_for
+    ps.db_sink_for = lambda url: None
+    try:
+        assert privacy_shadow_for(on, judge, reflex)("a very sad day") == "private"
+        assert privacy_shadow_for(off, judge, reflex)("a very sad day") == "public"
+    finally:
+        ps.db_sink_for = orig
+
+
 def test_keyword_hit_is_recorded():
     reflex, sink = FakeReflex(), Sink()
     classify = shadow_privacy_fn(lambda t: "private", reflex, sink)
@@ -126,3 +202,29 @@ def test_report_scores_the_category_candidate_both_directions():
     assert s["category_private_but_judge_public"] == 1 and s["category_public_but_judge_private"] == 1
     assert s["category_private_by_kind"] == {"health": 1}
     assert "by kind={'health': 1}" in format_report(rows)
+
+
+def test_report_counts_what_the_vote_made_private():
+    rows = [
+        {"judge": "public", "keyword_hit": False, "jev_p_public": 0.95, "jev_error": None, "jev_latency_ms": 9,
+         "sample_len": 5, "jev_category": "ordinary", "jev_p_ordinary": 0.97},
+        {"judge": "public", "keyword_hit": False, "jev_p_public": 0.6, "jev_error": None, "jev_latency_ms": 9,
+         "sample_len": 5, "jev_category": "wellbeing", "jev_p_ordinary": 0.1},
+        {"judge": "public", "keyword_hit": False, "jev_p_public": None, "jev_error": "timeout", "jev_latency_ms": None,
+         "sample_len": 5, "jev_category": None, "jev_p_ordinary": None},
+        {"judge": "private", "keyword_hit": False, "jev_p_public": 0.2, "jev_error": None, "jev_latency_ms": 9,
+         "sample_len": 5, "jev_category": "health", "jev_p_ordinary": 0.01},
+    ]
+    assert summarize(rows)["vote_made_private"] == 2              # the wellbeing one + the no-answer one
+    assert "vote (judge public -> private at p(ordinary)<0.3 or no answer) = 2" in format_report(rows)
+
+
+def test_gate_and_report_share_one_vote_rule():
+    from aerys_v2.privacy_shadow import vote_says_private
+    for p, want in ((0.0, True), (0.29, True), (0.3, False), (0.97, False), (None, True), (True, True),
+                    (False, True), ("0.9", True), (float("nan"), True)):
+        assert vote_says_private(p, 0.3) is want, p
+    row = {"judge": "public", "keyword_hit": False, "jev_p_public": 0.6, "jev_error": None, "jev_latency_ms": 9,
+           "sample_len": 5, "jev_category": "ordinary", "jev_p_ordinary": float("nan")}
+    assert summarize([row])["vote_made_private"] == 1                       # NaN counted as the gate acts
+    assert "p(ordinary)<0.5 or no answer) = 1" in format_report([dict(row, jev_p_ordinary=0.4)], vote_below=0.5)

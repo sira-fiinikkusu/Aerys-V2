@@ -433,7 +433,7 @@ def _privacy_report_main(settings: Settings, args: argparse.Namespace) -> int:
         conn.read_only = True
         conn.execute("SET statement_timeout = '30s'")
         rows = read_rows(conn, args.window)
-    print(format_report(rows))
+    print(format_report(rows, vote_below=settings.reflex_privacy_vote_below))
     return 0
 
 

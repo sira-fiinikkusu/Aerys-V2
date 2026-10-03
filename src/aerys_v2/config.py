@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # metered judge; both verdicts land in v2_privacy_shadow (no content). Evidence
     # only — the judge still decides. `python -m aerys_v2.workers privacy-report`.
     reflex_privacy_shadow: bool = True
+    # Phase 3 VOTE (Chris 2026-10-03, option B on the held-out rescore): Jev's category
+    # answer becomes a SECOND "private" vote. Judge private -> private, as before. Judge
+    # public -> private when p(ordinary) is below this bar, or when Jev can't answer
+    # (fail closed). Jev never makes public anything the judge called private. Held-out
+    # week: judge caught 0/7 borderline turns; this vote 7/7 with 0 extra over-hides.
+    # REFLEX_PRIVACY_VOTE_BELOW=0 is the kill switch (back to shadow only).
+    reflex_privacy_vote_below: float = Field(default=0.3, ge=0, le=1)
     # Router sampling (Chris 2026-09-20 00:16, approved): in live mode the Haiku router
     # no longer runs beside Jev on EVERY turn. It runs when its output is needed —
     # voice (the spoken ack, J2) and any turn Jev is unsure about — plus this fraction

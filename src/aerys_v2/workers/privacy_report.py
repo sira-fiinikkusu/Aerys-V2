@@ -1,6 +1,8 @@
 """privacy-report: how often Jev agrees with the metered content-privacy judge."""
 from __future__ import annotations
 
+from aerys_v2.privacy_shadow import vote_says_private
+
 
 def read_rows(conn, window: str = '24 hours') -> list[dict]:
     cur = conn.execute(
@@ -13,7 +15,7 @@ def read_rows(conn, window: str = '24 hours') -> list[dict]:
             for r in cur.fetchall()]
 
 
-def summarize(rows: list[dict], public_floor: float = 0.9) -> dict:
+def summarize(rows: list[dict], public_floor: float = 0.9, vote_below: float = 0.3) -> dict:
     """Agreement uses the design's fail-closed rule: Jev says public only at p >= 0.9."""
     judged = [r for r in rows if r.get('jev_p_public') is not None]
     def jev_word(r):
@@ -31,6 +33,12 @@ def summarize(rows: list[dict], public_floor: float = 0.9) -> dict:
         'keyword_hits': sum(1 for r in rows if r.get('keyword_hit')),
         'p50_ms': p50,
         **_category_summary(rows),
+        # Option B (10/03): judge-public turns the category vote made private (p(ordinary)
+        # below the bar, or no category answer: fail closed). Rows before 10/03 show what
+        # it WOULD have done.
+        'vote_made_private': sum(r['judge'] == 'public' and vote_says_private(r.get('jev_p_ordinary'), vote_below)
+                                 for r in rows),
+        'vote_below': vote_below,
     }
 
 
@@ -51,8 +59,8 @@ def _category_summary(rows: list[dict], ordinary_floor: float = 0.5) -> dict:
     }
 
 
-def format_report(rows: list[dict]) -> str:
-    s = summarize(rows)
+def format_report(rows: list[dict], vote_below: float = 0.3) -> str:
+    s = summarize(rows, vote_below=vote_below)
     pct = lambda v: 'n/a' if v is None else f'{v * 100:.1f}%'  # noqa: E731
     return '\n'.join([
         f"privacy shadow: n={s['n']} judged={s['judged']} errors={s['errors']} keyword_hits={s['keyword_hits']}",
@@ -62,4 +70,5 @@ def format_report(rows: list[dict]) -> str:
         f"category candidate (private at p(ordinary)<0.5): scored={s['category_scored']} "
         f"public-but-judge-private={s['category_public_but_judge_private']} "
         f"private-but-judge-public={s['category_private_but_judge_public']} by kind={s['category_private_by_kind']}",
+        f"vote (judge public -> private at p(ordinary)<{s['vote_below']:g} or no answer) = {s['vote_made_private']}",
     ])
