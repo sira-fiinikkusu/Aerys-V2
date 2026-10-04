@@ -76,11 +76,13 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
     if not state or state in ("unknown", "unavailable"):
         return []
     if state != "home":
-        return ["Chris is away from home right now."]
-    lines = ["Chris is home."]
+        return ["Chris's own phone says he is away from home right now."]
+    # Attributed to HIS phone, out loud: the occupancy caveat below ("sensors do not say
+    # WHO") made her doubt these lines too on the first live probe (2026-10-03).
+    lines = ["Chris's own phone says he is home - that is him, so you can say it plainly."]
     room = (settled or "").strip()
     if room.lower() == "office":
-        lines.append("His phone has settled in the office, so he is most likely there.")
+        lines.append("His phone has settled in the office, so he is most likely there - say so if it comes up.")
     elif room and room.lower() not in ("unknown", "unavailable", "away", "not_home", "none"):
         lines.append(f"His phone suggests he might be in the {room.lower()} - a rough guess (other people "
                      "and pets confuse the room sensors, and it lags by minutes): mention it lightly if at "
@@ -107,7 +109,8 @@ def format_presence(occupied: list[str], spoken_from: str | None = None,
         rooms = ", ".join(occupied)
         lines.append(f"Rooms showing occupancy right now: {rooms}.")
         lines.append("Occupancy sensors do not say WHO — that could be Megan or a pet. "
-                     "Use this as ambient awareness; never assert where someone is from occupancy alone.")
+                     "Use this as ambient awareness; never assert where someone is from occupancy alone"
+                     + (" (this caveat is about the room sensors, not his phone)." if where else "."))
     elif spoken_from or not where:
         lines.append("No room is showing occupancy right now.")
     # Leading-separated like room_block/portable_block — the prompt f-strings

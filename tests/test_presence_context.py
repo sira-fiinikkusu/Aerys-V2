@@ -125,29 +125,30 @@ from aerys_v2.services.presence import format_whereabouts  # noqa: E402
 
 
 def test_home_and_away_are_stated_plainly():
-    assert format_whereabouts("home", "") == ["Chris is home."]
-    assert format_whereabouts("not_home", "Office") == ["Chris is away from home right now."]
+    home = "Chris's own phone says he is home - that is him, so you can say it plainly."
+    assert format_whereabouts("home", "") == [home]
+    assert format_whereabouts("not_home", "Office") == ["Chris's own phone says he is away from home right now."]
     for unknown in ("", None, "unknown", "unavailable"):
         assert format_whereabouts(unknown, "Office") == [], "no person state is silence"
 
 
 def test_the_office_is_likely_and_every_other_room_is_only_a_hint():
     office = format_whereabouts("home", "Office")
-    assert office[1] == "His phone has settled in the office, so he is most likely there."
+    assert office[1].startswith("His phone has settled in the office, so he is most likely there")
     (_, bedroom) = format_whereabouts("home", "Bedroom")
     assert "might be in the bedroom" in bedroom and "never act on it or state it as fact" in bedroom
-    assert format_whereabouts("home", "away") == ["Chris is home."], "phone not seen: home only"
+    assert len(format_whereabouts("home", "away")) == 1, "phone not seen: home only"
 
 
 def test_whereabouts_alone_make_a_block_without_an_empty_occupancy_line():
     text = format_presence([], None, whereabouts=("home", "Office"))
-    assert text.startswith("\n\n[House presence]") and "Chris is home." in text
+    assert text.startswith("\n\n[House presence]") and "says he is home" in text
     assert "No room is showing occupancy" not in text
 
 
 def test_the_satellite_he_speaks_through_beats_the_lagging_phone_room():
     text = format_presence(["bedroom"], spoken_from="bedroom", whereabouts=("home", "Office"))
-    assert "Chris is home." in text and "He is speaking from the bedroom." in text
+    assert "says he is home" in text and "He is speaking from the bedroom." in text
     assert "office" not in text.lower().replace("occupancy", "")
 
 
@@ -227,4 +228,4 @@ def test_a_voice_turn_keeps_home_and_drops_the_lagging_phone_room():
     from aerys_v2.factory import PresenceSnapshot
     fn = lambda: PresenceSnapshot([], whereabouts=("home", "Office"))  # noqa: E731
     text = presence_block({"user_id": OWNER, "privacy_context": "private", "voice": True}, fn)
-    assert "Chris is home." in text and "office" not in text.lower()
+    assert "says he is home" in text and "office" not in text.lower()
