@@ -620,3 +620,12 @@ def test_lab_traffic_still_advances_the_watermark():
     from aerys_v2.workers import capability_requests as module
     assert 'lab_channels' not in module.MINER_SQL
     assert 'LAB_CHANNELS' in inspect.getsource(module.classify_turn)
+
+
+def test_a_withdrawn_request_is_not_a_gap():
+    """J10 (2026-09-19): "never mind" drops the turn with the dropped_cancelled receipt,
+    by design, like a false wake. The miner skipped dropped_unaddressed but not this
+    one, so a cancel surfaced as an [error] gap (#104, 2026-10-04)."""
+    from aerys_v2.service import DROPPED_CANCELLED_MARKER, DROPPED_UNADDRESSED_MARKER
+    assert classify_turn(turn(degraded=[DROPPED_CANCELLED_MARKER])) == []
+    assert classify_turn(turn(degraded=[DROPPED_UNADDRESSED_MARKER])) == []

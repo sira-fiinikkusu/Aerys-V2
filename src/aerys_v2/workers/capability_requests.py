@@ -70,8 +70,10 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # module doc). A chat turn that raises its hand and the action turn that
 # recovers it are the escalation feature WORKING; mining them as gaps put
 # false positives at the top of the owner's board (gaps #8/#9, 2026-07-21).
-# They stay in v2_turns for misroute-rate auditing — they just aren't gaps.
-BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed"})
+# They stay in v2_turns for misroute-rate auditing — they just aren't gaps. The two
+# drop receipts (service.DROPPED_UNADDRESSED_MARKER / DROPPED_CANCELLED_MARKER) are the
+# same: a false wake and a withdrawn request ("never mind") are the gate working (#104).
+BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed", "dropped_cancelled"})
 
 # These channels are test rigs whose failures describe the harness, not a
 # missing capability. The skip lives in Python, NOT in the miner's SQL: an
