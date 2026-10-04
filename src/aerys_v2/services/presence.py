@@ -63,23 +63,52 @@ def parse_rooms(spec: str) -> dict[str, str]:
     return out or dict(DEFAULT_ROOMS)
 
 
-def format_presence(occupied: list[str], spoken_from: str | None = None) -> str:
+def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
+    """Where CHRIS is, at the trust the week-long soak earned (Chris approved 2026-10-03).
+
+    The BLE soak, 9/27-10/03: home/away never put him in a room while he was out (7
+    nights), and his phone's settled room agreed with the office sensors 99.5% of the
+    time; the bedroom read 50% (Megan, the cats, a still sleeper), and the settled room
+    lags a move by about 6 minutes. So home/away and "most likely in the office" are
+    stated; any other room is a soft guess she may mention lightly and never act on.
+    """
+    state = (home or "").strip()
+    if not state or state in ("unknown", "unavailable"):
+        return []
+    if state != "home":
+        return ["Chris is away from home right now."]
+    lines = ["Chris is home."]
+    room = (settled or "").strip()
+    if room.lower() == "office":
+        lines.append("His phone has settled in the office, so he is most likely there.")
+    elif room and room.lower() not in ("unknown", "unavailable", "away", "not_home", "none"):
+        lines.append(f"His phone suggests he might be in the {room.lower()} - a rough guess (other people "
+                     "and pets confuse the room sensors, and it lags by minutes): mention it lightly if at "
+                     "all, never act on it or state it as fact.")
+    return lines
+
+
+def format_presence(occupied: list[str], spoken_from: str | None = None,
+                    whereabouts: tuple | None = None) -> str:
     """The block's text, or '' when there is nothing honest to say.
 
-    Deliberately phrased as occupancy, never as a person's location, and it says the
-    limit out loud so she does not over-read it in front of him.
+    Occupancy is phrased as occupancy, never as a person's location, and it says the
+    limit out loud. WHEREABOUTS (person state, settled phone room) is the one place a
+    location is stated, and only at the trust format_whereabouts allows.
     """
-    if not occupied and not spoken_from:
+    # The satellite he is speaking through beats a phone room that lags by minutes.
+    where = format_whereabouts(whereabouts[0], None if spoken_from else whereabouts[1]) if whereabouts else []
+    if not occupied and not spoken_from and not where:
         return ""
-    lines = []
+    lines = list(where)
     if spoken_from:
         lines.append(f"He is speaking from the {spoken_from}.")
     if occupied:
         rooms = ", ".join(occupied)
         lines.append(f"Rooms showing occupancy right now: {rooms}.")
         lines.append("Occupancy sensors do not say WHO — that could be Megan or a pet. "
-                     "Use this as ambient awareness; never assert where someone is.")
-    else:
+                     "Use this as ambient awareness; never assert where someone is from occupancy alone.")
+    elif spoken_from or not where:
         lines.append("No room is showing occupancy right now.")
     # Leading-separated like room_block/portable_block — the prompt f-strings
     # concatenate blocks with no separator of their own.

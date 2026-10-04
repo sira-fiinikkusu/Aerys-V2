@@ -2437,6 +2437,7 @@ def presence_fn_for(settings: Settings):
         return None
     set_owner_id(settings.owner_person_id)   # the fence needs to know who he is
     import httpx
+    import json
 
     from aerys_v2.services.presence import parse_rooms
 
@@ -2448,11 +2449,16 @@ def presence_fn_for(settings: Settings):
     # N timeouts, so a slow-but-alive HA would add seconds to EVERY turn. The template
     # endpoint answers all of them in a single small call, and /api/states is not used
     # because it ships the whole house (hundreds of entities) to pick six booleans.
-    template = "{{ [" + ",".join(
+    person, settled = settings.presence_person_entity.strip(), settings.presence_settled_entity.strip()
+    # Still ONE call: the rooms plus Chris's person state and settled phone room, as
+    # JSON so no room name can shift a field (Codex, 2026-10-03: a ';;' in a room name
+    # turned "home" into "away").
+    template = "{{ {'rooms': [" + ",".join(
         f"('{room}' if is_state('{entity}','on') else '')" for room, entity in rooms.items()
-    ) + "] | select | list | join(',') }}"
+    ) + "] | select | list, 'person': " + (f"states('{person}')" if person else "''") + ", 'room': " + (
+        f"states('{settled}')" if settled else "''") + "} | to_json }}"
 
-    def occupied() -> list[str]:
+    def occupied() -> PresenceSnapshot:
         try:
             with httpx.Client(timeout=2.0) as http:
                 r = http.post(f"{base}/api/template",
@@ -2460,13 +2466,30 @@ def presence_fn_for(settings: Settings):
                               json={"template": template})
             if r.status_code != 200:
                 log.debug("presence read: HA returned %s — no presence block this turn", r.status_code)
-                return []
-            return [room for room in r.text.strip().split(",") if room]
+                return PresenceSnapshot([])
+            data = json.loads(r.text)
+            if not isinstance(data, dict) or not isinstance(data.get("rooms"), list):
+                log.debug("presence read: HA answer is not the expected shape — no presence block")
+                return PresenceSnapshot([])
+            occupied = [room for room in data["rooms"] if isinstance(room, str) and room]
+            home, room = data.get("person"), data.get("room")
+            if not isinstance(home, str) or not isinstance(room, str):
+                home = room = ""                # a malformed answer states nothing about him
+            return PresenceSnapshot(occupied, whereabouts=(home, room) if person else None)
         except Exception:
             log.debug("presence read failed — no presence block this turn", exc_info=True)
-            return []
+            return PresenceSnapshot([])
 
     return occupied
+
+
+class PresenceSnapshot(list):
+    """The occupied rooms (still a list, for every existing caller), plus Chris's
+    whereabouts (person state, settled phone room) when configured."""
+
+    def __init__(self, rooms, whereabouts=None):
+        super().__init__(rooms)
+        self.whereabouts = whereabouts
 
 
 def voice_room_fn_for(settings: Settings):
@@ -2543,14 +2566,22 @@ def presence_block(identity: dict, presence_fn, spoken_from: str | None = None) 
     """
     if presence_fn is None:
         return ""
-    if identity.get("privacy_context") == "public":
+    # PRIVATE, not merely "not public": a missing or unknown privacy context is shut
+    # (Codex, 2026-10-03 -- the block now carries where he is, not only room occupancy).
+    if identity.get("privacy_context") != "private":
         return ""
     if not _OWNER_ID or identity.get("user_id") != _OWNER_ID:
         return ""
     try:
         from aerys_v2.services.presence import format_presence
 
-        return format_presence(presence_fn(), spoken_from)
+        snapshot = presence_fn()
+        whereabouts = getattr(snapshot, "whereabouts", None)
+        if whereabouts and identity.get("voice"):
+            # He is talking to a satellite, which is where he is; his phone's room
+            # lags by minutes and could contradict it. Home/away only.
+            whereabouts = (whereabouts[0], None)
+        return format_presence(snapshot, spoken_from, whereabouts=whereabouts)
     except Exception:
         log.debug("presence block failed — omitted", exc_info=True)
         return ""

@@ -337,6 +337,10 @@ class Settings(BaseSettings):
     # says whether the block exists at all.
     presence_context: bool = False
     presence_rooms: str = ""  # 'office=binary_sensor.x,...'; empty = presence.DEFAULT_ROOMS
+    # Chris's whereabouts (approved 2026-10-03 after the BLE soak): his HA person and his
+    # phone's settled room. Empty = no whereabouts line; read in presence's one HA call.
+    presence_person_entity: str = "person.chris"
+    presence_settled_entity: str = "sensor.chris_settled_room"
     # The house alarm panel entity (e.g. "alarm_control_panel.panel"). Empty =
     # the control_alarm tool doesn't exist — same arming pattern as ha_token.
     # Owner-commissioned 2026-08-07; the tool itself carries the owner-only and

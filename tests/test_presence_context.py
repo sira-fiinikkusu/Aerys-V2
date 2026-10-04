@@ -95,7 +95,7 @@ def test_the_whole_house_is_read_in_ONE_request_not_one_per_room():
         assert request.url.path == "/api/template" and request.method == "POST"
         tpl = json.loads(request.content)["template"]
         assert "binary_sensor.office_occupancy" in tpl and "binary_sensor.sunroom_occupancy" in tpl
-        return httpx.Response(200, text="office,living room")
+        return httpx.Response(200, text='{"rooms": ["office", "living room"], "person": "home", "room": "Office"}')
 
     real = httpx.Client
     try:
@@ -108,7 +108,8 @@ def test_the_whole_house_is_read_in_ONE_request_not_one_per_room():
 
 
 def test_an_unhappy_home_assistant_is_silence_not_a_guess():
-    for resp in (httpx.Response(500, text="nope"), httpx.Response(200, text="")):
+    for resp in (httpx.Response(500, text="nope"), httpx.Response(200, text=""),
+                 httpx.Response(200, text="office,living room"), httpx.Response(200, text='{"rooms": 3}')):
         real = httpx.Client
         try:
             httpx.Client = lambda **kw: real(transport=httpx.MockTransport(lambda r: resp), **kw)  # type: ignore[misc]
@@ -116,3 +117,114 @@ def test_an_unhappy_home_assistant_is_silence_not_a_guess():
             assert fn() == []
         finally:
             httpx.Client = real  # type: ignore[misc]
+
+
+# --- his whereabouts (BLE soak, approved 2026-10-03) ---------------------------
+
+from aerys_v2.services.presence import format_whereabouts  # noqa: E402
+
+
+def test_home_and_away_are_stated_plainly():
+    assert format_whereabouts("home", "") == ["Chris is home."]
+    assert format_whereabouts("not_home", "Office") == ["Chris is away from home right now."]
+    for unknown in ("", None, "unknown", "unavailable"):
+        assert format_whereabouts(unknown, "Office") == [], "no person state is silence"
+
+
+def test_the_office_is_likely_and_every_other_room_is_only_a_hint():
+    office = format_whereabouts("home", "Office")
+    assert office[1] == "His phone has settled in the office, so he is most likely there."
+    (_, bedroom) = format_whereabouts("home", "Bedroom")
+    assert "might be in the bedroom" in bedroom and "never act on it or state it as fact" in bedroom
+    assert format_whereabouts("home", "away") == ["Chris is home."], "phone not seen: home only"
+
+
+def test_whereabouts_alone_make_a_block_without_an_empty_occupancy_line():
+    text = format_presence([], None, whereabouts=("home", "Office"))
+    assert text.startswith("\n\n[House presence]") and "Chris is home." in text
+    assert "No room is showing occupancy" not in text
+
+
+def test_the_satellite_he_speaks_through_beats_the_lagging_phone_room():
+    text = format_presence(["bedroom"], spoken_from="bedroom", whereabouts=("home", "Office"))
+    assert "Chris is home." in text and "He is speaking from the bedroom." in text
+    assert "office" not in text.lower().replace("occupancy", "")
+
+
+def test_the_one_request_also_carries_his_person_and_settled_room():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tpl = json.loads(request.content)["template"]
+        seen.append(tpl)
+        return httpx.Response(200, text='{"rooms": ["office"], "person": "home", "room": "Office"}')
+
+    real = httpx.Client
+    try:
+        httpx.Client = lambda **kw: real(transport=httpx.MockTransport(handler), **kw)  # type: ignore[misc]
+        fn = presence_fn_for(settings(presence_context=True))
+        snapshot = fn()
+    finally:
+        httpx.Client = real  # type: ignore[misc]
+    assert len(seen) == 1 and "states('person.chris')" in seen[0] and "states('sensor.chris_settled_room')" in seen[0]
+    # Serialized by HA as JSON (rendered live 10/03: {"rooms":["office"],"person":"home","room":"Office"});
+    # a plain-text join would let a room name shift his fields.
+    assert seen[0].startswith("{{ {'rooms': [") and seen[0].endswith("} | to_json }}"), seen[0]
+    assert "'person': states(" in seen[0] and "'room': states(" in seen[0]
+    assert snapshot == ["office"] and snapshot.whereabouts == ("home", "Office")
+    set_owner_id(OWNER)        # presence_fn_for re-reads the owner from settings (unset here)
+    fn = lambda: snapshot  # noqa: E731
+    block = presence_block({"user_id": OWNER, "privacy_context": "private"}, fn)
+    assert "most likely there" in block and "Rooms showing occupancy right now: office." in block
+    assert presence_block({"user_id": OWNER, "privacy_context": "public"}, fn) == "", "owner + private only"
+
+
+def test_a_room_name_can_never_shift_his_fields():
+    """Codex, 2026-10-03: with a ';;' text format, a room named 'den;;annex' parsed
+    'annex' as his person state and told her he was away. JSON carries each field."""
+    answer = json.dumps({"rooms": ["den;;annex", "a,b"], "person": "home", "room": "Office"})
+    real = httpx.Client
+    try:
+        httpx.Client = lambda **kw: real(transport=httpx.MockTransport(  # type: ignore[misc]
+            lambda r: httpx.Response(200, text=answer)), **kw)
+        snapshot = presence_fn_for(settings(presence_context=True, presence_rooms="den;;annex=binary_sensor.x"))()
+    finally:
+        httpx.Client = real  # type: ignore[misc]
+    assert snapshot == ["den;;annex", "a,b"] and snapshot.whereabouts == ("home", "Office")
+
+
+@pytest.mark.parametrize("answer,rooms,whereabouts", [
+    ({"rooms": [], "person": "home", "room": 7}, [], ("", "")),          # a bad room states nothing about him
+    ({"rooms": [], "person": None, "room": "Office"}, [], ("", "")),     # a bad person state, likewise
+    ({"rooms": ["office", 3, ""], "person": "home", "room": "Office"}, ["office"], ("home", "Office")),
+    ({"rooms": "office", "person": "home", "room": "Office"}, [], None),  # not a list: silence, not letters
+    ({"rooms": {"office": False}, "person": "home", "room": "Office"}, [], None),
+    (["office"], [], None),
+])
+def test_a_malformed_answer_is_silence_field_by_field(answer, rooms, whereabouts):
+    real = httpx.Client
+    try:
+        httpx.Client = lambda **kw: real(transport=httpx.MockTransport(  # type: ignore[misc]
+            lambda r: httpx.Response(200, text=json.dumps(answer))), **kw)
+        snapshot = presence_fn_for(settings(presence_context=True))()
+    finally:
+        httpx.Client = real  # type: ignore[misc]
+    assert snapshot == rooms and getattr(snapshot, "whereabouts", None) == whereabouts
+    if whereabouts == ("", ""):
+        assert format_presence(snapshot, None, whereabouts=snapshot.whereabouts) == ""
+
+
+def test_only_a_private_owner_turn_hears_where_he_is():
+    snapshot_fn = lambda: __import__("aerys_v2.factory", fromlist=["PresenceSnapshot"]).PresenceSnapshot(  # noqa: E731
+        [], whereabouts=("home", "Office"))
+    for privacy in (None, "", "guild", "public"):
+        identity = {"user_id": OWNER} if privacy is None else {"user_id": OWNER, "privacy_context": privacy}
+        assert presence_block(identity, snapshot_fn) == "", privacy
+    assert "most likely there" in presence_block({"user_id": OWNER, "privacy_context": "private"}, snapshot_fn)
+
+
+def test_a_voice_turn_keeps_home_and_drops_the_lagging_phone_room():
+    from aerys_v2.factory import PresenceSnapshot
+    fn = lambda: PresenceSnapshot([], whereabouts=("home", "Office"))  # noqa: E731
+    text = presence_block({"user_id": OWNER, "privacy_context": "private", "voice": True}, fn)
+    assert "Chris is home." in text and "office" not in text.lower()
