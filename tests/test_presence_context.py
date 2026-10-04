@@ -121,13 +121,20 @@ def test_an_unhappy_home_assistant_is_silence_not_a_guess():
 
 # --- his whereabouts (BLE soak, approved 2026-10-03) ---------------------------
 
+NO_TIMES = "This is his state right now; it carries no times, so never say when he arrived or moved."
+
+
+def home_line():
+    return "Chris's own phone says he is home - that is him, so you can say it plainly."
+
 from aerys_v2.services.presence import format_whereabouts  # noqa: E402
 
 
 def test_home_and_away_are_stated_plainly():
     home = "Chris's own phone says he is home - that is him, so you can say it plainly."
-    assert format_whereabouts("home", "") == [home]
-    assert format_whereabouts("not_home", "Office") == ["Chris's own phone says he is away from home right now."]
+    no_times = "This is his state right now; it carries no times, so never say when he arrived or moved."
+    assert format_whereabouts("home", "") == [home, no_times]
+    assert format_whereabouts("not_home", "Office") == ["Chris's own phone says he is away from home right now.", NO_TIMES]
     for unknown in ("", None, "unknown", "unavailable"):
         assert format_whereabouts(unknown, "Office") == [], "no person state is silence"
 
@@ -135,9 +142,9 @@ def test_home_and_away_are_stated_plainly():
 def test_the_office_is_likely_and_every_other_room_is_only_a_hint():
     office = format_whereabouts("home", "Office")
     assert office[1].startswith("His phone has settled in the office, so he is most likely there")
-    (_, bedroom) = format_whereabouts("home", "Bedroom")
+    (_, bedroom, _) = format_whereabouts("home", "Bedroom")
     assert "might be in the bedroom" in bedroom and "never act on it or state it as fact" in bedroom
-    assert len(format_whereabouts("home", "away")) == 1, "phone not seen: home only"
+    assert format_whereabouts("home", "away") == [home_line(), NO_TIMES], "phone not seen: home only"
 
 
 def test_whereabouts_alone_make_a_block_without_an_empty_occupancy_line():

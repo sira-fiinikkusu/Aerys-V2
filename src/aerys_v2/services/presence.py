@@ -63,6 +63,10 @@ def parse_rooms(spec: str) -> dict[str, str]:
     return out or dict(DEFAULT_ROOMS)
 
 
+# She invented "his phone pinged home a minute ago" on the first good probe (2026-10-03).
+NO_TIMES = "This is his state right now; it carries no times, so never say when he arrived or moved."
+
+
 def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
     """Where CHRIS is, at the trust the week-long soak earned (Chris approved 2026-10-03).
 
@@ -76,7 +80,7 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
     if not state or state in ("unknown", "unavailable"):
         return []
     if state != "home":
-        return ["Chris's own phone says he is away from home right now."]
+        return ["Chris's own phone says he is away from home right now.", NO_TIMES]
     # Attributed to HIS phone, out loud: the occupancy caveat below ("sensors do not say
     # WHO") made her doubt these lines too on the first live probe (2026-10-03).
     lines = ["Chris's own phone says he is home - that is him, so you can say it plainly."]
@@ -87,6 +91,7 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
         lines.append(f"His phone suggests he might be in the {room.lower()} - a rough guess (other people "
                      "and pets confuse the room sensors, and it lags by minutes): mention it lightly if at "
                      "all, never act on it or state it as fact.")
+    lines.append(NO_TIMES)
     return lines
 
 
