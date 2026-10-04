@@ -86,7 +86,7 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
     lines = ["Chris's own phone says he is home - that is him, so you can say it plainly."]
     room = (settled or "").strip()
     if room.lower() == "office":
-        lines.append("His phone has settled in the office, so he is most likely there - say so if it comes up.")
+        lines.append("His phone has settled in the office, so he is most likely there - a strong sign, not a certainty.")
     elif room and room.lower() not in ("unknown", "unavailable", "away", "not_home", "none"):
         lines.append(f"His phone suggests he might be in the {room.lower()} - a rough guess (other people "
                      "and pets confuse the room sensors, and it lags by minutes): mention it lightly if at "
