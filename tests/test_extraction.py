@@ -899,6 +899,39 @@ def test_a_successful_pass_resets_the_stall_streak(caplog):
     assert not caplog.records, "the streak restarts after a pass that stored something"
 
 
+def test_rows_that_move_the_line_and_hold_nothing_are_not_a_stall(caplog):
+    """2026-10-04 (Chris chose it): an evening of ember verify turns ("reply READY",
+    "make a folder") read rows, advanced the watermark and held nothing worth
+    remembering -- and the alarm called that a stall. Moving is healthy."""
+    import logging
+
+    from aerys_v2.workers import __main__ as wm
+
+    wm._zero_insert_streak, wm._last_watermarks = 0, {}
+    with caplog.at_level(logging.WARNING, logger=wm.log.name):
+        for hour in range(6):
+            wm._check_stalled({"inserted_total": 0, "sources": {"v2_turns": {
+                "rows": 2, "parse_failures": 0, "watermark": f"2026-10-04 2{hour}:21:12+00"}}})
+    assert not caplog.records
+
+
+def test_a_pinned_line_with_no_parse_failure_still_alarms(caplog):
+    """The 7/29 shape: the same rows re-read every hour behind a watermark that never
+    moves, and no parse failure counted. That stays a stall."""
+    import logging
+
+    from aerys_v2.workers import __main__ as wm
+
+    wm._zero_insert_streak, wm._last_watermarks = 0, {}
+    pinned = {"inserted_total": 0, "sources": {"v2_turns": {
+        "rows": 190, "parse_failures": 0, "watermark": "2026-07-05 21:48:52+00"}}}
+    with caplog.at_level(logging.WARNING, logger=wm.log.name):
+        for _ in range(wm.STALL_PASSES):
+            wm._check_stalled(pinned)
+    assert len(caplog.records) == 1 and "2026-07-05 21:48:52+00" in caplog.records[0].getMessage()
+    wm._zero_insert_streak, wm._last_watermarks = 0, {}
+
+
 # ─────────────────── tense fix (owner-approved 8/05, built 8/06): time absolutizing
 
 

@@ -121,6 +121,8 @@ _zero_insert_streak = 0
 #: reads while memory formation was stopped — a repeat of the 7/29 lesson at a
 #: smaller scale. A log line is not a voice.
 _stall_alarm: Callable[[str], None] | None = None
+#: Each source's watermark after the previous pass: a stall is a line that stopped moving.
+_last_watermarks: dict = {}
 
 
 def kael_desk_alarm_for(settings: Settings) -> Callable[[str], None] | None:
@@ -153,10 +155,24 @@ def _check_stalled(summary: dict) -> None:
     the routine pass log, and it carries the watermarks + parse_failures so the
     first question ("what is it stuck behind?") is answered in the line itself.
     """
-    global _zero_insert_streak
+    global _zero_insert_streak, _last_watermarks
     sources = summary.get("sources") or {}
     had_rows = any((s or {}).get("rows") for s in sources.values())
+    watermarks = {n: (s or {}).get("watermark") for n, s in sources.items()}
+    previous, _last_watermarks = _last_watermarks, watermarks
     if summary.get("inserted_total") or not had_rows:
+        _zero_insert_streak = 0
+        return
+    # 2026-10-04 (Chris chose it): rows that MOVE the line and simply hold nothing worth
+    # remembering -- test chatter, light commands, a goodnight -- are not a stall; that
+    # false alarm fired on an evening of ember verify turns. A stall is rows that fail to
+    # parse, or a line that does not move: the 7/29 outage re-read the same ~190 rows
+    # every hour behind a pinned watermark with no parse failure counted at all. A source
+    # never seen before counts as not moving, so a line pinned from startup still alarms.
+    stuck = any((s or {}).get("rows") and ((s or {}).get("parse_failures") or watermarks.get(n) is None
+                                           or n not in previous or watermarks.get(n) == previous.get(n))
+                for n, s in sources.items())
+    if not stuck:
         _zero_insert_streak = 0
         return
     _zero_insert_streak += 1
