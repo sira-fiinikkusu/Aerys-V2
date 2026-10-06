@@ -175,3 +175,19 @@ def test_system_prompt_carries_clock_and_where():
     assert "never cite URLs" in RecordingModel.seen[0]             # no plumbing narration
     assert "a private Discord DM" in RecordingModel.seen[1]        # DM says private
     assert "shared Discord server" not in RecordingModel.seen[1]   # DM never says shared
+
+
+def test_a_link_ask_is_answered_and_a_new_release_is_looked_up():
+    """Board #51 (2026-10-06). (1) The awareness line said "never cite URLs, links"
+    on every typed turn -- meant for how she knows the time and the room, read as
+    "no links". It keeps that meaning and says links are fine when asked. (2) Asked
+    about a game released after her cutoff, the chat tier said it was "past what I
+    can verify" instead of handing off to search."""
+    RecordingModel.seen = []
+    m = RecordingModel(messages=iter([AIMessage(content="a")]))
+    graph = build_graph(m, soul="s")
+    ask(graph, "hi", identity=CHRIS, thread_id="t-links")
+    prompt = RecordingModel.seen[0]
+    assert "never cite URLs" in prompt
+    assert "when someone asks you for a link to something, give it" in prompt
+    assert "after your knowledge cutoff" in prompt and "past what you can verify" in prompt

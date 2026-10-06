@@ -93,6 +93,7 @@ def build_web_search_tool(*, api_key: str, client: httpx.Client | None = None):
 
         Returns: a short answer (when available) plus the top results as
         `title | url | snippet`. Never fabricate results — use only what comes back.
+        When the user asked for a link, give them the url from these results.
         """
         q = query.strip() if isinstance(query, str) else ""
         if not q:

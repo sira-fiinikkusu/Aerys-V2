@@ -1370,7 +1370,11 @@ SEARCH_OVERLAY = (
     "estimate no dedicated tool provides (a rideshare fare, a flight, a service "
     "quote): do NOT refuse — search for typical current rates and answer with a "
     "clearly-labeled estimate, noting only the provider's own app has the live "
-    "number. A sourced ballpark beats an empty-handed refusal."
+    "number. A sourced ballpark beats an empty-handed refusal. When they ask for "
+    "a link — or to find, show or 'link me' a specific product, listing, page or "
+    "video — give the exact URL from the results, copied as returned, next to what "
+    "it is. Never tell them to go search for it themselves; if no result has a "
+    "fitting URL, say so plainly."
 )
 
 LOG_GAP_OVERLAY = (
@@ -2717,7 +2721,9 @@ def _where_when_line(thread: object, identity: dict) -> str:
         f"\n\nRight now it is {when} Eastern. You're talking with them in "
         f"{_channel_phrase(_surface_thread_for_phrase(thread, identity), identity.get('channel_name', ''))}. "
         "Treat this as your own awareness — use it naturally, and never cite URLs, "
-        "links, or metadata to the user to explain how you know something."
+        "links, or metadata to the user to explain how you know the time or where "
+        "you are. That is only about this awareness: when someone asks you for a "
+        "link to something, give it."
     )
 
 
@@ -2833,6 +2839,10 @@ def build_graph(
             "or availability: that is CURRENT information, not timeless knowledge — "
             "you cannot know what a store has on its shelves today, and a plausible "
             "brand name is the same failure as a fabricated device state. "
+            "The same goes for anything released, announced or that happened after "
+            "your knowledge cutoff — a new game, film, product or event: it can be "
+            "looked up, so hand it off rather than saying it is past what you can "
+            "verify. "
             f"Instead begin your reply with the exact token {HANDOFF_MARKER} "
             "followed by one short natural line in your voice about getting it "
             f'done, e.g. "{HANDOFF_MARKER} Let me actually flip that for you." '

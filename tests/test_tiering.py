@@ -425,6 +425,10 @@ def test_search_overlay_names_search_web_and_only_when_armed():
     # gap #11 (2026-07-22): a sourced ballpark beats refusing an estimate ask
     assert "clearly-labeled estimate" in lowered
     assert "do not refuse" in lowered
+    # board #51 (2026-10-06): asked for a Newegg link in the guild, she named the
+    # card and said "just search Newegg" -- the URL was in her results
+    assert "give the exact url from the results" in lowered
+    assert "never tell them to go search for it themselves" in lowered
 
     # armed -> the search clause appears; unarmed -> it must not
     search_only = action_overlay_for(settings_with(tavily_api_key="tvly-key"))
