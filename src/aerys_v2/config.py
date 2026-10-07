@@ -579,7 +579,7 @@ class Settings(BaseSettings):
     tier_standard_model: str = "claude-sonnet-5-5"    # the daily driver (api backend
     #   only — on the oauth backend, standard IS `model` above: the subscription
     #   client is single-model, so this knob applies when chat bills the API key)
-    tier_deep_model: str = "claude-opus-4-8"        # research/analysis — rationed
+    tier_deep_model: str = "claude-opus-5-5"        # research/analysis — rationed
     # Deep turns per UTC day, enforced atomically in v2_model_usage (migration
     # 003) when database_url is set — V1's aerys_model_usage 10/day opus cap,
     # minus its check-then-increment race. Cap hit -> silently costs nothing:

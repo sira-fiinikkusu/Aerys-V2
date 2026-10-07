@@ -230,7 +230,7 @@ def test_tier_models_for_api_backend_maps_the_settings_knobs():
     assert set(models) == set(TIERS)
     assert models["fast"].model == "claude-haiku-5-5"
     assert models["standard"].model == "claude-sonnet-5-5"
-    assert models["deep"].model == "claude-opus-4-8"
+    assert models["deep"].model == "claude-opus-5-5"
 
 
 def test_tier_models_for_oauth_backend_keeps_standard_on_the_pool():
@@ -445,7 +445,7 @@ def test_the_deep_tier_rides_the_plan_only_when_asked():
     from aerys_v2.oauth_model import ClaudeOAuthChatModel
 
     models = tier_models_for(settings_with(model_backend="oauth", oauth_deep_backend="oauth"))
-    assert isinstance(models["deep"], ClaudeOAuthChatModel) and models["deep"].model == "claude-opus-4-8"
+    assert isinstance(models["deep"], ClaudeOAuthChatModel) and models["deep"].model == "claude-opus-5-5"
     assert isinstance(models["standard"], ClaudeOAuthChatModel) and isinstance(models["fast"], ChatAnthropic)
     assert isinstance(tier_models_for(settings_with(oauth_deep_backend="oauth"))["deep"], ChatAnthropic), \
         "the api backend never puts deep on the plan"
