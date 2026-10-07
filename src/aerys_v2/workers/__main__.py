@@ -78,6 +78,10 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
     # prod aerys (READ-ONLY — the same belt-and-braces as factory's memory-context
     # connection) + aerys_v2 (v2_turns reads and every write). `with` commits the
     # staging transaction on clean exit, rolls back if the pass blew up mid-batch.
+    # Turns said in a sealed room extract as private, always (extraction.seal_rows).
+    sealed_rooms = frozenset(
+        c.strip() for c in settings.discord_sealed_channel_ids.split(",") if c.strip()
+    )
     with psycopg.connect(settings.memories_database_url) as source_conn:
         source_conn.read_only = True
         with psycopg.connect(settings.database_url) as staging_conn:
@@ -94,6 +98,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                         embedder,
                         lookback_hours=settings.extraction_lookback_hours,
                         batch_limit=settings.extraction_batch_limit,
+                        sealed_rooms=sealed_rooms,
                     )
             else:
                 summary = run_extraction(
@@ -103,6 +108,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                     embedder,
                     lookback_hours=settings.extraction_lookback_hours,
                     batch_limit=settings.extraction_batch_limit,
+                    sealed_rooms=sealed_rooms,
                 )
     log.info("extraction pass (%s): %s", "live" if live else "shadow", json.dumps(summary))
     _check_stalled(summary)

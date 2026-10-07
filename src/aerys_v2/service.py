@@ -58,7 +58,8 @@ from aerys_v2.services.content_privacy import (
     CONTENT_PRIVACY_KEY,
     PRIVATE,
     PUBLIC,
-    redact_private_history,
+    SEALED_ROOM_KEY,
+    gate_for_room,
 )
 from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
@@ -126,12 +127,26 @@ def _origin_privacy(identity: Identity | dict | None) -> str:
     return PUBLIC if (identity or {}).get("privacy_context") == "public" else PRIVATE
 
 
-def _human_turn(text: str, origin_privacy: str, msg_id: str) -> HumanMessage:
+def _human_turn(
+    text: str, origin_privacy: str, msg_id: str, *, sealed_room: str = ""
+) -> HumanMessage:
     """A tagged HumanMessage with a STABLE id — the id lets the async judge retag THIS
-    exact message later (add_messages replaces by id, in place)."""
-    return HumanMessage(
-        content=text, id=msg_id, additional_kwargs={CONTENT_PRIVACY_KEY: origin_privacy}
-    )
+    exact message later (add_messages replaces by id, in place). A turn said in a
+    sealed room also carries that room, so it never shows in any other shared room
+    (content_privacy.redact_sealed_history). Every writer passes the room it has, the
+    retag included: replacing a message by id with a copy that lacked the room would
+    quietly unseal it."""
+    kwargs = {CONTENT_PRIVACY_KEY: origin_privacy}
+    if sealed_room:
+        kwargs[SEALED_ROOM_KEY] = sealed_room
+    return HumanMessage(content=text, id=msg_id, additional_kwargs=kwargs)
+
+
+def _sealed_room(config: dict | None) -> str:
+    """The sealed room this turn is being said in ('' for an ordinary room), read off
+    the identity the transport stamped (discord_gateway.sealed_room_for)."""
+    identity = ((config or {}).get("configurable") or {}).get("identity") or {}
+    return str(identity.get("sealed_room") or "")
 
 
 # ── v2_turns audit seam (migration 001; recorder wired by factory.turn_recorder_for) ──
@@ -441,7 +456,7 @@ def _reclassify_content_privacy(
             for _ in range(_RETAG_MAX_ATTEMPTS):
                 graph.update_state(
                     {"configurable": configurable},
-                    {"messages": [_human_turn(text, PUBLIC, msg_id)]},
+                    {"messages": [_human_turn(text, PUBLIC, msg_id, sealed_room=_sealed_room(config))]},
                     as_node="chat",
                 )
                 if _retag_landed(graph, configurable, msg_id):
@@ -1468,7 +1483,8 @@ def _chat_turn(
     try:
         with track_local_tool_fallback():
             result = graph.invoke(
-                {"messages": [_human_turn(text, human_privacy, human_id)]}, config
+                {"messages": [_human_turn(text, human_privacy, human_id,
+                                           sealed_room=_sealed_room(config))]}, config
             )
     except Exception as e:
         # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
@@ -1714,13 +1730,12 @@ def _action_history_seed(
     # specialist=False (voice banter: conversation riding the tool graph) keeps the
     # windowed prior exchange — her replies ARE the context there.
     current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
-    private_room = identity.get("privacy_context") == PRIVATE
     if not specialist:
         seeded = list(prior) if current_checkpointed else [*prior, HumanMessage(content=text)]
-        # Mirror the chat node's fail-closed gate: redact unless the room is
-        # EXPLICITLY private. A public/unknown context drops private-tagged priors;
-        # a private DM/voice context passes the owner's full history through.
-        return seeded if private_room else redact_private_history(seeded)
+        # The chat node's own room gate (content_privacy.gate_for_room): a private
+        # DM/voice context passes the full history through; any other room drops
+        # private-tagged priors and priors sealed to some other room.
+        return gate_for_room(seeded, identity)
     humans = [m for m in prior if getattr(m, "type", "") == "human"]
     if current_checkpointed:
         current = prior[-1]          # already checkpointed by the chat invoke
@@ -1730,7 +1745,7 @@ def _action_history_seed(
     window = humans[-ACTION_SEED_HUMAN_TURNS:] if ACTION_SEED_HUMAN_TURNS > 0 else []
     # Same room gate on the window, BEFORE folding (the gate works on message lists
     # and always keeps the last human, so the current turn rides along as the tail).
-    kept = [*window, current] if private_room else redact_private_history([*window, current])
+    kept = gate_for_room([*window, current], identity)
     priors = [_trim_human_turn(m) for m in kept[:-1]]
     # ★ FOLD, don't stack (9/04 bench): seeded as separate human messages with no
     # replies between them, three prior requests read as a BATCH of pending
@@ -1852,7 +1867,8 @@ def _action_turn(
     if add_human:
         # The tagged, stable-id human turn (so the async judge can retag it) — the
         # action graph never touched the main thread, so THIS is where it lands.
-        messages.insert(0, _human_turn(text, human_privacy, human_id))
+        messages.insert(0, _human_turn(text, human_privacy, human_id,
+                                        sealed_room=_sealed_room(config)))
     graph.update_state(
         {"configurable": config["configurable"]}, {"messages": messages}, as_node="chat"
     )
@@ -2121,7 +2137,8 @@ def _voice_parallel_start(
         )
         graph.update_state(
             {"configurable": real_configurable},
-            {"messages": [_human_turn(text, human_privacy, human_id)]},
+            {"messages": [_human_turn(text, human_privacy, human_id,
+                                       sealed_room=_sealed_room({"configurable": real_configurable}))]},
             as_node="chat",
         )
 
@@ -2311,7 +2328,9 @@ def _voice_parallel_start(
         # a spoken reply the next turn's model can't see is a continuity hole).
         graph.update_state(
             {"configurable": real_configurable},
-            {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=honest)]},
+            {"messages": [_human_turn(text, human_privacy, human_id,
+                                       sealed_room=_sealed_room({"configurable": real_configurable})),
+                          AIMessage(content=honest)]},
             as_node="chat",
         )
         _face(face_push, "speaking", honest)
@@ -2322,7 +2341,9 @@ def _voice_parallel_start(
     # invariant: a banter turn must never produce a reply AND a follow-up).
     graph.update_state(
         {"configurable": real_configurable},
-        {"messages": [_human_turn(text, human_privacy, human_id), AIMessage(content=reply)]},
+        {"messages": [_human_turn(text, human_privacy, human_id,
+                                   sealed_room=_sealed_room({"configurable": real_configurable})),
+                      AIMessage(content=reply)]},
         as_node="chat",
     )
 

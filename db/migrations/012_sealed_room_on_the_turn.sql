@@ -1,0 +1,14 @@
+-- 012: remember which SEALED room a turn was said in.
+-- Runs against the aerys_v2 database (NAS Postgres), same as 001, 010 and 011.
+--
+-- WHY: a sealed room is a shared channel that is private by membership; what is
+-- said there must never surface in another shared room, and the memories it yields
+-- are always private. The live thread carries the room on each message; the
+-- extraction worker reads v2_turns, so the room has to be on the row too. It is
+-- the room that was SEALED (a thread inside a sealed channel records its parent),
+-- which is why channel_id alone cannot answer the question.
+--
+-- Append-only and nullable: ordinary rooms leave it NULL. Apply BEFORE deploying the
+-- code that writes it: the recorder is fail-open, so a missing column loses audit
+-- rows (and the extraction read would fail), never replies.
+ALTER TABLE v2_turns ADD COLUMN IF NOT EXISTS sealed_room TEXT;

@@ -218,6 +218,8 @@ SOURCE_COLUMNS = (
     "created_at_raw",
     "speaker_name",
     "source_thread",
+    "channel_id",
+    "sealed_room",
 )
 
 # v1 channels — the "Fetch from n8n_chat_histories" query, ported. READ-ONLY
@@ -238,7 +240,9 @@ SELECT
   h.created_at,
   h.created_at::text AS created_at_raw,
   COALESCE(pers.display_name, 'Unknown') AS speaker_name,
-  'v1:n8n_chat_histories' AS source_thread
+  'v1:n8n_chat_histories' AS source_thread,
+  NULL::text AS channel_id,
+  NULL::text AS sealed_room
 FROM n8n_chat_histories h
 JOIN valid_sessions vs ON vs.session_id = h.session_id
 LEFT JOIN persons pers ON pers.id = vs.session_id::uuid
@@ -287,7 +291,9 @@ SELECT
     ELSE t.created_at END AS created_at,
   t.created_at::text AS created_at_raw,
   'Unknown' AS speaker_name,
-  t.thread_id AS source_thread
+  t.thread_id AS source_thread,
+  t.channel_id::text AS channel_id,
+  t.sealed_room AS sealed_room
 FROM v2_turns t
 WHERE t.person_id IS NOT NULL
   AND t.guard_verdict IS DISTINCT FROM 'portable_untrusted'
@@ -773,6 +779,31 @@ def save_watermark(staging_conn: Any, source: str, raw: str) -> None:
     staging_conn.execute(WATERMARK_SET_SQL, {"source": source, "raw": raw})
 
 
+PRIVATE_LEVEL = "private"
+
+
+def seal_rows(rows: list[dict], sealed_rooms: frozenset[str]) -> list[dict]:
+    """Mark the turns said in a SEALED room (a shared channel that is private by
+    membership). Their memories are always private and they are never batched with
+    other turns: the extraction model's own rule says a job or a plan is public, which
+    is exactly the content a sealed room exists to keep in."""
+    for row in rows:
+        stamped = bool(row.get("sealed_room"))  # written at ingest (migration 012)
+        listed = bool(row.get("channel_id")) and str(row["channel_id"]) in sealed_rooms
+        if stamped or listed:
+            row["sealed"] = True
+            row["privacy_level"] = PRIVATE_LEVEL
+    return rows
+
+
+def observation_privacy(obs: dict, group: dict) -> str:
+    """The privacy a memory lands with. The model may tighten a group's level, never
+    loosen a sealed one."""
+    if group.get("sealed"):
+        return PRIVATE_LEVEL
+    return obs.get("privacy_level") or group["privacy_level"]
+
+
 def group_by_person(rows: list[dict], *, batch_size: int = BATCH_SIZE) -> list[dict]:
     """The "Group Messages" Code node: person_id FIRST, then slice into batches.
 
@@ -785,11 +816,14 @@ def group_by_person(rows: list[dict], *, batch_size: int = BATCH_SIZE) -> list[d
         pid = row.get("person_id")
         if not pid:
             continue
-        group_key = (str(pid), row.get("source_thread")) if row.get("source_platform") == "portable" else (str(pid), None)
+        group_key = (
+            (str(pid), row.get("source_thread")) if row.get("source_platform") == "portable"
+            else (str(pid), None)
+        ) + (bool(row.get("sealed")),)  # a sealed room's turns never share a call
         by_person.setdefault(group_key, []).append(row)
 
     groups = []
-    for (pid, _thread), msgs in by_person.items():
+    for (pid, _thread, sealed), msgs in by_person.items():
         for i in range(0, len(msgs), batch_size):
             batch = msgs[i : i + batch_size]
             # latest message in the batch: memory created_at + batch-date fallback
@@ -799,9 +833,11 @@ def group_by_person(rows: list[dict], *, batch_size: int = BATCH_SIZE) -> list[d
                     "person_id": pid,
                     "messages": batch,
                     "source_platform": batch[0].get("source_platform") or "discord",
-                    "privacy_level": batch[0].get("privacy_level") or "public",
+                    "privacy_level": PRIVATE_LEVEL if sealed
+                    else batch[0].get("privacy_level") or "public",
                     "source_thread": batch[0].get("source_thread") or "unknown",
                     "latest": latest,
+                    "sealed": sealed,
                 }
             )
     return groups
@@ -1037,6 +1073,7 @@ def run_extraction(
     *,
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
+    sealed_rooms: frozenset[str] = frozenset(),
 ) -> dict:
     """One shadow extraction pass over both conversation sources.
 
@@ -1068,7 +1105,7 @@ def run_extraction(
     for name, conn, sql in sources:
         after = read_watermark(staging_conn, name, lookback_hours=lookback_hours)
         raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1}).fetchall()
-        rows = [dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows]
+        rows = seal_rows([dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows], sealed_rooms)
         rows = _trim_tie_boundary(rows, batch_limit)
 
         stats = {
@@ -1113,7 +1150,7 @@ def run_extraction(
                         "event_date": event_date,
                         "embedding": embedding_to_pgvector(embedder(content)),
                         "source_platform": group["source_platform"],
-                        "privacy_level": obs.get("privacy_level") or group["privacy_level"],
+                        "privacy_level": observation_privacy(obs, group),
                         # original message time, not now() — the h.created_at lesson
                         "created_at": group["latest"]["created_at_raw"],
                         "source_thread": group["source_thread"],
@@ -1167,6 +1204,7 @@ def run_live_extraction(
     *,
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
+    sealed_rooms: frozenset[str] = frozenset(),
 ) -> dict:
     """The live counterpart of run_extraction(): same read -> group -> LLM ->
     embed pipeline, same watermark table (both modes share the high-water
@@ -1228,7 +1266,7 @@ def run_live_extraction(
     for name, conn, sql in sources:
         after = read_watermark(staging_conn, name, lookback_hours=lookback_hours)
         raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1}).fetchall()
-        rows = [dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows]
+        rows = seal_rows([dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows], sealed_rooms)
         rows = _trim_tie_boundary(rows, batch_limit)
 
         quarantine_hook = portable_quarantine_hook()
@@ -1283,7 +1321,7 @@ def run_live_extraction(
                     event_date=event_date,
                     embedding=embedding_to_pgvector(embedder(content)),
                     source_platform=group["source_platform"],
-                    privacy_level=obs.get("privacy_level") or group["privacy_level"],
+                    privacy_level=observation_privacy(obs, group),
                     # original message time, not now() — the h.created_at lesson
                     created_at=group["latest"]["created_at_raw"],
                     category=list(PORTABLE_FALLBACK_CATEGORY) if portable else None,

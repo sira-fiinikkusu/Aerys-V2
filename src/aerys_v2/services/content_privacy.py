@@ -36,6 +36,9 @@ log = logging.getLogger(__name__)
 CONTENT_PRIVACY_KEY = "content_privacy"
 PUBLIC = "public"
 PRIVATE = "private"
+# The room a turn was said in, when that room is SEALED (see redact_sealed_history).
+# Absent on every turn from an ordinary room.
+SEALED_ROOM_KEY = "sealed_room"
 
 # Keyword fast-path for the classifier: a small, high-precision set of markers for the
 # five private CATEGORIES (extraction.py's privacy_level rules). A hit is a confident
@@ -173,3 +176,57 @@ def redact_private_history(messages: list) -> list:
         if keeping_response:
             kept.append(m)
     return kept
+
+
+def sealed_room_of(message: object) -> str:
+    """The sealed room a message was said in, or '' for an ordinary room."""
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    return str(kwargs.get(SEALED_ROOM_KEY) or "")
+
+
+def redact_sealed_history(messages: list, current_room: str) -> list:
+    """The SEALED-ROOM gate: what is said in a sealed room stays in that room.
+
+    The content gate above judges what a turn SAYS; this one honours where it was
+    said. A sealed room is a shared channel that is private by membership, used for
+    something that reads as everyday (a job search, say) but must not come up in any
+    other shared room. Every turn said there carries its room (SEALED_ROOM_KEY); in
+    any other room that turn is dropped along with its whole response span, exactly
+    like a private turn above. Turns from the room being served stay, and so does the
+    current turn, always.
+
+    Callers apply this only to shared rooms (gate_for_room): a person's own 1:1
+    surfaces see their whole thread, sealed turns included.
+    """
+    last_human = max(
+        (i for i, m in enumerate(messages) if getattr(m, "type", "") == "human"),
+        default=-1,
+    )
+    kept: list = []
+    keeping_response = False
+    for i, m in enumerate(messages):
+        if getattr(m, "type", "") == "human":
+            room = sealed_room_of(m)
+            keeping_response = not room or room == current_room or i == last_human
+            if keeping_response:
+                kept.append(m)
+            continue
+        if keeping_response:
+            kept.append(m)
+    return kept
+
+
+def gate_for_room(messages: list, identity: dict | None) -> list:
+    """Everything a room may see of a person's thread: the ONE place both gates meet.
+
+    A 1:1 private surface (DM, voice) sees the whole thread. Any other room, public
+    or unknown (fail-closed), loses private-tagged turns AND turns sealed to some
+    other room. Every path that shows thread history to a model goes through here, so
+    the two gates cannot drift apart.
+    """
+    identity = identity or {}
+    if identity.get("privacy_context") == PRIVATE:
+        return messages
+    return redact_sealed_history(
+        redact_private_history(messages), str(identity.get("sealed_room") or "")
+    )

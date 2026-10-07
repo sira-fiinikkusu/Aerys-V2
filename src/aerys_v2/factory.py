@@ -2787,14 +2787,13 @@ def build_graph(
         # and inside redact_private_history untagged/legacy priors drop too. `public` is
         # the STRICTER, explicit-only signal used to arm the room-context block below —
         # an unknown context redacts (safe) but does NOT get a room block injected.
+        # The same gate also drops turns SEALED to some other room (a shared channel
+        # that is private by membership); gate_for_room is the one place both live.
+        from aerys_v2.services.content_privacy import gate_for_room
+
         privacy_context = identity.get("privacy_context")
         public = privacy_context == "public"
-        redact = privacy_context != "private"
-        messages = state["messages"]
-        if redact:
-            from aerys_v2.services.content_privacy import redact_private_history
-
-            messages = redact_private_history(messages)
+        messages = gate_for_room(state["messages"], identity)
         # Her own replies, as the READER saw them. Tags are stripped at the door for a
         # screen but the message she keeps is what the model produced, so a typed
         # thread fills with tagged replies and she imitates herself — measured after

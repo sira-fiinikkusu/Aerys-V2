@@ -47,6 +47,10 @@ class Identity(TypedDict, total=False):
     platform: str
     channel_kind: str
     channel_id: str
+    # The room's id again, set ONLY when the room is SEALED (a shared channel that is
+    # private by membership; discord_gateway.sealed_room_for). Turns said there are
+    # stamped with it and never show in any other shared room. Absent = ordinary room.
+    sealed_room: str
     # EXPLICIT voice signal (track/memory-continuity): set True by the voice
     # transport (http_api's /v1/chat/completions shim, and /ask when voice=True).
     # It is what arms the three voice behaviors — parallel-start (service.py),

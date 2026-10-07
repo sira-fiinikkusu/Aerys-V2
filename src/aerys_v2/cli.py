@@ -461,6 +461,11 @@ def main() -> None:
         channel_ids = frozenset(
             int(c) for c in settings.discord_reply_channel_ids.split(",") if c.strip()
         )
+        # Sealed rooms: shared channels whose conversation never shows in any other
+        # shared room (content_privacy.redact_sealed_history).
+        sealed_ids = frozenset(
+            int(c) for c in settings.discord_sealed_channel_ids.split(",") if c.strip()
+        )
         client = AerysDiscordClient(
             ask_fn=lambda text, identity, thread: ask(
                 graph, text, identity=identity, thread_id=thread,
@@ -477,6 +482,7 @@ def main() -> None:
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,
             allowed_channel_ids=channel_ids,
+            sealed_channel_ids=sealed_ids,
         )
         # Slash commands (the n8n 03-02/04-03 + CF-worker chain, ported): attach
         # only when the identity DB and a guild are both wired — the interactions

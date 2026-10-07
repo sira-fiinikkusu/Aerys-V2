@@ -138,6 +138,24 @@ def drop_reason(
     return None if mentions_me else 'no-mention'
 
 
+def sealed_room_for(
+    channel_id: int, sealed_channel_ids: frozenset[int], parent_id: int | None = None
+) -> str:
+    """The room id to stamp on identity when this channel is SEALED, else ''.
+
+    A sealed channel is private by membership: what is said there never shows in any
+    other shared room (content_privacy.redact_sealed_history). A thread or forum post
+    has its OWN channel id, so it inherits the seal of its parent and records the
+    parent: the seal belongs to the room people were let into. DMs never pass
+    through here; they are already private.
+    """
+    if channel_id in sealed_channel_ids:
+        return str(channel_id)
+    if parent_id is not None and parent_id in sealed_channel_ids:
+        return str(parent_id)
+    return ""
+
+
 def looks_like_a_summon(text: str, *, names: tuple[str, ...]) -> bool:
     """Does this text name her, even though Discord sent us no mention?
 
@@ -221,6 +239,7 @@ class AerysDiscordClient(discord.Client):
         resolve_fn,
         allowed_guild_id: int | None,
         allowed_channel_ids: frozenset[int] = frozenset(),
+        sealed_channel_ids: frozenset[int] = frozenset(),
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged — enabled on the dev bot app page
@@ -229,6 +248,7 @@ class AerysDiscordClient(discord.Client):
         self._resolve = resolve_fn
         self._guild_id = allowed_guild_id
         self._channel_ids = allowed_channel_ids
+        self._sealed_ids = sealed_channel_ids
 
     async def on_ready(self) -> None:  # pragma: no cover - live only
         print(f"gateway up as {self.user} (guild={self._guild_id})")
@@ -263,6 +283,11 @@ class AerysDiscordClient(discord.Client):
             return
         event = normalize(message, self_id=self.user.id)
         identity: Identity = self._resolve(event)
+        if message.guild is not None:
+            sealed = sealed_room_for(message.channel.id, self._sealed_ids,
+                                     getattr(message.channel, "parent_id", None))
+            if sealed:
+                identity = {**identity, "sealed_room": sealed}
         # Person-keyed threading: the checkpointer key is built from the RESOLVED
         # identity, AFTER _resolve — so his DM, this guild channel, and Telegram all
         # share one 'person:{id}' thread (cross-surface continuity). event.thread_id

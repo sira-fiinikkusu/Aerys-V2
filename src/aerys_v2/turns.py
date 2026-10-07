@@ -44,13 +44,13 @@ INSERT INTO v2_turns
   (thread_id, channel, channel_id, display_name, person_id, platform_identity,
    resolver_version, classifier_intent, tier, tier_override_source, guard_verdict,
    input_text, raw_reply, emitted_reply, tool_calls, degraded,
-   error, latency_ms, trace_id, room_context, reflex)
+   error, latency_ms, trace_id, room_context, reflex, sealed_room)
 VALUES
   (%(thread_id)s, %(channel)s, %(channel_id)s, %(display_name)s, %(person_id)s::uuid,
    %(platform_identity)s, %(resolver_version)s, %(classifier_intent)s, %(tier)s,
    %(tier_override_source)s, %(guard_verdict)s, %(input_text)s, %(raw_reply)s,
    %(emitted_reply)s, %(tool_calls)s::jsonb, %(degraded)s::jsonb, %(error)s,
-   %(latency_ms)s, %(trace_id)s, %(room_context)s, %(reflex)s::jsonb)
+   %(latency_ms)s, %(trace_id)s, %(room_context)s, %(reflex)s::jsonb, %(sealed_room)s)
 """
 
 
@@ -399,6 +399,9 @@ def build_turn_row(
         # because the lines nearest his message are the ones that explain it.
         "room_context": _clip_room(room_context),
         "reflex": json.dumps(reflex) if reflex is not None else None,
+        # The SEALED room this was said in (migration 012), else NULL. Extraction
+        # reads it so a sealed room's memories land private.
+        "sealed_room": (str(identity.get("sealed_room") or "").strip() or None),
         "trace_id": trace_id,
     }
 

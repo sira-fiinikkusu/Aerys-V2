@@ -195,6 +195,9 @@ class Settings(BaseSettings):
     discord_bot_token: SecretStr | None = None
     discord_guild_id: int | None = None          # only this guild is served (None = DMs only)
     discord_reply_channel_ids: str = ""          # csv of guild channel ids to listen in ("" = all)
+    # csv of SEALED guild channel ids: what is said in one never shows in any other
+    # shared room, and its memories are always private ("" = none sealed).
+    discord_sealed_channel_ids: str = ""
     # The Aerys Admin role (guild role id) gating /admin-link + /admin-unlink.
     # None = admin slash commands always refuse (fail-closed, same posture as
     # every other optional credential). n8n mapping: 03-02's "Check Admin Role"

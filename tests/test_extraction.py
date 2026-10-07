@@ -37,7 +37,8 @@ MEGAN = "11111111-2222-3333-4444-555555555555"
 
 
 def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
-        platform="discord", privacy="private", thread="v1:n8n_chat_histories"):
+        platform="discord", privacy="private", thread="v1:n8n_chat_histories",
+        channel_id=None, sealed_room=None):
     """A source row in SOURCE_COLUMNS order — both queries return this shape.
 
     id defaults to "1" (fine when a test only ever has one row, or doesn't
@@ -54,6 +55,8 @@ def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
         "created_at_raw": raw or at.strftime("%Y-%m-%d %H:%M:%S.%f+00"),
         "speaker_name": speaker,
         "source_thread": thread,
+        "channel_id": channel_id,
+        "sealed_room": sealed_room,
     }
     return tuple(values[c] for c in SOURCE_COLUMNS)
 
