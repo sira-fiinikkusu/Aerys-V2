@@ -142,7 +142,7 @@ def _call_llm(llm: Llm, system: str, user: str, *, plain: bool = False) -> LlmRe
 BATCH_SIZE = 20          # messages per LLM call (Group Messages sliced at 20)
 DEFAULT_LOOKBACK_H = 2   # first run with no watermark: 2 hours ago (v1 default)
 DEFAULT_LIMIT = 200      # rows per source per run (v1 LIMIT 200)
-LLM_MODEL = "anthropic/claude-haiku-4.5"   # v1's extraction model, via OpenRouter
+LLM_MODEL = "anthropic/claude-haiku-5.5"   # v1's extraction model, via OpenRouter
 USER_TZ = ZoneInfo("America/New_York")     # batch-date fallback renders in owner tz
 
 # Shared extraction and explicit-fact labeling contract.

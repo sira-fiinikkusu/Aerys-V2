@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     cli_tool_backend: Literal["cli", "api"] = "cli"   # action/tool turns on the plan too
     cli_voice_backend: Literal["cli", "api"] = "api"  # voice stays metered until the --serve warm soak passes
     anthropic_api_key: SecretStr
-    model: str = "claude-sonnet-5"   # daily driver; env MODEL overrides; opus returns via tier routing
+    model: str = "claude-sonnet-5-5"   # daily driver; env MODEL overrides; opus returns via tier routing
     # The pinned observer earns evidence before any judgment can steer a turn.
     reflex_mode: Literal["off", "shadow", "live"] = "off"
     typesafe_api_key: SecretStr | None = None
@@ -554,7 +554,7 @@ class Settings(BaseSettings):
     # prod conversations READ-ONLY and writes ONLY to aerys_v2 staging tables
     # (migration 002) — output gets diffed against prod before any lease flip.
     # Reuses embeddings_api_key (it's an OpenRouter key) for the extraction LLM.
-    extraction_model: str = "anthropic/claude-haiku-4.5"  # v1's extractor, via OpenRouter
+    extraction_model: str = "anthropic/claude-haiku-5.5"  # v1's extractor, via OpenRouter
     extraction_interval_minutes: int = 60   # loop-mode cadence (v1 cron: hourly)
     extraction_lookback_hours: int = 2      # first-run window when no watermark exists
     extraction_batch_limit: int = 200       # rows per source per pass (v1 LIMIT 200)
@@ -575,8 +575,8 @@ class Settings(BaseSettings):
     # routes on TEXT threads; voice stays pinned to standard (ChannelPolicy,
     # locked: the ~3.6s voice budget can't absorb opus latency, and fast-tier
     # identity wobbles are exactly what got Haiku demoted in V1).
-    tier_fast_model: str = "claude-haiku-4-5"       # greetings, trivia — pennies
-    tier_standard_model: str = "claude-sonnet-5"    # the daily driver (api backend
+    tier_fast_model: str = "claude-haiku-5-5"       # greetings, trivia — pennies
+    tier_standard_model: str = "claude-sonnet-5-5"    # the daily driver (api backend
     #   only — on the oauth backend, standard IS `model` above: the subscription
     #   client is single-model, so this knob applies when chat bills the API key)
     tier_deep_model: str = "claude-opus-4-8"        # research/analysis — rationed

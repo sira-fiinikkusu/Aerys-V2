@@ -500,7 +500,7 @@ class ClaudeOAuthChatModel(BaseChatModel):
     gets navigated on purpose, not by accident (see CROSS-REVIEW).
     """
 
-    model: str = "claude-sonnet-5"
+    model: str = "claude-sonnet-5-5"
     # bind_tools() fills these on a COPY: OpenAI-style schemas (name/description/
     # parameters) and whether the first pass must call a tool (tool_choice="any").
     bound_tools: list[dict] = []

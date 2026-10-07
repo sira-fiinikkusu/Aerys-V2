@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 # the soul saves ~50ms. A materially faster router needs a different class of
 # model (a non-generating decision model), not a faster prompt.
 
-ROUTER_MODEL = "claude-haiku-4-5"
+ROUTER_MODEL = "claude-haiku-5-5"
 
 # Degraded-path ack ONLY — fires when the router call itself failed, so there is
 # no generated ack to use. Normal operation never speaks this string.

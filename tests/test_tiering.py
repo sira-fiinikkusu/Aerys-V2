@@ -228,8 +228,8 @@ def test_no_tier_models_keeps_old_behavior():
 def test_tier_models_for_api_backend_maps_the_settings_knobs():
     models = tier_models_for(settings_with())
     assert set(models) == set(TIERS)
-    assert models["fast"].model == "claude-haiku-4-5"
-    assert models["standard"].model == "claude-sonnet-5"
+    assert models["fast"].model == "claude-haiku-5-5"
+    assert models["standard"].model == "claude-sonnet-5-5"
     assert models["deep"].model == "claude-opus-4-8"
 
 

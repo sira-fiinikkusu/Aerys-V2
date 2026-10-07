@@ -92,7 +92,7 @@ def test_unarmed_bindings_are_plain_and_do_not_construct_local_client(monkeypatc
         assert isinstance(binding.bound, ChatAnthropic)
     assert pair._forced.kwargs["tool_choice"] == {"type": "any"}
     assert pair._fast_forced.kwargs["tool_choice"] == {"type": "any"}
-    assert pair._conv.bound.model == pair._auto.bound.model == "claude-sonnet-5"
+    assert pair._conv.bound.model == pair._auto.bound.model == "claude-sonnet-5-5"
 
 
 @pytest.mark.parametrize("specialist,fast,after_tool", [

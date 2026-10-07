@@ -349,3 +349,27 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         return {"text": gaps_fn()}
 
     return app
+
+
+def serve_once(app: FastAPI, body_path: str, api_token: str) -> int:
+    """Serve exactly one /ask request through this app, print the reply, return an
+    exit code (0 ok, 1 refused or failed).
+
+    ASK_ONCE in --serve. Chris, 2026-10-07: the morning note is a scheduled turn
+    nobody waits on, yet it rode the voice container, which is metered on the API key
+    by design. Running the SAME door once, in a container whose backend is the plan,
+    moves it without a second code path: same identity, tools, thread and recorder.
+    """
+    import json
+
+    from fastapi.testclient import TestClient
+
+    with open(body_path, encoding="utf-8") as fh:
+        body = json.load(fh)
+    with TestClient(app) as client:
+        response = client.post("/ask", json=body, headers={"Authorization": f"Bearer {api_token}"})
+    if response.status_code != 200:
+        log.error("ask-once refused: HTTP %s %s", response.status_code, response.text[:300])
+        return 1
+    print(response.json().get("reply", ""), flush=True)
+    return 0

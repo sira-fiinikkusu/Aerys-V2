@@ -334,6 +334,17 @@ def main() -> None:
                 speaker_redirect=speaker_redirect_for(settings),
                 settings=settings,  # speaker ID: voice_speaker_persons / unknown policy
             )
+            # ASK_ONCE=<path to an /ask JSON body>: serve that one request through this
+            # door and exit, before any watcher starts or a port binds. Scheduled turns
+            # that nobody waits on run this way in a container on the plan instead of
+            # the metered voice container (the morning note, Chris 2026-10-07).
+            import os
+
+            ask_once = os.environ.get("ASK_ONCE")
+            if ask_once:
+                from aerys_v2.transports.http_api import serve_once
+
+                sys.exit(serve_once(app, ask_once, settings.api_token.get_secret_value()))
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;
             # None unless panel + HA + occupancy entity are all configured.
