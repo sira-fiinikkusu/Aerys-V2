@@ -32,6 +32,13 @@ DEFAULT_LIMIT = 30
 #: A room block is worth a moment, never a stall: she answers late or not at all.
 DEFAULT_TIMEOUT_S = 3.0
 
+#: How her own messages read in the room block. Chris, 2026-10-07: in a brand-new
+#: private channel her "Got it held" came back as "Aerys - Resonant Span: ...", the
+#: bot's display name, and with little else in the room she took her own line for
+#: "a different instance" and disowned it. The turns-table reader already says
+#: "Aerys" for her replies; the live read has to say so too, and say it is her.
+SELF_LABEL = 'Aerys (you)'
+
 
 class LiveRoomReader:
     """A `room_context_fn` backed by the live channel, with the DB one as fallback.
@@ -90,11 +97,22 @@ class LiveRoomReader:
         channel = client.get_channel(int(channel_id))
         if channel is None:
             channel = await client.fetch_channel(int(channel_id))
+        me = getattr(client, 'user', None)
+        my_id = getattr(me, 'id', None)
+        # Every name she shows up under: her account names and her nickname in this
+        # server (clean_content renders a mention with the server nickname).
+        guild_me = getattr(getattr(channel, 'guild', None), 'me', None)
+        my_names = {n for n in (getattr(me, 'display_name', None), getattr(me, 'name', None),
+                                getattr(me, 'global_name', None),
+                                getattr(guild_me, 'display_name', None))
+                    if isinstance(n, str) and n and n != 'Aerys'}
         rows = []
         async for message in channel.history(limit=self._limit):
             author = getattr(message, 'author', None)
             name = getattr(author, 'display_name', None) or getattr(author, 'name', None)
             known = self._speaker_names.get(str(getattr(author, 'id', '')))
+            if my_id is not None and getattr(author, 'id', None) == my_id:
+                known = SELF_LABEL
             # clean_content shows a mention the way Discord does (@Name), never as a raw
             # <@id> token. Chris, 2026-10-03: "She tagged herself" -- Korvius's line read
             # `<@her-id> it turned out...`, she took the token for HIS tag, and used it to
@@ -102,6 +120,8 @@ class LiveRoomReader:
             text = getattr(message, 'clean_content', None)
             if not isinstance(text, str):
                 text = getattr(message, 'content', '')
+            for my_name in sorted(my_names, key=len, reverse=True):
+                text = text.replace(f'@{my_name}', '@Aerys')
             rows.append((known or name, text))
         rows.reverse()  # history yields newest first; the block reads chronologically
         return rows

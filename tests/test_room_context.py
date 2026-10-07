@@ -430,3 +430,34 @@ def test_she_never_pings_herself_on_the_way_out():
         'someone else is still pinged'
     assert without_self_mention('<@1473712595520192552>', me) == '<@1473712595520192552>', \
         'a reply that is ONLY the tag is left alone rather than sent empty'
+
+
+def test_the_live_reader_knows_her_own_lines_and_her_own_name():
+    """Chris, 2026-10-07, a brand-new private channel: her own "Got it held" reached
+    the room block as "Aerys - Resonant Span: ...", the bot's display name, and with
+    almost nothing else in the room she took her own line for "a different instance"
+    and disowned it. Her lines read as hers, and a mention of her reads as @Aerys."""
+    from types import SimpleNamespace
+    me = SimpleNamespace(id=42, display_name='Aerys - Resonant Span', name='Aerys - Resonant Span')
+    newest_first = [
+        SimpleNamespace(author=SimpleNamespace(id=7, display_name='Chris'),
+                        content='<@42> what was it?',
+                        clean_content="@Aerys - Resonant Span what's the codeword?"),
+        SimpleNamespace(author=SimpleNamespace(id=42, display_name='Aerys - Resonant Span'),
+                        content='Got it held.', clean_content='Got it held.'),
+        SimpleNamespace(author=SimpleNamespace(id=7, display_name='Chris'),
+                        content='<@42> the codeword is heron',
+                        clean_content='@Aerys - Resonant Span the codeword is heron'),
+    ]
+    client = FakeClient(FakeChannel(newest_first))
+    client.user = me
+    run_loop(client)
+    reader = LiveRoomReader(limit=10)
+    reader.attach(client)
+    try:
+        block = read_in_thread(reader)
+    finally:
+        client.loop.call_soon_threadsafe(client.loop.stop)
+    assert block.splitlines() == ['Chris: @Aerys the codeword is heron',
+                                  'Aerys (you): Got it held.',
+                                  "Chris: @Aerys what's the codeword?"]
