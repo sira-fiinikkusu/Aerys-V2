@@ -290,3 +290,82 @@ def test_the_extraction_model_cannot_loosen_a_sealed_memory():
     assert observation_privacy({"privacy_level": "public"}, {"privacy_level": "public"}) == "public"
     assert observation_privacy({}, {"privacy_level": "private"}) == "private"
     assert observation_privacy({"privacy_level": "private"}, {"privacy_level": "public"}) == "private"
+
+
+# ── a person's DMs can belong to their sealed room ───────────────────────────
+# A sealed room keeps what is said IN it. But the same person may DM her about the
+# same thing, and two ordinary DM rules then carry it out: an everyday DM turn is
+# relaxed to 'public' by the content judge, and a DM memory about a job comes out
+# public. For someone listed, their DMs are sealed to their room: visible in their
+# DMs and in that room, nowhere else, and their memories always private.
+
+def test_dm_users_parse_from_config():
+    from aerys_v2.transports.discord_gateway import parse_sealed_dm_users
+
+    assert parse_sealed_dm_users("123:777, 456:888") == {123: "777", 456: "888"}
+    assert parse_sealed_dm_users("") == {}
+    assert parse_sealed_dm_users("junk, 123:, :777, 9:9") == {9: "9"}, "malformed entries are skipped"
+
+
+def test_a_listed_persons_dm_is_sealed_to_their_room():
+    from aerys_v2.transports.discord_gateway import sealed_room_for_dm
+
+    listed = {432: SEALED}
+    assert sealed_room_for_dm(432, listed) == SEALED
+    assert sealed_room_for_dm(999, listed) == ""
+
+
+SEALED_DM = {**THEIR_DM, "sealed_room": SEALED}
+
+
+def test_a_sealed_dm_stays_out_of_other_rooms_even_once_judged_public():
+    import time as _time
+
+    CapturingModel.seen = []
+    model = CapturingModel(messages=iter([AIMessage(content=r) for r in
+                                          ("dm-1", "other-2", "sealed-3", "dm-4")]))
+    graph = build_graph(model, soul="s")
+    # an everyday DM line the judge relaxes to public (a job is "general" content)
+    ask(graph, "applied to the analyst role today", identity=SEALED_DM, thread_id="person:p2",
+        content_privacy_classifier=lambda _t: "public")
+    deadline = _time.monotonic() + 3
+    while _time.monotonic() < deadline:
+        m = _human_on_thread(graph, "person:p2", "analyst role")
+        if m.additional_kwargs.get(CONTENT_PRIVACY_KEY) == "public":
+            break
+        _time.sleep(0.02)
+    m = _human_on_thread(graph, "person:p2", "analyst role")
+    assert m.additional_kwargs.get(CONTENT_PRIVACY_KEY) == "public", "the judge relaxed it"
+    assert sealed_room_of(m) == SEALED, "and the retag kept the seal"
+    ask(graph, "hi all", identity=OTHER_ROOM, thread_id="person:p2")
+    ask(graph, "any news?", identity=SEALED_ROOM, thread_id="person:p2")
+    ask(graph, "just us", identity=SEALED_DM, thread_id="person:p2")
+    in_other, in_sealed, in_dm = CapturingModel.seen[1], CapturingModel.seen[2], CapturingModel.seen[3]
+    assert not any("analyst role" in s for s in in_other)
+    assert any("analyst role" in s for s in in_sealed)
+    assert any("analyst role" in s for s in in_dm)
+
+
+def test_a_sealed_dm_turn_extracts_private():
+    from aerys_v2.workers.extraction import group_by_person, observation_privacy, seal_rows
+
+    rows = seal_rows([_row("p2", "dm fact", "999", platform="discord_dm", sealed_room=SEALED)],
+                     frozenset({SEALED}))
+    (group,) = group_by_person(rows)
+    assert group["sealed"] and group["privacy_level"] == "private"
+    assert observation_privacy({"privacy_level": "public"}, group) == "private"
+
+
+def test_a_duplicate_dm_entry_is_said_out_loud(caplog):
+    from aerys_v2.transports.discord_gateway import parse_sealed_dm_users
+
+    with caplog.at_level("WARNING"):
+        assert parse_sealed_dm_users("123:777, 123:888") == {123: "888"}
+    assert "listed twice" in caplog.text
+
+
+def test_a_dm_sealed_to_an_unsealed_room_shows_in_no_shared_room():
+    """Gemini (review 2) feared a DM mapped to an UNsealed room would show there.
+    It cannot: only a sealed room is ever the current room for the gate."""
+    history = [_human("dm line", sealed="1234"), AIMessage(content="r"), _human("current")]
+    assert [m.content for m in gate_for_room(history, OTHER_ROOM)] == ["current"]

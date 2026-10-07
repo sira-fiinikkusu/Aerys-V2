@@ -156,6 +156,37 @@ def sealed_room_for(
     return ""
 
 
+def parse_sealed_dm_users(raw: str) -> dict[int, str]:
+    """`user_id:room_id, ...` -> {user_id: room_id}. Malformed entries are skipped
+    (logged), never guessed at: a half-read entry must not seal the wrong person."""
+    out: dict[int, str] = {}
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        user, _, room = part.partition(":")
+        if user.strip().isdigit() and room.strip().isdigit():
+            if int(user) in out:
+                log.warning("sealed DM users: %s listed twice; the last entry wins", user.strip())
+            out[int(user)] = room.strip()
+        else:
+            log.warning("sealed DM users: skipped malformed entry %r", part)
+    return out
+
+
+def sealed_room_for_dm(author_id: int, sealed_dm_users: dict[int, str]) -> str:
+    """The sealed room a listed person's DMs belong to, else ''.
+
+    A sealed room keeps what is said IN it, but the same person may DM her about the
+    same thing, and two ordinary DM rules would then carry it out: an everyday DM turn
+    is relaxed to 'public' by the content judge, and a DM memory about, say, a job
+    comes out public. A listed person's DMs are sealed to their room instead: seen in
+    their DMs and in that room, nowhere else. Keyed on the ACCOUNT id, never a display
+    name, which anyone can set.
+    """
+    return sealed_dm_users.get(author_id, "")
+
+
 def looks_like_a_summon(text: str, *, names: tuple[str, ...]) -> bool:
     """Does this text name her, even though Discord sent us no mention?
 
@@ -240,6 +271,7 @@ class AerysDiscordClient(discord.Client):
         allowed_guild_id: int | None,
         allowed_channel_ids: frozenset[int] = frozenset(),
         sealed_channel_ids: frozenset[int] = frozenset(),
+        sealed_dm_users: dict[int, str] | None = None,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged — enabled on the dev bot app page
@@ -249,6 +281,14 @@ class AerysDiscordClient(discord.Client):
         self._guild_id = allowed_guild_id
         self._channel_ids = allowed_channel_ids
         self._sealed_ids = sealed_channel_ids
+        self._sealed_dms = dict(sealed_dm_users or {})
+        for user_id, room in self._sealed_dms.items():
+            if int(room) not in sealed_channel_ids:
+                # Fail-closed, not open: an unsealed room never counts as the current
+                # sealed room, so these DMs show in no shared room at all. Still a
+                # misconfiguration worth saying out loud.
+                log.warning("sealed DM user %s is mapped to room %s, which is not a sealed "
+                            "channel; their DMs will show in no shared room", user_id, room)
 
     async def on_ready(self) -> None:  # pragma: no cover - live only
         print(f"gateway up as {self.user} (guild={self._guild_id})")
@@ -286,8 +326,10 @@ class AerysDiscordClient(discord.Client):
         if message.guild is not None:
             sealed = sealed_room_for(message.channel.id, self._sealed_ids,
                                      getattr(message.channel, "parent_id", None))
-            if sealed:
-                identity = {**identity, "sealed_room": sealed}
+        else:
+            sealed = sealed_room_for_dm(message.author.id, self._sealed_dms)
+        if sealed:
+            identity = {**identity, "sealed_room": sealed}
         # Person-keyed threading: the checkpointer key is built from the RESOLVED
         # identity, AFTER _resolve — so his DM, this guild channel, and Telegram all
         # share one 'person:{id}' thread (cross-surface continuity). event.thread_id

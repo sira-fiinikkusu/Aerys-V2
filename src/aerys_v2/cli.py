@@ -383,7 +383,7 @@ def main() -> None:
         )
         from aerys_v2.service import ask
         from aerys_v2.services.live_room import LiveRoomReader
-        from aerys_v2.transports.discord_gateway import AerysDiscordClient
+        from aerys_v2.transports.discord_gateway import AerysDiscordClient, parse_sealed_dm_users
 
         # [01-05 PHOENIX] same degrade-safe arming as --serve: the soak
         # container's turns must trace too (gap found 2026-07-03 — only
@@ -483,6 +483,7 @@ def main() -> None:
             allowed_guild_id=settings.discord_guild_id,
             allowed_channel_ids=channel_ids,
             sealed_channel_ids=sealed_ids,
+            sealed_dm_users=parse_sealed_dm_users(settings.discord_sealed_dm_users),
         )
         # Slash commands (the n8n 03-02/04-03 + CF-worker chain, ported): attach
         # only when the identity DB and a guild are both wired — the interactions

@@ -82,7 +82,8 @@ def test_discord_runner_wires_context_fn(monkeypatch):
 
     class FakeDiscordClient:
         def __init__(self, *, ask_fn, resolve_fn, allowed_guild_id=None,
-                     allowed_channel_ids=frozenset(), sealed_channel_ids=frozenset()):
+                     allowed_channel_ids=frozenset(), sealed_channel_ids=frozenset(),
+                     sealed_dm_users=None):
             self.ask_fn = ask_fn
             self.resolve_fn = resolve_fn
             self.run_token = None
