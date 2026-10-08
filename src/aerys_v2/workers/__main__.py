@@ -40,7 +40,7 @@ from .capability_requests import (
     read_gaps,
     run_gap_mining,
 )
-from .extraction import openrouter_chat, run_extraction, run_live_extraction
+from .extraction import anthropic_chat, openrouter_chat, run_extraction, run_live_extraction
 
 log = logging.getLogger("aerys_v2.workers")
 
@@ -64,15 +64,25 @@ def _add_interval_job(scheduler, func, *, minutes: int):
     return scheduler.add_job(func, "interval", minutes=minutes)
 
 
-def _run_once(settings: Settings, *, live: bool = False) -> dict:
-    """One pass: shadow staging by default, or prod triage when --live."""
-    import psycopg
-
-    llm = openrouter_chat(
+def extraction_llm(settings):
+    """The extraction model: the Anthropic API by default (covered by the plan's
+    monthly API credit since 2026-10-07), OpenRouter when EXTRACTION_BACKEND says so.
+    Embeddings stay on OpenRouter either way; Anthropic has no embedding model."""
+    if settings.extraction_backend == "anthropic":
+        return anthropic_chat(settings.anthropic_api_key.get_secret_value(),
+                              model=settings.extraction_anthropic_model)
+    return openrouter_chat(
         settings.embeddings_api_key.get_secret_value(),
         model=settings.extraction_model,
         base_url=settings.embeddings_base_url,
     )
+
+
+def _run_once(settings: Settings, *, live: bool = False) -> dict:
+    """One pass: shadow staging by default, or prod triage when --live."""
+    import psycopg
+
+    llm = extraction_llm(settings)
     embedder = openrouter_embedder(settings.embeddings_api_key.get_secret_value())
 
     # prod aerys (READ-ONLY — the same belt-and-braces as factory's memory-context

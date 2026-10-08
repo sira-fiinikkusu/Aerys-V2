@@ -554,6 +554,10 @@ class Settings(BaseSettings):
     # prod conversations READ-ONLY and writes ONLY to aerys_v2 staging tables
     # (migration 002) — output gets diffed against prod before any lease flip.
     # Reuses embeddings_api_key (it's an OpenRouter key) for the extraction LLM.
+    # Where the extractor's model runs: "anthropic" (default since 2026-10-07, the
+    # plan's monthly API credit covers it) or "openrouter" (extraction_model below).
+    extraction_backend: str = "anthropic"
+    extraction_anthropic_model: str = "claude-haiku-5-5"
     extraction_model: str = "anthropic/claude-haiku-5.5"  # v1's extractor, via OpenRouter
     extraction_interval_minutes: int = 60   # loop-mode cadence (v1 cron: hourly)
     extraction_lookback_hours: int = 2      # first-run window when no watermark exists

@@ -1432,6 +1432,46 @@ def openrouter_chat(api_key: str, *, model: str = LLM_MODEL,
     return llm
 
 
+def anthropic_chat(api_key: str, *, model: str = "claude-haiku-5-5",
+                   timeout_s: float = 120.0, client=None) -> Llm:
+    """The same Llm seam as openrouter_chat, on the Anthropic API.
+
+    Chris, 2026-10-07: Max plans now include monthly API credit, and this was the
+    one Claude caller still billed through OpenRouter. Same contract: the schema is
+    enforced (output_config json_schema, the very schema _RESPONSE_FORMAT carries),
+    the observations array comes back, and `truncated` is honest, any stop other
+    than a clean end_turn holds the watermark. No temperature: Haiku 5.5 rejects it
+    as deprecated for the model (live 400, 2026-10-07).
+    """
+    if client is None:
+        import anthropic
+
+        client = anthropic.Anthropic(api_key=api_key, timeout=timeout_s)
+    schema = _RESPONSE_FORMAT["json_schema"]["schema"]
+
+    def llm(system: str, user: str, *, plain: bool = False) -> LlmReply:
+        kwargs = {
+            "model": model,
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        if not plain:
+            kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        reply = client.messages.create(**kwargs)
+        if reply.stop_reason == "refusal":
+            # A declined group yields nothing, and it would decline again every pass:
+            # report it as an EMPTY reply, not a truncated one, or the watermark would
+            # hold on it forever and stall extraction for everyone.
+            log.warning("extraction: the model declined a group; recording it as no observations")
+            return LlmReply(text="[]", truncated=False)
+        content = "".join(getattr(b, "text", "") for b in (reply.content or [])
+                          if getattr(b, "type", "") == "text")
+        return LlmReply(text=_unwrap_observations(content), truncated=reply.stop_reason != "end_turn")
+
+    return llm
+
+
 def _unwrap_observations(content: str) -> str:
     """Schema wrapper -> the array text every caller already expects.
 
