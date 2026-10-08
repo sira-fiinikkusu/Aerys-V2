@@ -110,12 +110,31 @@ class _LifeboatPrimary(_PrefixCached):
         return client.with_options(timeout=httpx.Timeout(client.timeout, connect=5.0))
 
 
+#: Measured against the live API on 2026-10-07, the night the 5.5 upgrade broke her voice
+#: path. Only Haiku 4.5 (and older) still accepts `temperature`; every 5.x model and
+#: Opus 4.8 answer 400 "`temperature` is deprecated for this model".
+def accepts_temperature(model: str) -> bool:
+    return str(model or "").startswith(("claude-haiku-4", "claude-3"))
+
+
+#: Same night: a forced tool call (tool_choice "any" or a named tool) is refused by
+#: Sonnet 5.5, Opus 5.5 and Fable 5.1 ('type "tool" and "any" are not supported for this
+#: model'). Haiku 5.5, Sonnet 5, Opus 5 and Opus 4.8 still take it.
+_NO_FORCED_TOOL_CHOICE = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-", "claude-mythos-")
+
+
+def supports_forced_tool_choice(model: str) -> bool:
+    return not str(model or "").startswith(_NO_FORCED_TOOL_CHOICE)
+
+
 def build_metered_model(settings: Settings, **kwargs: Any) -> ChatAnthropic:
     """Preserve unarmed clients exactly; the lifeboat replaces SDK retries.
 
     cache_prefix=True asks for system and history prompt-cache breakpoints
     (see mark_cached_prefix); without it the plain ChatAnthropic is returned.
     """
+    if "temperature" in kwargs and not accepts_temperature(kwargs.get("model", "")):
+        kwargs = {k: v for k, v in kwargs.items() if k != "temperature"}
     if getattr(settings, "local_fallback_url", None) is None:
         if kwargs.get("cache_prefix"):
             return _PrefixCached(**kwargs)

@@ -1006,9 +1006,12 @@ def memory_key_labeler_for(settings: Settings):
     from aerys_v2.workers.extraction import LlmReply, key_label_for
     from langchain_anthropic import ChatAnthropic
 
+    from aerys_v2.anthropic_model import accepts_temperature
+
     model = ChatAnthropic(model=settings.tier_fast_model,
         api_key=settings.anthropic_api_key.get_secret_value(),
-        temperature=0, max_tokens=512, timeout=20, max_retries=0)
+        max_tokens=512, timeout=20, max_retries=0,
+        **({"temperature": 0} if accepts_temperature(settings.tier_fast_model) else {}))
 
     def llm(system, user):
         reply = model.invoke([("system", system), ("human", user)])
@@ -1723,11 +1726,18 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
         )
 
     def pair(model_name: str) -> tuple[object, object]:
+        from aerys_v2.anthropic_model import supports_forced_tool_choice
+
         base = chat(model_name)
         auto = with_lifeboat(base.bind_tools(tools))
+        # The API refuses a forced tool call on the newest models (Sonnet 5.5, Opus 5.5:
+        # live 400s, 2026-10-07); their first pass runs on auto and the honesty gate
+        # still bounces a reply that skipped the tool. The plan backend forces it its
+        # own way and keeps the forced pass.
+        can_force = backend != "api" or supports_forced_tool_choice(model_name)
         forced = (
             with_lifeboat(base.bind_tools(tools, tool_choice="any"))
-            if settings.action_force_tool else auto
+            if settings.action_force_tool and can_force else auto
         )
         return auto, forced
 

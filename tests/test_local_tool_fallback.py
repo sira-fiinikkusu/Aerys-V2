@@ -79,7 +79,10 @@ def test_every_binding_has_same_unforced_local_tools(name, pin, force):
         assert "tool_choice" not in local.kwargs
         assert [t["function"]["name"] for t in local.kwargs["tools"]] == ["home_control"]
         assert [t["name"] for t in binding.primary.kwargs["tools"]] == ["home_control"]
-    assert pair._forced.primary.kwargs.get("tool_choice") == ({"type": "any"} if force else None)
+    from aerys_v2.anthropic_model import supports_forced_tool_choice
+
+    forceable = supports_forced_tool_choice(pin or "claude-sonnet-5-5")
+    assert pair._forced.primary.kwargs.get("tool_choice") == ({"type": "any"} if force and forceable else None)
 
 
 def test_unarmed_bindings_are_plain_and_do_not_construct_local_client(monkeypatch):
@@ -90,7 +93,9 @@ def test_unarmed_bindings_are_plain_and_do_not_construct_local_client(monkeypatc
     pair = build_api_tool_model(settings(local_fallback_url=None), [home_control])
     for binding in bindings(pair):
         assert isinstance(binding.bound, ChatAnthropic)
-    assert pair._forced.kwargs["tool_choice"] == {"type": "any"}
+    # Sonnet 5.5 refuses a forced tool call on the API (live 400, 2026-10-07), so its
+    # forced lane is the auto binding; Haiku 5.5 still takes the forced pass.
+    assert "tool_choice" not in pair._forced.kwargs
     assert pair._fast_forced.kwargs["tool_choice"] == {"type": "any"}
     assert pair._conv.bound.model == pair._auto.bound.model == "claude-sonnet-5-5"
 
