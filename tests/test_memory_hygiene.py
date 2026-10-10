@@ -155,3 +155,20 @@ def test_skipped_tool_write_never_claims_already_kept():
     tool = build_remember_tool(lambda record: 'skipped', key_labeler=lambda fact: 'interest.beverage')
     reply = tool.invoke({'fact': 'Likes drinks'}, config={'configurable': {'identity': {'user_id': PERSON}}})
     assert reply.startswith('Nothing was kept:')
+
+
+def test_labeler_reads_the_text_block_when_the_model_thinks_first(monkeypatch):
+    """10/10: Haiku 5.5 thinks by default, so reply.content is a LIST of blocks
+    ([thinking, text]). str(list) hid the JSON from the parser and every rack
+    remember fell back to a hash key (found replaying the commitment-guard measure;
+    probed live: content type list, blocks ['thinking', 'text'])."""
+    from aerys_v2.config import Settings
+    from aerys_v2.factory import memory_key_labeler_for
+    model = Mock()
+    model.invoke.return_value = Mock(
+        content=[{'type': 'thinking', 'thinking': 'a birthday fact', 'signature': 'sig'},
+                 {'type': 'text', 'text': json.dumps([dict(key_label='event.birthday', value_text=BIRTHDAY)])}],
+        response_metadata={'stop_reason': 'end_turn'})
+    monkeypatch.setattr('langchain_anthropic.ChatAnthropic', Mock(return_value=model))
+    labeler = memory_key_labeler_for(Settings(_env_file=None, anthropic_api_key='offline-placeholder'))
+    assert labeler(BIRTHDAY) == 'basic.birth_date'

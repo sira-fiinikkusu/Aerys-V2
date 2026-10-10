@@ -1015,7 +1015,10 @@ def memory_key_labeler_for(settings: Settings):
 
     def llm(system, user):
         reply = model.invoke([("system", system), ("human", user)])
-        return LlmReply(str(reply.content), reply.response_metadata.get("stop_reason") == "max_tokens")
+        # Text blocks only: Haiku 5.5 thinks first, so content is [thinking, text] and
+        # str() of that list hid the JSON from the parser (10/10, every label fell back).
+        from aerys_v2.oauth_model import _text
+        return LlmReply(_text(reply.content), reply.response_metadata.get("stop_reason") == "max_tokens")
 
     return lambda fact: key_label_for(fact, llm=llm)
 
