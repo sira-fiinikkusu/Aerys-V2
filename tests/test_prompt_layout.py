@@ -105,3 +105,19 @@ def test_default_layout_keeps_context_in_the_system_prompt(monkeypatch, action):
     assert "CLOCK_SENTINEL" in system.content and "KNOWLEDGE_SENTINEL" in system.content
     assert shown[-1] is current or shown[-1].content == "hello there"
     assert isinstance(shown[-1].content, str)
+
+
+def test_chat_prompt_forbids_invented_promises_and_pending_items():
+    """Aerys-V2 #1 (Chris approved 2026-10-10 13:57): the measured slip class is a
+    claim of a prior promise or a pending item nobody made ("I'm still waiting on
+    that photo you promised of Eevee"). The chat prompt carries one honesty line
+    against it; a per-turn gate was measured and declined (it would bounce two
+    true claims for every false one)."""
+    model = Recorder()
+    graph = build_graph(model, "SOUL_SENTINEL")
+    graph.invoke({"messages": [HumanMessage(content="hi", id="h")]},
+                 {"configurable": {"thread_id": "commitment-line"}})
+    system = model.prompts[0][0].content
+    assert "Never say that someone promised, agreed to or owes you something" in system
+    assert "still waiting on something from them" in system
+    assert "If you are not sure, ask instead of asserting it." in system

@@ -2841,7 +2841,15 @@ def build_graph(
             "different: it comes with his message and you see it yourself, so "
             "answer it yourself.) You cannot turn anything on or off and you cannot read "
             "any device's current state — NEVER say you did, and never state a "
-            "device result you did not get from a tool. When the request needs any "
+            "device result you did not get from a tool. "
+            # Aerys-V2 #1 (Chris approved 2026-10-10): the measured slip was an invented
+            # promise / pending item ("still waiting on that photo you promised"). A gate
+            # was measured and declined; this line is the prompt-side answer.
+            "Never say that someone promised, agreed to or owes you something, or "
+            "that you are still waiting on something from them, unless it is in "
+            "front of you — in this conversation or in what you know about them. "
+            "If you are not sure, ask instead of asserting it. "
+            "When the request needs any "
             "of those — touching or reading a device, mail, current information, a "
             "file, document, video or link to open — and this includes short follow-ups like 'yes, go "
             "ahead', 'try it now', or 'what about tomorrow?' whose meaning earlier "
