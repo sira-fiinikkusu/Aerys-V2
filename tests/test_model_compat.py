@@ -31,6 +31,36 @@ def test_forced_tool_choice_is_refused_by_the_newest_models(model, ok):
     assert supports_forced_tool_choice(model) is ok
 
 
+@pytest.mark.parametrize("model,ok", [
+    ("claude-opus-6", False), ("claude-sonnet-6", False), ("claude-haiku-6", False),
+    ("claude-sonnet-5-5-20261001", False), ("claude-mythos-5", False), ("", False), (None, False),
+    ("claude-haiku-4-5-20251001", True), ("claude-sonnet-5-20260601", True),
+])
+def test_a_model_nobody_measured_is_never_forced(model, ok):
+    """An allow-list: the next release that refuses forcing must not break the API path
+    the way Sonnet 5.5 did on 10/07. Whole ids or dated snapshots only."""
+    assert supports_forced_tool_choice(model) is ok
+
+
+def test_the_allow_list_keeps_every_verdict_the_rack_runs_on():
+    """Every model id the deployed containers and tiers use (Settings defaults + the Jetson's
+    MODEL pins on 2026-10-11) keeps the verdict the 10/07 deny-list gave it, so swapping the
+    list changed nothing that runs today."""
+    deny_list_verdict = {
+        "claude-sonnet-5-5": False,   # brain/soak/telegram/extractor MODEL; tier_standard
+        "claude-sonnet-5": True,      # gaps, email
+        "claude-haiku-5-5": True,     # tier_fast; extraction_anthropic_model
+        "claude-opus-5-5": False,     # tier_deep
+        "claude-fable-5-1": False, "claude-mythos-5": False,
+    }
+    defaults = Settings(_env_file=None, anthropic_api_key="sk-test")
+    for model in (defaults.model, defaults.tier_fast_model, defaults.tier_standard_model,
+                  defaults.tier_deep_model, defaults.extraction_anthropic_model):
+        assert model in deny_list_verdict, model
+    for model, verdict in deny_list_verdict.items():
+        assert supports_forced_tool_choice(model) is verdict, model
+
+
 def settings(**overrides):
     return Settings(_env_file=None, anthropic_api_key="sk-test", **overrides)
 

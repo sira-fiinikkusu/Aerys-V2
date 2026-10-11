@@ -1,5 +1,6 @@
 """Metered transport policy when an offline lifeboat is armed."""
 
+import re
 from copy import deepcopy
 from functools import cached_property
 from typing import Any
@@ -119,12 +120,20 @@ def accepts_temperature(model: str) -> bool:
 
 #: Same night: a forced tool call (tool_choice "any" or a named tool) is refused by
 #: Sonnet 5.5, Opus 5.5 and Fable 5.1 ('type "tool" and "any" are not supported for this
-#: model'). Haiku 5.5, Sonnet 5, Opus 5 and Opus 4.8 still take it.
-_NO_FORCED_TOOL_CHOICE = ("claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-", "claude-mythos-")
+#: model'). Haiku 4.5, Haiku 5.5, Sonnet 5, Opus 5 and Opus 4.8 still take it.
+#: So forcing is an ALLOW-list of the models measured to take it: a deny-list broke the
+#: API path on every new release that refuses, until someone added it. A model not named
+#: here, including the next release, runs its first pass on auto; the honesty gate still
+#: bounces a reply that skipped the tool.
+_FORCED_TOOL_CHOICE_OK = ("claude-haiku-4-5", "claude-haiku-5-5", "claude-sonnet-5",
+                          "claude-opus-4-8", "claude-opus-5")
 
 
 def supports_forced_tool_choice(model: str) -> bool:
-    return not str(model or "").startswith(_NO_FORCED_TOOL_CHOICE)
+    """Whole ids only, or a dated snapshot of one: 'claude-sonnet-5' never admits 'claude-sonnet-5-5'."""
+    model = str(model or "")
+    return any(model == name or re.fullmatch(re.escape(name) + r"-\d{8}", model)
+               for name in _FORCED_TOOL_CHOICE_OK)
 
 
 def build_metered_model(settings: Settings, **kwargs: Any) -> ChatAnthropic:
