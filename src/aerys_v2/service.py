@@ -888,6 +888,11 @@ _RECORD_CLAIM_RE = re.compile(
 #: emitted (visibility over censorship) but countable by the miner.
 RECORD_CLAIM_MARKER = "unverifiable_record_claim"
 
+#: Aerys-V2 #3 (2026-10-12): a chat turn came back with NO text (raw_reply '', no error,
+#: degraded []) and passed as a clean success. The marker makes it countable; the log
+#: line says what came back (stop_reason, block types) so the cause shows next time.
+EMPTY_REPLY_MARKER = "empty_reply"
+
 # Same internal-plumbing contract as the audio correction. Honesty-only v1:
 # no re-route instruction — a bounce retry cannot ride the handoff escalation
 # (that flag was computed from the original reply), so the honest recovery is
@@ -1638,6 +1643,17 @@ def _chat_turn(
         degraded.append(RECORD_CLAIM_MARKER)
     if timed_out:
         degraded.append("wall_clock_exceeded")
+    if not raw.strip():
+        degraded.append(EMPTY_REPLY_MARKER)
+        last = result["messages"][-1]
+        content = getattr(last, "content", None)
+        log.warning(
+            "chat reply was empty: thread=%s stop_reason=%s blocks=%s",
+            (config.get("configurable") or {}).get("thread_id"),
+            (getattr(last, "response_metadata", None) or {}).get("stop_reason"),
+            [b.get("type") for b in content if isinstance(b, dict)] if isinstance(content, list)
+            else type(content).__name__,
+        )
 
     _fire_turn_record(
         record_turn, config, text, int(elapsed * 1000),

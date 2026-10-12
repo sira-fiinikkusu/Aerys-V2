@@ -540,3 +540,27 @@ def test_reflex_json_and_null():
     assert json.loads(build_turn_row(**fields, reflex=shadow)['reflex']) == shadow
     assert build_turn_row(**fields)['reflex'] is None
     assert '%(reflex)s::jsonb' in INSERT_TURN_SQL
+
+
+def test_an_empty_chat_reply_is_marked_degraded_not_a_clean_success(caplog):
+    """2026-10-12 (Aerys-V2 #3): a chat turn came back with no text at all (raw_reply
+    '', no error, degraded []). It looked like a successful turn. It must be countable
+    and leave a log line saying what came back instead."""
+    rec = Recorder()
+    graph = build_graph(fake_model(AIMessage(content=[{"type": "thinking", "thinking": "", "signature": "s"}],
+                                             response_metadata={"stop_reason": "max_tokens"})), soul="s")
+    with caplog.at_level(logging.WARNING, logger="aerys_v2.service"):
+        reply = ask(graph, "write me something long", identity=OWNER, thread_id="cli",
+                    router=chat_router, record_turn=rec)
+    (row,) = rec.wait(1)
+    assert reply == "" and row["raw_reply"] == ""
+    assert "empty_reply" in json.loads(row["degraded"])
+    assert any("empty" in r.message and "max_tokens" in r.message for r in caplog.records)
+
+
+def test_a_normal_chat_reply_carries_no_empty_marker():
+    rec = Recorder()
+    graph = build_graph(fake_model("hello there"), soul="s")
+    ask(graph, "hi", identity=OWNER, thread_id="cli", router=chat_router, record_turn=rec)
+    (row,) = rec.wait(1)
+    assert "empty_reply" not in json.loads(row["degraded"] or "[]")

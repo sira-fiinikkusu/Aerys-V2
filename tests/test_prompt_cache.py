@@ -189,3 +189,26 @@ def test_actual_router_and_privacy_judge_remain_uncached(monkeypatch, armed):
     for model in seen:
         payload = model._get_request_payload([SystemMessage(content="soul"), HumanMessage(content="hi")])
         assert _markers(payload) == 0
+
+
+@pytest.mark.parametrize("blocks,marked_index", [
+    ([{"type": "thinking", "thinking": "", "signature": "sig"}], None),
+    ([{"type": "thinking", "thinking": "", "signature": "sig"}, {"type": "text", "text": "reply"}], 1),
+    ([{"type": "text", "text": "reply"}, {"type": "redacted_thinking", "data": "x"}], 0),
+])
+def test_history_marker_never_lands_on_a_thinking_block(blocks, marked_index):
+    """2026-10-12 (Aerys-V2 #3): the action-honesty gate replays a reply that made no tool
+    call; when that reply was thinking-only, the marker went on the thinking block and the
+    API answered 400 'messages.1.content.0.thinking.cache_control: Extra inputs are not
+    permitted'. Thinking blocks are never a breakpoint; with nothing else, nothing is marked."""
+    payload = mark_cached_prefix({"system": "soul", "messages": [
+        {"role": "user", "content": "do the thing"},
+        {"role": "assistant", "content": blocks}, {"role": "user", "content": "you made no tool call"}]})
+    content = payload["messages"][1]["content"]
+    for i, block in enumerate(content):
+        if "thinking" in block["type"]:
+            assert "cache_control" not in block, i
+    if marked_index is None:
+        assert _markers(content) == 0 and _markers(payload) == 1, "only the system breakpoint"
+    else:
+        assert content[marked_index]["cache_control"] == EPHEMERAL

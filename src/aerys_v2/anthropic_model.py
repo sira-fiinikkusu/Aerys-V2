@@ -54,13 +54,16 @@ def mark_cached_prefix(payload: dict) -> dict:
     last_assistant = next((m for m in reversed(messages) if m.get("role") == "assistant"), None)
     if last_assistant is not None:
         # 1.4.6's helper skips tool calls made by code_execution and their results.
-        # Server-side execution blocks need the same exclusion.
+        # Server-side execution blocks need the same exclusion, and so do thinking
+        # blocks: the API refuses a breakpoint on one (400 "thinking.cache_control"),
+        # and a thinking-only reply is what the action-honesty gate replays (#3).
         candidate = dict(last_assistant)
         if isinstance(candidate.get("content"), list):
             candidate["content"] = [
                 block for block in candidate["content"]
                 if not isinstance(block, dict) or not (
                     "code_execution" in block.get("type", "")
+                    or block.get("type") in ("thinking", "redacted_thinking")
                     or (block.get("type") == "server_tool_use"
                         and "code_execution" in block.get("name", ""))
                 )
