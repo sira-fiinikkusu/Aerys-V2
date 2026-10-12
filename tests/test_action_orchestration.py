@@ -1137,3 +1137,18 @@ def test_action_tools_guest_drops_only_the_house_half():
     assert {"analyze_image", "read_document", "youtube_summary", "search_web"} <= guest
     # ...but the HOME half (house control, presence reads, timers) is structurally gone
     assert not ({"home_control", "search_entities", "timer"} & guest)
+
+
+def test_voice_action_that_comes_back_blank_speaks_her_line():
+    """2026-10-12 (Chris approved; Aerys wrote the line): a voice action that ends with no
+    text would otherwise stay silent after the ack. It speaks her blank-reply line."""
+    from aerys_v2.service import BLANK_REPLY_LINE
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph([], final="")
+    ask(graph, "do the thing", identity=CHRIS, thread_id="voice:blank",
+        router=action_router, action_graph=stub, speak_fn=speak,
+        satellite_for=fixed_satellite, followup_skip_s=6.0)
+    msgs = wait_for_messages(graph, "voice:blank", 2)
+    assert any(m.content == BLANK_REPLY_LINE for m in msgs)
+    assert calls and calls[-1] == BLANK_REPLY_LINE

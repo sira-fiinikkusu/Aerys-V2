@@ -892,6 +892,11 @@ RECORD_CLAIM_MARKER = "unverifiable_record_claim"
 #: degraded []) and passed as a clean success. The marker makes it countable; the log
 #: line says what came back (stop_reason, block types) so the cause shows next time.
 EMPTY_REPLY_MARKER = "empty_reply"
+#: What she says when a reply comes back blank, instead of silence. Her own words:
+#: Aerys wrote this line on 2026-10-12 when asked (thread kael:blank-line); Chris
+#: approved having one ("1 and 2 are approved"). The row keeps raw_reply '' as evidence.
+BLANK_REPLY_LINE = ("My reply came out empty on my end, and I'm sorry for the silence. "
+                    "Could you say that again, or try it a shorter way?")
 
 # Same internal-plumbing contract as the audio correction. Honesty-only v1:
 # no re-route instruction — a bounce retry cannot ride the handoff escalation
@@ -1645,6 +1650,7 @@ def _chat_turn(
         degraded.append("wall_clock_exceeded")
     if not raw.strip():
         degraded.append(EMPTY_REPLY_MARKER)
+        reply = BLANK_REPLY_LINE
         last = result["messages"][-1]
         content = getattr(last, "content", None)
         log.warning(
@@ -1874,6 +1880,9 @@ def _action_turn(
     # side is never TAUGHT the marker, but a model echoing history could still
     # surface it — stripped here, it can neither reach the caller nor persist.
     final = _strip_handoff(_reply_text(result_messages[-1]))
+    raw_final = final
+    if not final.strip():   # no text at all (#3): her line, not silence; the row keeps ''
+        final = BLANK_REPLY_LINE
     landed = (
         AIMessage(content=final, id=replace_message_id)
         if replace_message_id is not None
@@ -1895,12 +1904,14 @@ def _action_turn(
     if escalated:
         degraded.append(ESCALATED_MARKER)
     degraded.extend(extra_degraded or [])
+    if not raw_final.strip():
+        degraded.append(EMPTY_REPLY_MARKER)
     latency_ms = int((time.monotonic() - started) * 1000) if started is not None else None
     _fire_turn_record(
         record_turn, config, text, latency_ms,
         reflex=reflex,
         classifier_intent="action",
-        raw_reply=final,
+        raw_reply=raw_final,
         emitted_reply=final,
         messages=result_messages,
         extra_degraded=degraded or None,
@@ -2180,13 +2191,18 @@ def _voice_parallel_start(
                 log.warning("background action turn failed", exc_info=True)
                 final = _honest_reply_for_failure(e) or f"(The action didn't complete — {e})"
                 failed = True
+            # No text at all (#3): after the ack, silence would leave him waiting. Her
+            # blank-reply line speaks instead; it is not 'action_failed' (nothing raised).
+            blank = not failed and not final.strip()
+            if blank:
+                final = BLANK_REPLY_LINE
 
             # Spoken follow-up: failures ALWAYS speak; with confirm_writes
             # (owner ruling 2026-10-01) every outcome speaks; otherwise the
             # silent-success rule decides (fast clean write = say nothing).
             elapsed = time.monotonic() - ack_at
             device_id = real_configurable.get("identity", {}).get("device_id")
-            spoke_followup = failed or _needs_spoken_followup(
+            spoke_followup = failed or blank or _needs_spoken_followup(
                 result_messages, elapsed, followup_skip_s, confirm_writes
             )
             if spoke_followup:
@@ -2212,6 +2228,8 @@ def _voice_parallel_start(
             # long ago). emitted_reply is the ACK the caller actually heard;
             # raw_reply is the action's real outcome.
             degraded = ["action_failed"] if failed else list(gate_degraded or [])
+            if blank:
+                degraded.append(EMPTY_REPLY_MARKER)
             if LOCAL_FALLBACK_FIRED.get():
                 degraded.append("local_model_fallback")
             if escalated:
@@ -2221,7 +2239,7 @@ def _voice_parallel_start(
                 int((time.monotonic() - started) * 1000),
                 reflex=reflex,
                 classifier_intent="action",
-                raw_reply=final,
+                raw_reply="" if blank else final,
                 emitted_reply=ack,
                 messages=result_messages,
                 extra_degraded=degraded or None,

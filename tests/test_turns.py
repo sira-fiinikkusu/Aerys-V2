@@ -553,7 +553,9 @@ def test_an_empty_chat_reply_is_marked_degraded_not_a_clean_success(caplog):
         reply = ask(graph, "write me something long", identity=OWNER, thread_id="cli",
                     router=chat_router, record_turn=rec)
     (row,) = rec.wait(1)
-    assert reply == "" and row["raw_reply"] == ""
+    from aerys_v2.service import BLANK_REPLY_LINE
+    assert reply == BLANK_REPLY_LINE == row["emitted_reply"], "she says so instead of silence (Chris 10/12)"
+    assert row["raw_reply"] == "", "the row keeps what the model really returned"
     assert "empty_reply" in json.loads(row["degraded"])
     assert any("empty" in r.message and "max_tokens" in r.message for r in caplog.records)
 
@@ -564,3 +566,18 @@ def test_a_normal_chat_reply_carries_no_empty_marker():
     ask(graph, "hi", identity=OWNER, thread_id="cli", router=chat_router, record_turn=rec)
     (row,) = rec.wait(1)
     assert "empty_reply" not in json.loads(row["degraded"] or "[]")
+
+
+def test_an_empty_action_reply_says_her_line_too():
+    """The sequential action path: no tool call twice (the gate's bounce included) and no
+    text either. 2026-10-12 replay on the rack: the turn emitted '' after the gate."""
+    from aerys_v2.service import BLANK_REPLY_LINE
+    rec = Recorder()
+    graph = build_graph(fake_model("unused"), soul="s")
+    out = ask(graph, "write the long post", identity=OWNER, thread_id="discord:dm:1",
+              router=action_router, action_graph=StubActionGraph(final=""), record_turn=rec)
+    assert out == BLANK_REPLY_LINE
+    (row,) = rec.wait(1)
+    assert row["raw_reply"] == "" and row["emitted_reply"] == BLANK_REPLY_LINE
+    degraded = json.loads(row["degraded"])
+    assert "empty_reply" in degraded and "no_tool_action" in degraded
