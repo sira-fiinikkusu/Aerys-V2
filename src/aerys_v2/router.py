@@ -614,7 +614,11 @@ def router_for(settings, soul: str, *, extra_routes=None, extra_predicates=None)
         model=ROUTER_MODEL,
         api_key=settings.anthropic_api_key,  # SecretStr — unwrapped only by the client
         temperature=0,
-        max_tokens=200,      # one small JSON object; anything longer is wrong
+        # One small JSON object, but Haiku 5.5 THINKS first: at 200 the thinking ran the
+        # budget out on 75 of 150 real turns (reply '' -> keyword heuristic). Replayed at
+        # 1024: 6 of 150, median latency unchanged, p90 2.85 s inside the 10 s race
+        # (Aerys-V2 #3, 2026-10-12).
+        max_tokens=1024,
         timeout=10.0,        # slow router = fall back to heuristic, not a stall
         max_retries=1,
     )

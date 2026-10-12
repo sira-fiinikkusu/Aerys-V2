@@ -71,12 +71,17 @@ def test_all_metered_clients_preserve_read_budget_and_set_connection_policy(
     clients.append(((empty.primary if armed else empty).bound, timeout_s, 2))
 
     # Exercise the real closures to capture their actual client, not a factory stub.
+    # The router is called first (10 s), then the privacy judge (15 s). Told apart by
+    # call order: the router's max_tokens is no longer a unique marker (#3, 200 -> 1024).
+    expected_timeout = [10.0]
+
     def record(self, *args, **kwargs):
-        clients.append((self, 10.0 if self.max_tokens == 200 else 15.0, 1))
+        clients.append((self, expected_timeout[0], 1))
         return AIMessage(content="public")
 
     monkeypatch.setattr(ChatAnthropic, "invoke", record)
     router_for(s, "soul")("hello")
+    expected_timeout[0] = 15.0
     assert content_privacy_fn_for(s)("hello") == "public"
     clients.append((Judge.from_settings(s)._model, 60.0, 2))
 

@@ -277,3 +277,24 @@ def test_router_prompt_teaches_shopping_is_action():
     assert "shopping and availability" in lowered
     assert "stocks" in lowered or "sells" in lowered
     assert "publix" in lowered  # the concrete example carries the rule
+
+
+def test_the_router_budget_leaves_room_for_haiku_55_to_think_first(monkeypatch):
+    """Aerys-V2 #3 (2026-10-12): Haiku 5.5 thinks before it answers. At max_tokens=200
+    the thinking ran out the budget on 75 of 150 real turns (replayed through the live
+    router): reply '', so half her routing was the keyword heuristic. At 1024 the same
+    150 turns fell back 6 times, median latency unchanged (1.65 s vs 1.68 s)."""
+    import aerys_v2.anthropic_model as transport
+    from aerys_v2.config import Settings
+    from aerys_v2.router import router_for
+
+    seen, original = {}, transport.build_metered_model
+
+    def record(settings, **kwargs):
+        seen.update(kwargs)
+        return original(settings, **kwargs)
+
+    monkeypatch.setattr(transport, "build_metered_model", record)
+    router_for(Settings(_env_file=None, anthropic_api_key="sk-test"), "soul")
+    assert seen["max_tokens"] >= 1024
+    assert seen["timeout"] == 10.0, "the voice race budget is unchanged"
