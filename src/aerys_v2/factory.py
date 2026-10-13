@@ -2171,6 +2171,14 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
                 settings.kael_desk_token.get_secret_value(),
             )
         )
+        if settings.database_url:
+            # KAEL CHECK-INS (owner ask 2026-10-12): the recurring jobs that tap Kael
+            # down this same line live with her; she lists, stops and resumes them.
+            # Owner-side only for the same reason as the line itself.
+            from aerys_v2.checkins import PostgresCheckinStore
+            from aerys_v2.tools.kael_checkins import build_kael_checkins_tool
+
+            tools.append(build_kael_checkins_tool(PostgresCheckinStore(settings.database_url)))
 
     if not guest and settings.email_app_password is not None and settings.email_address:
         # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:

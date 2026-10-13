@@ -360,6 +360,12 @@ def main() -> None:
 
             if start_storm_watch(settings) is not None:
                 log.info("storm watch armed | alerts=10m outlook=6h")
+            # Kael check-ins (owner ask 2026-10-12): the recurring jobs that tap Kael.
+            # Same one-daemon, --serve-only doctrine: the transports must not each tap.
+            from aerys_v2.checkins import start_checkins
+
+            if start_checkins(settings) is not None:
+                log.info("kael check-ins armed | every 60s")
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
