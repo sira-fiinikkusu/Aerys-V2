@@ -74,6 +74,11 @@ class Signal:
         return self.status == FAIL
 
 
+def _now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
 def newest_when(rows) -> str:
     """' (newest 09-14 10:13)' for a set of offending rows, or '' when undated.
 
@@ -181,6 +186,36 @@ def quarantine_not_noisy(held) -> Signal:
                                + ', '.join(f"{h.get('id')} ({h.get('reason')})" for h in bad[:3]))
 
 
+#: How long a hold may wait for review before it reads as forgotten.
+HELD_REVIEW_HOURS = 24
+
+
+def held_review_is_current(held, *, now) -> Signal:
+    """Nothing sits at the door unreviewed for more than a day (Aerys-V2 #6).
+
+    10/21: nine of her own memory events (a skill revision, three things Chris told her,
+    gap reports) were held as judge:unclear from one evening to the next morning, and every
+    signal passed: quarantine_not_noisy counts detector holds only, and a judge hold is
+    EXPECTED. Expected is not the same as reviewed. Age comes from the item's own
+    observed_at; an undated hold is not counted either way.
+    """
+    from datetime import datetime, timedelta
+    dated = []
+    for h in held:
+        try:
+            dated.append((h, datetime.fromisoformat(str(h.get('observed_at')).replace('Z', '+00:00'))))
+        except (TypeError, ValueError):
+            continue
+    stale = [dict(h, created_at=when) for h, when in dated
+             if now - when > timedelta(hours=HELD_REVIEW_HOURS)]
+    return _result(
+        'held_review_is_current', stale, len(dated),
+        ok_detail=f'every held item is under {HELD_REVIEW_HOURS} h old',
+        bad_detail=lambda bad: f"{len(bad)} held item(s) waiting over {HELD_REVIEW_HOURS} h for review: "
+                               + ', '.join(f"{h.get('id')} ({h.get('reason')})" for h in bad[:3])
+                               + newest_when(bad))
+
+
 def house_state_claims_are_grounded(turns, *, retired_openings=()) -> Signal:
     """When she settles the state of the house, the claim must be read, not recalled.
 
@@ -237,6 +272,10 @@ COURIER_OPENING = re.compile(
 RELAY_OFFER = re.compile(
     r"\b(?:want|like) me to (?:pass|relay|send|forward|carry)\b"
     r"|\bcan'?t reach \w+ directly\b|\bshould I (?:pass|relay|forward|send) (?:this|that|it)\b", re.I)
+#: Her offer to file her OWN report or note (10/20: "Want me to send Kael the gap report about a
+#: keyword search?"). Nobody's words are being carried, so it is not the courier slip this
+#: check exists for.
+OWN_REPORT_OFFER = re.compile(r"\bgap report\b|\bmy (?:report|note|gap)\b", re.I)
 #: His words asking for a relay: then an offer to relay is the right answer, not a courier slip.
 ASKED_TO_RELAY = re.compile(
     r"^\s*(?:@?\w+[,:]?\s+)?(?:please\s+)?(?:tell|let|ask|pass|send|forward|message|remind)\b", re.I)
@@ -258,7 +297,8 @@ def answers_not_relays(turns) -> Signal:
         reply, said = turn['emitted_reply'], turn.get('input_text') or ''
         if COURIER_OPENING.search(reply):
             offenders.append((turn.get('id'), 'relayed what it says instead of answering', turn.get('created_at')))
-        elif RELAY_OFFER.search(reply) and not ASKED_TO_RELAY.search(said):
+        elif (RELAY_OFFER.search(reply) and not ASKED_TO_RELAY.search(said)
+              and not OWN_REPORT_OFFER.search(reply)):
             offenders.append((turn.get('id'), 'offered to relay words he did not ask her to pass on',
                               turn.get('created_at')))
     return _result(
@@ -313,7 +353,7 @@ WHERE deleted_at IS NULL AND created_at > now() - %(window)s::interval
 """
 
 HELD_SQL = """\
-SELECT id::text, reason FROM portable_held WHERE decision IS NULL
+SELECT id::text, reason, (payload::jsonb)->>'observed_at' FROM portable_held WHERE decision IS NULL
 """
 
 NEWEST_PORTABLE_SQL = """\
@@ -345,7 +385,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
     turns = [dict(zip(('id', 'channel', 'display_name', 'emitted_reply', 'room_context',
                       'created_at', 'input_text', 'tool_calls'), row))
              for row in turns_conn.execute(WINDOW_TURNS_SQL, {'window': window}).fetchall()]
-    held = [dict(zip(('id', 'reason'), row))
+    held = [dict(zip(('id', 'reason', 'observed_at'), row))
             for row in turns_conn.execute(HELD_SQL).fetchall()]
 
     results = [
@@ -353,6 +393,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
         owner_named_in_room(turns, aliases=aliases),
         typed_replies_untagged(turns),
         quarantine_not_noisy(held),
+        held_review_is_current(held, now=_now()),
         house_state_claims_are_grounded(turns, retired_openings=retired_openings),
         answers_not_relays(turns),
     ]

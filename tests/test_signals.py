@@ -325,3 +325,33 @@ def test_answers_not_relays_passes_a_real_answer_and_an_asked_for_relay():
     ]
     result = answers_not_relays(turns)
     assert not result.failed and result.checked == 2
+
+
+def test_her_offer_to_file_her_own_report_is_not_a_courier_slip():
+    """Aerys-V2 #6 (10/20 evening): she offered to send Kael her own gap report three times."""
+    from aerys_v2.workers.signals import answers_not_relays
+    turns = [
+        dict(id=7, channel='portable', input_text='why arent you checking long term if the attic doesnt have what you need?',
+             emitted_reply='I can add this to the gap report for Kael: a tool to search long-term memory by keyword. Want me to send that?'),
+        dict(id=8, channel='portable', input_text='i just told him about it. For the record, Megan is my wife',
+             emitted_reply='Got it. Want me to send Kael the gap report about a keyword search for long-term memory?'),
+    ]
+    result = answers_not_relays(turns)
+    assert not result.failed and result.checked == 2
+    selyra = [dict(id=2, channel='dm', input_text='Selyra said this: hi.\nTell her this from me:',
+                   emitted_reply="I can't reach Selyra directly, only Kael. Do you want me to pass this message to him to relay")]
+    assert answers_not_relays(selyra).failed, 'carrying someone else\'s words still fails'
+
+
+def test_a_hold_nobody_reviewed_for_a_day_fails():
+    """Aerys-V2 #6: nine judge holds sat a night unseen while every signal passed."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 10, 21, 14, 0, tzinfo=timezone.utc)
+    fresh = {'id': 'a', 'reason': 'judge:unclear', 'observed_at': (now - timedelta(hours=2)).isoformat()}
+    old = {'id': 'b', 'reason': 'judge:unclear', 'observed_at': (now - timedelta(hours=30)).isoformat()}
+    undated = {'id': 'c', 'reason': 'judge:unclear', 'observed_at': None}
+    assert signals.held_review_is_current([fresh, undated], now=now).status == signals.PASS
+    stale = signals.held_review_is_current([fresh, old], now=now)
+    assert stale.failed and 'b (judge:unclear)' in stale.detail and 'over 24 h' in stale.detail
+    assert signals.held_review_is_current([], now=now).status == signals.SKIP
+    assert signals.held_review_is_current([undated], now=now).status == signals.SKIP
