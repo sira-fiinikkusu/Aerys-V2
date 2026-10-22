@@ -192,3 +192,35 @@ def test_the_gate_and_the_reason_never_disagree():
                       {'is_dm': True, 'author_is_bot': True}):
         args = gate_args(**overrides)
         assert should_handle(**args) is (drop_reason(**args) is None), overrides
+
+
+# Open channels (Chris, 2026-10-22: "open channel is fine"): a channel where people talk to
+# her without tagging her. Her own messages and other bots' still never reach her, so the
+# posts she makes there can never set her off.
+
+def test_an_open_channel_needs_no_mention():
+    assert gate(mentions_me=False, open_channel_ids=frozenset({7})) is True
+    assert gate(mentions_me=False, open_channel_ids=frozenset({8})) is False, 'only the open one'
+
+
+def test_an_open_channel_still_drops_herself_and_bots():
+    from aerys_v2.transports.discord_gateway import drop_reason
+    assert gate(mentions_me=False, author_is_self=True, open_channel_ids=frozenset({7})) is False
+    assert gate(mentions_me=False, author_is_bot=True, open_channel_ids=frozenset({7})) is False
+    assert drop_reason(**gate_args(mentions_me=False, author_is_self=True,
+                                   open_channel_ids=frozenset({7}))) == 'self'
+
+
+def test_an_open_channel_outside_her_guild_or_allowlist_stays_closed():
+    assert gate(mentions_me=False, guild_id=5, open_channel_ids=frozenset({7})) is False
+    assert gate(mentions_me=False, allowed_channel_ids=frozenset({3}),
+                open_channel_ids=frozenset({7})) is False
+
+
+def test_open_channels_keep_the_gate_and_the_reason_in_step():
+    from aerys_v2.transports.discord_gateway import drop_reason
+    for overrides in ({'mentions_me': False}, {'mentions_me': False, 'channel_id': 7},
+                      {'mentions_me': False, 'channel_id': 7, 'author_is_self': True},
+                      {'mentions_me': False, 'channel_id': 7, 'guild_id': 5}, {'mentions_me': False, 'channel_id': 8}):
+        args = gate_args(open_channel_ids=frozenset({7}), **overrides)
+        assert should_handle(**args) is (drop_reason(**args) is None), overrides

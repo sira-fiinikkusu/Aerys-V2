@@ -461,3 +461,22 @@ def test_the_live_reader_knows_her_own_lines_and_her_own_name():
     assert block.splitlines() == ['Chris: @Aerys the codeword is heron',
                                   'Aerys (you): Got it held.',
                                   "Chris: @Aerys what's the codeword?"]
+
+
+def test_her_own_posts_read_whole_in_the_room_block():
+    """Chris 10/22: a digest posted in her name by a script is not one of her turns, so the
+    room block is the only place she sees it. At 300 characters a 1,300-character digest
+    was cut after its first item; her own lines now keep up to 2,000."""
+    from aerys_v2.services.live_room import SELF_LABEL
+    digest = 'Hey Sam, this week. ' + 'Item: a long line about one thing worth reading. ' * 25
+    block = format_room_messages([(SELF_LABEL, digest), ('Sam', 'y' * 500)])
+    mine, his = block.splitlines()
+    assert mine == f'{SELF_LABEL}: {" ".join(digest.split())}', 'her post, whole'
+    assert len(his) < 350 and his.endswith('…'), "everyone else's stays capped"
+    capped = format_room_messages([(SELF_LABEL, 'z' * 5000)])
+    assert len(capped) < 2100 and capped.endswith('…')
+
+
+def test_the_two_self_labels_agree():
+    from aerys_v2.services import live_room, room_context
+    assert room_context._SELF == live_room.SELF_LABEL

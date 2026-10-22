@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     # csv of `discord_user_id:sealed_room_id`: that person's DMs belong to their sealed
     # room (seen only in their DMs and that room; memories private). "" = none.
     discord_sealed_dm_users: str = ""
+    # csv of OPEN guild channel ids: people talk to her there without tagging her (her own
+    # messages and other bots' still never reach her). "" = none (Chris, 2026-10-22).
+    discord_open_channel_ids: str = ""
     # The Aerys Admin role (guild role id) gating /admin-link + /admin-unlink.
     # None = admin slash commands always refuse (fail-closed, same posture as
     # every other optional credential). n8n mapping: 03-02's "Check Admin Role"

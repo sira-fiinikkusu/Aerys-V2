@@ -501,6 +501,9 @@ def main() -> None:
             allowed_channel_ids=channel_ids,
             sealed_channel_ids=sealed_ids,
             sealed_dm_users=parse_sealed_dm_users(settings.discord_sealed_dm_users),
+            open_channel_ids=frozenset(
+                int(c) for c in settings.discord_open_channel_ids.split(",") if c.strip()
+            ),
         )
         # Slash commands (the n8n 03-02/04-03 + CF-worker chain, ported): attach
         # only when the identity DB and a guild are both wired — the interactions

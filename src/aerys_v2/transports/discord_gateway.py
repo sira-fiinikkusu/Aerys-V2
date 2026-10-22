@@ -86,13 +86,17 @@ def should_handle(
     channel_id: int,
     allowed_channel_ids: frozenset[int],
     mentions_me: bool,
+    open_channel_ids: frozenset[int] = frozenset(),
 ) -> bool:
     """Every drop/accept rule in one pure function.
 
     Mirrors the live adapters' gates: never self, never bots (bots don't get to
     summon Aerys — the same rule that keeps Kael and Aerys from looping each
     other), DMs always in, guild only in the configured guild (+channel allowlist
-    when set), and guild messages must mention her (DMs don't need to).
+    when set), and guild messages must mention her (DMs don't need to) unless the
+    channel is an OPEN one (Chris, 2026-10-22: "open channel is fine"), where
+    people talk to her without tagging her. Self and bots stay out there too, so
+    nothing she posts in an open channel can set her off.
     """
     if author_is_self or author_is_bot:
         return False
@@ -102,7 +106,7 @@ def should_handle(
         return False
     if allowed_channel_ids and channel_id not in allowed_channel_ids:
         return False
-    return mentions_me
+    return mentions_me or channel_id in open_channel_ids
 
 
 def drop_reason(
@@ -115,6 +119,7 @@ def drop_reason(
     channel_id: int,
     allowed_channel_ids: frozenset[int],
     mentions_me: bool,
+    open_channel_ids: frozenset[int] = frozenset(),
 ) -> str | None:
     """Why this message was not handled, or None when it was. Same rules as
     should_handle, kept in step by a test, so a drop can be SAID rather than
@@ -135,7 +140,7 @@ def drop_reason(
         return 'other-guild'
     if allowed_channel_ids and channel_id not in allowed_channel_ids:
         return 'channel-not-allowed'
-    return None if mentions_me else 'no-mention'
+    return None if mentions_me or channel_id in open_channel_ids else 'no-mention'
 
 
 def sealed_room_for(
@@ -272,6 +277,7 @@ class AerysDiscordClient(discord.Client):
         allowed_channel_ids: frozenset[int] = frozenset(),
         sealed_channel_ids: frozenset[int] = frozenset(),
         sealed_dm_users: dict[int, str] | None = None,
+        open_channel_ids: frozenset[int] = frozenset(),
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged — enabled on the dev bot app page
@@ -280,6 +286,7 @@ class AerysDiscordClient(discord.Client):
         self._resolve = resolve_fn
         self._guild_id = allowed_guild_id
         self._channel_ids = allowed_channel_ids
+        self._open_ids = open_channel_ids
         self._sealed_ids = sealed_channel_ids
         self._sealed_dms = dict(sealed_dm_users or {})
         for user_id, room in self._sealed_dms.items():
@@ -303,6 +310,7 @@ class AerysDiscordClient(discord.Client):
             channel_id=message.channel.id,
             allowed_channel_ids=self._channel_ids,
             mentions_me=self.user in message.mentions,
+            open_channel_ids=self._open_ids,
         )
         reason = drop_reason(**gate)
         if reason is not None:

@@ -89,15 +89,23 @@ def _speaker(display_name: object, person_id: object) -> str:
     return f"person·{pid[-4:]}" if pid else "Someone"
 
 
+#: Her own lines in the live room block keep this much (Chris, 2026-10-22): a post made in
+#: her name by a script, such as a scheduled digest, is not one of her turns, so the room
+#: block is the only place she sees it, and at _FIELD_CAP a digest was cut after its first item.
+_SELF_CAP = 2000
+#: How the live reader labels her own messages (live_room.SELF_LABEL says the same).
+_SELF = 'Aerys (you)'
+
+
 def format_room_messages(rows) -> str:
     """(speaker, text) pairs, chronological, -> the same block shape as turns.
 
     Used by the live-channel reader: these are plain messages, most of which were
-    never addressed to her, so there is no reply half to render.
+    never addressed to her, so there is no reply half to render. Her own keep more.
     """
     lines = []
     for display_name, text in rows:
-        clipped = _clip(text)
+        clipped = _clip(text, _SELF_CAP if display_name == _SELF else _FIELD_CAP)
         if clipped:
             lines.append(f"{_speaker(display_name, None)}: {clipped}")
     return "\n".join(lines)
