@@ -258,7 +258,45 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
             log.warning("memory-context connect failed for person %s", person_id, exc_info=True)
             return ""
 
+    def people(person_id: str, window_text: str, privacy_context: str = "public") -> str:
+        # What she remembers about the people the conversation is ABOUT (owner 2026-10-22:
+        # on voice she "suddenly doesnt remember Joe"). Same fences as context_fn.
+        from aerys_v2.services.people_memory import people_memory_block
+        try:
+            with psycopg.connect(settings.memories_database_url) as conn:
+                conn.read_only = True
+                return people_memory_block(conn, person_id, window_text, privacy_context)
+        except Exception:
+            log.warning("people-memory context failed for person %s", person_id, exc_info=True)
+            return ""
+
+    context_fn.people = people
     return context_fn
+
+
+def people_window(messages, query_text: str, *, last: int = 6) -> str:
+    """The text a turn's people block looks for names in: the current line and the last few
+    messages of the conversation, hers included (a name she said a turn ago still counts)."""
+    texts = []
+    for message in list(messages or [])[-last:]:
+        content = getattr(message, "content", "")
+        texts.append(content if isinstance(content, str) else str(content))
+    texts.append(query_text or "")
+    return "\n".join(texts)
+
+
+def people_knowledge(context_fn, identity: dict, messages, query_text: str) -> str:
+    """The '[People in this conversation]' block, or '' (no seam, nobody named, or a failure)."""
+    people = getattr(context_fn, "people", None)
+    if people is None:
+        return ""
+    try:
+        block = people(str(identity.get("user_id", "")), people_window(messages, query_text),
+                       identity.get("privacy_context", "public"))
+    except Exception:
+        log.warning("people block raised; continuing without it", exc_info=True)
+        return ""
+    return f"\n\n[People in this conversation]\n{block}" if block else ""
 
 
 def satellite_map_from(csv: str) -> dict[str, str]:
@@ -1891,6 +1929,7 @@ def build_action_graph(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
+            knowledge += people_knowledge(context_fn, identity, state["messages"], query_text)
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
@@ -2951,6 +2990,7 @@ def build_graph(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
+            knowledge += people_knowledge(context_fn, identity, messages, query_text)
 
         thread = ((config or {}).get("configurable") or {}).get("thread_id", "")
         voice_style = ""
