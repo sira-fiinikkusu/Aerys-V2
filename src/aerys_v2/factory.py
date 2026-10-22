@@ -1120,6 +1120,40 @@ WHERE pi.platform = %(platform)s AND pi.person_id = %(person_id)s::uuid
 """
 
 
+ROOM_NAMES_SQL = """\
+SELECT pi.platform_user_id, p.display_name
+FROM platform_identities pi
+JOIN persons p ON p.id = pi.person_id
+WHERE pi.platform = %(platform)s
+"""
+
+
+def room_names_for(settings: Settings, platform: str = "discord") -> dict:
+    """{platform_user_id: canonical name} for EVERY person linked on PLATFORM, or {}.
+
+    The live room read shows whatever the platform shows, so a person Chris has linked
+    still read under their platform name. On 2026-10-22 a friend thanked her in a
+    channel under his Discord display name, Chris told her that friend had replied, and
+    she said she could not see it: the line was in front of her under a name she did not
+    know was his. Linked people now read by their canonical name, the way their turns do.
+    Keyed on the ACCOUNT id, never a display name; people nobody linked keep the name they
+    chose. Resolved once at startup, fail-open to {} like owner_room_names_for.
+    """
+    if settings.memories_database_url is None:
+        return {}
+    import psycopg
+
+    try:
+        with psycopg.connect(settings.memories_database_url, connect_timeout=5,
+                             options="-c statement_timeout=5000") as conn:
+            conn.read_only = True
+            rows = conn.execute(ROOM_NAMES_SQL, {"platform": platform}).fetchall()
+    except Exception:
+        log.warning("room names unavailable; the room will use platform names", exc_info=True)
+        return {}
+    return {str(user_id): name for user_id, name in rows if user_id and name}
+
+
 def owner_room_names_for(settings: Settings, platform: str = "discord") -> dict:
     """{platform_user_id: canonical name} for the owner, or {} when unknowable.
 

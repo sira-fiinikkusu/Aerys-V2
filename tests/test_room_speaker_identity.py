@@ -112,5 +112,41 @@ def test_the_import_is_in_the_branch_that_uses_it():
     block = re.search(r'from aerys_v2\.factory import \((?:[^)]*)\)\s*\n(?:.*\n)*?'
                       r'.*LiveRoomReader', source)
     assert block, 'the discord runner should import LiveRoomReader after its factory block'
-    assert 'owner_room_names_for' in block.group(0), \
+    assert re.search(r'\broom_names_for,', block.group(0)), \
         'the discord runner must import the name it calls at startup'
+
+
+
+def test_a_linked_friend_reads_by_his_name_and_a_stranger_keeps_hers():
+    """2026-10-22: a friend thanked her under his Discord name; told he had replied, she said
+    she could not see it. Linked people read by their canonical name now; nobody else changes."""
+    reader = LiveRoomReader(speaker_names={'60426939629838336': 'Chris', '111222333444555666': 'Sam'})
+    import asyncio
+    room = [FakeMessage(111222333444555666, 'Nightjar', "That's perfect."),
+            FakeMessage(999, 'Stratus', 'anything forming out there')]
+    rows = asyncio.run(reader._read(FakeClient(FakeChannel(room)), '555'))
+    assert ('Sam', "That's perfect.") in rows and ('Stratus', 'anything forming out there') in rows, rows
+
+
+def test_room_names_maps_every_linked_person_on_the_platform(monkeypatch):
+    import psycopg
+
+    from aerys_v2 import factory
+    seen = {}
+
+    class Conn:
+        read_only = False
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def execute(self, sql, params):
+            seen.update(sql=sql, params=params)
+            return type('R', (), {'fetchall': lambda self: [('60426939629838336', 'Chris'),
+                                                           ('111222333444555666', 'Sam'),
+                                                           ('1', None), (None, 'x')]})()
+    monkeypatch.setattr(psycopg, 'connect', lambda *a, **k: Conn())
+    settings = type('S', (), {'memories_database_url': 'postgresql://x', 'owner_person_id': None})()
+    assert factory.room_names_for(settings) == {'60426939629838336': 'Chris', '111222333444555666': 'Sam'}
+    assert '%(person_id)s' not in seen['sql'] and seen['params'] == {'platform': 'discord'}
+    assert factory.room_names_for(type('S', (), {'memories_database_url': None})()) == {}
