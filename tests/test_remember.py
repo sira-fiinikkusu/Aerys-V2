@@ -105,6 +105,8 @@ def test_tool_schema_has_no_trust_or_confirmation_parameter():
     "remember that the pool guy comes Tuesdays", "Keep in mind I hate cilantro",
     "make a note that the gate code changed", "don't forget the vet is Friday",
     "for next time, Megan takes oat milk", "note that for later", "remind me the gate code is 4411",
+    "remind me to call the vet on Friday",
+    "remind me about the dentist at 3",  # Chris 10/23: a real reminder, so keep it
 ])
 def test_router_fallback_routes_keep_requests_to_action(text):
     assert router.plausibly_wants_remember(text)
@@ -119,6 +121,18 @@ def test_router_fallback_routes_keep_requests_to_action(text):
 def test_router_fallback_keeps_recall_and_reminiscing_in_chat(text):
     assert not router.plausibly_wants_remember(text)
     assert router.fallback_decision(text).route == "chat"
+
+
+@pytest.mark.parametrize("text", [
+    "Remind me what my favourite games are", "remind me who Sam is", "remind me where we parked",
+    "remind me when the wedding was", "remind me which movie we watched",
+    "remind me why we picked Proxmox", "remind me how the garage code works",
+    "remind me of my favourite games",     # Chris 10/23: "you remind me of someone" is no request
+    "remind me what to buy at the store",  # Chris 10/23: answered, not kept
+])
+def test_remind_me_with_a_question_word_is_recall_not_a_keep(text):
+    """Issue #5, fixed by Chris by hand (lesson 1): she said "Kept." to a recall question."""
+    assert not router.plausibly_wants_remember(text)
 
 
 def test_router_prompt_advertises_the_distinction():

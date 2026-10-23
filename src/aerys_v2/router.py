@@ -446,7 +446,12 @@ def plausibly_wants_email(text: str) -> bool:
 def plausibly_wants_remember(text: str) -> bool:
     """Degraded-path heuristic: an explicit ask to KEEP something (not to recall it)."""
     lowered = text.lower()
-    if any(marker in lowered for marker in _RECALL_MARKERS):
+    # Issue #5: "remind me what my favourite games are" asks to be TOLD, but "remind me" is a
+    # keep marker, so she saved it and said "Kept." A question word after it makes it recall.
+    # Chris's calls (10/23): "of" is recall ("you remind me of someone"); "remind me about the
+    # dentist at 3" stays a real reminder, and "remind me what to buy" is answered.
+    if (any(marker in lowered for marker in _RECALL_MARKERS)
+            or re.search(r"\bremind me (what|who|where|when|which|why|how|of)\b", lowered)):
         return False
     return any(marker in lowered for marker in _REMEMBER_MARKERS)
 
