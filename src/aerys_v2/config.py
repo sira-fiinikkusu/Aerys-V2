@@ -542,6 +542,10 @@ class Settings(BaseSettings):
     # training knowledge.
     tavily_api_key: SecretStr | None = None
 
+    # Page-reading seam — Firecrawl returns main-page text beyond search snippets.
+    # None = read_web_page disarmed (tool and overlay both absent).
+    firecrawl_api_key: SecretStr | None = None
+
     # ---- EMAIL (her own mailbox — scope decided 2026-07-11) -------------------
     # Aerys's OWN Gmail account over IMAP/SMTP with an app password — the
     # rebuild of n8n's email trio (Email Sub-Agent kbKrKBVUgwU6n9gg, Gmail
