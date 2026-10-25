@@ -1152,3 +1152,23 @@ def test_voice_action_that_comes_back_blank_speaks_her_line():
     msgs = wait_for_messages(graph, "voice:blank", 2)
     assert any(m.content == BLANK_REPLY_LINE for m in msgs)
     assert calls and calls[-1] == BLANK_REPLY_LINE
+
+
+def test_voice_action_that_comes_back_blank_logs_what_came_back(caplog):
+    """Gap #116: the background (voice) action path leaves the same diagnostic line as
+    chat when its final message has no text, so the cause shows next time."""
+    import logging
+    calls, speak = recording_speaker()
+    graph = build_graph(fake_model("speculative chat"), soul="s")
+    stub = ToolNoteActionGraph([], final="")
+    with caplog.at_level(logging.WARNING, logger="aerys_v2.service"):
+        ask(graph, "do the thing", identity=CHRIS, thread_id="voice:blank-log",
+            router=action_router, action_graph=stub, speak_fn=speak,
+            satellite_for=fixed_satellite, followup_skip_s=6.0)
+        wait_for_messages(graph, "voice:blank-log", 2)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not any(
+                "reply was empty" in r.getMessage() for r in caplog.records):
+            time.sleep(0.02)
+    lines = [r.getMessage() for r in caplog.records if "reply was empty" in r.getMessage()]
+    assert any("voice:blank-log" in m and "stop_reason" in m for m in lines), lines

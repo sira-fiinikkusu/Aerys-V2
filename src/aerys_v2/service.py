@@ -114,6 +114,22 @@ def _direct_device_seed(action_graph: object, seed: list) -> list:
 log = logging.getLogger(__name__)
 
 
+# Gap #116: keep empty-reply diagnostics on every chat and action path.
+def _log_empty_reply(path: str, thread_id, last_message) -> None:
+    content = getattr(last_message, "content", None)
+    blocks = (
+        [b.get("type") for b in content if isinstance(b, dict)]
+        if isinstance(content, list) else type(content).__name__
+    ) if last_message is not None else None
+    log.warning(
+        "%s reply was empty: thread=%s stop_reason=%s blocks=%s",
+        path,
+        thread_id,
+        (getattr(last_message, "response_metadata", None) or {}).get("stop_reason"),
+        blocks,
+    )
+
+
 # ── per-message content-privacy tagging (the short-term privacy gate's write half) ──
 # Every human turn is tagged 'public'|'private' in additional_kwargs (checkpointer-
 # persisted) so the chat node's public-room gate (services.content_privacy) can drop
@@ -1651,14 +1667,10 @@ def _chat_turn(
     if not raw.strip():
         degraded.append(EMPTY_REPLY_MARKER)
         reply = BLANK_REPLY_LINE
-        last = result["messages"][-1]
-        content = getattr(last, "content", None)
-        log.warning(
-            "chat reply was empty: thread=%s stop_reason=%s blocks=%s",
+        _log_empty_reply(
+            "chat",
             (config.get("configurable") or {}).get("thread_id"),
-            (getattr(last, "response_metadata", None) or {}).get("stop_reason"),
-            [b.get("type") for b in content if isinstance(b, dict)] if isinstance(content, list)
-            else type(content).__name__,
+            result["messages"][-1],
         )
 
     _fire_turn_record(
@@ -1883,6 +1895,9 @@ def _action_turn(
     raw_final = final
     if not final.strip():   # no text at all (#3): her line, not silence; the row keeps ''
         final = BLANK_REPLY_LINE
+        _log_empty_reply(
+            "action", config["configurable"].get("thread_id"), result_messages[-1],
+        )
     landed = (
         AIMessage(content=final, id=replace_message_id)
         if replace_message_id is not None
@@ -2196,6 +2211,10 @@ def _voice_parallel_start(
             blank = not failed and not final.strip()
             if blank:
                 final = BLANK_REPLY_LINE
+                _log_empty_reply(
+                    "background action", real_configurable.get("thread_id"),
+                    result_messages[-1] if result_messages else None,
+                )
 
             # Spoken follow-up: failures ALWAYS speak; with confirm_writes
             # (owner ruling 2026-10-01) every outcome speaks; otherwise the

@@ -581,3 +581,25 @@ def test_an_empty_action_reply_says_her_line_too():
     assert row["raw_reply"] == "" and row["emitted_reply"] == BLANK_REPLY_LINE
     degraded = json.loads(row["degraded"])
     assert "empty_reply" in degraded and "no_tool_action" in degraded
+
+
+class _BlankFinalActionGraph:
+    """The action subgraph's last message carries no text: one empty thinking block."""
+
+    def invoke(self, inp, config):
+        return {"messages": [AIMessage(content=[{"type": "thinking", "thinking": "", "signature": "s"}],
+                                       response_metadata={"stop_reason": "end_turn"})]}
+
+
+def test_an_empty_action_reply_logs_what_came_back(caplog):
+    """Gap #116 (turn 2564, 10/24 18:16): an action turn ran calendar_events cleanly and came
+    back blank. #3's log line lived on the chat path only, so the cause was lost. The
+    sequential action path leaves the same line: thread, stop_reason, block types."""
+    rec = Recorder()
+    graph = build_graph(fake_model("unused"), soul="s")
+    with caplog.at_level(logging.WARNING, logger="aerys_v2.service"):
+        ask(graph, "list the calendars", identity=OWNER, thread_id="kael:warmup",
+            router=action_router, action_graph=_BlankFinalActionGraph(), record_turn=rec)
+    rec.wait(1)
+    lines = [r.getMessage() for r in caplog.records if "reply was empty" in r.getMessage()]
+    assert any("kael:warmup" in m and "end_turn" in m and "thinking" in m for m in lines), lines
