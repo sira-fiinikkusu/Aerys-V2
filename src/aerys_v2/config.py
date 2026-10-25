@@ -419,6 +419,12 @@ class Settings(BaseSettings):
     # cost — same arming pattern as every optional half. The address stays in
     # the environment: it's a LAN IP and this repo is public.
     panel_state_url: str | None = None
+    # Face remap (owner ask 2026-10-24: her photoreal faces in place of the sprites). csv of
+    # "state=file" pairs applied just before a state goes out, e.g.
+    # "neutral_idle=wideidle,neutral_speaking=widetalk". States not listed go out unchanged,
+    # so a partial face set falls back to the sprites, and the panel still prefers a
+    # "<world>__<file>" clip when one is installed. Empty = no remap.
+    panel_face_map: str = ""
     # Her circadian rhythm (owner ask 2026-07-19): the --serve container runs a
     # presence watcher that darkens the panel when this occupancy entity goes
     # off AND the listed lights are out (the vacancy automation's fingerprint),

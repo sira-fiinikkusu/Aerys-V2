@@ -312,3 +312,39 @@ def test_build_timer_strip_arming_and_url_derivation():
     assert build_timer_strip("") is None
     s = build_timer_strip("http://panel:8300/state", async_send=False)
     assert s._url == "http://panel:8300/strip"
+
+
+# ── face remap (owner ask 2026-10-24: her photoreal faces in place of the sprites) ──
+
+
+def test_parse_face_map_reads_pairs_and_skips_junk():
+    assert panel.parse_face_map("") == {}
+    assert panel.parse_face_map(" neutral_idle=wideidle , neutral_speaking=widetalk,") == {
+        "neutral_idle": "wideidle", "neutral_speaking": "widetalk"}
+    # A pair without "=" or with an empty side is skipped, never a crash.
+    assert panel.parse_face_map("bogus,=x,y=,thinking=wideidle") == {"thinking": "wideidle"}
+
+
+def test_face_map_renames_only_the_states_it_lists(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda text: 0.01)
+    client = RecordingClient()
+    p = FacePusher("http://panel:8300/state", client=client, async_send=False,
+                   face_map={"neutral_speaking": "widetalk", "neutral_idle": "wideidle"})
+    p("speaking", "hello there")
+    time.sleep(0.1)                       # the settle flip lands on the mapped idle
+    p("speaking", "[gasps] no way!")      # surprised isn't in the map: unchanged
+    assert client.states[:3] == ["widetalk", "wideidle", "surprised"]
+
+
+def test_build_face_pusher_carries_the_face_map():
+    client = RecordingClient()
+    p = build_face_pusher("http://panel:8300/state", client=client, async_send=False,
+                          face_map={"neutral_idle": "wideidle"})
+    p("idle", "")
+    assert client.states == ["wideidle"]
+
+
+def test_no_face_map_sends_states_unchanged():
+    p, client = pusher()
+    p("idle", "")
+    assert client.states == ["neutral_idle"]

@@ -650,3 +650,17 @@ def test_frame_counter_going_backwards_counts_as_a_reboot():
     w._health = lambda: {"player": "playing", "display": True, "frames": 120}
     w._check_daytime_wedge()
     assert w._world_pushed is None and w._glyph_key is None and w._world_checked_at is None
+
+
+def test_wake_and_settle_go_through_the_face_map():
+    # Owner ask 2026-10-24: photoreal faces in place of the sprites. The watcher's own
+    # pushes (wake emote, settle) must wear the same remap as the turn's pushes.
+    world = FakeWorld({OCC: "on"})
+    w = watcher(world, face_map={IDLE_STATE: "wideidle"})
+    w.asleep = True
+    w.tick()
+    assert world.panel_calls == [
+        ("/display", {"on": True}),
+        ("/state", {"state": WAKE_EMOTE_STATE}),   # not in the map: unchanged
+        ("/state", {"state": "wideidle"}),
+    ]

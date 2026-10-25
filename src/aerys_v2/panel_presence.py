@@ -117,6 +117,7 @@ class PanelPresenceWatcher:
         doze_s: float = 3.0,
         sleep_fn: Callable[[float], None] = time.sleep,
         notify_fn: Callable[[str], None] | None = None,
+        face_map: dict[str, str] | None = None,
     ) -> None:
         import httpx
 
@@ -124,6 +125,8 @@ class PanelPresenceWatcher:
         if base.endswith("/state"):
             base = base[: -len("/state")]
         self._panel_state = f"{base}/state"
+        # The same send-time remap the turn's face pushes wear (Settings.panel_face_map).
+        self._face_map = dict(face_map or {})
         self._panel_display = f"{base}/display"
         self._panel_health = f"{base}/health"
         self._panel_reboot = f"{base}/reboot"
@@ -266,7 +269,7 @@ class PanelPresenceWatcher:
     # -- panel writes (fail-open) -----------------------------------------
     def _push_state(self, state: str) -> None:
         try:
-            self._client.post(self._panel_state, json={"state": state})
+            self._client.post(self._panel_state, json={"state": self._face_map.get(state, state)})
         except Exception:
             log.debug("panel state push failed (harmless)", exc_info=True)
 
@@ -570,6 +573,8 @@ def start_panel_presence(settings) -> threading.Thread | None:
                 timeout=5.0,
             )
 
+    from .panel import parse_face_map
+
     watcher = PanelPresenceWatcher(
         panel_state_url=settings.panel_state_url,
         ha_base_url=settings.ha_base_url,
@@ -579,6 +584,7 @@ def start_panel_presence(settings) -> threading.Thread | None:
         wake_entities=wake,
         world_weather_entity=settings.ha_weather_entity if getattr(settings, "panel_worlds", False) else None,
         notify_fn=notify_fn,
+        face_map=parse_face_map(getattr(settings, "panel_face_map", "")),
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")
     thread.start()

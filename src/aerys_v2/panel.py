@@ -140,6 +140,16 @@ def caption_of(text: str) -> str:
     return collapsed
 
 
+def parse_face_map(csv: str) -> dict[str, str]:
+    """PANEL_FACE_MAP ('state=file,...') -> {state: file}; malformed pairs are skipped."""
+    out: dict[str, str] = {}
+    for part in (csv or "").split(","):
+        state, sep, file = part.strip().partition("=")
+        if sep and state.strip() and file.strip():
+            out[state.strip()] = file.strip()
+    return out
+
+
 class FacePusher:
     """Callable seam: ``push(phase, text)`` with phase in working|speaking|idle.
 
@@ -148,10 +158,14 @@ class FacePusher:
     that settles her back to the matching idle face — any newer push cancels it.
     """
 
-    def __init__(self, url: str, *, client=None, async_send: bool = True) -> None:
+    def __init__(self, url: str, *, client=None, async_send: bool = True,
+                 face_map: dict[str, str] | None = None) -> None:
         import httpx
 
         self._url = url
+        # Renames applied at send time only, so moods, dedup and the settle flip all
+        # keep reasoning in her state names (see Settings.panel_face_map).
+        self._face_map = dict(face_map or {})
         self._client = client or httpx.Client(timeout=2.0)
         self._async = async_send
         self._lock = threading.Lock()
@@ -245,7 +259,7 @@ class FacePusher:
 
     def _post(self, state: str, caption: str = "") -> None:
         try:
-            body: dict = {"state": state}
+            body: dict = {"state": self._face_map.get(state, state)}
             if caption:
                 body["text"] = caption
             self._client.post(self._url, json=body)
@@ -254,14 +268,15 @@ class FacePusher:
 
 
 def build_face_pusher(
-    url: str | None, *, client=None, async_send: bool = True
+    url: str | None, *, client=None, async_send: bool = True,
+    face_map: dict[str, str] | None = None,
 ) -> Callable[[str, str], None] | None:
     """None unless a panel URL is configured — the standard optional-seam arming
     pattern. The URL lives in the environment (PANEL_STATE_URL), never in code:
     it's a LAN address and this repo is public."""
     if not url:
         return None
-    return FacePusher(url, client=client, async_send=async_send)
+    return FacePusher(url, client=client, async_send=async_send, face_map=face_map)
 
 
 class TimerStrip:
