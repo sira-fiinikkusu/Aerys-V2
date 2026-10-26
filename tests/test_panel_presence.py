@@ -11,6 +11,7 @@ from aerys_v2.panel_presence import (
     SLEEP_DEBOUNCE_TICKS,
     IDLE_STATE,
     SLEEP_DOZE_STATE,
+    SLEEP_HOLD_STATE,
     WAKE_EMOTE_STATE,
     PanelPresenceWatcher,
     start_panel_presence,
@@ -66,7 +67,8 @@ def test_vacant_room_with_lights_out_puts_her_to_sleep():
         w.tick()
     assert w.asleep is True
     assert world.panel_calls == [
-        ("/state", {"state": SLEEP_DOZE_STATE}),   # she dozes off first
+        ("/state", {"state": SLEEP_DOZE_STATE}),   # she yawns and dozes off first
+        ("/state", {"state": SLEEP_HOLD_STATE}),   # then her sleeping is held (Chris 10/26)
         ("/display", {"on": False}),
     ]
 
@@ -683,6 +685,7 @@ def test_sleep_dims_her_when_a_sleep_brightness_is_set():
     assert w.asleep is True
     assert world.panel_calls == [
         ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/state", {"state": SLEEP_HOLD_STATE}),
         ("/display", {"on": True, "brightness": 15}),
     ]
 
@@ -729,7 +732,7 @@ def test_a_lost_doze_is_resent_while_she_sleeps():
     w.asleep = True
     w.tick()
     assert world.panel_calls == [
-        ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/state", {"state": SLEEP_HOLD_STATE}),   # the held sleep, not a second yawn
         ("/display", {"on": True, "brightness": 15}),
     ]
 
@@ -759,6 +762,17 @@ def test_old_firmware_without_brightness_still_reconciles_on_off():
     w.asleep = True
     w.tick()
     assert world.panel_calls == [
-        ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/state", {"state": SLEEP_HOLD_STATE}),
         ("/display", {"on": False}),
+    ]
+
+
+def test_a_lost_wake_from_the_held_sleep_settles_her_too():
+    # 10/26: the hold is a sleep face as well, so a wake lost behind it gets the idle re-sent
+    world = HealthWorld({OCC: "on"}, display=False, state=SLEEP_HOLD_STATE)
+    w = watcher(world)
+    w.tick()
+    assert world.panel_calls == [
+        ("/display", {"on": True}),
+        ("/state", {"state": IDLE_STATE}),
     ]

@@ -36,8 +36,14 @@ from typing import Callable
 
 log = logging.getLogger(__name__)
 
-WAKE_EMOTE_STATE = "surprised"
-SLEEP_DOZE_STATE = "eyes_closed"
+#: Her sleep and wake (Chris 2026-10-26: "when her panel dims, she does the sleepy yawn, then a clip
+#: of her sleeping is held. when the panel wakes, she wakes up and stretches before going to her
+#: normal idle (instead of the shocked face)"). The watcher's own states, mapped to clips by
+#: PANEL_FACE_MAP (dozing=m_dozeoff, asleep=m_asleep, waking=m_waking), so the turn's own
+#: eyes_closed mood keeps its plain sleepy face. Each clip runs ~6 s before the next push.
+WAKE_EMOTE_STATE = "waking"
+SLEEP_DOZE_STATE = "dozing"
+SLEEP_HOLD_STATE = "asleep"
 IDLE_STATE = "neutral_idle"
 
 #: Consecutive daytime ticks (20s apart) with the panel's health endpoint
@@ -114,8 +120,8 @@ class PanelPresenceWatcher:
         world_sun_entity: str = "sun.sun",
         client=None,
         poll_s: float = 20.0,
-        emote_s: float = 2.5,
-        doze_s: float = 3.0,
+        emote_s: float = 6.0,
+        doze_s: float = 6.0,
         sleep_fn: Callable[[float], None] = time.sleep,
         notify_fn: Callable[[str], None] | None = None,
         face_map: dict[str, str] | None = None,
@@ -319,11 +325,11 @@ class PanelPresenceWatcher:
                 "doze" if self.asleep else "wake", h.get("display"), h.get("brightness"),
             )
         if self.asleep:
-            self._push_state(SLEEP_DOZE_STATE)
+            self._push_state(SLEEP_HOLD_STATE)   # the held sleep, never a second yawn
             self._push_sleep_display()
             return
         self._push_display(True)
-        if h.get("state") == self._face_map.get(SLEEP_DOZE_STATE, SLEEP_DOZE_STATE):
+        if h.get("state") in {self._face_map.get(s, s) for s in (SLEEP_DOZE_STATE, SLEEP_HOLD_STATE)}:
             self._push_state(IDLE_STATE)  # the settle was lost with the wake
 
     # -- panel health (fail-open: None = unknowable, never a transition) ---
@@ -530,14 +536,15 @@ class PanelPresenceWatcher:
     def _fall_asleep(self) -> None:
         log.info("office empty + lights out — panel going to sleep")
         self._push_state(SLEEP_DOZE_STATE)
-        self._sleep(self._doze_s)  # let her visibly doze off first
+        self._sleep(self._doze_s)  # the yawn plays once...
+        self._push_state(SLEEP_HOLD_STATE)  # ...then her sleeping is held
         self._push_sleep_display()
         self.asleep = True
 
     def _wake_up(self) -> None:
         log.info("owner is back — panel waking up")
         self._push_display(True)
-        self._push_state(WAKE_EMOTE_STATE)  # the little "oh!" he asked for
+        self._push_state(WAKE_EMOTE_STATE)  # she wakes and stretches
         self._sleep(self._emote_s)
         self._push_state(IDLE_STATE)
         self.asleep = False
