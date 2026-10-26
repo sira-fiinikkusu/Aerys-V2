@@ -224,6 +224,15 @@ def test_voice_action_turn_speaks_ack_then_works():
     assert phases[-1] in ("speaking", "idle")
 
 
+def test_sentinel_heartbeat_never_moves_her_face():
+    # a health probe settling her on idle woke her face while she dozed (2026-10-26)
+    graph = build_graph(fake_model("[warmly] all good"), soul="s")
+    face = FaceLog()
+    reply = ask(graph, "heartbeat", identity=CHRIS, thread_id="sentinel:heartbeat", face_push=face)
+    assert reply == "all good"
+    assert face.calls == []
+
+
 def test_seam_survives_a_raising_face_push():
     def bomb(_phase: str, _text: str = "") -> None:
         raise RuntimeError("misbehaving fake")

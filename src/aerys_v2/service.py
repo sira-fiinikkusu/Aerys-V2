@@ -1193,6 +1193,12 @@ def ask(
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
 
+    # The sentinel's heartbeat is a probe, not someone talking to her: it must not
+    # move her desk face (2026-10-26: its 01:02 and 07:08 turns settled her on the
+    # idle face while she dozed, dimmed, in the empty office).
+    if derive_channel(thread_id) == "sentinel":
+        face_push = None
+
     # Content-privacy tagging (short-term gate, write half): compute THIS turn's ingest
     # tag once, and mint a stable id so the async judge can retag this exact human
     # message. Both ride down into whichever path builds the main-thread human message.
