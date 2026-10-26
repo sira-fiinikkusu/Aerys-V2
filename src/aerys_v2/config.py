@@ -439,6 +439,10 @@ class Settings(BaseSettings):
     # these entities reading "on" (with occupancy on) is required to WAKE her,
     # while the group alone may keep her awake. Empty = legacy wake-on-occupancy.
     panel_wake_entities: str = ""
+    # Owner ask 2026-10-25: "dimming the screen with her sleepy face when the room
+    # is vacant" instead of a dark screen. N = backlight percent while she dozes
+    # (os24 firmware takes {"on":true,"brightness":N}); 0 = the old dark sleep.
+    panel_sleep_brightness: int = 0
     # Her worlds (owner ask 2026-09-26): the presence watcher picks a world from
     # the sun and ha_weather_entity and POSTs it to the panel's /world; the panel
     # plays "<world>__<state>" clips where they exist. False = plain clips only.

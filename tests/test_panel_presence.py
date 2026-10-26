@@ -145,11 +145,14 @@ class HealthWorld(FakeWorld):
     frames advance by 100 per read while `advancing`; a /reboot flips
     `advancing` True (the wedge cleared by a restart)."""
 
-    def __init__(self, states=None, *, player="playing", display=True, advancing=True):
+    def __init__(self, states=None, *, player="playing", display=True, advancing=True,
+                 brightness=None, state="neutral_idle"):
         super().__init__(states)
         self.player = player
         self.display = display
         self.advancing = advancing
+        self.brightness = brightness   # None = pre-os24 firmware (no brightness field)
+        self.state = state
         self.frames = 1000
         self.reboots = 0
 
@@ -158,10 +161,13 @@ class HealthWorld(FakeWorld):
         if path == "/health":
             if self.advancing:
                 self.frames += 100
-            return httpx.Response(200, json={
-                "ok": True, "player": self.player, "state": "neutral_idle",
+            body = {
+                "ok": True, "player": self.player, "state": self.state,
                 "frames": self.frames, "display": self.display,
-            })
+            }
+            if self.brightness is not None:
+                body["brightness"] = self.brightness
+            return httpx.Response(200, json=body)
         if path == "/reboot":
             self.reboots += 1
             self.advancing = True
@@ -663,4 +669,96 @@ def test_wake_and_settle_go_through_the_face_map():
         ("/display", {"on": True}),
         ("/state", {"state": WAKE_EMOTE_STATE}),   # not in the map: unchanged
         ("/state", {"state": "wideidle"}),
+    ]
+
+
+# -- dimmed sleep + screen reconcile (owner ask / incident, 2026-10-25) -------
+
+def test_sleep_dims_her_when_a_sleep_brightness_is_set():
+    # "dimming the screen with her sleepy face when the room is vacant"
+    world = FakeWorld({OCC: "off", L1: "off", L2: "off"})
+    w = watcher(world, sleep_brightness=15)
+    for _ in range(SLEEP_DEBOUNCE_TICKS):
+        w.tick()
+    assert w.asleep is True
+    assert world.panel_calls == [
+        ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/display", {"on": True, "brightness": 15}),
+    ]
+
+
+def test_a_lost_wake_is_resent_on_the_next_tick():
+    # 22:30 incident: the wake push timed out behind a face upload; /health still
+    # shows the dark screen and the doze face while she's meant to be awake.
+    world = HealthWorld({OCC: "on"}, display=False, state=SLEEP_DOZE_STATE)
+    w = watcher(world)
+    w.tick()
+    assert world.panel_calls == [
+        ("/display", {"on": True}),
+        ("/state", {"state": IDLE_STATE}),
+    ]
+
+
+def test_a_lost_wake_resend_leaves_her_current_face_alone():
+    # Dark but showing a mood (a turn pushed it) — bring the screen back, keep the face.
+    world = HealthWorld({OCC: "on"}, display=False, state="happy_idle")
+    w = watcher(world)
+    w.tick()
+    assert world.panel_calls == [("/display", {"on": True})]
+
+
+def test_awake_and_lit_at_full_sends_nothing():
+    world = HealthWorld({OCC: "on"}, brightness=100)
+    w = watcher(world)
+    for _ in range(3):
+        w.tick()
+    assert world.panel_calls == []
+
+
+def test_awake_but_still_dimmed_is_brought_back_to_full():
+    world = HealthWorld({OCC: "on"}, brightness=15)
+    w = watcher(world, sleep_brightness=15)
+    w.tick()
+    assert ("/display", {"on": True}) in world.panel_calls
+
+
+def test_a_lost_doze_is_resent_while_she_sleeps():
+    # asleep, but the dim never landed: she's lit at full over an empty room
+    world = HealthWorld({OCC: "off", L1: "off", L2: "off"}, brightness=100)
+    w = watcher(world, sleep_brightness=15)
+    w.asleep = True
+    w.tick()
+    assert world.panel_calls == [
+        ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/display", {"on": True, "brightness": 15}),
+    ]
+
+
+def test_dimmed_and_asleep_as_asked_sends_nothing():
+    world = HealthWorld({OCC: "off", L1: "off", L2: "off"}, brightness=15)
+    w = watcher(world, sleep_brightness=15)
+    w.asleep = True
+    for _ in range(3):
+        w.tick()
+    assert world.panel_calls == []
+
+
+def test_wake_verify_does_not_call_a_dark_screen_awake():
+    # frames advance with the backlight off, so the verify must read the screen too
+    world = HealthWorld({OCC: "on"}, display=False)   # the fake never lights up
+    w = watcher(world)
+    w.asleep = True
+    w.tick()
+    assert w.asleep is False
+    assert world.panel_calls.count(("/display", {"on": True})) == 2   # the wake + the re-send
+
+
+def test_old_firmware_without_brightness_still_reconciles_on_off():
+    world = HealthWorld({OCC: "off", L1: "off", L2: "off"}, display=True)
+    w = watcher(world)            # dark sleep (no brightness configured)
+    w.asleep = True
+    w.tick()
+    assert world.panel_calls == [
+        ("/state", {"state": SLEEP_DOZE_STATE}),
+        ("/display", {"on": False}),
     ]

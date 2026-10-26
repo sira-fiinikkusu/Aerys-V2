@@ -5,7 +5,8 @@ her display to the office presence sensors the owner installed the same day:
 
 - room vacated (occupancy group off AND the office lights are out — i.e. the
   motion-lights automation's cleared branch has fired): she visibly dozes off
-  (eyes_closed for a beat) and the screen goes dark.
+  (eyes_closed for a beat) and the screen goes dark — or, with
+  panel_sleep_brightness set (owner ask 2026-10-25), dims and keeps playing.
 - owner returns (occupancy on): screen wakes, she does a little surprised
   "oh!" and settles back to idle.
 - movie mode falls out for free: lights killed manually while someone is
@@ -118,6 +119,7 @@ class PanelPresenceWatcher:
         sleep_fn: Callable[[float], None] = time.sleep,
         notify_fn: Callable[[str], None] | None = None,
         face_map: dict[str, str] | None = None,
+        sleep_brightness: int = 0,
     ) -> None:
         import httpx
 
@@ -175,6 +177,9 @@ class PanelPresenceWatcher:
         # Hysteresis state (the Nanoleaf-test yo-yo, 8/02)
         self._occ_off_ticks = 0
         self._last_wake_monotonic: float | None = None
+        # Dimmed sleep (owner ask 2026-10-25): backlight % while she dozes; 0 = dark.
+        self._sleep_brightness = max(0, min(100, int(sleep_brightness)))
+        self._display_misses = 0
 
     # -- HA reads (fail-open: unknown never causes a transition) ----------
     def _entity_state(self, entity_id: str) -> str:
@@ -273,11 +278,53 @@ class PanelPresenceWatcher:
         except Exception:
             log.debug("panel state push failed (harmless)", exc_info=True)
 
-    def _push_display(self, on: bool) -> None:
+    def _push_display(self, on: bool, brightness: int | None = None) -> None:
+        body: dict = {"on": on}
+        if brightness is not None:
+            body["brightness"] = brightness
         try:
-            self._client.post(self._panel_display, json={"on": on})
+            self._client.post(self._panel_display, json=body)
         except Exception:
             log.debug("panel display push failed (harmless)", exc_info=True)
+
+    def _push_sleep_display(self) -> None:
+        if self._sleep_brightness > 0:
+            self._push_display(True, brightness=self._sleep_brightness)
+        else:
+            self._push_display(False)
+
+    def _display_as_expected(self, h: dict) -> bool:
+        """Does /health show the screen the way this watcher last asked for it?
+        Pre-os24 firmware reports no brightness, so there only on/off counts."""
+        on = bool(h.get("display"))
+        brightness = h.get("brightness")
+        if self.asleep and self._sleep_brightness > 0:
+            return on and (brightness is None or brightness == self._sleep_brightness)
+        if self.asleep:
+            return not on
+        return on and (brightness is None or brightness == 100)
+
+    def _reconcile_display(self, h: dict) -> None:
+        """Re-send whatever /health says didn't land. The panel answers one request at
+        a time, so a long face upload holds the line past the 5 s timeout and the push
+        is dropped (2026-10-25 22:30: he walked in mid-upload, the wake timed out, and
+        she sat dark at his desk while the log said she was awake)."""
+        if self._display_as_expected(h):
+            self._display_misses = 0
+            return
+        self._display_misses += 1
+        if self._display_misses == 1 or self._display_misses % 15 == 0:
+            log.warning(
+                "panel screen missed the %s (display=%s brightness=%s) — re-sending",
+                "doze" if self.asleep else "wake", h.get("display"), h.get("brightness"),
+            )
+        if self.asleep:
+            self._push_state(SLEEP_DOZE_STATE)
+            self._push_sleep_display()
+            return
+        self._push_display(True)
+        if h.get("state") == self._face_map.get(SLEEP_DOZE_STATE, SLEEP_DOZE_STATE):
+            self._push_state(IDLE_STATE)  # the settle was lost with the wake
 
     # -- panel health (fail-open: None = unknowable, never a transition) ---
     def _health(self) -> dict | None:
@@ -410,6 +457,11 @@ class PanelPresenceWatcher:
             return
         self._note_health_answered()
         if check:
+            # Frames keep moving with the backlight off, so they alone don't prove a wake.
+            h = self._health()
+            if h is not None and not self._display_as_expected(h):
+                self._reconcile_display(h)
+                return
             log.info("wake verify: frames advancing — she's really awake")
             return
         log.warning("wake verify: display on but frames stalled — rebooting panel")
@@ -441,6 +493,7 @@ class PanelPresenceWatcher:
                 )
             return
         self._note_health_answered()
+        self._reconcile_display(h)
         if h.get("player") != "playing" or not h.get("display"):
             self._last_frames = None
             self._stall_strikes = 0
@@ -478,7 +531,7 @@ class PanelPresenceWatcher:
         log.info("office empty + lights out — panel going to sleep")
         self._push_state(SLEEP_DOZE_STATE)
         self._sleep(self._doze_s)  # let her visibly doze off first
-        self._push_display(False)
+        self._push_sleep_display()
         self.asleep = True
 
     def _wake_up(self) -> None:
@@ -499,6 +552,10 @@ class PanelPresenceWatcher:
         if self.asleep:
             if occupied == "on" and self._wake_gate_open():
                 self._wake_up()
+                return
+            h = self._health()
+            if h is not None:
+                self._reconcile_display(h)
             return
         self._check_daytime_wedge()
         if occupied != "off":
@@ -585,6 +642,7 @@ def start_panel_presence(settings) -> threading.Thread | None:
         world_weather_entity=settings.ha_weather_entity if getattr(settings, "panel_worlds", False) else None,
         notify_fn=notify_fn,
         face_map=parse_face_map(getattr(settings, "panel_face_map", "")),
+        sleep_brightness=getattr(settings, "panel_sleep_brightness", 0),
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")
     thread.start()
