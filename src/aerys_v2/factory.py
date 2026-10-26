@@ -1823,11 +1823,20 @@ def build_api_tool_model(settings: Settings, tools: list, *, timeout_s: float = 
     return _build_tool_model(settings, tools, timeout_s=timeout_s, backend="api")
 
 
+#: The tool lifeboat's tools (Chris 2026-10-26: "house controls only honestly makes sense. general
+#: web related tools would be unavailable anyways if she cant reach her API"). All 23 tool schemas
+#: were ~6k of the lifeboat's 10.5k-token prompt; these are the ones that work with the internet down.
+LIFEBOAT_TOOLS = frozenset({
+    "home_control", "search_entities", "timer", "control_alarm", "sticky_note", "manage_list", "no_action",
+})
+
+
 def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, backend: str) -> object:
     lifeboat = None
     if settings.local_fallback_url is not None:
         from langchain_openai import ChatOpenAI
 
+        house = [t for t in tools if getattr(t, "name", None) in LIFEBOAT_TOOLS]
         lifeboat = ChatOpenAI(
             model=settings.local_tool_model_name or settings.local_model_name,
             base_url=settings.local_fallback_url,
@@ -1835,7 +1844,7 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
             max_tokens=1024,
             timeout=settings.local_model_timeout_s,
             max_retries=1,
-        ).bind_tools(tools)  # No forced tool_choice: Ollama's shim may ignore it.
+        ).bind_tools(house or tools)  # No forced tool_choice: Ollama's shim may ignore it.
 
     def with_lifeboat(primary: object) -> object:
         if lifeboat is None:

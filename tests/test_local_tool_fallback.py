@@ -391,3 +391,24 @@ def test_the_tool_lifeboat_gets_the_text_and_is_told_it_cannot_see_the_image():
     forwarded = model.lifeboat.invoke.call_args.args[0]
     human = [m for m in forwarded if isinstance(m, HumanMessage)][0]
     assert human.content == [{"type": "text", "text": f"{UNSEEN} find this lamp"}]
+
+
+@tool
+def search_web(query: str) -> str:
+    """Search the web."""
+    return "results"
+
+
+def test_the_tool_lifeboat_carries_only_the_house_tools():
+    # Chris 2026-10-26: "house controls only honestly makes sense" — web tools can't work when the
+    # cloud is out of reach, and all 23 schemas were ~6k tokens of the lifeboat's prompt.
+    pair = build_api_tool_model(settings(), [home_control, search_web])
+    for binding in bindings(pair):
+        assert [t["function"]["name"] for t in binding.lifeboat.kwargs["tools"]] == ["home_control"]
+        assert [t["name"] for t in binding.primary.kwargs["tools"]] == ["home_control", "search_web"]
+
+
+def test_a_lane_with_no_house_tools_keeps_its_own_on_the_lifeboat():
+    pair = build_api_tool_model(settings(), [search_web])
+    for binding in bindings(pair):
+        assert [t["function"]["name"] for t in binding.lifeboat.kwargs["tools"]] == ["search_web"]
