@@ -18,7 +18,7 @@ import anthropic
 import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -554,6 +554,77 @@ def local_model_for(settings: Settings, *, base_url: str | None = None) -> BaseC
     )
 
 
+# 2026-10-26, gap #118: the cloud charter cannot fit the small local context.
+LIFEBOAT_MAX_CHARS = 12000
+LIFEBOAT_SYSTEM = (
+    "You are Aerys, Chris's home AI. The cloud is unreachable, so you are running "
+    "on a small local backup model with only the house controls. Answer warmly "
+    "and directly in one or two short sentences. Help with the current request "
+    "using the controls available to you. If something needs the internet, your "
+    "memory, or a tool you do not have, say plainly that you are offline and "
+    "cannot do it right now. Never claim a device changed unless a tool result "
+    "in this conversation shows that change. Do not invent readings, actions, "
+    "or remembered facts. If a control fails, say what you could not do. Keep "
+    "your answer simple and honest about what you can see and do right now."
+)
+
+
+def lifeboat_prompt(messages, *, hardening=None, max_chars=LIFEBOAT_MAX_CHARS):
+    """Fit the local context without splitting human-led exchanges (gap #118)."""
+    from aerys_v2.images import without_images
+
+    prompt = without_images(messages)
+
+    def size(message):
+        content = message.content
+        return len(content) if isinstance(content, str) else len(str(content))
+
+    if sum(map(size, prompt)) <= max_chars:
+        if hardening is not None:
+            for i in range(len(prompt) - 1, -1, -1):
+                if isinstance(prompt[i], SystemMessage):
+                    content = prompt[i].content
+                    hardened = (content + hardening if isinstance(content, str)
+                                else [*content, {"type": "text", "text": hardening}])
+                    prompt[i] = prompt[i].model_copy(update={"content": hardened})
+                    break
+            else:
+                prompt.insert(0, SystemMessage(content=hardening))
+        return prompt
+
+    remaining = max(0, max_chars - len(LIFEBOAT_SYSTEM))
+    history = [m for m in prompt if not isinstance(m, SystemMessage)]
+    starts = [i for i, m in enumerate(history) if isinstance(m, HumanMessage)]
+    kept = []
+    end = len(history)
+    for start in reversed(starts):
+        exchange = history[start:end]
+        cost = sum(map(size, exchange))
+        if cost > remaining:
+            if not kept:
+                # 2026-10-26, gap #118: the latest exchange is always kept WHOLE, each message's text
+                # cut to an even share, so a turn mid-tool-loop still sees its own tool results and
+                # never repeats an action it already took.
+                share = max(1, remaining // len(exchange))
+
+                def cut(message):
+                    content = message.content
+                    if not isinstance(content, str):
+                        content = "".join(
+                            b if isinstance(b, str) else b.get("text", "")
+                            for b in content
+                            if isinstance(b, str) or b.get("type") == "text"
+                        )
+                    return message.model_copy(update={"content": content[:share]}) if size(message) > share else message
+
+                kept = [cut(m) for m in exchange]
+            break
+        kept = exchange + kept
+        remaining -= cost
+        end = start
+    return [SystemMessage(content=LIFEBOAT_SYSTEM + (hardening or "")), *kept]
+
+
 class LocalFailoverModel(BaseChatModel):
     """A metered primary with a local lifeboat (owner call 2026-08-03: automatic
     failover is fine PROVIDED the logs reflect it).
@@ -584,9 +655,7 @@ class LocalFailoverModel(BaseChatModel):
             receipt = _LOCAL_TOOL_FALLBACK.get()
             if receipt is not None:
                 receipt.append(True)
-            from aerys_v2.images import without_images
-
-            msg = self.lifeboat.invoke(without_images(messages), stop=stop)
+            msg = self.lifeboat.invoke(lifeboat_prompt(messages), stop=stop)
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
 
@@ -1673,20 +1742,7 @@ class LocalToolFailoverModel:
             receipt = _LOCAL_TOOL_FALLBACK.get()
             if receipt is not None:
                 receipt.append(True)
-            from aerys_v2.images import without_images
-
-            prompt = without_images(list(messages))    # a text model errors on an image
-            for i in range(len(prompt) - 1, -1, -1):
-                if isinstance(prompt[i], SystemMessage):
-                    content = prompt[i].content
-                    hardened = (
-                        content + LOCAL_ACTION_HARDENING if isinstance(content, str)
-                        else [*content, {"type": "text", "text": LOCAL_ACTION_HARDENING}]
-                    )
-                    prompt[i] = prompt[i].model_copy(update={"content": hardened})
-                    break
-            else:
-                prompt.insert(0, SystemMessage(content=LOCAL_ACTION_HARDENING))
+            prompt = lifeboat_prompt(messages, hardening=LOCAL_ACTION_HARDENING)
             return self.lifeboat.invoke(prompt, **kwargs)
 
 
