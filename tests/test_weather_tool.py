@@ -92,8 +92,32 @@ def test_no_probability_is_ever_invented():
 
 
 def test_unknown_span_falls_back_to_now():
-    out = tool().invoke({"span": "next week"})
+    out = tool().invoke({"span": "last month"})
     assert out.startswith("Right now:")
+
+
+# 10/27: "he hears it'll be wet all week" -- the provider carries ~6 days of
+# daily forecast and the tool stopped at tomorrow. "week" reads all of them.
+def test_week_lists_every_forecast_day_with_its_weekday():
+    out = tool().invoke({"span": "week"})
+    assert out == (
+        'Next 2 days: Sun 7/19 rainy, 76–88°, 0.42" precipitation; '
+        "Mon 7/20 sunny, 75–91°"
+    )
+
+
+def test_week_phrasings_reach_the_week_span():
+    for span in ("this week", "next week", "weekly", "WEEK"):
+        assert tool().invoke({"span": span}).startswith("Next 2 days: ")
+
+
+def test_week_never_invents_a_probability():
+    assert "%" not in tool().invoke({"span": "week"})
+
+
+def test_week_with_empty_forecast_is_reported_not_fabricated():
+    out = tool(daily=[]).invoke({"span": "week"})
+    assert out == "The weather provider returned no daily forecast."
 
 
 def test_http_error_is_an_honest_string():

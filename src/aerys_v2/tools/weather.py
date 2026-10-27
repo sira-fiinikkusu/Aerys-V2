@@ -22,13 +22,14 @@ whole action turn). Reads only — no canary, no outbox, nothing to allowlist.
 """
 
 import logging
+from datetime import date
 
 import httpx
 from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
 
-_SPANS = ("now", "today", "tomorrow", "hourly")
+_SPANS = ("now", "today", "tomorrow", "hourly", "week")
 
 
 def _fmt_num(v: object) -> str:
@@ -110,11 +111,14 @@ def build_weather_tool(
         house's own Home Assistant weather station/provider.
 
         span: "now" (current conditions), "today" (today's forecast),
-        "tomorrow", or "hourly" (next hours, times in UTC).
+        "tomorrow", "hourly" (next hours, times in UTC), or
+        "week" (every forecast day the provider has, about 6).
         Note: precipitation is reported in inches; this provider has no
         rain-probability percentage — do not invent one.
         """
         want = (span or "now").strip().lower()
+        if "week" in want:
+            want = "week"
         if want not in _SPANS:
             want = "now"
         try:
@@ -128,6 +132,17 @@ def build_weather_tool(
             days = _forecast("daily")
             if not days:
                 return "The weather provider returned no daily forecast."
+            if want == "week":
+                entries = []
+                for f in days:
+                    raw = str(f.get("datetime", ""))[:10]
+                    try:
+                        day = date.fromisoformat(raw)
+                        label = f"{day:%a} {day.month}/{day.day}"
+                    except ValueError:  # one odd row must not sink the week
+                        label = raw or "?"
+                    entries.append(f"{label} " + _fmt_day(f))
+                return f"Next {len(days)} days: " + "; ".join(entries)
             if want == "tomorrow":
                 if len(days) < 2:
                     return "The weather provider returned no forecast for tomorrow."
