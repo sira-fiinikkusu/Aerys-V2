@@ -111,6 +111,26 @@ Every completed turn writes one audit row (off the hot path, fail-open) capturin
 - **Boot-time config assertions** — refuses to start on dangerous misconfiguration (e.g., pointing the write database at the wrong target) with a plain-English reason instead of a stack trace.
 - **A Home Assistant custom component** (`ha_custom_components/aerys_conversation/`) that lets HA's conversation pipeline talk to the brain and carries the originating device id for per-device voice follow-ups.
 
+Added since September 2026:
+
+- **A face at the desk.** A small touchscreen panel shows her as an animated portrait.
+  - Her expression follows each reply: happy, playful, caring, heart hands, a clap.
+  - Her scene follows the sun and the weather.
+  - She dozes off when the room empties and wakes with a stretch.
+  - About ten times a day she slips in a rare surprise, like knocking on the glass or stepping out for a drink.
+  - A presence watcher reconciles the screen every tick and recovers a wedged panel by itself.
+- **Her own wake words.** The ESPHome voice satellites listen on-device for custom "Aerys" / "hey Aerys" models trained from household recordings, with a stricter cutoff in rooms that need it.
+- **Sealed rooms.** What is said in a room stays in that room, and a listed person's DMs belong to their own sealed room.
+- **People memory.** When a conversation is about someone, she recalls who they are before what happened lately.
+- **Open channels.** Discord channels where people talk to her without tagging her.
+- **Honesty rails.** A device action claimed without a tool call is bounced and retried, and a prompt line forbids invented promises and pending items.
+- **A local lifeboat.** When the cloud model can't be reached, a small local model on house hardware carries a trimmed prompt and the house controls, so the lights still work.
+- **The self-improvement loop, end to end.**
+  - The gap miner and her own self-reports publish to the owner's review board, with credential-shaped text held back.
+  - Read-only invariants ("signals") catch what she got wrong without noticing.
+- **Scheduled check-ins and nudges.** Recurring jobs live with her as scheduled check-ins, and storm alerts and rain heads-ups come to you instead of waiting to be asked.
+- **Weather and the web.** The house's own forecast for the whole week, and a page reader on top of search.
+
 ---
 
 ## Setup & running
@@ -234,7 +254,7 @@ CI (GitHub Actions) installs with `uv` and runs the pytest suite on every push a
 
 ## Status & roadmap
 
-Personal project, **actively evolving.** The core is in place and exercised: the `ask()` seam, the checkpointed chat graph, model tiering, the full tool/action layer (home control, media, web search, timers), long-term memory retrieval, the short-term privacy gate, cross-surface person-keyed continuity, turn auditing, Phoenix/OTel tracing, the shadow-mode extraction worker, and the capability-gap miner. All three text/voice transports plus the HTTP door are implemented, and there is a Home Assistant custom component for the voice path.
+Personal project, **actively evolving.** It has been the only brain since July 2026: the workflow-engine version was retired on 2026-07-11. It runs 24/7 at home on a Jetson Orin Nano, backed by about 2,100 offline tests. The core is in place and exercised: the `ask()` seam, the checkpointed chat graph, model tiering, the full tool/action layer (home control, media, web search, timers), long-term memory retrieval, the short-term privacy gate, cross-surface person-keyed continuity, turn auditing, Phoenix/OTel tracing, the shadow-mode extraction worker, and the capability-gap miner. All three text/voice transports plus the HTTP door are implemented, and there is a Home Assistant custom component for the voice path.
 
 Being built and refined incrementally, in public, as a learning-forward exercise — expect rough edges, opinionated internals, and design docs (`docs/design/`) and a numbered learning series (`docs/learning/`) that narrate *why* each piece exists. It is a single-operator system; some defaults and integrations are shaped around one home setup and would need generalizing for other environments.
 
