@@ -35,6 +35,7 @@ log = logging.getLogger(__name__)
 _IDLE = {
     "neutral": "neutral_idle",
     "happy": "happy_idle",
+    "celebrate": "happy_idle",
     "playful": "playful_idle",
     "grumpy": "grumpy_idle",
     "surprised": "surprised",
@@ -48,6 +49,7 @@ _IDLE = {
 _SPEAKING = {
     "neutral": "neutral_speaking",
     "happy": "happy_speaking",
+    "celebrate": "clap",
     "playful": "playful_speaking",
     "grumpy": "neutral_speaking",
     "surprised": "surprised",
@@ -59,12 +61,21 @@ _SPEAKING = {
 }
 # 10/28 HeyGen faces: use the previous face until the new clip is mapped.
 _FACE_FALLBACKS = {
+    "clap": "happy_speaking",
     "playful_speaking": "happy_speaking",
     "heart_hands": "heart_emote",
     "concerned_speaking": "neutral_speaking",
 }
 # 10/28 HeyGen faces: the heart-hands clip runs ~6 s; finish before the gentle hold.
 HEART_HANDS_S = 6.5
+# 10/28 The clap clip runs ~6.6 s; finish before settling happy.
+CLAP_S = 6.6
+
+
+def _minimum_hold_s(state: str) -> float:
+    # 10/28 Read clip minimums at call time so timing overrides take effect.
+    return {"heart_hands": HEART_HANDS_S, "clap": CLAP_S}.get(state, 0.0)
+
 
 # Owner ask 2026-09-26: the landscape coffee clip ("working") was so unlike her other
 # faces that it was unsettling when it popped up. Tool time now wears her own portrait
@@ -78,8 +89,12 @@ _TAG_MOODS = {
     # colorful one — the polisher leads with the dominant emotion.
     "neutral": ("softly", "calmly", "gently", "thoughtfully", "quietly", "evenly"),
     "happy": (
-        "warmly", "happily", "excited", "excitedly", "cheerfully",
+        "warmly", "happily", "cheerfully",
         "delighted", "brightly",
+    ),
+    # 10/28 Celebrating replies clap before settling happy.
+    "celebrate": (
+        "excitedly", "excited", "proudly", "triumphantly", "cheering", "celebrating",
     ),
     # Split from happy 8/04: these words now have their own face.
     "laughing": ("laughs", "laughing", "giggles", "giggling", "chuckles"),
@@ -221,9 +236,7 @@ class FacePusher:
                 self._last_caption = caption
                 if phase == "speaking":
                     # Settle back to this mood's idle face when the words run out.
-                    delay = speaking_estimate_s(text)
-                    if state == "heart_hands":
-                        delay = max(delay, HEART_HANDS_S)
+                    delay = max(speaking_estimate_s(text), _minimum_hold_s(state))
                     self._arm_timer(
                         delay, _IDLE.get(mood, "neutral_idle")
                     )

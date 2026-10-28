@@ -411,3 +411,28 @@ def test_concern_speaks_concerned_and_settles_neutral(monkeypatch):
     p("speaking", "[reassuringly] we'll figure it out together")
     time.sleep(0.2)
     assert client.states == ["m_talk_concerned", "m_idle"]
+
+
+# 10/28 Chris: "the clap can be used for both surprise and her replies". A celebrating
+# reply claps once (held for the clip, like the heart), then settles to her happy idle.
+
+def test_celebrate_tags_read_as_celebrate():
+    for tag in ("excitedly", "excited", "proudly", "triumphantly", "cheering", "celebrating"):
+        assert mood_of(f"[{tag}] it worked!") == "celebrate"
+
+
+def test_celebrate_claps_then_settles_happy(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.01)
+    monkeypatch.setattr(panel, "CLAP_S", 0.25)
+    p, client = mapped_pusher({**NEW_FACES, "clap": "m_clap", "happy_idle": "m_happy"})
+    p("speaking", "[excitedly] it worked!")
+    time.sleep(0.1)          # a one-liner, but the clap plays out
+    assert client.states == ["m_clap"]
+    time.sleep(0.35)
+    assert client.states == ["m_clap", "m_happy"]
+
+
+def test_clap_falls_back_to_happy_talk_when_unmapped():
+    p, client = mapped_pusher({"neutral_idle": "m_idle"})
+    p("speaking", "[proudly] done!")
+    assert client.states == ["happy_speaking"]
