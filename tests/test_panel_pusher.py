@@ -357,3 +357,57 @@ def test_no_face_map_sends_states_unchanged():
     p, client = pusher()
     p("idle", "")
     assert client.states == ["neutral_idle"]
+
+
+# ── 10/28 HeyGen faces: playful talk, heart hands, concerned talk ───────────
+# New states only go out when PANEL_FACE_MAP names a clip for them; otherwise
+# they fall back to the face they replaced, so the deploy and the .env edit
+# can land in either order without her face going dark.
+
+NEW_FACES = {"playful_speaking": "m_talk_playful", "heart_hands": "m_heart",
+             "concerned_speaking": "m_talk_concerned", "heart_emote": "m_gentle",
+             "neutral_idle": "m_idle", "happy_speaking": "m_talk_happy"}
+
+
+def mapped_pusher(face_map):
+    client = RecordingClient()
+    return FacePusher("http://panel:8300/state", client=client, async_send=False,
+                      face_map=face_map), client
+
+
+def test_playful_speaks_with_its_own_face_when_mapped():
+    p, client = mapped_pusher(NEW_FACES)
+    p("speaking", "[teasingly] make me")
+    assert client.states == ["m_talk_playful"]
+
+
+def test_new_faces_fall_back_when_the_map_lacks_them():
+    p, client = mapped_pusher({"neutral_idle": "m_idle"})
+    p("speaking", "[teasingly] make me")
+    p("speaking", "[lovingly] always ❤️")
+    p("speaking", "[reassuringly] hey, it's okay")
+    assert client.states == ["happy_speaking", "heart_emote", "neutral_speaking"]
+
+
+def test_heart_hands_play_out_before_the_gentle_hold(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.01)
+    monkeypatch.setattr(panel, "HEART_HANDS_S", 0.25)
+    p, client = mapped_pusher(NEW_FACES)
+    p("speaking", "love you too ❤️")
+    time.sleep(0.1)          # the short reply is over, but the hands aren't
+    assert client.states == ["m_heart"]
+    time.sleep(0.35)
+    assert client.states == ["m_heart", "m_gentle"]
+
+
+def test_concern_tags_read_as_concern():
+    for tag in ("reassuringly", "sympathetically", "comfortingly", "concerned", "worriedly"):
+        assert mood_of(f"[{tag}] hey, I'm here") == "concern"
+
+
+def test_concern_speaks_concerned_and_settles_neutral(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.05)
+    p, client = mapped_pusher(NEW_FACES)
+    p("speaking", "[reassuringly] we'll figure it out together")
+    time.sleep(0.2)
+    assert client.states == ["m_talk_concerned", "m_idle"]

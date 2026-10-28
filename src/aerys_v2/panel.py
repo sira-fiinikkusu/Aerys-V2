@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 
 # Face states installed on the panel's SD card (finish.sh -> /faces/*.mjpeg).
 # Moods without a speaking variant fall back to the nearest one that reads
-# right in motion: playful speaks as happy, grumpy speaks as neutral (deadpan).
+# right in motion: grumpy speaks as neutral (deadpan).
 _IDLE = {
     "neutral": "neutral_idle",
     "happy": "happy_idle",
@@ -39,6 +39,7 @@ _IDLE = {
     "grumpy": "grumpy_idle",
     "surprised": "surprised",
     "affection": "heart_emote",
+    "concern": "neutral_idle",
     # 8/04 sprite drop (Veo batch): dedicated faces for moods that used to
     # borrow a neighbor's — laughter wore "happy", deadpan wore "grumpy".
     "laughing": "laughing",
@@ -47,14 +48,24 @@ _IDLE = {
 _SPEAKING = {
     "neutral": "neutral_speaking",
     "happy": "happy_speaking",
-    "playful": "happy_speaking",
+    "playful": "playful_speaking",
     "grumpy": "neutral_speaking",
     "surprised": "surprised",
-    "affection": "heart_emote",
+    "affection": "heart_hands",
+    "concern": "concerned_speaking",
     # A laugh keeps laughing while she talks; deadpan delivery IS the joke.
     "laughing": "laughing",
     "unimpressed": "unimpressed_dead",
 }
+# 10/28 HeyGen faces: use the previous face until the new clip is mapped.
+_FACE_FALLBACKS = {
+    "playful_speaking": "happy_speaking",
+    "heart_hands": "heart_emote",
+    "concerned_speaking": "neutral_speaking",
+}
+# 10/28 HeyGen faces: the heart-hands clip runs ~6 s; finish before the gentle hold.
+HEART_HANDS_S = 6.5
+
 # Owner ask 2026-09-26: the landscape coffee clip ("working") was so unlike her other
 # faces that it was unsettling when it popped up. Tool time now wears her own portrait
 # "thinking" loop (finger on chin, eyes up), which also has world versions.
@@ -80,6 +91,7 @@ _TAG_MOODS = {
     "unimpressed": ("deadpan", "flatly", "sarcastically", "dryly", "unimpressed"),
     "surprised": ("surprised", "gasps", "shocked", "amazed", "astonished"),
     "affection": ("lovingly", "affectionately", "tenderly", "adoringly"),
+    "concern": ("reassuringly", "sympathetically", "comfortingly", "concerned", "worriedly"),
 }
 _WORD_TO_MOOD = {
     word: mood for mood, words in _TAG_MOODS.items() for word in words
@@ -184,6 +196,9 @@ class FacePusher:
                 state = _SPEAKING.get(mood, "neutral_speaking")
             else:
                 state = _IDLE.get(mood, "neutral_idle")
+            # 10/28 HeyGen faces: dedup and timing use the available face.
+            if state not in self._face_map:
+                state = _FACE_FALLBACKS.get(state, state)
             # Her words ride the speaking push into the panel's top strip;
             # every other phase clears the caption (the strip falls back to
             # timer/glance).
@@ -206,8 +221,11 @@ class FacePusher:
                 self._last_caption = caption
                 if phase == "speaking":
                     # Settle back to this mood's idle face when the words run out.
+                    delay = speaking_estimate_s(text)
+                    if state == "heart_hands":
+                        delay = max(delay, HEART_HANDS_S)
                     self._arm_timer(
-                        speaking_estimate_s(text), _IDLE.get(mood, "neutral_idle")
+                        delay, _IDLE.get(mood, "neutral_idle")
                     )
             if not dup:
                 self._send(state, caption)
