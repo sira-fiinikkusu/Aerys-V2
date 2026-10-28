@@ -30,6 +30,7 @@ only (three transports must not fight over her eyelids).
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from typing import Callable
@@ -45,6 +46,11 @@ WAKE_EMOTE_STATE = "waking"
 SLEEP_DOZE_STATE = "dozing"
 SLEEP_HOLD_STATE = "asleep"
 IDLE_STATE = "neutral_idle"
+
+#: Rare surprises (2026-10-28): budget over about ten awake hours a day.
+SURPRISE_AWAKE_DAY_S = 36000.0
+#: Rare surprises (2026-10-28): at least half an hour between clips.
+SURPRISE_MIN_GAP_S = 1800.0
 
 #: Consecutive daytime ticks (20s apart) with the panel's health endpoint
 #: unreachable before escalating — ~3 minutes. The panel rides office WiFi
@@ -106,6 +112,22 @@ def pick_world(elevation: float | None, rising: bool | None, weather: str | None
     return "rack_glow"
 
 
+def parse_surprises(csv: str) -> list[tuple[str, float]]:
+    """Read state:seconds pairs, ignoring blank or malformed entries."""
+    surprises = []
+    for entry in csv.split(","):
+        state, sep, seconds = entry.partition(":")
+        state = state.strip()
+        if not state or not sep:
+            continue
+        try:
+            hold_s = float(seconds)
+        except ValueError:
+            continue
+        surprises.append((state, hold_s))
+    return surprises
+
+
 class PanelPresenceWatcher:
     def __init__(
         self,
@@ -126,6 +148,10 @@ class PanelPresenceWatcher:
         notify_fn: Callable[[str], None] | None = None,
         face_map: dict[str, str] | None = None,
         sleep_brightness: int = 0,
+        surprises: list[tuple[str, float]] | None = None,
+        surprises_per_day: int = 10,
+        rng=None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         import httpx
 
@@ -186,6 +212,14 @@ class PanelPresenceWatcher:
         # Dimmed sleep (owner ask 2026-10-25): backlight % while she dozes; 0 = dark.
         self._sleep_brightness = max(0, min(100, int(sleep_brightness)))
         self._display_misses = 0
+        # Rare amusing idles (owner ask 2026-10-28); empty = off.
+        self._surprises = list(surprises or [])
+        self._surprises_per_day = surprises_per_day
+        self._rng = rng if rng is not None else random.Random()
+        self._clock = clock
+        self._surprise_times: list[float] = []
+        self._last_surprise_at: float | None = None
+        self._last_surprise_state: str | None = None
 
     # -- HA reads (fail-open: unknown never causes a transition) ----------
     def _entity_state(self, entity_id: str) -> str:
@@ -552,6 +586,41 @@ class PanelPresenceWatcher:
         self._occ_off_ticks = 0
         self._verify_wake()
 
+    def _maybe_surprise(self) -> None:
+        """Rare occupied-room idles (2026-10-28), never settling over a newer face."""
+        if not self._surprises:
+            return
+        try:
+            chance = self._surprises_per_day * self._poll_s / SURPRISE_AWAKE_DAY_S
+            if not self._rng.random() < chance:
+                return
+            now = self._clock()
+            if self._last_surprise_at is not None and now - self._last_surprise_at < SURPRISE_MIN_GAP_S:
+                return
+            self._surprise_times = [t for t in self._surprise_times if now - t < 86400.0]
+            if len(self._surprise_times) >= self._surprises_per_day:
+                return
+            h = self._health()
+            if h is None or h.get("state") != self._face_map.get(IDLE_STATE, IDLE_STATE):
+                return
+            choices = self._surprises
+            if len(choices) > 1:
+                choices = [pair for pair in choices if pair[0] != self._last_surprise_state]
+            if not choices:
+                return
+            state, hold_s = self._rng.choice(choices)
+            self._push_state(state)
+            self._last_surprise_at = now
+            self._last_surprise_state = state
+            self._surprise_times.append(now)
+            log.info("panel surprise -> %s (%.1fs)", state, hold_s)
+            self._sleep(hold_s)
+            h = self._health()
+            if h is not None and h.get("state") == self._face_map.get(state, state):
+                self._push_state(IDLE_STATE)
+        except Exception:
+            log.debug("panel surprise failed (harmless)", exc_info=True)
+
     def tick(self) -> None:
         """One poll cycle — separated from the loop so tests drive it directly."""
         self._maybe_push_world()
@@ -569,6 +638,8 @@ class PanelPresenceWatcher:
             # occupied, or HA unreadable — never sleep on uncertainty, and any
             # sighting of the owner restarts the debounce from zero.
             self._occ_off_ticks = 0
+            if occupied == "on":
+                self._maybe_surprise()
             return
         self._occ_off_ticks += 1
         if self._occ_off_ticks < SLEEP_DEBOUNCE_TICKS:
@@ -650,6 +721,8 @@ def start_panel_presence(settings) -> threading.Thread | None:
         notify_fn=notify_fn,
         face_map=parse_face_map(getattr(settings, "panel_face_map", "")),
         sleep_brightness=getattr(settings, "panel_sleep_brightness", 0),
+        surprises=parse_surprises(getattr(settings, "panel_surprises", "")),
+        surprises_per_day=getattr(settings, "panel_surprises_per_day", 10),
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="panel-presence")
     thread.start()

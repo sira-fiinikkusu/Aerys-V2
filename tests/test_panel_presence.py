@@ -776,3 +776,169 @@ def test_a_lost_wake_from_the_held_sleep_settles_her_too():
         ("/display", {"on": True}),
         ("/state", {"state": IDLE_STATE}),
     ]
+
+
+# ── 10/28 rare surprises ────────────────────────────────────────────────────
+# Chris: "a couple... amusing idles that can play rarely throughout the day (maybe
+# like... 10x a day)": knocking on the glass, fists on the glass, leaving for a drink.
+# Only while she's awake, the room is occupied and her plain idle is on the panel;
+# never twice within SURPRISE_MIN_GAP_S, never more than per_day in 24 h, never the
+# same one twice running, and the settle back to idle never clobbers a newer face.
+
+from aerys_v2.panel_presence import SURPRISE_AWAKE_DAY_S, SURPRISE_MIN_GAP_S, parse_surprises
+
+SURPRISES = [("surprise_knock", 7.0), ("surprise_drink", 46.0)]
+
+
+class Dice:
+    """Deterministic rng: random() pops queued rolls (1.0 = never), choice() pops indexes."""
+
+    def __init__(self, rolls, picks=None):
+        self.rolls, self.picks = list(rolls), list(picks or [])
+
+    def random(self):
+        return self.rolls.pop(0) if self.rolls else 1.0
+
+    def choice(self, seq):
+        return seq[self.picks.pop(0)] if self.picks else seq[0]
+
+
+class SurpriseWorld(HealthWorld):
+    """HealthWorld whose /health reports the last state the panel was sent."""
+
+    def handle(self, request):
+        if request.url.path == "/state":
+            import json
+            self.state = json.loads(request.content)["state"]
+        return super().handle(request)
+
+
+def surprise_watcher(world, rolls, *, picks=None, per_day=10, clock=None, on_sleep=None, **kwargs):
+    t = {"now": 0.0}
+    sleeps = []
+
+    def sleep(s):
+        sleeps.append(s)
+        if on_sleep:
+            on_sleep(s)
+
+    w = PanelPresenceWatcher(
+        panel_state_url="http://panel:8300/state", ha_base_url="http://ha:8123", ha_token="t",
+        occupancy_entity=OCC, light_entities=[L1, L2], client=world.client(), sleep_fn=sleep,
+        surprises=SURPRISES, surprises_per_day=per_day, rng=Dice(rolls, picks),
+        clock=clock or (lambda: t["now"]), **kwargs,
+    )
+    return w, t, sleeps
+
+
+def states_sent(world):
+    return [body["state"] for path, body in world.panel_calls if path == "/state"]
+
+
+def test_parse_surprises_reads_state_and_seconds():
+    assert parse_surprises("surprise_knock:7, surprise_drink:46 ,junk, x:, :3") == SURPRISES
+    assert parse_surprises("") == []
+
+
+def test_a_lucky_roll_plays_a_surprise_then_settles_back_to_idle():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w, _t, sleeps = surprise_watcher(world, [0.0])
+    w.tick()
+    assert states_sent(world) == ["surprise_knock", IDLE_STATE]
+    assert 7.0 in sleeps                     # held for the clip's own length
+
+
+def test_an_unlucky_roll_plays_nothing():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w, _t, _s = surprise_watcher(world, [0.99])
+    w.tick()
+    assert states_sent(world) == []
+
+
+def test_the_roll_targets_per_day_over_an_awake_day():
+    chance = 10 * 20.0 / SURPRISE_AWAKE_DAY_S   # per_day x poll_s / awake seconds
+    for roll, plays in ((chance * 0.9, True), (chance * 1.1, False)):
+        world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+        w, _t, _s = surprise_watcher(world, [roll])
+        w.tick()
+        assert bool(states_sent(world)) is plays
+
+
+def test_only_her_plain_idle_can_be_interrupted():
+    for busy in ("neutral_speaking", "happy_idle", "thinking", SLEEP_HOLD_STATE):
+        world = SurpriseWorld({OCC: "on"}, state=busy)
+        w, _t, _s = surprise_watcher(world, [0.0])
+        w.tick()
+        assert states_sent(world) == [], busy
+
+
+def test_never_in_an_empty_room_or_while_asleep():
+    world = SurpriseWorld({OCC: "off", L1: "on", L2: "off"}, state=IDLE_STATE)
+    w, _t, _s = surprise_watcher(world, [0.0])
+    w.tick()
+    assert states_sent(world) == []
+    world = SurpriseWorld({OCC: "off", L1: "off", L2: "off"}, state=IDLE_STATE)
+    w, _t, _s = surprise_watcher(world, [0.0])
+    w.asleep = True
+    w.tick()
+    assert "surprise_knock" not in states_sent(world)
+
+
+def test_surprises_keep_their_distance():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w, t, _s = surprise_watcher(world, [0.0, 0.0, 0.0], picks=[0, 0, 0])
+    w.tick()
+    t["now"] = SURPRISE_MIN_GAP_S - 1
+    w.tick()                                 # too soon after the last one
+    assert states_sent(world).count(IDLE_STATE) == 1
+    t["now"] = SURPRISE_MIN_GAP_S + 1
+    w.tick()
+    assert len([s for s in states_sent(world) if s.startswith("surprise_")]) == 2
+
+
+def test_daily_cap():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w, t, _s = surprise_watcher(world, [0.0] * 5, per_day=2)
+    for i in range(4):
+        t["now"] = i * (SURPRISE_MIN_GAP_S + 1)
+        w.tick()
+    assert len([s for s in states_sent(world) if s.startswith("surprise_")]) == 2
+    t["now"] = 24 * 3600 + 10                # a day after the first one, the cap reopens
+    w.tick()
+    assert len([s for s in states_sent(world) if s.startswith("surprise_")]) == 3
+
+
+def test_never_the_same_surprise_twice_running():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w, t, _s = surprise_watcher(world, [0.0, 0.0])   # Dice.choice defaults to index 0
+    w.tick()
+    t["now"] = SURPRISE_MIN_GAP_S + 1
+    w.tick()
+    assert [s for s in states_sent(world) if s.startswith("surprise_")] == ["surprise_knock", "surprise_drink"]
+
+
+def test_a_newer_face_during_the_surprise_is_never_clobbered():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+
+    def he_talks_to_her(_s):
+        world.state = "neutral_speaking"     # a turn's face push lands mid-surprise
+
+    w, _t, _s = surprise_watcher(world, [0.0], on_sleep=he_talks_to_her)
+    w.tick()
+    assert states_sent(world) == ["surprise_knock"]
+
+
+def test_surprises_wear_the_face_map():
+    world = SurpriseWorld({OCC: "on"}, state="m_idle")
+    w, _t, _s = surprise_watcher(world, [0.0],
+                                 face_map={"surprise_knock": "m_knock", IDLE_STATE: "m_idle"})
+    w.tick()
+    assert states_sent(world) == ["m_knock", "m_idle"]
+
+
+def test_no_surprises_configured_means_none_ever():
+    world = SurpriseWorld({OCC: "on"}, state=IDLE_STATE)
+    w = watcher(world)
+    for _ in range(50):
+        w.tick()
+    assert states_sent(world) == []

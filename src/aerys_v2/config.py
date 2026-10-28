@@ -447,6 +447,10 @@ class Settings(BaseSettings):
     # the sun and ha_weather_entity and POSTs it to the panel's /world; the panel
     # plays "<world>__<state>" clips where they exist. False = plain clips only.
     panel_worlds: bool = False
+    # Owner ask 2026-10-28: "amusing idles ... maybe like... 10x a day".
+    # CSV state:seconds for rare surprises; empty = off.
+    panel_surprises: str = ""
+    panel_surprises_per_day: int = 10
     # Speaker redirect (owner ask 2026-09-26): csv "device_id=http://host:port" — a
     # satellite whose speaker is gone speaks through a player service on another
     # machine (aerys-speaker on Leviathan). Replies are rendered by HA in the Assist
