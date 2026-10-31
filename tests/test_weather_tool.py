@@ -140,3 +140,47 @@ def test_unreachable_ha_is_an_honest_string():
 def test_empty_forecast_is_reported_not_fabricated():
     out = tool(daily=[]).invoke({"span": "today"})
     assert out == "The weather provider returned no daily forecast."
+
+
+# The weekend span (Chris, Python lesson 2, 10/31): the real forecast HA gave on Fri 10/30.
+FRI_TO_WED = [
+    {"datetime": "2026-10-30T16:00:00+00:00", "condition": "partlycloudy", "temperature": 80, "templow": 76, "precipitation": 0.0},
+    {"datetime": "2026-10-31T16:00:00+00:00", "condition": "rainy", "temperature": 85, "templow": 74, "precipitation": 0.11},
+    {"datetime": "2026-11-01T17:00:00+00:00", "condition": "rainy", "temperature": 81, "templow": 71, "precipitation": 0.83},
+    {"datetime": "2026-11-02T17:00:00+00:00", "condition": "rainy", "temperature": 78, "templow": 70, "precipitation": 0.39},
+    {"datetime": "2026-11-03T17:00:00+00:00", "condition": "rainy", "temperature": 84, "templow": 70, "precipitation": 0.03},
+    {"datetime": "2026-11-04T17:00:00+00:00", "condition": "sunny", "temperature": 84, "templow": 71, "precipitation": 0.0},
+]
+WEEKEND = ('This weekend: Sat 10/31 rainy, 74–85°, 0.11" precipitation; '
+           'Sun 11/1 rainy, 71–81°, 0.83" precipitation')
+
+
+def test_weekend_lists_only_saturday_and_sunday():
+    assert tool(daily=FRI_TO_WED).invoke({"span": "weekend"}) == WEEKEND
+
+
+def test_weekend_is_checked_before_week():
+    # "week" is inside "weekend": every weekend phrasing must reach the weekend, not the week list.
+    for span in ("weekend", "this weekend", "Weekend", "WEEKEND", "next weekend"):
+        out = tool(daily=FRI_TO_WED).invoke({"span": span})
+        assert out == WEEKEND, span
+        assert "Next 6 days" not in out and "Fri 10/30" not in out
+
+
+def test_week_still_lists_every_day_with_a_weekend_in_it():
+    assert tool(daily=FRI_TO_WED).invoke({"span": "week"}).startswith(
+        "Next 6 days: Fri 10/30 partlycloudy, 76–80°; Sat 10/31 rainy")
+
+
+def test_weekend_says_so_when_the_forecast_stops_before_it():
+    mon_to_fri = FRI_TO_WED[3:5]  # Mon 11/2, Tue 11/3: no Saturday or Sunday
+    assert tool(daily=mon_to_fri).invoke({"span": "weekend"}) == "The forecast doesn't reach this weekend yet."
+
+
+def test_weekend_skips_an_odd_row_instead_of_failing():
+    odd = [{"datetime": "garbage", "condition": "rainy"}, *FRI_TO_WED]
+    assert tool(daily=odd).invoke({"span": "weekend"}) == WEEKEND
+
+
+def test_weekend_with_empty_forecast_is_reported_not_fabricated():
+    assert tool(daily=[]).invoke({"span": "weekend"}) == "The weather provider returned no daily forecast."
