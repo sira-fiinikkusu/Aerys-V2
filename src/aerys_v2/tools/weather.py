@@ -29,7 +29,15 @@ from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
 
-_SPANS = ("now", "today", "tomorrow", "hourly", "week")
+_SPANS = ("now", "today", "tomorrow", "hourly", "week", "weekend")
+
+
+def _day_of(f: dict) -> date | None:
+    """A forecast row's date, or None for an odd row (one must never sink a whole answer)."""
+    try:
+        return date.fromisoformat(str(f.get("datetime", ""))[:10])
+    except ValueError:
+        return None
 
 
 def _fmt_num(v: object) -> str:
@@ -111,13 +119,18 @@ def build_weather_tool(
         house's own Home Assistant weather station/provider.
 
         span: "now" (current conditions), "today" (today's forecast),
-        "tomorrow", "hourly" (next hours, times in UTC), or
-        "week" (every forecast day the provider has, about 6).
+        "tomorrow", "hourly" (next hours, times in UTC),
+        "week" (every forecast day the provider has, about 6), or
+        "weekend" (only the Saturday and Sunday in the forecast; it says so
+        plainly when the forecast doesn't reach them).
         Note: precipitation is reported in inches; this provider has no
         rain-probability percentage — do not invent one.
         """
         want = (span or "now").strip().lower()
-        if "week" in want:
+        # "week" is inside "weekend": ask the narrower question first (Chris, lesson 2).
+        if "weekend" in want:
+            want = "weekend"
+        elif "week" in want:
             want = "week"
         if want not in _SPANS:
             want = "now"
@@ -132,6 +145,11 @@ def build_weather_tool(
             days = _forecast("daily")
             if not days:
                 return "The weather provider returned no daily forecast."
+            if want == "weekend":
+                weekend = [(day, f) for f in days if (day := _day_of(f)) and day.weekday() >= 5]
+                if not weekend:
+                    return "The forecast doesn't reach this weekend yet."
+                return "This weekend: " + "; ".join(f"{day:%a} {day.month}/{day.day} {_fmt_day(f)}" for day, f in weekend)
             if want == "week":
                 entries = []
                 for f in days:
