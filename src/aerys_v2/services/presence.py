@@ -76,7 +76,7 @@ def location_fields(attributes: object, *, nearby: bool = False) -> dict[str, st
         keys += ("sub_locality", "thoroughfare")
     return {key: value.strip() for key in keys
             if isinstance(value := attributes.get(key), str)
-            and value.strip() and value.strip().lower() not in ("unknown", "unavailable", "none")}
+            and value.strip() and value.strip().lower() not in ("unknown", "unavailable", "none", "null")}
 
 
 def format_whereabouts(home: str | None, settled: str | None, city: dict | None = None) -> list[str]:

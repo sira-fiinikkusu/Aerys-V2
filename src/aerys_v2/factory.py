@@ -2196,6 +2196,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
                 person_entity=settings.presence_person_entity.strip(),
                 geocoded_entity=settings.presence_geocoded_entity.strip(),
                 owner_person_id=settings.owner_person_id,
+                coords_entity=settings.presence_coords_entity.strip(),
             ))
 
         if settings.ha_alarm_entity:

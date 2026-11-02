@@ -18,6 +18,7 @@ _GUIDANCE = (
 
 def build_whereabouts_tool(*, base_url: str, token: str, person_entity: str,
                            geocoded_entity: str, owner_person_id: str | None,
+                           coords_entity: str = "",
                            client: httpx.Client | None = None):
     """Build the owner/private-only HA reader; identity is injected, never model input."""
     def read(http, entity):
@@ -55,7 +56,13 @@ def build_whereabouts_tool(*, base_url: str, token: str, person_entity: str,
             if state == "home":
                 mark_location_turn(values=[fields.get("locality", "")], person_id=identity.get("user_id"))
                 return "Chris is home. " + json.dumps({"city": fields.get("locality", "")}) + " " + _GUIDANCE
-            coords = person.get("attributes", {})
+            # Home/away comes from the presence entity, which in production is a settled
+            # sensor with no GPS (live 2026-11-02: every lookup came back unavailable).
+            # Coordinates come from the HA person, which carries the phone's tracker.
+            source = read(http, coords_entity) if coords_entity and coords_entity != person_entity else person
+            coords = source.get("attributes", {})
+            if not isinstance(coords, dict):
+                raise ValueError("No coordinate attributes")
             result = {label: fields.get(key, "") for label, key in (
                 ("street", "thoroughfare"), ("neighborhood", "sub_locality"),
                 ("city", "locality"), ("state", "administrative_area"))}

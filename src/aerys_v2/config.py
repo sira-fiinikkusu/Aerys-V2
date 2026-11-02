@@ -350,6 +350,9 @@ class Settings(BaseSettings):
     # phone's settled room. Empty = no whereabouts line; read in presence's one HA call.
     presence_person_entity: str = "person.chris"
     presence_geocoded_entity: str = ""  # Optional companion geocoded sensor; allowlisted fields only.
+    # Where the nearby tool reads GPS from (the HA person carries the phone's tracker). The
+    # presence entity above may be a settled home/away sensor with no coordinates.
+    presence_coords_entity: str = "person.chris"
     presence_settled_entity: str = "sensor.chris_settled_room"
     # The house alarm panel entity (e.g. "alarm_control_panel.panel"). Empty =
     # the control_alarm tool doesn't exist — same arming pattern as ha_token.

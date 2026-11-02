@@ -512,3 +512,29 @@ def test_remember_propagates_writer_location_refusal():
     tool = build_remember_tool(lambda _: LOCATION_REFUSAL)
     assert tool.invoke({'fact': 'Likes tea'}, config={'configurable': {'identity': {
         'user_id': '00000000-0000-0000-0000-000000000001'}}}) == LOCATION_REFUSAL
+
+
+def test_nearby_reads_coordinates_from_the_person_when_presence_is_a_settled_sensor():
+    """Live 2026-11-02: PRESENCE_PERSON_ENTITY is a settled home/away sensor with no GPS,
+    so every lookup came back unavailable. Coordinates come from a separate entity."""
+    from aerys_v2.tools.whereabouts import build_whereabouts_tool
+    states = {
+        "sensor.synthetic_settled": {"state": "not_home", "attributes": {"friendly_name": "settled"}},
+        "person.synthetic": {"state": "not_home", "attributes": {"latitude": 39.7817, "longitude": -89.6501}},
+        "sensor.synthetic_geocoded": {"state": "1 Main St", "attributes": {
+            "locality": "Springfield", "administrative_area": "Illinois", "thoroughfare": "Main St"}},
+    }
+    def handler(request):
+        return httpx.Response(200, json=states[request.url.path.rsplit("/", 1)[-1]])
+    tool = build_whereabouts_tool(base_url="http://ha.test", token="synthetic",
+        person_entity="sensor.synthetic_settled", geocoded_entity="sensor.synthetic_geocoded",
+        coords_entity="person.synthetic", owner_person_id=OWNER,
+        client=httpx.Client(transport=httpx.MockTransport(handler)))
+    out = tool.invoke({}, config={"configurable": {"identity": PRIVATE}})
+    assert '"latitude": "39.782"' in out and '"longitude": "-89.650"' in out and "Springfield" in out
+
+
+def test_geocoder_null_strings_are_dropped():
+    """Live 2026-11-02: the companion app reports an empty sub_locality as the string "null"."""
+    from aerys_v2.services.presence import location_fields
+    assert location_fields({"locality": "Springfield", "sub_locality": "null"}, nearby=True) == {"locality": "Springfield"}
