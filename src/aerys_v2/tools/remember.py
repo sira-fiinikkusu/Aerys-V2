@@ -34,6 +34,7 @@ from typing import Callable
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
+from aerys_v2.services.location_guard import location_memory_blocked, LOCATION_REFUSAL
 from aerys_v2.state import identity_from_config
 from aerys_v2.workers.extraction import KEY_LABEL_PATTERN, question_shaped
 
@@ -137,6 +138,8 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
         longer one is refused rather than trimmed; nothing is ever half-kept.
         """
         text = (fact or "").strip()
+        if location_memory_blocked(text):
+            return LOCATION_REFUSAL
         if not text:
             return EMPTY
         if len(text) > FACT_LIMIT:
@@ -177,6 +180,8 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
         except Exception:
             log.warning("remember: writer failed for person %s", person_id, exc_info=True)
             return NOT_KEPT
+        if action == LOCATION_REFUSAL:
+            return LOCATION_REFUSAL
         if action == "duplicate":
             return f"{ALREADY_PREFIX} {text}"
         if action == "skipped":

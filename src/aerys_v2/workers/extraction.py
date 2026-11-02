@@ -90,6 +90,7 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
+from ..services.location_guard import location_shaped
 from ..services.memory import Embedder, embedding_to_pgvector
 
 log = logging.getLogger(__name__)
@@ -162,6 +163,10 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Timestamps without facts: "it's late", "been a long day"
 - Questions, requests for information, and observations derived only from questions (never infer an answer)
 - Greetings and smalltalk: "hey", "what's up", "how are you"
+
+## Current location privacy (overrides all other extraction rules):
+- Never save Chris's current location, whereabouts, address or coordinates, whether from the presence block, the nearby tool, or anything he says about where he is right now.
+- A trip may be saved only as a dated fact that includes its end date, e.g. "Chris is at a conference in Springfield, Nov 1-6, 2026". Without an end date, do not save the trip.
 
 ## Test-only observations (SKIP):
 - Testing, probing, or evaluating the assistant/system or its memory is not a memory about the person.
@@ -298,6 +303,9 @@ FROM v2_turns t
 WHERE t.person_id IS NOT NULL
   AND t.guard_verdict IS DISTINCT FROM 'portable_untrusted'
   AND t.channel IS DISTINCT FROM 'sentinel'
+  -- Fail closed on every nearby call, including refusals/unknown outcomes.
+  -- The audit stores tool names but not location payloads; no schema change needed.
+  AND NOT COALESCE(t.tool_calls, '[]'::jsonb) @> '[{"name":"where_is_chris_nearby"}]'::jsonb
   AND t.input_text != ''
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC
@@ -648,6 +656,8 @@ def triage_memory(
         "key_label: " row in its place. An observation that says nothing
         must never be allowed to overwrite one that does.
     """
+    if any(location_shaped(v) for v in (key_label, value_text, content, context, source_text, event_date)):
+        return "skipped"
     if key_label is None or not key_label.strip():
         return "skipped"
     if not value_text.strip():
@@ -899,6 +909,10 @@ def parse_observations(text: str) -> list[dict] | None:
     result = []
     for obs in observations:
         if not isinstance(obs, dict):
+            continue
+        # Inspect decoded fields so escaped newlines cannot bypass the guard.
+        if any(location_shaped(v) for v in obs.values() if isinstance(v, str)):
+            log.warning("memory skipped: location-shaped observation")
             continue
         if any(question_shaped(obs.get(k)) for k in ("value_text", "source_text", "context")):
             log.warning("memory skipped: question-shaped observation")

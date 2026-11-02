@@ -67,7 +67,19 @@ def parse_rooms(spec: str) -> dict[str, str]:
 NO_TIMES = "This is his state right now; it carries no times, so never say when he arrived or moved."
 
 
-def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
+def location_fields(attributes: object, *, nearby: bool = False) -> dict[str, str]:
+    """Discard all unapproved geocoder fields before any formatting or output."""
+    if not isinstance(attributes, dict):
+        return {}
+    keys = ("locality", "administrative_area", "country")
+    if nearby:
+        keys += ("sub_locality", "thoroughfare")
+    return {key: value.strip() for key in keys
+            if isinstance(value := attributes.get(key), str)
+            and value.strip() and value.strip().lower() not in ("unknown", "unavailable", "none")}
+
+
+def format_whereabouts(home: str | None, settled: str | None, city: dict | None = None) -> list[str]:
     """Where CHRIS is, at the trust the week-long soak earned (Chris approved 2026-10-03).
 
     The BLE soak, 9/27-10/03: home/away never put him in a room while he was out (7
@@ -80,6 +92,14 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
     if not state or state in ("unknown", "unavailable"):
         return []
     if state != "home":
+        fields = location_fields(city)
+        if fields.get("locality"):
+            place = ", ".join(fields[k] for k in ("locality", "administrative_area") if fields.get(k))
+            return [f"Chris's own phone says he is away from home, in {place} right now.",
+                    "Use this city for local time and suggestions. For weather where he is, search the "
+                    "web for this city: the weather tool reads the HOUSE forecast, not his. It is current, "
+                    "not a memory: never save it, and never claim a more exact location than the city.",
+                    NO_TIMES]
         return ["Chris's own phone says he is away from home right now.", NO_TIMES]
     # Attributed to HIS phone, out loud: the occupancy caveat below ("sensors do not say
     # WHO") made her doubt these lines too on the first live probe (2026-10-03).
@@ -96,7 +116,7 @@ def format_whereabouts(home: str | None, settled: str | None) -> list[str]:
 
 
 def format_presence(occupied: list[str], spoken_from: str | None = None,
-                    whereabouts: tuple | None = None) -> str:
+                    whereabouts: tuple | None = None, city: dict | None = None) -> str:
     """The block's text, or '' when there is nothing honest to say.
 
     Occupancy is phrased as occupancy, never as a person's location, and it says the
@@ -104,7 +124,8 @@ def format_presence(occupied: list[str], spoken_from: str | None = None,
     location is stated, and only at the trust format_whereabouts allows.
     """
     # The satellite he is speaking through beats a phone room that lags by minutes.
-    where = format_whereabouts(whereabouts[0], None if spoken_from else whereabouts[1]) if whereabouts else []
+    where = format_whereabouts(whereabouts[0], None if spoken_from else whereabouts[1],
+                               None if spoken_from else city) if whereabouts else []
     if not occupied and not spoken_from and not where:
         return ""
     lines = list(where)

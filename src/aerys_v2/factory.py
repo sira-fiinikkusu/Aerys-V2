@@ -1155,6 +1155,10 @@ def remember_writer_for(settings: Settings):
         from aerys_v2.services.memory import embedding_to_pgvector
         from aerys_v2.workers.extraction import triage_memory
 
+        from aerys_v2.services.location_guard import location_memory_blocked, LOCATION_REFUSAL
+
+        if any(location_memory_blocked(v) for v in record.values() if isinstance(v, str)):
+            return LOCATION_REFUSAL
         embedding = embedding_to_pgvector(embed(record["fact"]))
         with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
             action = triage_memory(
@@ -1380,7 +1384,7 @@ def content_privacy_fn_for(settings: Settings) -> ContentPrivacyFn | None:
             "sexual orientation — OR any secret or credential: passwords, passcodes, "
             "PINs, door/garage/gate/alarm codes, wifi passwords, API or private keys, "
             "seed/recovery phrases, account/card/routing numbers, or an exact "
-            "home/street address. A number or a location that is a SECRET is PRIVATE, "
+            "home/street address; where a person is right now: city, street, coordinates, or whereabouts. A number or a location that is a SECRET is PRIVATE, "
             "never public — never treat a code, password, or precise address as a "
             "'general fact'. EVERYTHING ELSE IS PUBLIC: names, jobs, hobbies, "
             "interests, plans, opinions, and ordinary chatter — what someone is doing, "
@@ -2085,7 +2089,9 @@ def build_action_graph(
     graph.add_edge(START, "act")
     graph.add_conditional_edges("act", after_act, {"tools": "tools", END: END})
     graph.add_edge("tools", "act")
-    return graph.compile(checkpointer=checkpointer)
+    compiled = graph.compile(checkpointer=checkpointer)
+    compiled.presence_fn = presence_fn
+    return compiled
 
 
 def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
@@ -2180,6 +2186,17 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
                 entity_id=settings.ha_weather_entity,
             )
         )
+
+        if settings.presence_geocoded_entity.strip():
+            from aerys_v2.tools.whereabouts import build_whereabouts_tool
+
+            tools.append(build_whereabouts_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+                person_entity=settings.presence_person_entity.strip(),
+                geocoded_entity=settings.presence_geocoded_entity.strip(),
+                owner_person_id=settings.owner_person_id,
+            ))
 
         if settings.ha_alarm_entity:
             # ALARM (owner-commissioned 2026-08-07): same HA door, but its own
@@ -2620,13 +2637,13 @@ def presence_fn_for(settings: Settings):
     HA returns [] and the block simply does not appear — presence is ambient colour,
     never something a turn may block on.
     """
+    set_owner_id(settings.owner_person_id)   # away lock also applies when presence is off
     if not settings.presence_context or settings.ha_token is None:
         return None
-    set_owner_id(settings.owner_person_id)   # the fence needs to know who he is
     import httpx
     import json
 
-    from aerys_v2.services.presence import parse_rooms
+    from aerys_v2.services.presence import parse_rooms, location_fields
 
     rooms = parse_rooms(settings.presence_rooms)
     base = settings.ha_base_url.rstrip("/")
@@ -2640,10 +2657,18 @@ def presence_fn_for(settings: Settings):
     # Still ONE call: the rooms plus Chris's person state and settled phone room, as
     # JSON so no room name can shift a field (Codex, 2026-10-03: a ';;' in a room name
     # turned "home" into "away").
+    geocoded = settings.presence_geocoded_entity.strip()
+    city_expr = "{}"
+    if geocoded and person:
+        city_expr = "({" + ", ".join(
+            f"'{key}': state_attr({geocoded!r}, '{key}')"
+            for key in ("locality", "administrative_area", "country")
+        ) + f"}} if states({person!r}) != 'home' else {{}})"
     template = "{{ {'rooms': [" + ",".join(
         f"('{room}' if is_state('{entity}','on') else '')" for room, entity in rooms.items()
     ) + "] | select | list, 'person': " + (f"states('{person}')" if person else "''") + ", 'room': " + (
-        f"states('{settled}')" if settled else "''") + "} | to_json }}"
+        f"states('{settled}')" if settled else "''") + ", 'city': " + city_expr + ", 'geocoded_state': " + (
+        f"states({geocoded!r})" if geocoded else "''") + "} | to_json }}"
 
     def occupied() -> PresenceSnapshot:
         try:
@@ -2662,9 +2687,14 @@ def presence_fn_for(settings: Settings):
             home, room = data.get("person"), data.get("room")
             if not isinstance(home, str) or not isinstance(room, str):
                 home = room = ""                # a malformed answer states nothing about him
-            return PresenceSnapshot(occupied, whereabouts=(home, room) if person else None)
+            geo_state = data.get("geocoded_state")
+            geo_valid = (isinstance(geo_state, str) and bool(geo_state.strip())
+                         and geo_state.strip().lower() not in ("unknown", "unavailable"))
+            city = location_fields(data.get("city")) if geo_valid and geocoded and person and home not in (
+                "", "home", "unknown", "unavailable") else {}
+            return PresenceSnapshot(occupied, whereabouts=(home, room) if person else None, city=city)
         except Exception:
-            log.debug("presence read failed — no presence block this turn", exc_info=True)
+            log.debug("presence read failed — no presence block this turn")
             return PresenceSnapshot([])
 
     return occupied
@@ -2672,11 +2702,12 @@ def presence_fn_for(settings: Settings):
 
 class PresenceSnapshot(list):
     """The occupied rooms (still a list, for every existing caller), plus Chris's
-    whereabouts (person state, settled phone room) when configured."""
+    whereabouts (person state, settled phone room) and filtered city when configured."""
 
-    def __init__(self, rooms, whereabouts=None):
+    def __init__(self, rooms, whereabouts=None, city=None):
         super().__init__(rooms)
         self.whereabouts = whereabouts
+        self.city = city or {}
 
 
 def voice_room_fn_for(settings: Settings):
@@ -2768,7 +2799,13 @@ def presence_block(identity: dict, presence_fn, spoken_from: str | None = None) 
             # He is talking to a satellite, which is where he is; his phone's room
             # lags by minutes and could contradict it. Home/away only.
             whereabouts = (whereabouts[0], None)
-        return format_presence(snapshot, spoken_from, whereabouts=whereabouts)
+        from aerys_v2.services.location_guard import mark_location_turn
+
+        if getattr(snapshot, "city", None) and not identity.get("voice"):
+            mark_location_turn(values=(snapshot.city.get(k, "") for k in ("locality", "administrative_area")),
+                               person_id=identity.get("user_id"))
+        return format_presence(snapshot, spoken_from, whereabouts=whereabouts,
+                               city=None if identity.get("voice") else getattr(snapshot, "city", None))
     except Exception:
         log.debug("presence block failed — omitted", exc_info=True)
         return ""
@@ -3184,5 +3221,6 @@ def build_graph(
     compiled = graph.compile(checkpointer=checkpointer or InMemorySaver())
     # The action seed reads this same thread, so it must inherit its view limit.
     # This is graph configuration, never checkpointed conversation state.
+    compiled.presence_fn = presence_fn
     compiled.history_window_messages = history_window_messages
     return compiled

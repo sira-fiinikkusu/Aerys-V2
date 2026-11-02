@@ -33,6 +33,7 @@ import threading
 from datetime import datetime
 from typing import Callable
 
+from aerys_v2.services.location_guard import location_shaped
 from aerys_v2.services.memory import embedding_to_pgvector, openrouter_embedder
 from aerys_v2.workers.extraction import test_shaped
 
@@ -121,6 +122,8 @@ def a2a_memory_writer_for(
                         exc_info=True)
 
     def write(thread_id: str, kael_text: str, reply_text: str) -> None:
+        if any(location_shaped(v) for v in (thread_id, kael_text, reply_text)):
+            return
         if not str(thread_id).startswith("kael:"):
             return
         if not str(kael_text).strip() or not str(reply_text).strip():

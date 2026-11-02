@@ -45,6 +45,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
 from aerys_v2.history import window_messages
+from aerys_v2.services.location_guard import LOCATION_TURN
 from aerys_v2.tools.remember import CURRENT_TURN_TEXT
 from aerys_v2.router import (
     DEFAULT_TIER,
@@ -463,8 +464,28 @@ def _reclassify_content_privacy(
     the SAFE 'private' tag in place. Worst case a general DM message never carries into
     public (conservative), never a private one leaking."""
 
+    # Capture THIS turn before starting the daemon; later asks get a fresh marker.
+    location_marker = LOCATION_TURN.get()
+
     def run() -> None:
         try:
+            from aerys_v2 import factory
+            from aerys_v2.services.location_guard import recent_location_turn
+
+            person_id = (config.get("configurable", {}).get("identity") or {}).get("user_id")
+            if factory._OWNER_ID and person_id == factory._OWNER_ID:
+                if location_marker or recent_location_turn(person_id):
+                    return
+                presence_fn = getattr(graph, "presence_fn", None)
+                if presence_fn is None:
+                    return
+                try:
+                    whereabouts = getattr(presence_fn(), "whereabouts", None)
+                    if not whereabouts or whereabouts[0] != "home":
+                        return
+                except Exception:
+                    return  # no traceback: presence exceptions may contain location
+
             if classifier(f"{text}\n{reply}") != PUBLIC:
                 return  # judge kept it private — the ingest tag already is; nothing to do
             configurable = config["configurable"]
@@ -1207,6 +1228,7 @@ def ask(
     # The remember tool grades trust by comparing a kept fact against what the
     # owner said THIS turn; every ask() sets it, so a stale value never survives.
     CURRENT_TURN_TEXT.set(text)
+    LOCATION_TURN.set(set())
 
     specialists = dict(specialists or {})
     if action_graph is not None:

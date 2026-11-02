@@ -54,6 +54,7 @@ import json
 import uuid
 from typing import Any, Callable, Sequence
 
+from aerys_v2.services.location_guard import LOCATION_REFUSAL, location_memory_blocked
 from aerys_v2.services.memory import embedding_to_pgvector
 
 Embedder = Callable[[str], Sequence[float]]
@@ -227,12 +228,16 @@ def correct(
     The replacement keeps key_label/context/privacy_level/created_at from the
     old row — identity and history survive, only the content changes.
     """
+    if location_memory_blocked(value) or location_memory_blocked(fact):
+        return LOCATION_REFUSAL
     if not fact or not fact.strip():
         return "Tell me which memory to correct — I need something to search for."
     row = _find_memory(conn, person_id, fact)
     if row is None:
         return _not_found(fact)
     old_id, old_content, key_label, context, privacy_level, created_at = row
+    if any(location_memory_blocked(v) for v in (old_content, key_label, context)):
+        return LOCATION_REFUSAL
     try:
         embedding = embedding_to_pgvector(embedder(value))
     except Exception:
@@ -275,6 +280,8 @@ def tell(
     room-not-person rule as resolver._privacy_for. Embeds before writing:
     a raising embedder means no row and an honest reply.
     """
+    if location_memory_blocked(fact):
+        return LOCATION_REFUSAL
     if not fact or not fact.strip():
         return "Tell me the thing to remember — I got an empty fact."
     try:
