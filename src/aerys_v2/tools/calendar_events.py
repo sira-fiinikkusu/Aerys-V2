@@ -23,12 +23,15 @@ Failure posture: ToolNode contract — honest strings, never raises.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from collections.abc import Callable
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
+from aerys_v2.services.location_guard import mark_location_turn
+from aerys_v2.services.presence import EASTERN, LocalZone, valid_local_zone
 from aerys_v2.tools.home_control import _get_with_retry
 
 log = logging.getLogger(__name__)
@@ -79,6 +82,7 @@ def build_calendar_tool(
     token: str,
     entities: tuple[str, ...],
     client: httpx.Client | None = None,
+    local_zone_fn: Callable[[], LocalZone | None] | None = None,
 ):
     """Close over config and return the calendar_events tool (test seam: inject
     an httpx.Client on a MockTransport)."""
@@ -102,8 +106,9 @@ def build_calendar_tool(
         window when the user asks about something further out.
 
         Returns events in order, one per line, grouped under day headers,
-        each tagged with the calendar it came from. Times are the owner's
-        local timezone. An empty window says so honestly.
+        each tagged with the calendar it came from. Travel times are labelled
+        in his local time with Eastern alongside; otherwise times retain the
+        calendar's supplied offset. An empty window says so honestly.
         """
         try:
             span = int(days)
@@ -111,6 +116,12 @@ def build_calendar_tool(
             span = DAYS_DEFAULT
         span = max(1, min(span, DAYS_MAX))
 
+        try:
+            zone = valid_local_zone(local_zone_fn()) if local_zone_fn else None
+        except Exception:
+            zone = None
+        if zone:
+            mark_location_turn()
         now = datetime.now().astimezone()
         # urlencode is load-bearing: a UTC box renders isoformat() with +00:00,
         # and a RAW '+' in a query string decodes as a SPACE → HA 400s the
@@ -145,6 +156,17 @@ def build_calendar_tool(
                 e_dt, e_day = _parse_when(ev.get("end"))
                 if s_dt is not None:
                     when = f"{_fmt_time(s_dt)}–{_fmt_time(e_dt)}" if e_dt else _fmt_time(s_dt)
+                    if zone:
+                        # Offset-less legacy events are Eastern, never the server's zone.
+                        s_dt = s_dt if s_dt.tzinfo else s_dt.replace(tzinfo=EASTERN)
+                        if e_dt and not e_dt.tzinfo:
+                            e_dt = e_dt.replace(tzinfo=EASTERN)
+                        local_tz = timezone(zone[0])
+                        def time_range(tz):
+                            start = _fmt_time(s_dt.astimezone(tz))
+                            return f"{start}–{_fmt_time(e_dt.astimezone(tz))}" if e_dt else start
+                        when = f"{time_range(local_tz)} his time ({time_range(EASTERN)} Eastern)"
+                        s_dt = s_dt.astimezone(local_tz)
                     day = s_dt.date()
                     sort_key = (day.isoformat(), 1, s_dt.isoformat())
                 elif s_day is not None:
@@ -174,7 +196,8 @@ def build_calendar_tool(
         truncated = len(events) > EVENT_CAP
         events = events[:EVENT_CAP]
 
-        lines: list[str] = []
+        lines: list[str] = ([f"Times shown in his local time, {zone[1]}, with Eastern in brackets."]
+                            if zone else [])
         current_day = None
         for _, day_hdr, line in events:
             if day_hdr != current_day:

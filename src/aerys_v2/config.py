@@ -349,6 +349,7 @@ class Settings(BaseSettings):
     # Chris's whereabouts (approved 2026-10-03 after the BLE soak): his HA person and his
     # phone's settled room. Empty = no whereabouts line; read in presence's one HA call.
     presence_person_entity: str = "person.chris"
+    presence_timezone_entity: str = ""  # Companion current-zone sensor; empty disables travel time.
     presence_geocoded_entity: str = ""  # Optional companion geocoded sensor; allowlisted fields only.
     # Where the nearby tool reads GPS from (the HA person carries the phone's tracker). The
     # presence entity above may be a settled home/away sensor with no coordinates.

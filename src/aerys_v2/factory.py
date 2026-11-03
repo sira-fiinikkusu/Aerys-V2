@@ -2253,11 +2253,15 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             # is deliberately off the table.
             from aerys_v2.tools.calendar_events import build_calendar_tool, calendar_set
 
+            from aerys_v2.services.presence import current_travel_zone
+
             tools.append(
                 build_calendar_tool(
                     base_url=settings.ha_base_url,
                     token=settings.ha_token.get_secret_value(),
                     entities=calendar_set(settings.ha_calendar_entities),
+                    # Only the zone presence_block showed this turn: same fence, no extra read.
+                    local_zone_fn=current_travel_zone if settings.presence_timezone_entity.strip() else None,
                 )
             )
 
@@ -2644,7 +2648,7 @@ def presence_fn_for(settings: Settings):
     import httpx
     import json
 
-    from aerys_v2.services.presence import parse_rooms, location_fields
+    from aerys_v2.services.presence import parse_rooms, location_fields, parse_local_zone
 
     rooms = parse_rooms(settings.presence_rooms)
     base = settings.ha_base_url.rstrip("/")
@@ -2665,10 +2669,16 @@ def presence_fn_for(settings: Settings):
             f"'{key}': state_attr({geocoded!r}, '{key}')"
             for key in ("locality", "administrative_area", "country")
         ) + f"}} if states({person!r}) != 'home' else {{}})"
+    tz_entity = settings.presence_timezone_entity.strip()
+    zone_expr = "{}"
+    if tz_entity and person:
+        zone_expr = (f"({{'name': states({tz_entity!r}), 'utc_offset': "
+                     f"state_attr({tz_entity!r}, 'utc_offset')}} "
+                     f"if states({person!r}) != 'home' else {{}})")
     template = "{{ {'rooms': [" + ",".join(
         f"('{room}' if is_state('{entity}','on') else '')" for room, entity in rooms.items()
     ) + "] | select | list, 'person': " + (f"states('{person}')" if person else "''") + ", 'room': " + (
-        f"states('{settled}')" if settled else "''") + ", 'city': " + city_expr + ", 'geocoded_state': " + (
+        f"states('{settled}')" if settled else "''") + ", 'city': " + city_expr + ", 'local_zone': " + zone_expr + ", 'geocoded_state': " + (
         f"states({geocoded!r})" if geocoded else "''") + "} | to_json }}"
 
     def occupied() -> PresenceSnapshot:
@@ -2693,7 +2703,13 @@ def presence_fn_for(settings: Settings):
                          and geo_state.strip().lower() not in ("unknown", "unavailable"))
             city = location_fields(data.get("city")) if geo_valid and geocoded and person and home not in (
                 "", "home", "unknown", "unavailable") else {}
-            return PresenceSnapshot(occupied, whereabouts=(home, room) if person else None, city=city)
+            zone_data = data.get("local_zone")
+            local_zone = None
+            if (tz_entity and person and home not in ("", "home", "unknown", "unavailable")
+                    and isinstance(zone_data, dict)):
+                local_zone = parse_local_zone(zone_data.get("utc_offset"), zone_data.get("name"))
+            return PresenceSnapshot(occupied, whereabouts=(home, room) if person else None,
+                                    city=city, local_zone=local_zone)
         except Exception:
             log.debug("presence read failed — no presence block this turn")
             return PresenceSnapshot([])
@@ -2705,10 +2721,11 @@ class PresenceSnapshot(list):
     """The occupied rooms (still a list, for every existing caller), plus Chris's
     whereabouts (person state, settled phone room) and filtered city when configured."""
 
-    def __init__(self, rooms, whereabouts=None, city=None):
+    def __init__(self, rooms, whereabouts=None, city=None, local_zone=None):
         super().__init__(rooms)
         self.whereabouts = whereabouts
         self.city = city or {}
+        self.local_zone = local_zone
 
 
 def voice_room_fn_for(settings: Settings):
@@ -2805,8 +2822,17 @@ def presence_block(identity: dict, presence_fn, spoken_from: str | None = None) 
         if getattr(snapshot, "city", None) and not identity.get("voice"):
             mark_location_turn(values=(snapshot.city.get(k, "") for k in ("locality", "administrative_area")),
                                person_id=identity.get("user_id"))
+        local_zone = None if identity.get("voice") or spoken_from else getattr(snapshot, "local_zone", None)
+        if local_zone and whereabouts and whereabouts[0] not in ("", "home", "unknown", "unavailable"):
+            mark_location_turn(person_id=identity.get("user_id"))
+            from aerys_v2.services.presence import TRAVEL_ZONE
+
+            holder = TRAVEL_ZONE.get()
+            if holder is not None:
+                holder["zone"] = local_zone
         return format_presence(snapshot, spoken_from, whereabouts=whereabouts,
-                               city=None if identity.get("voice") else getattr(snapshot, "city", None))
+                               city=None if identity.get("voice") else getattr(snapshot, "city", None),
+                               local_zone=local_zone)
     except Exception:
         log.debug("presence block failed — omitted", exc_info=True)
         return ""

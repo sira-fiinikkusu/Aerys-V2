@@ -46,6 +46,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from aerys_v2.factory import LOCAL_FALLBACK_FIRED, track_local_tool_fallback
 from aerys_v2.history import window_messages
 from aerys_v2.services.location_guard import LOCATION_TURN
+from aerys_v2.services.presence import TRAVEL_ZONE
 from aerys_v2.tools.remember import CURRENT_TURN_TEXT
 from aerys_v2.router import (
     DEFAULT_TIER,
@@ -1229,6 +1230,7 @@ def ask(
     # owner said THIS turn; every ask() sets it, so a stale value never survives.
     CURRENT_TURN_TEXT.set(text)
     LOCATION_TURN.set(set())
+    TRAVEL_ZONE.set({})
 
     specialists = dict(specialists or {})
     if action_graph is not None:
