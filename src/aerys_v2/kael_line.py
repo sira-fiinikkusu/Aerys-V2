@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
@@ -198,6 +198,7 @@ def kael_note_for(
     proactive_lookup_chat_id=None,
     proactive_lookup_surface=None,
     proactive_sync: bool = False,
+    proactive_meeting_hold=None,
 ) -> Callable[[str, str, bool], str]:
     """Build the note-injector the /kael-note door calls.
 
@@ -217,6 +218,7 @@ def kael_note_for(
     owner_thread = f"person:{owner}" if owner else None
     tg_token = getattr(settings, "telegram_bot_token", None)
     dc_token = getattr(settings, "discord_bot_token", None)
+    meeting_hold = proactive_meeting_hold if proactive_meeting_hold is not None else meeting_hold_fn_for(settings)
 
     def _proactive(note_text: str) -> None:
         try:
@@ -266,6 +268,24 @@ def kael_note_for(
             if not text or _HOLD_RE.match(text):
                 log.info("kael-note proactive: HOLD")
                 return
+            # D15 meeting rule, checked at the moment of delivery (a meeting can start while
+            # she composes): this turn can't wait for the window (it has no queue), so in a
+            # meeting it goes as text without a buzz instead of out loud.
+            try:
+                in_meeting = meeting_hold is not None and meeting_hold() is not None
+            except Exception:
+                log.warning("meeting hold check failed; not holding", exc_info=True)
+                in_meeting = False
+            if in_meeting and surface == "device":
+                surface, device_id = "discord", None
+                if dc_token is None and proactive_send is None:
+                    log.info("kael-note proactive: in a meeting and no text surface — holding")
+                    return
+                if proactive_send is None:
+                    chat_id = (proactive_lookup_chat_id or (lambda s: _owner_platform_id(s, "discord")))(settings)
+                    if not chat_id:
+                        log.info("kael-note proactive: no owner discord identity — holding")
+                        return
             if proactive_send is not None:
                 proactive_send(surface, chat_id or device_id, text)
             elif surface == "device":
@@ -278,9 +298,9 @@ def kael_note_for(
                     raise RuntimeError("followup router unarmed (no ha_token)")
                 route(text, device_id)
             elif surface == "telegram":
-                _telegram_send(tg_token.get_secret_value(), chat_id, text)
+                _telegram_send(tg_token.get_secret_value(), chat_id, text, silent=in_meeting)
             else:
-                _discord_dm_send(dc_token.get_secret_value(), chat_id, text)
+                _discord_dm_send(dc_token.get_secret_value(), chat_id, text, silent=in_meeting)
             # She said it — so the thread must remember she said it (the same
             # continuity rule the voice paths follow: a message the next turn's
             # model can't see is a hole in her).
@@ -414,8 +434,75 @@ def in_quiet_hours(now: datetime, start_h: int, end_h: int) -> bool:
     return start_h <= hour < end_h
 
 
+def meeting_hold_fn_for(settings, *, get=None, clock=None, cache_s: float = 60.0):
+    """fn() -> the time her unprompted SPEECH is held until, or None (D15, the owner 11/08:
+    "doesnt speak over voice while a meeting is active and speaks at the next window with a
+    10 minute buffer").
+
+    A meeting is a TIMED event on one of owner_meeting_calendars that is on now, or ended
+    less than owner_meeting_buffer_min ago; the hold lasts until the latest such end plus
+    the buffer (back-to-back meetings chain). All-day entries never hold: an out-of-office
+    day isn't a meeting. Read from HA's calendar API, at most once a minute. Fail-open: a
+    calendar that can't be read holds nothing, and says so in the log.
+
+    None when no meeting calendar is configured or HA isn't armed. get(url, headers) is
+    the test seam (an httpx-style GET returning .json())."""
+    entities = [e.strip() for e in str(getattr(settings, "owner_meeting_calendars", "") or "").split(",")
+                if e.strip()]
+    token = getattr(settings, "ha_token", None)
+    if not entities or token is None:
+        return None
+    import httpx
+    from urllib.parse import urlencode
+
+    from aerys_v2.tools.calendar_events import _parse_when
+
+    buffer = timedelta(minutes=int(getattr(settings, "owner_meeting_buffer_min", 10)))
+    base = str(getattr(settings, "ha_base_url", "")).rstrip("/")
+    headers = {"Authorization": f"Bearer {token.get_secret_value()}"}
+    now_fn = clock or (lambda: datetime.now(timezone.utc))
+    fetch = get or (lambda url, hdrs: httpx.get(url, headers=hdrs, timeout=5.0))
+    cache: dict = {}
+
+    def intervals(now: datetime) -> list:
+        """(start, end + buffer) for every timed event that is on, just ended, or starts
+        before the next read; fetched at most every cache_s."""
+        if cache and (now - cache["at"]).total_seconds() < cache_s:
+            return cache["spans"]
+        ahead = now + timedelta(seconds=cache_s + 60)    # a meeting starting before the next read
+        window = urlencode({"start": (now - buffer).isoformat(), "end": ahead.isoformat()})
+        spans = []
+        for entity in entities:
+            try:
+                r = fetch(f"{base}/api/calendars/{entity}?{window}", headers)
+                r.raise_for_status()
+                items = r.json()
+            except Exception as e:  # fail-open: never silent about it
+                log.warning("meeting hold: calendar read failed (%s); not holding", type(e).__name__)
+                continue
+            for ev in items if isinstance(items, list) else []:
+                start, _ = _parse_when((ev or {}).get("start"))
+                end, _ = _parse_when((ev or {}).get("end"))
+                if start is None or end is None:
+                    continue                      # all-day, or malformed: never a meeting
+                start = start if start.tzinfo else start.replace(tzinfo=_EASTERN)
+                end = end if end.tzinfo else end.replace(tzinfo=_EASTERN)
+                spans.append((start, end + buffer))
+        cache.update(at=now, spans=spans)
+        return spans
+
+    def held_until() -> datetime | None:
+        # Judged against NOW on every call, from the cached spans: a meeting that starts
+        # between two reads holds from its first second (Codex review 11/08).
+        now = now_fn()
+        ends = [until for start, until in intervals(now) if start <= now < until]
+        return max(ends) if ends else None
+
+    return held_until
+
+
 def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=None,
-                    clock=None) -> Callable[[str], bool] | None:
+                    clock=None, hold_fn=None) -> Callable[[str], bool] | None:
     """fn(text) -> bool: put a message in front of the owner where he was last active (the
     proactive turn's rule, owner 8/16), except in quiet hours: nothing is spoken in a room,
     and the text arrives without a notification. A device that can't take it falls back to
@@ -433,6 +520,15 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
     end_h = int(getattr(settings, "owner_quiet_end_hour", 9))
     now_fn = clock or (lambda: datetime.now(timezone.utc))
     chat_for = lookup_chat_id or _owner_platform_id
+    hold = hold_fn if hold_fn is not None else meeting_hold_fn_for(settings)
+    pick_surface = lookup_surface or _owner_last_surface
+
+    def in_meeting() -> bool:
+        try:
+            return hold is not None and hold() is not None
+        except Exception:
+            log.warning("meeting hold check failed; not holding", exc_info=True)
+            return False
 
     def _one(surface: str, device_id: str | None, text: str, quiet: bool) -> bool:
         chat_id = None
@@ -462,8 +558,9 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
         return True
 
     def reach(text: str) -> bool:
-        quiet = in_quiet_hours(now_fn(), start_h, end_h)
-        surface, device_id = (lookup_surface or _owner_last_surface)(settings)
+        # A meeting quiets her like the night does: nothing spoken, and text without a buzz.
+        quiet = in_quiet_hours(now_fn(), start_h, end_h) or in_meeting()
+        surface, device_id = pick_surface(settings)
         if surface == "device" and quiet:
             surface, device_id = "discord", None      # never spoken into a room at night
         if surface == "telegram" and tg_token is None and send is None:
@@ -478,6 +575,12 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
             return _one("discord", None, text, quiet)
         return False
 
+    def held() -> bool:
+        """True when a message that can wait should: he's in a meeting and she would have
+        SPOKEN it (his last turn was by voice). It goes out loud at the next window."""
+        return in_meeting() and pick_surface(settings)[0] == "device"
+
+    reach.held = held
     return reach
 
 
@@ -517,6 +620,8 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None) -> Callable[...
     def relay(ticket) -> bool:
         from aerys_v2.tickets import label
 
+        if getattr(reach, "held", None) and reach.held() and not _last_hour(ticket):
+            return False           # he's in a meeting and she'd say it aloud: the next window
         name = label(ticket.id)
         text = ""
         try:
@@ -545,6 +650,17 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None) -> Callable[...
     return relay
 
 
+def _last_hour(ticket) -> bool:
+    """In the last hour before the watcher would give up on relaying an answer, it doesn't
+    wait for a meeting any more: reach() then sends it as quiet text (Codex review 11/08)."""
+    from aerys_v2.tickets import RELAY_FOR
+
+    answered = getattr(ticket, "answered_at", None)
+    if answered is None:
+        return False
+    return datetime.now(timezone.utc) - answered.astimezone(timezone.utc) > RELAY_FOR - timedelta(hours=1)
+
+
 def owner_notice_for(graph, settings, *, reach=None) -> Callable[..., bool] | None:
     """fn(ticket, reached) -> bool: tell the owner an ask of his is still open (reached: the
     line accepted it and Kael hasn't answered) or never got through (his line is down).
@@ -555,6 +671,9 @@ def owner_notice_for(graph, settings, *, reach=None) -> Callable[..., bool] | No
 
     def notice(ticket, reached: bool) -> bool:
         from aerys_v2.tickets import label
+
+        if getattr(reach, "held", None) and reach.held():
+            return False           # a status can wait for the next window too
 
         asked = (ticket.created_at or datetime.now(timezone.utc)).astimezone(_EASTERN)
         when = f"{asked:%a} {asked.month}/{asked.day} at {asked:%I:%M %p}".replace(" 0", " ")

@@ -426,6 +426,13 @@ class Settings(BaseSettings):
     # 9 AM"). Inside them a message she owes him arrives as silent text, never spoken.
     owner_quiet_start_hour: int = 21
     owner_quiet_end_hour: int = 9
+    # The owner's meetings (D15, 11/08: "doesnt speak over voice while a meeting is active
+    # and speaks at the next window with a 10 minute buffer"). A csv of HA calendar entities
+    # whose TIMED events are meetings (all-day entries never count); while one is on, and for
+    # owner_meeting_buffer_min after it ends, nothing she says unprompted is spoken out loud.
+    # The entity ids stay in the environment (they can name an employer; this repo is public).
+    owner_meeting_calendars: str = ""
+    owner_meeting_buffer_min: int = 10
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
