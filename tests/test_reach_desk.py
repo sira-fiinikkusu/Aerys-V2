@@ -473,3 +473,64 @@ def test_a_detail_that_keeps_failing_is_still_tried_after_an_hour():
     clock["now"] += timedelta(hours=1)
     desk.tick()
     assert texts == ["Details."]
+
+
+# --- the nap hold (the owner picked it 11/08: "2 works") -----------------------------------
+
+def test_a_nap_holds_her_like_a_meeting_and_ends_when_he_talks_to_her():
+    world = World()                                         # he's settled in the bedroom: a room with a speaker
+    store = MemoryReachStore()
+    tool = build_reach_prefs_tool(store, clock=lambda: DAY)
+    assert "Holding" in tool.invoke({"action": "nap", "his_words": "gonna take a nap"})
+    replied = {"v": False}
+    clock = {"now": DAY + timedelta(minutes=5)}
+    desk = ReachDesk(store, world.deliverer(), replied_since=lambda when: replied["v"] and when >= DAY,
+                     clock=lambda: clock["now"])
+    assert desk.reach_out(ev(headline="news")) == "queued" and world.spoken == []
+    assert "nap" in store.rows[1].reason
+    assert desk.reach_out(ev(urgency="timely", headline="the oven timer")) == "sent"
+    assert world.texts[-1] == ("discord", "the oven timer", True)        # silent text, never spoken
+    replied["v"] = True                                                  # he's up and talking to her
+    clock["now"] += timedelta(minutes=3)
+    desk.tick()
+    assert world.spoken == [("news", "dev-office")]                      # well before the hour
+
+
+def test_a_nap_ends_on_its_own_after_the_hour():
+    world, store = World(), MemoryReachStore()
+    build_reach_prefs_tool(store, clock=lambda: DAY).invoke({"action": "nap"})
+    clock = {"now": DAY + timedelta(minutes=10)}
+    desk = ReachDesk(store, world.deliverer(), replied_since=lambda when: False, clock=lambda: clock["now"])
+    assert desk.reach_out(ev()) == "queued"
+    clock["now"] = DAY + timedelta(minutes=61)
+    assert desk.tick()["sent"] == 1
+
+
+def test_the_nap_asks_for_turns_that_started_after_it_began():
+    world, store = World(), MemoryReachStore()
+    build_reach_prefs_tool(store, clock=lambda: DAY).invoke({"action": "nap"})
+    asked = []
+    desk = ReachDesk(store, world.deliverer(), replied_since=lambda when: asked.append(when) or False,
+                     clock=lambda: DAY + timedelta(minutes=3))
+    assert desk.reach_out(ev()) == "queued"
+    assert asked and all(DAY < w <= DAY + timedelta(seconds=10) for w in asked)   # skew grace only
+
+
+def test_a_safety_warning_still_speaks_during_a_nap():
+    world, store = World(), MemoryReachStore()
+    build_reach_prefs_tool(store, clock=lambda: DAY).invoke({"action": "nap"})
+    desk = ReachDesk(store, world.deliverer(), replied_since=lambda when: False, clock=lambda: DAY + timedelta(minutes=5))
+    assert desk.reach_out(ev(urgency="safety", headline="Tornado warning.")) == "sent"
+    assert world.spoken == [("Tornado warning.", "dev-office")]
+
+
+def test_awake_clears_it_and_the_length_is_bounded():
+    store = MemoryReachStore()
+    tool = build_reach_prefs_tool(store, clock=lambda: DAY)
+    assert "180 minutes" in tool.invoke({"action": "nap", "minutes": 600})
+    assert "off" in tool.invoke({"action": "awake", "his_words": "I'm up"})
+    assert store.prefs(3).hold_until is None
+    assert "no nap hold" in tool.invoke({"action": "awake"})
+    tool.invoke({"action": "nap", "minutes": 30})
+    tool.invoke({"action": "less"})                                      # other changes keep the hold
+    assert store.prefs(3).hold_until == DAY + timedelta(minutes=30)

@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, VOICE_OWNER_ASSUMED_MARKER
@@ -46,13 +47,14 @@ INSERT INTO v2_turns
   (thread_id, channel, channel_id, display_name, person_id, platform_identity,
    resolver_version, classifier_intent, tier, tier_override_source, guard_verdict,
    input_text, raw_reply, emitted_reply, tool_calls, degraded,
-   error, latency_ms, trace_id, room_context, reflex, sealed_room)
+   error, latency_ms, trace_id, room_context, reflex, sealed_room, started_at)
 VALUES
   (%(thread_id)s, %(channel)s, %(channel_id)s, %(display_name)s, %(person_id)s::uuid,
    %(platform_identity)s, %(resolver_version)s, %(classifier_intent)s, %(tier)s,
    %(tier_override_source)s, %(guard_verdict)s, %(input_text)s, %(raw_reply)s,
    %(emitted_reply)s, %(tool_calls)s::jsonb, %(degraded)s::jsonb, %(error)s,
-   %(latency_ms)s, %(trace_id)s, %(room_context)s, %(reflex)s::jsonb, %(sealed_room)s)
+   %(latency_ms)s, %(trace_id)s, %(room_context)s, %(reflex)s::jsonb, %(sealed_room)s,
+   %(started_at)s)
 """
 
 
@@ -407,6 +409,12 @@ def build_turn_row(
         # The SEALED room this was said in (migration 012), else NULL. Extraction
         # reads it so a sealed room's memories land private.
         "sealed_room": (str(identity.get("sealed_room") or "").strip() or None),
+        # When the turn STARTED (migration 017). The row is built the moment the turn
+        # ends, but created_at is when the write lands, which can trail it (the audit
+        # thread joins the reflex shadow first). "Did he talk to her after X?" (the
+        # nap hold, the spoken-word follow-through) needs the start, not the landing.
+        "started_at": (datetime.now(timezone.utc) - timedelta(milliseconds=latency_ms)
+                       if latency_ms is not None else None),
         "trace_id": trace_id,
     }
 

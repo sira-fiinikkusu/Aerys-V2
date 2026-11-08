@@ -178,6 +178,32 @@ def test_build_turn_row_person_vs_platform_and_json_shape():
     assert cold["platform_identity"] == "discord:60426"
 
 
+def test_the_row_carries_when_the_turn_started_not_when_it_lands():
+    # Migration 017: "did he talk to her after he said he was napping?" reads the start.
+    # It's fixed when the row is built (the turn's end), however late the write lands.
+    from datetime import datetime, timedelta, timezone
+
+    from aerys_v2.turns import INSERT_TURN_SQL
+
+    before = datetime.now(timezone.utc)
+    row = build_turn_row(thread_id="cli", identity={}, input_text="hi", latency_ms=5000)
+    after = datetime.now(timezone.utc)
+    assert before - timedelta(seconds=5) <= row["started_at"] <= after - timedelta(seconds=5)
+    assert build_turn_row(thread_id="cli", identity={}, input_text="hi", latency_ms=None)["started_at"] is None
+    assert "%(started_at)s" in INSERT_TURN_SQL
+
+
+def test_ask_stamps_the_start_of_the_turn():
+    from datetime import datetime, timedelta, timezone
+
+    rec = Recorder()
+    graph = build_graph(fake_model("hello there"), soul="s")
+    began = datetime.now(timezone.utc)
+    ask(graph, "hi", identity=OWNER, thread_id="cli", record_turn=rec)
+    (row,) = rec.wait(1)
+    assert abs(row["started_at"] - began) < timedelta(seconds=1)
+
+
 # ── ask() recording, per completion path ────────────────────────────────────
 
 def test_chat_only_path_records_one_clean_row():

@@ -728,8 +728,13 @@ def owner_notice_for(graph, settings, *, reach=None, desk=None) -> Callable[...,
 
 # --- board #176, Stage 2: the reach-out desk, wired from settings -------------------------
 
+#: A turn of his that STARTED after `when`: the turn that started a nap never counts as
+#: waking up from it, however long it ran, and any turn of his after it does (Codex review
+#: 11/08). started_at is stamped when the turn ends (migration 017); a row from before it
+#: falls back to created_at minus its latency, which a slow audit write can push later.
 _OWNER_REPLIED_SQL = (
-    "SELECT 1 FROM v2_turns WHERE person_id = %s::uuid AND created_at > %s "
+    "SELECT 1 FROM v2_turns WHERE person_id = %s::uuid "
+    "AND COALESCE(started_at, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0)) > %s "
     "AND channel NOT IN ('kael', 'sentinel', 'http') LIMIT 1"
 )
 

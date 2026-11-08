@@ -52,6 +52,10 @@ FAIL_BACKOFF = (timedelta(minutes=1), timedelta(minutes=2), timedelta(minutes=5)
                 timedelta(minutes=10), timedelta(minutes=30))
 GIVE_UP_AFTER = 8                     # failed attempts before a NON-owed item is given up
 FOLLOW_THROUGH_FOR = timedelta(hours=1)
+NAP_RECHECK = timedelta(minutes=2)     # a nap-held message is looked at again this often
+NAP_GRACE = timedelta(seconds=10)      # clock skew only: replies are judged by when his turn STARTED
+NAP_DEFAULT = timedelta(hours=1)
+NAP_MAX = timedelta(hours=3)
 DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went keeps trying this long
 TICK_S = 30
 MISSED_PREFIX = "In case you missed what I said:"
@@ -104,6 +108,8 @@ class Reach:
 class Prefs:
     budget: int = 3
     muted: list = field(default_factory=list)
+    hold_since: datetime | None = None   # a nap: he said so at hold_since...
+    hold_until: datetime | None = None   # ...and it lasts until he talks to her again, or this
 
 
 @dataclass
@@ -135,8 +141,11 @@ def local_day_start(now: datetime) -> datetime:
 
 
 def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
-           quiet: bool, meeting_until: datetime | None, morning_hour: int) -> Decision:
-    """The desk's checks, in order (module docstring). Pure: every input is given."""
+           quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str = "meeting") -> Decision:
+    """The desk's checks, in order (module docstring). Pure: every input is given.
+    meeting_until is any hold that works like a meeting; `hold` names it in the record
+    ("meeting" or "nap"). Safety breaks through every hold, a nap included: the owner's D4
+    lets storm warnings break through the night, and a nap is lighter than the night."""
     if duplicate:
         return Decision("drop", "already sent")
     if event.urgency == "safety":
@@ -149,12 +158,17 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
             return Decision("send", "night: as quiet text", silent=True, voice="reroute")
         return Decision("queue", "night: waits for the morning", not_before=next_local(now, morning_hour))
     if meeting_until is not None:
+        # A meeting ends when the calendar says; a nap can end early (he talks to her), so
+        # what it holds is looked at again every couple of minutes instead of at its end.
+        if hold == "nap":
+            meeting_until = min(meeting_until, now + NAP_RECHECK)
         if event.urgency == "timely":
-            return Decision("send", "meeting: as quiet text", silent=True, voice="reroute")
+            return Decision("send", f"{hold}: as quiet text", silent=True, voice="reroute")
         if event.owed:
-            return Decision("send", "meeting: quiet text, or the next window if it would be spoken",
+            return Decision("send", f"{hold}: quiet text, or the next window if it would be spoken",
                             silent=True, voice="wait", not_before=meeting_until)
-        return Decision("queue", "meeting: waits until 10 minutes after", not_before=meeting_until)
+        after = "until 10 minutes after" if hold == "meeting" else "until he's up"
+        return Decision("queue", f"{hold}: waits {after}", not_before=meeting_until)
     if not event.owed and sent_today >= prefs.budget:
         if event.urgency == "timely":
             return Decision("send", f"over today's budget ({prefs.budget}), but timely")
@@ -225,10 +239,12 @@ class MemoryReachStore:
     def prefs(self, default_budget):
         if self._prefs is None:
             self._prefs = Prefs(budget=default_budget)
-        return Prefs(budget=self._prefs.budget, muted=list(self._prefs.muted))
+        p = self._prefs
+        return Prefs(budget=p.budget, muted=list(p.muted), hold_since=p.hold_since, hold_until=p.hold_until)
 
     def set_prefs(self, prefs, now, change, words):
-        self._prefs = Prefs(budget=prefs.budget, muted=list(prefs.muted))
+        self._prefs = Prefs(budget=prefs.budget, muted=list(prefs.muted), hold_since=prefs.hold_since,
+                            hold_until=prefs.hold_until)
         self.changes.append((now, change, words))
 
 
@@ -303,15 +319,19 @@ class PostgresReachStore:
 
     def prefs(self, default_budget):
         with self._connect() as conn:
-            row = conn.execute("SELECT budget, muted FROM v2_reach_prefs WHERE id = 1").fetchone()
-        return Prefs(budget=row[0], muted=list(row[1])) if row else Prefs(budget=default_budget)
+            row = conn.execute("SELECT budget, muted, hold_since, hold_until FROM v2_reach_prefs WHERE id = 1").fetchone()
+        if not row:
+            return Prefs(budget=default_budget)
+        return Prefs(budget=row[0], muted=list(row[1]), hold_since=row[2], hold_until=row[3])
 
     def set_prefs(self, prefs, now, change, words):
         with self._connect() as conn:   # one transaction: the prefs and their record together
             conn.execute(
-                "INSERT INTO v2_reach_prefs (id, budget, muted, updated_at) VALUES (1, %s, %s, %s) "
-                "ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, muted = EXCLUDED.muted, "
-                "updated_at = EXCLUDED.updated_at", (prefs.budget, list(prefs.muted), now))
+                "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, updated_at) "
+                "VALUES (1, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, "
+                "muted = EXCLUDED.muted, hold_since = EXCLUDED.hold_since, hold_until = EXCLUDED.hold_until, "
+                "updated_at = EXCLUDED.updated_at",
+                (prefs.budget, list(prefs.muted), prefs.hold_since, prefs.hold_until, now))
             conn.execute("INSERT INTO v2_reach_pref_changes (at, change, words) VALUES (%s, %s, %s)",
                          (now, change, words))
 
@@ -410,7 +430,8 @@ class ReachDesk:
         # Rows delivered whose record didn't land (the store hiccuped after the send): only
         # the record is retried, never the delivery (the check-ins' stance; Codex 11/08).
         self.unrecorded: dict = {}
-        deliverer.may_speak = lambda: not self.quiet(self.clock()) and self._meeting() is None
+        deliverer.may_speak = lambda: (not self.quiet(self.clock()) and self._meeting() is None
+                                       and self._nap(self.store.prefs(self.budget_default), self.clock()) is None)
 
     def _meeting(self) -> datetime | None:
         try:
@@ -419,12 +440,29 @@ class ReachDesk:
             log.warning("reach: meeting check failed; not holding", exc_info=True)
             return None
 
+    def _nap(self, prefs: Prefs, now: datetime) -> datetime | None:
+        """A nap he told her about: it holds until hold_until, or until he talks to her again
+        (a turn of his after NAP_GRACE, so the turn that started the nap doesn't end it)."""
+        if prefs.hold_until is None or _utc(prefs.hold_until) <= now:
+            return None
+        if self.replied_since is not None and prefs.hold_since is not None:
+            try:
+                if self.replied_since(_utc(prefs.hold_since) + NAP_GRACE):
+                    return None
+            except Exception:
+                log.warning("reach: nap check failed; still holding", exc_info=True)
+        return _utc(prefs.hold_until)
+
     def _decide(self, event: ReachEvent, now: datetime, *, fresh: bool) -> Decision:
         duplicate = bool(fresh and event.dedupe_key
                          and self.store.recently_sent(event.dedupe_key, now - DEDUPE_WINDOW))
-        return decide(event, now, prefs=self.store.prefs(self.budget_default),
-                      sent_today=self.store.sent_since(local_day_start(now)), duplicate=duplicate,
-                      quiet=self.quiet(now), meeting_until=self._meeting(), morning_hour=self.morning_hour)
+        prefs = self.store.prefs(self.budget_default)
+        meeting, nap = self._meeting(), self._nap(prefs, now)
+        hold = "nap" if nap is not None and (meeting is None or nap >= _utc(meeting)) else "meeting"
+        until = max(t for t in (_utc(meeting), nap) if t is not None) if (meeting or nap) else None
+        return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
+                      duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,
+                      morning_hour=self.morning_hour, hold=hold)
 
     def reach_out(self, event: ReachEvent) -> str:
         if event.urgency not in URGENCIES or not event.headline.strip():

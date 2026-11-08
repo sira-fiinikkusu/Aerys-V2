@@ -1580,7 +1580,9 @@ REACH_PREFS_OVERLAY = (
     "own words. When he says anything like 'ease up', 'chill out', 'you're pinging me a "
     "lot', 'keep me posted more', 'stop telling me about X', or asks what you'll bring him "
     "unprompted, CALL reach_prefs (less / more / mute / unmute / show) and tell him plainly "
-    "what changed. Never claim a change the tool didn't confirm."
+    "what changed. When he says he's taking a nap or lying down, CALL reach_prefs nap (with "
+    "minutes if he said how long); when he says he's up, CALL reach_prefs awake. Never claim "
+    "a change the tool didn't confirm."
 )
 
 EMAIL_OVERLAY = (
