@@ -1712,6 +1712,33 @@ LOCAL_ACTION_HARDENING = (
 )
 
 
+def is_lifeboat_failure(e: BaseException) -> bool:
+    """A tool-model failure the local lifeboat answers: the connection or the server
+    side died. Client status errors (4xx, 429) and programming errors keep their
+    meaning and are raised. Shared by both action loops (board #176)."""
+    from aerys_v2.oauth_model import OAuthBackendError
+
+    if isinstance(e, anthropic.APIStatusError):
+        return not (isinstance(e, anthropic.RateLimitError) or e.status_code < 500)
+    return isinstance(e, (
+        anthropic.APIConnectionError, anthropic.APITimeoutError,
+        httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+        OAuthBackendError,  # the subscription client died twice — same class as a connection failure
+    ))
+
+
+def lifeboat_fired(e: BaseException) -> None:
+    """Mark the turn as answered by the local lifeboat (degraded marker + receipt)."""
+    log.warning(
+        "local_model_fallback: tool call failed (%s) — answering on the local tool model",
+        type(e).__name__,
+    )
+    LOCAL_FALLBACK_FIRED.set(True)
+    receipt = _LOCAL_TOOL_FALLBACK.get()
+    if receipt is not None:
+        receipt.append(True)
+
+
 class LocalToolFailoverModel:
     """A bound Anthropic primary with a connection/server-failure tool lifeboat.
 
@@ -1726,28 +1753,12 @@ class LocalToolFailoverModel:
         # Same positional shape as a LangChain Runnable (Gemini re-review 9/05).
         if config is not None:
             kwargs["config"] = config
-        from aerys_v2.oauth_model import OAuthBackendError
-
         try:
             return self.primary.invoke(messages, **kwargs)
-        except (
-            anthropic.APIConnectionError, anthropic.APITimeoutError,
-            anthropic.APIStatusError,
-            httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-            OAuthBackendError,  # the subscription client died twice — same class as a connection failure
-        ) as e:
-            if isinstance(e, anthropic.APIStatusError) and (
-                isinstance(e, anthropic.RateLimitError) or e.status_code < 500
-            ):
+        except Exception as e:
+            if not is_lifeboat_failure(e):
                 raise
-            log.warning(
-                "local_model_fallback: tool call failed (%s) — answering on the local tool model",
-                type(e).__name__,
-            )
-            LOCAL_FALLBACK_FIRED.set(True)
-            receipt = _LOCAL_TOOL_FALLBACK.get()
-            if receipt is not None:
-                receipt.append(True)
+            lifeboat_fired(e)
             prompt = lifeboat_prompt(messages, hardening=LOCAL_ACTION_HARDENING)
             return self.lifeboat.invoke(prompt, **kwargs)
 
@@ -1912,38 +1923,26 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
     return ToolModelPair(conversational, std_auto, std_forced, fast_auto, fast_forced)
 
 
-def build_action_graph(
-    api_model_with_tools: object,
+def _action_prompt_builder(
     soul: str,
-    tools: list,
-    context_fn: ContextFn | None = None,
-    overlay: str = ACTION_OVERLAY,
-    family_notes_fn=None,
-    room_context_fn: RoomContextFn | None = None,
-    portable_context_fn: PortableContextFn | None = None,
-    presence_fn=None,
-    voice_room_fn=None,
-    shared_surface_ids: dict | None = None,
-    charter: str = SPECIALIST_CHARTER,
-    checkpointer=None,
-    context_trailing: bool = False,
-) -> object:
-    """START → act ⇄ tools → END: the tool subgraph for device commands.
+    *,
+    charter: str,
+    overlay: str,
+    context_fn: ContextFn | None,
+    family_notes_fn,
+    room_context_fn: RoomContextFn | None,
+    portable_context_fn: PortableContextFn | None,
+    presence_fn,
+    voice_room_fn,
+    shared_surface_ids: dict | None,
+    context_trailing: bool,
+):
+    """The action mind's prompt for one model pass, shared by both loops (board #176):
+    the hand-rolled graph's act node and the create_agent loop build it with this same
+    code, so the request bytes can't drift between them. Returns
+    fn(messages, config) -> (prompt, specialist, fast)."""
 
-    n8n mapping: this is the AI Agent node with an ai_tool connection — the
-    model proposes tool_calls, ToolNode (LangGraph prebuilt) executes them and
-    feeds ToolMessages back, and the loop repeats until the model answers in
-    plain text. The recursion_limit rail from ask() applies here too: each
-    act/tools hop is a super-step, so a confused model hits the wall instead of
-    incinerating budget (the dormant turn_limit in Rails, now live).
-
-    By default there is no checkpointer — an action turn is a one-shot; the durable
-    record is (a) the outbox row the tool wrote and (b) the final AIMessage
-    that service.py appends to the MAIN thread's checkpointer.
-    """
-    from langgraph.prebuilt import ToolNode
-
-    def act(state: ChatState, config: RunnableConfig) -> dict:
+    def build(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
         # Same identity rule as the chat node: from per-call config, never state.
         identity = identity_from_config(config)
         # SPECIALIST MODE (2026-09-04) rides `configurable` like spoken_ack: set by
@@ -1995,7 +1994,7 @@ def build_action_graph(
         knowledge = ""
         if context_fn is not None:
             latest = next(
-                (m for m in reversed(state["messages"]) if getattr(m, "type", "") == "human"),
+                (m for m in reversed(messages) if getattr(m, "type", "") == "human"),
                 None,
             )
             query_text = ""
@@ -2013,7 +2012,7 @@ def build_action_graph(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
-            knowledge += people_knowledge(context_fn, identity, state["messages"], query_text)
+            knowledge += people_knowledge(context_fn, identity, messages, query_text)
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
@@ -2052,7 +2051,7 @@ def build_action_graph(
         static_ack, dynamic_ack = ("", ack_block) if spoken_ack else (ack_block, "")
         if context_trailing:
             prompt = prompt_with_context(
-                f"{persona}\n\n{overlay}{static_ack}", state["messages"],
+                f"{persona}\n\n{overlay}{static_ack}", messages,
                 f"{dynamic_ack}{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}",
             )
         else:
@@ -2061,13 +2060,59 @@ def build_action_graph(
             system = SystemMessage(
                 content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}"
             )
-            prompt = [system, *state["messages"]]
+            prompt = [system, *messages]
         # The current turn's image, for her tool-using side too (board #28, 2026-09-29):
         # a Telegram photo has no URL for analyze_image, so a photo whose words ask for
         # a tool ("search where to buy this") was invisible here. Same inlining as chat.
         from aerys_v2.images import inline_current_images
 
         prompt = inline_current_images(prompt)
+        return prompt, specialist, fast
+
+    return build
+
+
+def build_action_graph(
+    api_model_with_tools: object,
+    soul: str,
+    tools: list,
+    context_fn: ContextFn | None = None,
+    overlay: str = ACTION_OVERLAY,
+    family_notes_fn=None,
+    room_context_fn: RoomContextFn | None = None,
+    portable_context_fn: PortableContextFn | None = None,
+    presence_fn=None,
+    voice_room_fn=None,
+    shared_surface_ids: dict | None = None,
+    charter: str = SPECIALIST_CHARTER,
+    checkpointer=None,
+    context_trailing: bool = False,
+) -> object:
+    """START → act ⇄ tools → END: the tool subgraph for device commands.
+
+    n8n mapping: this is the AI Agent node with an ai_tool connection — the
+    model proposes tool_calls, ToolNode (LangGraph prebuilt) executes them and
+    feeds ToolMessages back, and the loop repeats until the model answers in
+    plain text. The recursion_limit rail from ask() applies here too: each
+    act/tools hop is a super-step, so a confused model hits the wall instead of
+    incinerating budget (the dormant turn_limit in Rails, now live).
+
+    By default there is no checkpointer — an action turn is a one-shot; the durable
+    record is (a) the outbox row the tool wrote and (b) the final AIMessage
+    that service.py appends to the MAIN thread's checkpointer.
+    """
+    from langgraph.prebuilt import ToolNode
+
+    build_prompt = _action_prompt_builder(
+        soul, charter=charter, overlay=overlay, context_fn=context_fn,
+        family_notes_fn=family_notes_fn, room_context_fn=room_context_fn,
+        portable_context_fn=portable_context_fn, presence_fn=presence_fn,
+        voice_room_fn=voice_room_fn, shared_surface_ids=shared_surface_ids,
+        context_trailing=context_trailing,
+    )
+
+    def act(state: ChatState, config: RunnableConfig) -> dict:
+        prompt, specialist, fast = build_prompt(state["messages"], config)
         if isinstance(api_model_with_tools, ToolModelPair):
             reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
         else:
@@ -2448,6 +2493,16 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
     return "\n\n".join(parts)
 
 
+def _action_engine(settings: Settings, tools: list) -> tuple[object, Callable[..., object]]:
+    """(models, builder) for ACTION_LOOP (board #176): the hand-rolled graph with its
+    pre-bound models, or the create_agent loop with the same choices unbound."""
+    if getattr(settings, "action_loop", "graph") == "agent":
+        from aerys_v2.action_loop import build_agent_action_graph, build_agent_tool_models
+
+        return build_agent_tool_models(settings, tools), build_agent_action_graph
+    return build_api_tool_model(settings, tools), build_action_graph
+
+
 def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None, portable_context_fn: PortableContextFn | None = None) -> tuple | None:
     """Wire the whole TOOLS block from Settings: (router, action_graph), or None.
 
@@ -2463,8 +2518,9 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
 
     from aerys_v2.kael_line import family_notes_fn_for
 
-    action_graph = build_action_graph(
-        build_api_tool_model(settings, tools),
+    models, build = _action_engine(settings, tools)
+    action_graph = build(
+        models,
         soul,  # used by voice banter turns; action routes swap in the charter per call
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
@@ -2510,8 +2566,10 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
     tools = action_tools_for(settings, guest=True)
     if not tools:
         return None
-    return build_action_graph(
-        build_api_tool_model(settings, tools),
+    # Structural on either engine: a separate graph built from the guest tool list.
+    models, build = _action_engine(settings, tools)
+    return build(
+        models,
         soul,
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
