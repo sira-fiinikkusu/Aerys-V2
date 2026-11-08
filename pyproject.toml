@@ -9,15 +9,21 @@ authors = [
 requires-python = ">=3.11"
 dependencies = [
     "aiogram>=3.13",
+    # Held at the SDK the sticks already run with langchain-anthropic 1.7.x (aerys-portable
+    # pins 0.125.0): SDK 1.x+ moves to httpx2, which is a separate, deliberate step.
+    "anthropic==0.125.0",
     "apscheduler>=3.11.3",
     "claude-agent-sdk>=0.2.144,<0.3",
     "discord-py>=2.4",
     "fastapi>=0.115",
-    "langchain-anthropic>=1.4.6",
+    "deepagents==0.7.34",
+    "langchain>=1.4.9,<2",
+    "langchain-anthropic>=1.7.10",
+    "langchain-core>=1.7.6",
     "langchain-claude-cli==1.2.1",
     "langchain-openai>=1.4.1",
-    "langgraph>=1.2.6",
-    "langgraph-checkpoint-postgres>=2.0",
+    "langgraph>=1.2.20",
+    "langgraph-checkpoint-postgres>=3.2.0",
     "numpy>=2.0",
     "openinference-instrumentation-langchain>=0.1.67",
     "opentelemetry-exporter-otlp>=1.42.1",
