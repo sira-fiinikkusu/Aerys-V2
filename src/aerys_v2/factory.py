@@ -1570,7 +1570,9 @@ MESSAGE_KAEL_OVERLAY = (
     "you, or when something needs his hands NOW. For non-urgent trackable "
     "items keep using log_gap — that's his review board; message_kael is the "
     "tap on the shoulder. One message per 30s; never claim delivery unless "
-    "the tool confirmed it."
+    "the tool confirmed it. Each message opens a ticket (T-12): to check on, "
+    "add to or cancel something you already asked him, use kael_tickets with "
+    "its id instead of sending it again."
 )
 
 EMAIL_OVERLAY = (
@@ -2347,10 +2349,24 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
         # the durable board; this is the shoulder-tap.
         from aerys_v2.tools.message_kael import build_message_kael_tool
 
+        ticket_store = None
+        if settings.database_url:
+            # KAEL TICKETS (board #176): every message opens a ticket, so what she asks
+            # comes back, and what the owner asked comes back to him (tickets.py).
+            from aerys_v2.tickets import PostgresTicketStore, line_sender
+            from aerys_v2.tools.kael_tickets import build_kael_tickets_tool
+
+            ticket_store = PostgresTicketStore(settings.database_url)
+            tools.append(build_kael_tickets_tool(
+                ticket_store,
+                line_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value()),
+            ))
         tools.append(
             build_message_kael_tool(
                 settings.kael_desk_url,
                 settings.kael_desk_token.get_secret_value(),
+                tickets=ticket_store,
+                owner_person_id=settings.owner_person_id,
             )
         )
         if settings.database_url:

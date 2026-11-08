@@ -416,6 +416,16 @@ class Settings(BaseSettings):
     # environment: a LAN IP and a credential, and this repo is public.
     kael_desk_url: str | None = None
     kael_desk_token: SecretStr | None = None
+    # KAEL TICKETS (board #176): every message_kael opens one (tickets.py). These are the
+    # watcher's clocks: remind Kael once after nag_after_h without an answer, and tell the
+    # owner once after tell_owner_after_h when it was his ask. D15 on #176 is the owner's
+    # call; these are the proposed defaults, so his word is a setting, not a rebuild.
+    kael_ticket_nag_after_h: float = 4.0
+    kael_ticket_tell_owner_after_h: float = 24.0
+    # The owner's quiet hours, Eastern (#174, 2026-11-07: "quiet hours between 9PM and
+    # 9 AM"). Inside them a message she owes him arrives as silent text, never spoken.
+    owner_quiet_start_hour: int = 21
+    owner_quiet_end_hour: int = 9
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,

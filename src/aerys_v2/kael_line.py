@@ -29,7 +29,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from datetime import datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -142,9 +144,11 @@ def _owner_last_surface(settings) -> tuple[str, str | None]:
     return ("discord", None)
 
 
-def _discord_dm_send(token: str, user_id: str, text: str) -> None:
+def _discord_dm_send(token: str, user_id: str, text: str, *, silent: bool = False) -> None:
     """A DM from HER OWN Discord account (the soak bot). The explicit
-    DiscordBot User-Agent is load-bearing — default urllib UA gets 403."""
+    DiscordBot User-Agent is load-bearing — default urllib UA gets 403.
+    silent: Discord's SUPPRESS_NOTIFICATIONS flag (1 << 12) — it arrives, but
+    doesn't buzz his phone (quiet hours)."""
     import json
     import urllib.request
 
@@ -162,7 +166,7 @@ def _discord_dm_send(token: str, user_id: str, text: str) -> None:
         channel_id = json.load(r)["id"]
     req = urllib.request.Request(
         f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps({"content": text[:1990]}).encode(),
+        data=json.dumps({"content": text[:1990], **({"flags": 1 << 12} if silent else {})}).encode(),
         headers=headers,
     )
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -170,14 +174,16 @@ def _discord_dm_send(token: str, user_id: str, text: str) -> None:
             raise RuntimeError(f"discord dm status {r.status}")
 
 
-def _telegram_send(token: str, chat_id: str, text: str) -> None:
-    """Her own voice on her own surface — the same bot the gateway runs."""
+def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False) -> None:
+    """Her own voice on her own surface — the same bot the gateway runs.
+    silent: delivered without a notification sound (quiet hours)."""
     import json
     import urllib.request
 
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage",
-        data=json.dumps({"chat_id": chat_id, "text": text}).encode(),
+        data=json.dumps({"chat_id": chat_id, "text": text,
+                         **({"disable_notification": True} if silent else {})}).encode(),
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -306,7 +312,10 @@ def kael_note_for(
             log.warning("kael note receipt write failed (note still delivered)",
                         exc_info=True)
 
-    def note(thread_id: str, text: str, family_visible: bool = False) -> str:
+    def note(thread_id: str, text: str, family_visible: bool = False, *,
+             proactive: bool = True) -> str:
+        # proactive=False: the caller brings it to the owner itself (a ticket answer's
+        # relay, tickets.py), so this note must not earn a second, HOLD-able turn.
         msg_id = f"kael-note-{uuid.uuid4().hex[:12]}"
         msg = HumanMessage(
             content=f"{NOTE_PREFIX} {text}",
@@ -325,7 +334,7 @@ def kael_note_for(
         ).start()
         # Gap #45: a family-visible note on the OWNER's thread earns her a
         # proactive turn — speak now or hold, her call, off the request path.
-        if family_visible and proactive_armed and thread_id == owner_thread:
+        if family_visible and proactive and proactive_armed and thread_id == owner_thread:
             if proactive_sync:
                 _proactive(text)
             else:
@@ -385,3 +394,182 @@ def family_notes_fn_for(settings) -> Callable[[dict], str] | None:
         )
 
     return family
+
+
+# --- board #176: Kael tickets — the owner gets his answer back --------------------------
+# The owner, 2026-11-07: "when i tell her to ask you something, she never follows up with
+# me." tickets.py keeps the ledger and the watcher; this is how a ticket's words reach him.
+
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def in_quiet_hours(now: datetime, start_h: int, end_h: int) -> bool:
+    """The owner's quiet hours, Eastern ("quiet hours between 9PM and 9 AM", #174 11/07).
+    A window that wraps midnight (21 -> 9) is the usual shape; start == end means none."""
+    hour = now.astimezone(_EASTERN).hour
+    if start_h == end_h:
+        return False
+    if start_h > end_h:
+        return hour >= start_h or hour < end_h
+    return start_h <= hour < end_h
+
+
+def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=None,
+                    clock=None) -> Callable[[str], bool] | None:
+    """fn(text) -> bool: put a message in front of the owner where he was last active (the
+    proactive turn's rule, owner 8/16), except in quiet hours: nothing is spoken in a room,
+    and the text arrives without a notification. A device that can't take it falls back to
+    his Discord DM. None when she has no way to reach him at all.
+
+    The keyword seams exist for tests: send(surface, chat_or_device_id, text, quiet),
+    lookup_surface(settings), lookup_chat_id(settings, surface), clock()."""
+    if settings.owner_person_id is None:
+        return None
+    tg_token = getattr(settings, "telegram_bot_token", None)
+    dc_token = getattr(settings, "discord_bot_token", None)
+    if tg_token is None and dc_token is None and send is None:
+        return None
+    start_h = int(getattr(settings, "owner_quiet_start_hour", 21))
+    end_h = int(getattr(settings, "owner_quiet_end_hour", 9))
+    now_fn = clock or (lambda: datetime.now(timezone.utc))
+    chat_for = lookup_chat_id or _owner_platform_id
+
+    def _one(surface: str, device_id: str | None, text: str, quiet: bool) -> bool:
+        chat_id = None
+        if surface != "device":
+            chat_id = chat_for(settings, surface)
+            if not chat_id:
+                log.info("owner reach: no owner %s identity", surface)
+                return False
+        try:
+            if send is not None:
+                send(surface, chat_id or device_id, text, quiet)
+            elif surface == "device":
+                from aerys_v2.factory import followup_router_for
+
+                route = followup_router_for(settings)
+                if route is None:
+                    raise RuntimeError("followup router unarmed (no ha_token)")
+                route(text, device_id)
+            elif surface == "telegram":
+                _telegram_send(tg_token.get_secret_value(), chat_id, text, silent=quiet)
+            else:
+                _discord_dm_send(dc_token.get_secret_value(), chat_id, text, silent=quiet)
+        except Exception:
+            log.warning("owner reach via %s failed", surface, exc_info=True)
+            return False
+        log.info("owner reach: %s%s (%d chars)", surface, " (silent)" if quiet else "", len(text))
+        return True
+
+    def reach(text: str) -> bool:
+        quiet = in_quiet_hours(now_fn(), start_h, end_h)
+        surface, device_id = (lookup_surface or _owner_last_surface)(settings)
+        if surface == "device" and quiet:
+            surface, device_id = "discord", None      # never spoken into a room at night
+        if surface == "telegram" and tg_token is None and send is None:
+            surface = "discord"
+        if surface == "discord" and dc_token is None and send is None:
+            surface = "telegram" if tg_token is not None else ""
+        if not surface:
+            return False
+        if _one(surface, device_id, text, quiet):
+            return True
+        if surface == "device" and (dc_token is not None or send is not None):
+            return _one("discord", None, text, quiet)
+        return False
+
+    return reach
+
+
+#: Appended to her soul when Kael answers a ticket the owner opened. Unlike the proactive
+#: turn there is no HOLD: he asked for this answer, so bringing it back IS the job.
+TICKET_RELAY_PROMPT = (
+    "\n\n[Kael's line — a ticket answered] Chris asked you to put something to Kael, and "
+    "Kael has answered. Tell Chris now: this is the follow-up he asked for, so there is no "
+    "holding it. Short, warm, first person, your own voice. Pass on what Kael said "
+    "accurately; never add facts he didn't give, and never say something was done unless "
+    "he said it was done. If Kael is asking something back, put that question to Chris. "
+    "Reply with ONLY the message to send."
+)
+
+
+def _said_to_owner(graph, settings, text: str) -> None:
+    """She said it, so the owner's thread must remember she said it (the continuity rule
+    the proactive turn and the voice paths follow). Fail-open: the message is already out."""
+    try:
+        graph.update_state(
+            {"configurable": {"thread_id": f"person:{settings.owner_person_id}"}},
+            {"messages": [AIMessage(content=text)]},
+        )
+    except Exception:
+        log.warning("owner thread append failed (message already delivered)", exc_info=True)
+
+
+def ticket_relay_for(graph, settings, *, model=None, reach=None) -> Callable[..., bool] | None:
+    """fn(ticket) -> bool: bring Kael's answer on a ticket the owner opened back to him, in
+    her words. If her words can't be had (model down, empty, a stray HOLD), Kael's answer
+    goes plainly: the follow-up must not be lost to a model hiccup. None = no way to reach
+    the owner (the watcher then leaves answers owed and logs nothing new)."""
+    reach = reach or owner_reach_for(settings)
+    if reach is None:
+        return None
+
+    def relay(ticket) -> bool:
+        from aerys_v2.tickets import label
+
+        name = label(ticket.id)
+        text = ""
+        try:
+            from aerys_v2.factory import build_model, load_soul
+            from aerys_v2.service import _reply_text
+
+            soul = load_soul(settings.soul_file_path)
+            reply = (model or build_model(settings)).invoke([
+                SystemMessage(content=soul + TICKET_RELAY_PROMPT),
+                HumanMessage(content=(
+                    f"What Chris asked you to put to Kael ({name}): {ticket.ask}\n\n"
+                    f"Kael's answer ({ticket.status}): {ticket.answer}"
+                )),
+            ])
+            text = _reply_text(reply).strip()
+        except Exception:
+            log.warning("ticket %s relay: her words failed; passing Kael's on plainly", name,
+                        exc_info=True)
+        if not text or _HOLD_RE.match(text):
+            text = f"Kael got back to you ({name}): {ticket.answer}"
+        if not reach(text):
+            return False
+        _said_to_owner(graph, settings, text)
+        return True
+
+    return relay
+
+
+def owner_notice_for(graph, settings, *, reach=None) -> Callable[..., bool] | None:
+    """fn(ticket, reached) -> bool: tell the owner an ask of his is still open (reached: the
+    line accepted it and Kael hasn't answered) or never got through (his line is down).
+    Plain words, no model: it's a status, and it must say exactly what's true."""
+    reach = reach or owner_reach_for(settings)
+    if reach is None:
+        return None
+
+    def notice(ticket, reached: bool) -> bool:
+        from aerys_v2.tickets import label
+
+        asked = (ticket.created_at or datetime.now(timezone.utc)).astimezone(_EASTERN)
+        when = f"{asked:%a} {asked.month}/{asked.day} at {asked:%I:%M %p}".replace(" 0", " ")
+        ask = ticket.ask if len(ticket.ask) <= 160 else ticket.ask[:157].rstrip() + "..."
+        if reached:
+            text = (f"I asked Kael something for you on {when} and haven't heard back yet: "
+                    f"\"{ask}\" ({label(ticket.id)}). It's still open; I'll bring you his "
+                    "answer when it comes.")
+        else:
+            text = (f"I couldn't get through to Kael with what you asked me to pass on, on "
+                    f"{when}: \"{ask}\" ({label(ticket.id)}). His line has been down; it's "
+                    "waiting on his ticket list and I'll keep trying.")
+        if not reach(text):
+            return False
+        _said_to_owner(graph, settings, text)
+        return True
+
+    return notice

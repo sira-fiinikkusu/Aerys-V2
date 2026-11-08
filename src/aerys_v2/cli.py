@@ -204,6 +204,7 @@ def main() -> None:
             turn_recorder_for,
         )
         from aerys_v2.kael_line import family_notes_fn_for, kael_note_for
+        from aerys_v2.tickets import start_tickets, ticket_door_for
         from aerys_v2.service import ask
         from aerys_v2.services.a2a_memory import a2a_memory_writer_for
         from aerys_v2.transports.http_api import build_app
@@ -299,6 +300,10 @@ def main() -> None:
                 log.info("spoken follow-ups armed | default_entity=%s satellites=%d skip<=%.1fs confirm_writes=%s",
                          settings.ha_announce_entity, len(satellite_map),
                          settings.voice_followup_skip_s, settings.voice_confirm_writes)
+            # The Kael line's return direction (task #66) and its tickets (board #176)
+            # share one note injector; the wake lets an answer reach the owner now.
+            kael_note_fn = kael_note_for(graph, settings)
+            ticket_wake = threading.Event()
             app = build_app(
                 lambda text, identity, thread: ask(
                     graph, text, identity=identity, thread_id=thread,
@@ -326,7 +331,10 @@ def main() -> None:
                 health_probe=health_probe_for(cp),
                 # The Kael line's return direction (task #66): his replies land
                 # in the thread she pinged from, receipted in v2_kael_notes.
-                kael_note_fn=kael_note_for(graph, settings),
+                kael_note_fn=kael_note_fn,
+                # Kael tickets (board #176): he answers by ticket; the watcher below
+                # brings answers to the owner, woken early by each answer.
+                kael_tickets=ticket_door_for(settings, kael_note_fn, ticket_wake),
                 # Gap #37: kael:* exchanges leave a durable memory (family
                 # memory door 1 — the only door approved to build solo).
                 a2a_memory_fn=a2a_memory_writer_for(settings),
@@ -366,6 +374,9 @@ def main() -> None:
 
             if start_checkins(settings) is not None:
                 log.info("kael check-ins armed | every 60s")
+            # Kael tickets (board #176): resend, remind Kael, tell the owner, relay answers.
+            if start_tickets(settings, graph, ticket_wake) is not None:
+                log.info("kael tickets armed | every 60s")
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 

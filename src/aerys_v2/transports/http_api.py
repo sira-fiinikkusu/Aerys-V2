@@ -82,9 +82,24 @@ class KaelNoteReply(BaseModel):
     message_id: str
 
 
+class KaelTicketUpdate(BaseModel):
+    """POST /kael-ticket/{id} — Kael's word on a ticket she opened (board #176).
+
+    status is an A2A task state Kael may set: working, input-required, completed,
+    failed, canceled. text is required when it goes back to the owner
+    (input-required, completed, failed): an answer with no words is the 1-way
+    line all over again.
+    """
+
+    status: str
+    text: str = ""
+    family_visible: bool = False
+
+
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
-              a2a_memory_fn=None, settings=None, speaker_redirect=None) -> FastAPI:
+              a2a_memory_fn=None, settings=None, speaker_redirect=None,
+              kael_tickets=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -348,6 +363,43 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             body.thread_id.strip(), body.text.strip(), body.family_visible
         )
         return KaelNoteReply(ok=True, message_id=msg_id)
+
+    # Kael tickets (board #176): her asks come back, and the owner's come back to him.
+    # kael_tickets is a tickets.TicketDoor; unarmed (DB-less dev) = honest 503.
+    def _ticket_door():
+        if kael_tickets is None:
+            raise HTTPException(status_code=503, detail="kael tickets not armed")
+        return kael_tickets
+
+    @app.get("/kael-tickets")
+    def kael_tickets_route(open_only: bool = True, limit: int = 20,
+                           _: None = Depends(require_token)) -> dict:
+        door = _ticket_door()
+        rows = door.store.recent(limit=max(1, min(limit, 100)), open_only=open_only)
+        return {"tickets": [t.public() for t in rows]}
+
+    @app.get("/kael-ticket/{ticket_id}")
+    def kael_ticket_get(ticket_id: int, _: None = Depends(require_token)) -> dict:
+        ticket = _ticket_door().store.get(ticket_id)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="no such ticket")
+        return ticket.public()
+
+    @app.post("/kael-ticket/{ticket_id}")
+    def kael_ticket_update(ticket_id: int, body: KaelTicketUpdate,
+                           _: None = Depends(require_token)) -> dict:
+        from aerys_v2.tickets import KAEL_STATUSES, OWED_TO_OWNER
+
+        door = _ticket_door()
+        if body.status not in KAEL_STATUSES:
+            raise HTTPException(status_code=422,
+                                detail=f"status must be one of {', '.join(KAEL_STATUSES)}")
+        if body.status in OWED_TO_OWNER and not body.text.strip():
+            raise HTTPException(status_code=422, detail=f"{body.status} needs text")
+        ticket = door.update(ticket_id, body.status, body.text, body.family_visible)
+        if ticket is None:
+            raise HTTPException(status_code=404, detail="no such ticket")
+        return ticket.public()
 
     @app.get("/gaps")
     def gaps_route(_: None = Depends(require_token)) -> dict:
