@@ -337,3 +337,38 @@ def test_a_repair_receipt_is_not_a_tool_that_ran_but_a_real_failure_still_is():
                                 "were malformed or truncated.", tool_call_id="bad1", name="home_control",
                         status="error")]
     assert [c["name"] for c in extract_tool_calls(msgs)] == ["echo"]
+
+
+def test_two_tools_in_one_pass_come_back_in_the_same_order_on_both_engines():
+    """Real traces have parallel calls (calendar_events + manage_list in one pass).
+    create_agent sends each call as its own task; the next model pass must still see
+    the results in the order the old ToolNode gave them."""
+    import time as _time
+
+    @tool
+    def slow(text: str) -> str:
+        """Slow tool."""
+        _time.sleep(0.05)
+        return f"slow: {text}"
+
+    tools = [echo, slow]
+
+    def script():
+        return [AIMessage(content="", tool_calls=[{"id": "a", "name": "slow", "args": {"text": "1"}},
+                                                  {"id": "b", "name": "echo", "args": {"text": "2"}}]),
+                AIMessage(content="Both done.")]
+
+    logs = []
+    for engine in ("old", "new"):
+        log, s = [], script()
+        conv, std = Rec(label="conv", script=s, log=log), Rec(label="std", script=s, log=log)
+        if engine == "old":
+            graph = OLD_BUILD(ToolModelPair(conv.bind_tools(tools), std.bind_tools(tools),
+                                            std.bind_tools(tools, tool_choice="any")), "SOUL", tools)
+        else:
+            graph = build_agent_action_graph(AgentToolModels(conv, (std, True)), "SOUL", tools)
+        out = graph.invoke({"messages": [HumanMessage(content="do both")]}, SURFACES["typed specialist"])
+        logs.append((log, [(m.type, m.content) for m in out["messages"]]))
+    (old_log, old_msgs), (new_log, new_msgs) = logs
+    assert new_log == old_log and new_msgs == old_msgs
+    assert [c for t, c in old_msgs if t == "tool"] == ["slow: 1", "echo: 2"]
