@@ -35,7 +35,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from aerys_v2.services.location_guard import location_memory_blocked, LOCATION_REFUSAL
-from aerys_v2.state import identity_from_config
+from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config
 from aerys_v2.workers.extraction import KEY_LABEL_PATTERN, question_shaped
 
 log = logging.getLogger(__name__)
@@ -65,6 +65,9 @@ KEPT_PREFIX = "Kept:"
 ALREADY_PREFIX = "Already kept:"
 NOT_KEPT = "I couldn't save that — the memory store didn't confirm the write. Nothing was kept."
 NOT_LINKED = "I can only keep memories for a linked person; nothing was kept."
+#: D2 (Chris 2026-11-08): a voice that wasn't clearly his can't write his memory.
+NOT_SURE_WHO = ("Nothing was kept: I couldn't tell for sure that was Chris's voice. "
+                "If it was you, Chris, say it again close to the speaker or text it to me.")
 EMPTY = "Tell me the thing to keep — I got an empty fact."
 #: An over-long "fact" is almost never one long fact — it is several that were
 #: never separated. That is exactly what arrived on 2026-09-13: four distinct
@@ -153,6 +156,8 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
                         len(text), FACT_LIMIT)
             return TOO_LONG
         identity = identity_from_config(config) if config else {}
+        if identity.get(VOICE_OWNER_ASSUMED_KEY):
+            return NOT_SURE_WHO
         person_id = str(identity.get("user_id") or "")
         if not _UUID_RE.match(person_id):
             return NOT_LINKED

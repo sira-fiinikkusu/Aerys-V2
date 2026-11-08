@@ -28,6 +28,8 @@ import logging
 import uuid
 from typing import Any
 
+from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, VOICE_OWNER_ASSUMED_MARKER
+
 log = logging.getLogger(__name__)
 
 # The INSERT lives with the row builder so the columns and the dict keys can never
@@ -347,6 +349,9 @@ def build_turn_row(
     """
     messages = messages or []
     identity = identity or {}
+    if identity.get(VOICE_OWNER_ASSUMED_KEY):
+        # D2: the extractor reads this marker and leaves the turn out of his memory.
+        extra_degraded = [*(extra_degraded or []), VOICE_OWNER_ASSUMED_MARKER]
     user_id = str(identity.get("user_id") or "").strip()
     is_uuid = _is_uuid(user_id)
     person_id = user_id if is_uuid else None

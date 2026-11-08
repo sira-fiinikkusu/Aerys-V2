@@ -24,6 +24,9 @@ class Identity(TypedDict, total=False):
     # service's visibility gates keep dm-only claims out of shared rooms. Absent =
     # 'private' (the owner's own single-user channels — CLI, voice/HTTP).
     privacy_context: str
+    # D2 (2026-11-08): True on a voice turn that is the owner's only by default
+    # (untagged / recognizer unsure). See VOICE_OWNER_ASSUMED_KEY below.
+    voice_owner_assumed: bool
     # HA ConversationInput.device_id — the originating satellite. Set by the HA
     # aerys_conversation component (via /ask); lets the spoken follow-up answer on
     # the SAME device the voice turn came from. Absent = fall back to the single
@@ -80,6 +83,14 @@ UNKNOWN_CALLER: Identity = {"display_name": "Unknown Caller"}
 # The Identity key the explicit voice flag lives under — one constant so the writer
 # (the voice transport) and every reader (is_voice_turn) can never drift on spelling.
 VOICE_KEY = "voice"
+
+# D2 (Chris 2026-11-08, board #176): a voice turn that stayed the owner's only BY
+# DEFAULT (untagged, or the recognizer itself unsure) carries this flag. Chat keeps
+# answering it as his, on purpose (9/22), but it never becomes HIS memory: the
+# extractor skips the turn and the remember tool won't keep its facts, so a voice
+# that wasn't clearly his (Megan, a guest, the TV) can't be written in as him.
+VOICE_OWNER_ASSUMED_KEY = "voice_owner_assumed"
+VOICE_OWNER_ASSUMED_MARKER = "voice_owner_assumed"
 
 # The Identity key the rendering-surface hint lives under, and the one surface
 # value with behavior attached — same writer/reader-can-never-drift rationale.

@@ -306,6 +306,9 @@ WHERE t.person_id IS NOT NULL
   -- Fail closed on every nearby call, including refusals/unknown outcomes.
   -- The audit stores tool names but not location payloads; no schema change needed.
   AND NOT COALESCE(t.tool_calls, '[]'::jsonb) @> '[{"name":"where_is_chris_nearby"}]'::jsonb
+  -- D2 (Chris 2026-11-08): a voice turn that stayed the owner's only by default
+  -- (untagged, or the recognizer unsure) never becomes his memory.
+  AND NOT COALESCE(t.degraded, '[]'::jsonb) @> '["voice_owner_assumed"]'::jsonb
   AND t.input_text != ''
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC

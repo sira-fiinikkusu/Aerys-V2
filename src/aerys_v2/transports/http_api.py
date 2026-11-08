@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from aerys_v2.state import Identity
+from aerys_v2.state import Identity, VOICE_OWNER_ASSUMED_KEY
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +146,16 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if settings.voice_unknown_speaker == "guest":
             return GUEST_VOICE_ID, "Guest (Voice)"
         return None
+
+    def owner_confirmed(speaker_id: str, confidence: float) -> bool:
+        """A NAMED match to the owner's own print at or above the floor. Anything else
+        that still lands on the owner (untagged, or the recognizer's unsure band) is
+        his turn by default only: chat answers it as his, memory never takes it (D2)."""
+        if settings is None:
+            return False
+        name = (speaker_id or "").strip().lower()
+        return (speaker_persons.get(name) == owner_person_id
+                and confidence >= settings.voice_speaker_min_confidence)
 
     def voice_thread() -> str:
         """The checkpointer thread a voice turn rides. When an owner is configured (the
@@ -291,10 +301,15 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if body.voice or str(body.thread_id or "").startswith("voice"):
             identity["voice"] = True
             thread_id = voice_thread()
-            if body.speaker is not None:
+            if body.speaker is None:
+                if owner_person_id:
+                    identity[VOICE_OWNER_ASSUMED_KEY] = True    # untagged: his by default only
+            else:
                 # Who spoke decides WHOSE turn this is. The Bearer proved the owner's
                 # infrastructure is calling; the voice decides the person.
                 who = resolve_speaker(body.speaker.id, body.speaker.confidence)
+                if who is None and owner_person_id and not owner_confirmed(body.speaker.id, body.speaker.confidence):
+                    identity[VOICE_OWNER_ASSUMED_KEY] = True    # the unsure band: his by default only
                 # The DOOR decides whether a verdict demotes; the gate obeys that flag
                 # rather than re-reading the id, so the two can never disagree.
                 demoted = who is not None and who[0] == GUEST_VOICE_ID
