@@ -203,7 +203,7 @@ def main() -> None:
             health_probe_for,
             turn_recorder_for,
         )
-        from aerys_v2.kael_line import family_notes_fn_for, kael_note_for
+        from aerys_v2.kael_line import family_notes_fn_for, kael_note_for, parse_room_devices
         from aerys_v2.tickets import start_tickets, ticket_door_for
         from aerys_v2.service import ask
         from aerys_v2.services.a2a_memory import a2a_memory_writer_for
@@ -302,7 +302,12 @@ def main() -> None:
                          settings.voice_followup_skip_s, settings.voice_confirm_writes)
             # The Kael line's return direction (task #66) and its tickets (board #176)
             # share one note injector; the wake lets an answer reach the owner now.
-            kael_note_fn = kael_note_for(graph, settings)
+            # The reach-out desk (board #176, Stage 2): everything she starts herself goes
+            # through it: the Kael-note turn and the ticket answers here, its watcher below.
+            from aerys_v2.kael_line import reach_desk_for
+
+            reach_desk = reach_desk_for(settings, graph)
+            kael_note_fn = kael_note_for(graph, settings, desk=reach_desk)
             ticket_wake = threading.Event()
             app = build_app(
                 lambda text, identity, thread: ask(
@@ -375,8 +380,13 @@ def main() -> None:
             if start_checkins(settings) is not None:
                 log.info("kael check-ins armed | every 60s")
             # Kael tickets (board #176): resend, remind Kael, tell the owner, relay answers.
-            if start_tickets(settings, graph, ticket_wake) is not None:
+            if start_tickets(settings, graph, ticket_wake, desk=reach_desk) is not None:
                 log.info("kael tickets armed | every 60s")
+            from aerys_v2.reach import start_reach_desk
+
+            if start_reach_desk(reach_desk) is not None:
+                log.info("reach-out desk armed | budget %s, rooms with a speaker: %d",
+                         settings.reach_daily_budget, len(parse_room_devices(settings.reach_room_devices)))
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 

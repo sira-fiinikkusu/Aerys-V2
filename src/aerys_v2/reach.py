@@ -1,0 +1,575 @@
+"""The reach-out desk: every message she starts herself goes through here (board #176, Stage 2).
+
+The owner's rulings, 2026-11-08:
+  D4 "3 a day plus briefs as a starting point but this can be adaptive, i'd like for an
+     option for me to say chill out or annoy me more (not exactly in those words)."
+  D6 "where-ever she detects my pressence (via our new home pressence + bluetooth
+     awareness of my phone)"
+  D7 "can we not use rigid emoji reactions for this? ... this should be natural language"
+  D15 + the meeting rule: nothing spoken over a work meeting; it waits until 10 minutes
+     after; quiet hours 21:00-09:00 make it quiet text.
+
+So one desk, with its checks in code, in this order (decide() below):
+  1. no repeats (a dedupe key already sent in the last day is dropped);
+  2. safety warnings always go;
+  3. topics he muted are dropped (an answer he asked for never is);
+  4. the night: an answer he asked for, or anything timely, goes as quiet text; the rest
+     waits for the morning;
+  5. his meetings: timely things go as quiet text; an answer he asked for goes as quiet
+     text, or waits for the window if she would have SAID it; the rest waits;
+  6. the daily budget (his, in v2_reach_prefs): over it, routine things are dropped and
+     timely ones still go.
+Then delivery, where he is: the room the house places him in (his phone's Bluetooth plus
+the room sensors: the settled room), if that room has a speaker; otherwise his last
+surface (a voice device he spoke on minutes ago, Telegram, or a Discord DM). The headline
+is what may be spoken; detail only ever goes as text. A spoken message he doesn't answer
+within a few minutes gets a text copy. Never over a satellite that's mid-conversation.
+
+The record (v2_reachouts, migration 016) holds every decision with its reason, so "why
+did she go quiet?" has an answer. Everything she queues is delivered by the watcher when
+its window opens; an answer he asked for is never dropped, only delayed.
+
+What she says is the private part: never logged (logs carry ids, sources and statuses).
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta, timezone
+from typing import Callable, Iterable, Protocol
+from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
+
+EASTERN = ZoneInfo("America/New_York")
+URGENCIES = ("routine", "timely", "safety")
+BUDGET_MIN, BUDGET_MAX = 0, 8
+DEDUPE_WINDOW = timedelta(hours=24)
+BUSY_RETRY = timedelta(minutes=1)
+FAIL_BACKOFF = (timedelta(minutes=1), timedelta(minutes=2), timedelta(minutes=5),
+                timedelta(minutes=10), timedelta(minutes=30))
+GIVE_UP_AFTER = 8                     # failed attempts before a NON-owed item is given up
+FOLLOW_THROUGH_FOR = timedelta(hours=1)
+DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went keeps trying this long
+TICK_S = 30
+MISSED_PREFIX = "In case you missed what I said:"
+
+
+@dataclass
+class ReachEvent:
+    source: str                       # who raised it: kael_note, ticket, ticket_notice, ...
+    topic: str                        # what it's about: kael, weather, email, ... (mutable by him)
+    headline: str                     # what may be spoken aloud
+    detail: str = ""                  # text only, never spoken
+    urgency: str = "routine"          # routine | timely | safety
+    owed: bool = False                # an answer he asked for: never dropped, never budgeted
+    dedupe_key: str | None = None
+    expires_at: datetime | None = None
+
+
+@dataclass
+class Reach:
+    """One row of the record."""
+
+    id: int
+    source: str
+    topic: str
+    urgency: str
+    owed: bool
+    headline: str
+    detail: str = ""
+    dedupe_key: str | None = None
+    status: str = "queued"
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
+    reason: str = ""
+    surface: str | None = None
+    silent: bool = False
+    spoken_at: datetime | None = None
+    dm_at: datetime | None = None
+    delivered_at: datetime | None = None
+    acked_at: datetime | None = None
+    attempts: int = 0
+    created_at: datetime | None = None
+
+    def event(self) -> ReachEvent:
+        return ReachEvent(source=self.source, topic=self.topic, headline=self.headline, detail=self.detail,
+                          urgency=self.urgency, owed=self.owed, dedupe_key=self.dedupe_key,
+                          expires_at=self.expires_at)
+
+
+@dataclass
+class Prefs:
+    budget: int = 3
+    muted: list = field(default_factory=list)
+
+
+@dataclass
+class Decision:
+    action: str                       # send | queue | drop
+    reason: str = ""
+    not_before: datetime | None = None
+    silent: bool = False
+    voice: str = "ok"                 # ok | reroute (text instead) | wait (until not_before)
+    breaks_through: bool = False      # safety: may speak at night or over a meeting (D4)
+
+
+def _utc(dt: datetime | None) -> datetime | None:
+    return dt.astimezone(timezone.utc) if dt is not None else None
+
+
+def next_local(now: datetime, hour: int) -> datetime:
+    """The next time it is `hour`:00 Eastern after `now` (DST-safe: built in local time)."""
+    local = now.astimezone(EASTERN)
+    target = datetime.combine(local.date(), time(hour), tzinfo=EASTERN)
+    if target <= local:
+        target = datetime.combine(local.date() + timedelta(days=1), time(hour), tzinfo=EASTERN)
+    return target.astimezone(timezone.utc)
+
+
+def local_day_start(now: datetime) -> datetime:
+    local = now.astimezone(EASTERN)
+    return datetime.combine(local.date(), time(0), tzinfo=EASTERN).astimezone(timezone.utc)
+
+
+def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
+           quiet: bool, meeting_until: datetime | None, morning_hour: int) -> Decision:
+    """The desk's checks, in order (module docstring). Pure: every input is given."""
+    if duplicate:
+        return Decision("drop", "already sent")
+    if event.urgency == "safety":
+        return Decision("send", "safety", breaks_through=True)
+    muted = {str(m).strip().lower() for m in prefs.muted}
+    if not event.owed and event.topic.strip().lower() in muted:
+        return Decision("drop", f"you muted {event.topic}")
+    if quiet:
+        if event.owed or event.urgency == "timely":
+            return Decision("send", "night: as quiet text", silent=True, voice="reroute")
+        return Decision("queue", "night: waits for the morning", not_before=next_local(now, morning_hour))
+    if meeting_until is not None:
+        if event.urgency == "timely":
+            return Decision("send", "meeting: as quiet text", silent=True, voice="reroute")
+        if event.owed:
+            return Decision("send", "meeting: quiet text, or the next window if it would be spoken",
+                            silent=True, voice="wait", not_before=meeting_until)
+        return Decision("queue", "meeting: waits until 10 minutes after", not_before=meeting_until)
+    if not event.owed and sent_today >= prefs.budget:
+        if event.urgency == "timely":
+            return Decision("send", f"over today's budget ({prefs.budget}), but timely")
+        return Decision("drop", f"over today's budget ({prefs.budget})")
+    return Decision("send")
+
+
+# --- the record --------------------------------------------------------------------------
+
+
+class ReachStore(Protocol):
+    def add(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
+            not_before: datetime | None) -> Reach: ...
+    def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
+    def sent_since(self, since: datetime) -> int: ...
+    def due(self, now: datetime) -> list[Reach]: ...
+    def awaiting_reply(self, before: datetime, after: datetime, detail_after: datetime | None = None) -> list[Reach]: ...
+    def mark(self, reach_id: int, now: datetime, **fields) -> None: ...
+    def prefs(self, default_budget: int) -> Prefs: ...
+    def set_prefs(self, prefs: Prefs, now: datetime, change: str, words: str) -> None: ...
+
+
+MARKABLE = {"status", "not_before", "reason", "surface", "silent", "spoken_at", "dm_at",
+            "delivered_at", "acked_at", "attempts"}
+
+
+class MemoryReachStore:
+    """In-process store (tests, dev boxes). Same semantics as the Postgres one."""
+
+    def __init__(self, rows: Iterable[Reach] = (), prefs: Prefs | None = None):
+        self.rows = {r.id: r for r in rows}
+        self._next = max(self.rows, default=0) + 1
+        self._prefs = prefs
+        self.changes: list = []
+
+    def add(self, event, now, *, status, reason, not_before):
+        r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
+                  headline=event.headline, detail=event.detail, dedupe_key=event.dedupe_key, status=status,
+                  not_before=not_before, expires_at=event.expires_at, reason=reason, created_at=now)
+        self.rows[r.id] = r
+        self._next += 1
+        return r
+
+    def recently_sent(self, dedupe_key, since):
+        return any(r.dedupe_key == dedupe_key and r.status in ("sent", "queued") and r.created_at >= since
+                   for r in self.rows.values())
+
+    def sent_since(self, since):
+        return sum(1 for r in self.rows.values() if r.status == "sent" and not r.owed
+                   and r.urgency != "safety" and r.delivered_at and r.delivered_at >= since)
+
+    def due(self, now):
+        return sorted((r for r in self.rows.values() if r.status == "queued"
+                       and (r.not_before is None or r.not_before <= now)), key=lambda r: r.id)
+
+    def awaiting_reply(self, before, after, detail_after=None):
+        lower = lambda r: detail_after if (r.detail and detail_after is not None) else after
+        return [r for r in self.rows.values() if r.status == "sent" and r.spoken_at and r.dm_at is None
+                and r.acked_at is None and lower(r) <= r.spoken_at <= before]
+
+    def mark(self, reach_id, now, **fields):
+        bad = set(fields) - MARKABLE
+        if bad:
+            raise ValueError(f"not markable: {bad}")
+        for k, v in fields.items():
+            setattr(self.rows[reach_id], k, v)
+
+    def prefs(self, default_budget):
+        if self._prefs is None:
+            self._prefs = Prefs(budget=default_budget)
+        return Prefs(budget=self._prefs.budget, muted=list(self._prefs.muted))
+
+    def set_prefs(self, prefs, now, change, words):
+        self._prefs = Prefs(budget=prefs.budget, muted=list(prefs.muted))
+        self.changes.append((now, change, words))
+
+
+class PostgresReachStore:
+    """v2_reachouts / v2_reach_prefs / v2_reach_pref_changes (db/migrations/016). Fresh short
+    connections per call, the tickets store's stance. Times are the brain's clock."""
+
+    COLUMNS = ("id, source, topic, urgency, owed, headline, detail, dedupe_key, status, not_before, expires_at, "
+               "reason, surface, silent, spoken_at, dm_at, delivered_at, acked_at, attempts, created_at")
+
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+
+    def _connect(self):
+        import psycopg
+
+        return psycopg.connect(self.database_url, connect_timeout=5, options="-c statement_timeout=5000")
+
+    @staticmethod
+    def _row(r) -> Reach:
+        return Reach(id=r[0], source=r[1], topic=r[2], urgency=r[3], owed=r[4], headline=r[5], detail=r[6],
+                     dedupe_key=r[7], status=r[8], not_before=r[9], expires_at=r[10], reason=r[11], surface=r[12],
+                     silent=r[13], spoken_at=r[14], dm_at=r[15], delivered_at=r[16], acked_at=r[17],
+                     attempts=r[18], created_at=r[19])
+
+    def add(self, event, now, *, status, reason, not_before):
+        with self._connect() as conn:
+            row = conn.execute(
+                "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
+                "dedupe_key, status, not_before, expires_at, reason) VALUES "
+                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
+                (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
+                 event.dedupe_key, status, not_before, event.expires_at, reason)).fetchone()
+        return self._row(row)
+
+    def recently_sent(self, dedupe_key, since):
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s AND status IN ('sent', 'queued') "
+                "AND created_at >= %s LIMIT 1", (dedupe_key, since)).fetchone() is not None
+
+    def sent_since(self, since):
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT count(*) FROM v2_reachouts WHERE status = 'sent' AND NOT owed AND urgency <> 'safety' "
+                "AND delivered_at >= %s", (since,)).fetchone()[0]
+
+    def due(self, now):
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' "
+                "AND (not_before IS NULL OR not_before <= %s) ORDER BY id", (now,)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def awaiting_reply(self, before, after, detail_after=None):
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'sent' AND spoken_at IS NOT NULL "
+                "AND dm_at IS NULL AND acked_at IS NULL AND spoken_at <= %s "
+                "AND spoken_at >= CASE WHEN detail <> '' THEN %s ELSE %s END ORDER BY id",
+                (before, detail_after or after, after)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def mark(self, reach_id, now, **fields):
+        bad = set(fields) - MARKABLE
+        if bad:
+            raise ValueError(f"not markable: {bad}")
+        cols = ", ".join(f"{k} = %s" for k in fields)
+        with self._connect() as conn:
+            conn.execute(f"UPDATE v2_reachouts SET {cols}, updated_at = %s WHERE id = %s",
+                         (*fields.values(), now, reach_id))
+
+    def prefs(self, default_budget):
+        with self._connect() as conn:
+            row = conn.execute("SELECT budget, muted FROM v2_reach_prefs WHERE id = 1").fetchone()
+        return Prefs(budget=row[0], muted=list(row[1])) if row else Prefs(budget=default_budget)
+
+    def set_prefs(self, prefs, now, change, words):
+        with self._connect() as conn:   # one transaction: the prefs and their record together
+            conn.execute(
+                "INSERT INTO v2_reach_prefs (id, budget, muted, updated_at) VALUES (1, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, muted = EXCLUDED.muted, "
+                "updated_at = EXCLUDED.updated_at", (prefs.budget, list(prefs.muted), now))
+            conn.execute("INSERT INTO v2_reach_pref_changes (at, change, words) VALUES (%s, %s, %s)",
+                         (now, change, words))
+
+
+# --- delivery ----------------------------------------------------------------------------
+
+
+@dataclass
+class Where:
+    kind: str                         # room | device | discord | telegram
+    device_id: str | None = None
+    label: str = ""
+
+
+@dataclass
+class Delivery:
+    status: str                       # sent | busy | wait | failed
+    surface: str = ""
+    spoken: bool = False
+    texted: bool = False
+
+
+class Deliverer:
+    """Where he is, and how to reach him there. Every leg is injected (tests; production
+    wires them in reach_desk_for)."""
+
+    def __init__(self, *, locate: Callable[[], Where], speak: Callable[[str, str], None],
+                 text: Callable[[str, str, bool], None], busy: Callable[[str], bool] | None = None,
+                 text_surface: str = "discord"):
+        self.locate, self.speak, self.text = locate, speak, text
+        self.busy = busy or (lambda device_id: False)
+        self.text_surface = text_surface
+        # Set by the desk: may she speak RIGHT NOW? Checked at the moment of speech, after the
+        # location and busy checks, because the night or a meeting can begin while those run.
+        self.may_speak: Callable[[], bool] = lambda: True
+
+    def deliver(self, row: Reach, decision: Decision) -> Delivery:
+        where = self.locate()
+        spoken = where.kind in ("room", "device")
+        if spoken and decision.voice == "wait":
+            return Delivery("wait")
+        if spoken and decision.voice == "reroute":
+            where, spoken = Where(self.text_surface), False
+        body = row.headline + (f"\n\n{row.detail}" if row.detail else "")
+        try:
+            if spoken:
+                if self.busy(where.device_id):
+                    return Delivery("busy")
+                if not decision.breaks_through and not self.may_speak():   # the night or a meeting began just now
+                    return Delivery("recheck")
+                self.speak(row.headline, where.device_id)
+            else:
+                self.text(where.kind, body, decision.silent)
+                return Delivery("sent", where.kind, texted=True)
+        except Exception as e:
+            log.warning("reach: delivery via %s failed (%s)", where.kind, type(e).__name__)
+            return Delivery("failed", where.kind)
+        # Spoken. The detail goes as text; if THAT fails the message still reached him (it is
+        # never spoken twice): the watcher's follow-through sends the detail later.
+        surface = f"{where.kind}:{where.label or where.device_id}"
+        if not row.detail:
+            return Delivery("sent", surface, spoken=True)
+        try:
+            self.text(self.text_surface, body, decision.silent)
+            return Delivery("sent", surface, spoken=True, texted=True)
+        except Exception as e:
+            log.warning("reach: spoken, but the detail text failed (%s); the follow-through sends it", type(e).__name__)
+            return Delivery("sent", surface, spoken=True)
+
+
+# --- the desk ----------------------------------------------------------------------------
+
+
+class ReachDesk:
+    """reach_out(event) -> 'sent' | 'queued' | 'dropped' | 'duplicate'. 'queued' is a promise: the watcher
+    delivers it when its window opens (or retries a failure), and an answer he asked for is
+    never dropped. said(row, text) records in her thread what she actually said."""
+
+    def __init__(self, store: ReachStore, deliverer: Deliverer, *, budget_default: int = 3,
+                 quiet: Callable[[datetime], bool] | None = None, morning_hour: int = 9,
+                 meeting_hold: Callable[[], datetime | None] | None = None,
+                 replied_since: Callable[[datetime], bool] | None = None,
+                 said: Callable[[Reach, str], None] | None = None,
+                 follow_through_after: timedelta = timedelta(minutes=5),
+                 clock: Callable[[], datetime] | None = None):
+        self.store, self.deliverer = store, deliverer
+        self.budget_default, self.morning_hour = budget_default, morning_hour
+        self.quiet = quiet or (lambda now: False)
+        self.meeting_hold = meeting_hold
+        self.replied_since = replied_since
+        self.said = said or (lambda row, text: None)
+        self.follow_through_after = follow_through_after
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.lock = threading.Lock()   # one delivery at a time: the watcher and a turn can race
+        self.wake = threading.Event()
+        # Rows delivered whose record didn't land (the store hiccuped after the send): only
+        # the record is retried, never the delivery (the check-ins' stance; Codex 11/08).
+        self.unrecorded: dict = {}
+        deliverer.may_speak = lambda: not self.quiet(self.clock()) and self._meeting() is None
+
+    def _meeting(self) -> datetime | None:
+        try:
+            return self.meeting_hold() if self.meeting_hold else None
+        except Exception:
+            log.warning("reach: meeting check failed; not holding", exc_info=True)
+            return None
+
+    def _decide(self, event: ReachEvent, now: datetime, *, fresh: bool) -> Decision:
+        duplicate = bool(fresh and event.dedupe_key
+                         and self.store.recently_sent(event.dedupe_key, now - DEDUPE_WINDOW))
+        return decide(event, now, prefs=self.store.prefs(self.budget_default),
+                      sent_today=self.store.sent_since(local_day_start(now)), duplicate=duplicate,
+                      quiet=self.quiet(now), meeting_until=self._meeting(), morning_hour=self.morning_hour)
+
+    def reach_out(self, event: ReachEvent) -> str:
+        if event.urgency not in URGENCIES or not event.headline.strip():
+            raise ValueError("a reach-out needs a headline and a known urgency")
+        with self.lock:
+            now = self.clock()
+            d = self._decide(event, now, fresh=True)
+            if d.action == "drop":
+                row = self.store.add(event, now, status="dropped", reason=d.reason, not_before=None)
+                log.info("reach %s (%s): dropped: %s", row.id, event.source, d.reason)
+                # "duplicate" = the desk already holds this one (sent, or queued for its window):
+                # a caller retrying the same item (a ticket relay whose own record failed) has
+                # been heard, not refused.
+                return "duplicate" if d.reason == "already sent" else "dropped"
+            # Written BEFORE any attempt: a crash mid-delivery leaves it queued, never lost.
+            row = self.store.add(event, now, status="queued", reason=d.reason,
+                                 not_before=d.not_before if d.action == "queue" else None)
+            if d.action == "queue":
+                log.info("reach %s (%s): queued: %s", row.id, event.source, d.reason)
+                return "queued"
+            return self._attempt(row, d, now)
+
+    def _attempt(self, row: Reach, d: Decision, now: datetime, *, rechecked: bool = False) -> str:
+        result = self.deliverer.deliver(row, d)
+        if result.status == "recheck":
+            # Speech was allowed when decided, not any more: decide again with the fresh clock.
+            now = self.clock()
+            if rechecked:
+                self.store.mark(row.id, now, not_before=now + BUSY_RETRY, reason="the window changed; retrying")
+                return "queued"
+            d2 = self._decide(row.event(), now, fresh=False)
+            if d2.action == "drop":
+                self.store.mark(row.id, now, status="dropped", reason=d2.reason)
+                return "dropped"
+            if d2.action == "queue":
+                self.store.mark(row.id, now, not_before=d2.not_before, reason=d2.reason)
+                return "queued"
+            return self._attempt(row, d2, now, rechecked=True)
+        if result.status == "sent":
+            record = dict(status="sent", delivered_at=now, surface=result.surface, silent=d.silent,
+                          spoken_at=now if result.spoken else None, dm_at=now if result.texted else None,
+                          attempts=row.attempts + 1)
+            self.unrecorded[row.id] = record          # first: a failed record must not mean a resend
+            try:
+                self.store.mark(row.id, now, **record)
+                self.unrecorded.pop(row.id, None)
+            except Exception:
+                log.warning("reach %s: delivered, but recording it failed; only the record is retried", row.id)
+            try:
+                self.said(row, row.headline + (f"\n\n{row.detail}" if row.detail else ""))
+            except Exception:
+                log.warning("reach %s: delivered, but her thread didn't take the note", row.id, exc_info=True)
+            log.info("reach %s (%s): sent via %s%s", row.id, row.source, result.surface, " (quiet)" if d.silent else "")
+            return "sent"
+        if result.status == "wait":
+            self.store.mark(row.id, now, not_before=d.not_before, reason="meeting: waits for the window")
+            return "queued"
+        if result.status == "busy":
+            self.store.mark(row.id, now, not_before=now + BUSY_RETRY, reason="the room was mid-conversation")
+            return "queued"
+        attempts = row.attempts + 1
+        if attempts >= GIVE_UP_AFTER and not row.owed:
+            self.store.mark(row.id, now, status="failed", attempts=attempts, reason="couldn't reach you")
+            log.warning("reach %s (%s): gave up after %d attempts", row.id, row.source, attempts)
+            return "dropped"
+        backoff = FAIL_BACKOFF[min(attempts - 1, len(FAIL_BACKOFF) - 1)]
+        self.store.mark(row.id, now, not_before=now + backoff, attempts=attempts,
+                        reason=f"delivery failed; retrying in {int(backoff.total_seconds() // 60)} min")
+        return "queued"
+
+    def tick(self) -> dict:
+        """The watcher's pass: deliver what's due, and text a copy of what he didn't answer."""
+        out = {"sent": 0, "queued": 0, "dropped": 0, "duplicate": 0, "copied": 0, "heard": 0}
+        with self.lock:
+            now = self.clock()
+            for rid, record in list(self.unrecorded.items()):   # delivered; only the record is owed
+                try:
+                    self.store.mark(rid, now, **record)
+                    self.unrecorded.pop(rid, None)
+                except Exception:
+                    log.warning("reach %s: the record still won't land; retried next pass", rid)
+            for row in self.store.due(now):
+                if row.id in self.unrecorded:          # sent already: never delivered twice
+                    continue
+                now = self.clock()                     # per row: a slow delivery can cross 21:00
+                if row.expires_at and _utc(row.expires_at) <= now and not row.owed:
+                    self.store.mark(row.id, now, status="dropped", reason="expired before its window")
+                    out["dropped"] += 1
+                    continue
+                d = self._decide(row.event(), now, fresh=False)
+                if d.action == "drop":
+                    self.store.mark(row.id, now, status="dropped", reason=d.reason)
+                    out["dropped"] += 1
+                elif d.action == "queue":
+                    self.store.mark(row.id, now, not_before=d.not_before, reason=d.reason)
+                    out["queued"] += 1
+                else:
+                    out[self._attempt(row, d, now)] += 1
+            if self.replied_since is not None:
+                for row in self.store.awaiting_reply(now - self.follow_through_after, now - FOLLOW_THROUGH_FOR,
+                                                     detail_after=now - DETAIL_FOR):
+                    if row.id in self.unrecorded:
+                        continue
+                    try:
+                        heard = self.replied_since(_utc(row.spoken_at))
+                    except Exception:
+                        log.warning("reach: reply check failed; no copy this pass", exc_info=True)
+                        continue
+                    if heard and not row.detail:
+                        self.store.mark(row.id, now, acked_at=now)
+                        out["heard"] += 1
+                        continue
+                    # Not answered: a copy. Answered but the detail never went (its text failed
+                    # after the speech): the detail alone, he heard the headline.
+                    copy = (row.detail if heard else
+                            f"{MISSED_PREFIX} {row.headline}" + (f"\n\n{row.detail}" if row.detail else ""))
+                    try:
+                        self.deliverer.text(self.deliverer.text_surface, copy, self.quiet(now))
+                    except Exception:
+                        log.warning("reach %s: the text copy failed; retried next pass", row.id)
+                        continue
+                    record = {"dm_at": now, **({"acked_at": now} if heard else {})}
+                    self.unrecorded[row.id] = record    # first: a failed record must not mean a second copy
+                    try:
+                        self.store.mark(row.id, now, **record)
+                        self.unrecorded.pop(row.id, None)
+                    except Exception:
+                        log.warning("reach %s: copy sent, but recording it failed; only the record is retried", row.id)
+                    out["copied"] += 1
+        return out
+
+    def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
+        log.info("reach-out desk up | every %d s", TICK_S)
+        while True:
+            try:
+                self.tick()
+            except Exception:
+                log.warning("reach desk tick failed", exc_info=True)
+            self.wake.wait(TICK_S)
+            self.wake.clear()
+
+
+def start_reach_desk(desk: "ReachDesk | None") -> threading.Thread | None:
+    if desk is None:
+        return None
+    thread = threading.Thread(target=desk.run_forever, daemon=True, name="reach-desk")
+    thread.start()
+    return thread

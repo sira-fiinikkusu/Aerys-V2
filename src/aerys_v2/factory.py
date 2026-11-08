@@ -1575,6 +1575,14 @@ MESSAGE_KAEL_OVERLAY = (
     "its id instead of sending it again."
 )
 
+REACH_PREFS_OVERLAY = (
+    "The owner steers how often you reach out to him on your own, and about what, in his "
+    "own words. When he says anything like 'ease up', 'chill out', 'you're pinging me a "
+    "lot', 'keep me posted more', 'stop telling me about X', or asks what you'll bring him "
+    "unprompted, CALL reach_prefs (less / more / mute / unmute / show) and tell him plainly "
+    "what changed. Never claim a change the tool didn't confirm."
+)
+
 EMAIL_OVERLAY = (
     "You have YOUR OWN email inbox (you, Aerys — not the owner's mail). Four "
     "tools: search_email and read_email to look through it, draft_email and "
@@ -2341,6 +2349,16 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
 
             tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings)))
 
+    if not guest and settings.database_url:
+        # REACH PREFS (board #176, Stage 2; the owner's D4/D7, 2026-11-08): he steers how
+        # often she reaches out on her own, and about what, in his own words; the reach-out
+        # desk (reach.py) enforces it in code. Owner-side only: it's his inbox she's managing.
+        from aerys_v2.reach import PostgresReachStore
+        from aerys_v2.tools.reach_prefs import build_reach_prefs_tool
+
+        tools.append(build_reach_prefs_tool(PostgresReachStore(settings.database_url),
+                                            default_budget=settings.reach_daily_budget))
+
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
         # Kael's live coding session via his channel server's aerys lane.
@@ -2443,6 +2461,8 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(REMEMBER_OVERLAY)
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         parts.append(MESSAGE_KAEL_OVERLAY)
+    if not guest and settings.database_url:
+        parts.append(REACH_PREFS_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:
         parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)

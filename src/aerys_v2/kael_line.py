@@ -199,6 +199,7 @@ def kael_note_for(
     proactive_lookup_surface=None,
     proactive_sync: bool = False,
     proactive_meeting_hold=None,
+    desk=None,
 ) -> Callable[[str, str, bool], str]:
     """Build the note-injector the /kael-note door calls.
 
@@ -267,6 +268,14 @@ def kael_note_for(
             text = _reply_text(reply).strip()
             if not text or _HOLD_RE.match(text):
                 log.info("kael-note proactive: HOLD")
+                return
+            if desk is not None and proactive_send is None:
+                # The reach-out desk (#176, Stage 2) owns when, where and whether: the night,
+                # his meetings, his daily budget, topics he muted. It records what she said.
+                from aerys_v2.reach import ReachEvent
+
+                outcome = desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline=text))
+                log.info("kael-note proactive: %s by the desk", outcome)
                 return
             # D15 meeting rule, checked at the moment of delivery (a meeting can start while
             # she composes): this turn can't wait for the window (it has no queue), so in a
@@ -608,19 +617,24 @@ def _said_to_owner(graph, settings, text: str) -> None:
         log.warning("owner thread append failed (message already delivered)", exc_info=True)
 
 
-def ticket_relay_for(graph, settings, *, model=None, reach=None) -> Callable[..., bool] | None:
+def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> Callable[..., bool] | None:
     """fn(ticket) -> bool: bring Kael's answer on a ticket the owner opened back to him, in
     her words. If her words can't be had (model down, empty, a stray HOLD), Kael's answer
     goes plainly: the follow-up must not be lost to a model hiccup. None = no way to reach
-    the owner (the watcher then leaves answers owed and logs nothing new)."""
-    reach = reach or owner_reach_for(settings)
-    if reach is None:
-        return None
+    the owner (the watcher then leaves answers owed and logs nothing new).
+
+    With the reach-out desk (board #176, Stage 2) her words go to the desk as an answer he
+    asked for: the desk decides when and where, holds it through the night or a meeting,
+    and never drops it, so True means the desk has it."""
+    if desk is None:
+        reach = reach or owner_reach_for(settings)
+        if reach is None:
+            return None
 
     def relay(ticket) -> bool:
         from aerys_v2.tickets import label
 
-        if getattr(reach, "held", None) and reach.held() and not _last_hour(ticket):
+        if desk is None and getattr(reach, "held", None) and reach.held() and not _last_hour(ticket):
             return False           # he's in a meeting and she'd say it aloud: the next window
         name = label(ticket.id)
         text = ""
@@ -642,6 +656,14 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None) -> Callable[...
                         exc_info=True)
         if not text or _HOLD_RE.match(text):
             text = f"Kael got back to you ({name}): {ticket.answer}"
+        if desk is not None:
+            from aerys_v2.reach import ReachEvent
+
+            answered = getattr(ticket, "answered_at", None)
+            return desk.reach_out(ReachEvent(
+                source="ticket", topic="kael", headline=text, owed=True,
+                dedupe_key=f"ticket:{ticket.id}:{answered.isoformat() if answered else ''}",
+            )) in ("sent", "queued", "duplicate")
         if not reach(text):
             return False
         _said_to_owner(graph, settings, text)
@@ -661,18 +683,20 @@ def _last_hour(ticket) -> bool:
     return datetime.now(timezone.utc) - answered.astimezone(timezone.utc) > RELAY_FOR - timedelta(hours=1)
 
 
-def owner_notice_for(graph, settings, *, reach=None) -> Callable[..., bool] | None:
+def owner_notice_for(graph, settings, *, reach=None, desk=None) -> Callable[..., bool] | None:
     """fn(ticket, reached) -> bool: tell the owner an ask of his is still open (reached: the
     line accepted it and Kael hasn't answered) or never got through (his line is down).
-    Plain words, no model: it's a status, and it must say exactly what's true."""
-    reach = reach or owner_reach_for(settings)
-    if reach is None:
-        return None
+    Plain words, no model: it's a status, and it must say exactly what's true. With the
+    reach-out desk, it goes through the desk as something he's owed."""
+    if desk is None:
+        reach = reach or owner_reach_for(settings)
+        if reach is None:
+            return None
 
     def notice(ticket, reached: bool) -> bool:
         from aerys_v2.tickets import label
 
-        if getattr(reach, "held", None) and reach.held():
+        if desk is None and getattr(reach, "held", None) and reach.held():
             return False           # a status can wait for the next window too
 
         asked = (ticket.created_at or datetime.now(timezone.utc)).astimezone(_EASTERN)
@@ -686,9 +710,133 @@ def owner_notice_for(graph, settings, *, reach=None) -> Callable[..., bool] | No
             text = (f"I couldn't get through to Kael with what you asked me to pass on, on "
                     f"{when}: \"{ask}\" ({label(ticket.id)}). His line has been down; it's "
                     "waiting on his ticket list and I'll keep trying.")
+        if desk is not None:
+            from aerys_v2.reach import ReachEvent
+
+            since = getattr(ticket, "waiting_since", None) or ticket.created_at
+            return desk.reach_out(ReachEvent(
+                source="ticket_notice", topic="kael", headline=text, owed=True,
+                dedupe_key=f"ticket-notice:{ticket.id}:{since.isoformat() if since else ''}",
+            )) in ("sent", "queued", "duplicate")
         if not reach(text):
             return False
         _said_to_owner(graph, settings, text)
         return True
 
     return notice
+
+
+# --- board #176, Stage 2: the reach-out desk, wired from settings -------------------------
+
+_OWNER_REPLIED_SQL = (
+    "SELECT 1 FROM v2_turns WHERE person_id = %s::uuid AND created_at > %s "
+    "AND channel NOT IN ('kael', 'sentinel', 'http') LIMIT 1"
+)
+
+
+def parse_room_devices(csv: str) -> dict:
+    """'office=<device_id>,bedroom=<device_id>' -> {'office': '<device_id>', ...} (rooms lowercased)."""
+    out = {}
+    for pair in str(csv or "").split(","):
+        room, _, device = pair.partition("=")
+        if room.strip() and device.strip():
+            out[room.strip().lower()] = device.strip()
+    return out
+
+
+def reach_desk_for(settings, graph):
+    """The desk every message she starts herself goes through (reach.py). None without a
+    database, an owner, or any way to reach him: the callers then keep their old paths."""
+    if not getattr(settings, "database_url", None) or settings.owner_person_id is None:
+        return None
+    tg_token = getattr(settings, "telegram_bot_token", None)
+    dc_token = getattr(settings, "discord_bot_token", None)
+    if tg_token is None and dc_token is None:
+        return None
+    from datetime import timedelta
+
+    from aerys_v2.reach import Deliverer, PostgresReachStore, ReachDesk, Where
+
+    rooms = parse_room_devices(getattr(settings, "reach_room_devices", ""))
+    start_h = int(getattr(settings, "owner_quiet_start_hour", 21))
+    end_h = int(getattr(settings, "owner_quiet_end_hour", 9))
+    text_surface = "discord" if dc_token is not None else "telegram"
+    presence = None
+    try:
+        from aerys_v2.factory import presence_fn_for
+
+        presence = presence_fn_for(settings)
+    except Exception:
+        log.warning("reach desk: presence unavailable; delivering by last surface", exc_info=True)
+
+    def locate() -> Where:
+        # D6: wherever the house places him (his phone's Bluetooth + the room sensors,
+        # settled). A room without a speaker, or no place at all, falls back to his last
+        # surface, and from there to a DM.
+        if presence is not None and rooms:
+            snap = presence()
+            whereabouts = getattr(snap, "whereabouts", None) or ("", "")
+            room = str(whereabouts[1] or "").strip().lower()
+            if whereabouts[0] == "home" and room in rooms:
+                return Where("room", rooms[room], room)
+        surface, device_id = _owner_last_surface(settings)
+        if surface == "device" and device_id:
+            return Where("device", device_id)
+        if surface == "telegram" and tg_token is not None:
+            return Where("telegram")
+        return Where(text_surface)
+
+    def speak(text: str, device_id: str) -> None:
+        from aerys_v2.factory import followup_router_for
+
+        route = followup_router_for(settings)
+        if route is None:
+            raise RuntimeError("followup router unarmed (no ha_token)")
+        route(text, device_id)
+
+    def text(surface: str, body: str, silent: bool) -> None:
+        chat_id = _owner_platform_id(settings, surface)
+        if not chat_id:
+            raise RuntimeError(f"no owner {surface} identity")
+        if surface == "telegram":
+            _telegram_send(tg_token.get_secret_value(), chat_id, body, silent=silent)
+        else:
+            _discord_dm_send(dc_token.get_secret_value(), chat_id, body, silent=silent)
+
+    def busy(device_id: str) -> bool:
+        # Never announce over a conversation in progress on that satellite.
+        from aerys_v2.factory import satellite_map_from
+
+        entity = satellite_map_from(getattr(settings, "ha_satellite_map", "")).get(device_id)
+        if not entity or settings.ha_token is None:
+            return False
+        import httpx
+
+        try:
+            r = httpx.get(f"{str(settings.ha_base_url).rstrip('/')}/api/states/{entity}",
+                          headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
+                          timeout=3.0)
+            # Busy means mid-conversation. "unavailable" is not busy: waiting on it would hold
+            # her forever; speaking to it fails, and the desk retries or the copy goes as text.
+            return r.status_code == 200 and r.json().get("state") in ("listening", "processing", "responding")
+        except Exception:
+            return False
+
+    def replied_since(when: datetime) -> bool:
+        import psycopg
+
+        with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+            conn.read_only = True
+            return conn.execute(_OWNER_REPLIED_SQL, (settings.owner_person_id, when)).fetchone() is not None
+
+    return ReachDesk(
+        PostgresReachStore(settings.database_url),
+        Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface),
+        budget_default=int(getattr(settings, "reach_daily_budget", 3)),
+        quiet=lambda now: in_quiet_hours(now, start_h, end_h),
+        morning_hour=end_h,
+        meeting_hold=meeting_hold_fn_for(settings),
+        replied_since=replied_since,
+        said=lambda row, body: _said_to_owner(graph, settings, body),
+        follow_through_after=timedelta(minutes=int(getattr(settings, "reach_follow_through_min", 5))),
+    )

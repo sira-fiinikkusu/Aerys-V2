@@ -433,6 +433,15 @@ class Settings(BaseSettings):
     # The entity ids stay in the environment (they can name an employer; this repo is public).
     owner_meeting_calendars: str = ""
     owner_meeting_buffer_min: int = 10
+    # THE REACH-OUT DESK (board #176, Stage 2; the owner's D4/D6, 2026-11-08): everything
+    # she starts herself goes through one desk (reach.py). reach_daily_budget = unsolicited
+    # reach-outs a day before he has said otherwise (he steers it in words; his word lives
+    # in v2_reach_prefs). reach_room_devices = 'office=<device_id>,...': the satellite to
+    # speak through in each room the house can place him in (ids stay in the environment).
+    # reach_follow_through_min: a spoken message he doesn't answer gets a text copy.
+    reach_daily_budget: int = 3
+    reach_room_devices: str = ""
+    reach_follow_through_min: int = 5
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,

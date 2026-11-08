@@ -488,7 +488,7 @@ def ticket_door_for(settings, note_fn, wake: threading.Event | None = None) -> T
     return TicketDoor(store=store, update=kael_update_for(store, note_fn, wake))
 
 
-def start_tickets(settings, graph, wake: threading.Event | None = None) -> threading.Thread | None:
+def start_tickets(settings, graph, wake: threading.Event | None = None, desk=None) -> threading.Thread | None:
     """Arm-and-forget, --serve only (one watcher, like the check-ins): None unless the
     database and Kael's line are both configured. The owner-facing steps arm only when she
     has a way to reach him (kael_line decides)."""
@@ -501,8 +501,8 @@ def start_tickets(settings, graph, wake: threading.Event | None = None) -> threa
         line_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value()),
         nag_after=timedelta(hours=settings.kael_ticket_nag_after_h),
         tell_owner_after=timedelta(hours=settings.kael_ticket_tell_owner_after_h),
-        relay=ticket_relay_for(graph, settings),
-        tell_owner=owner_notice_for(graph, settings),
+        relay=ticket_relay_for(graph, settings, desk=desk),
+        tell_owner=owner_notice_for(graph, settings, desk=desk),
         wake=wake,
     )
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="kael-tickets")
