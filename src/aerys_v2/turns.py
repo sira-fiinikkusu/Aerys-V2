@@ -232,6 +232,26 @@ def classify_tool_result(content: str, status: object) -> str | None:
     return None
 
 
+def invalid_call_ids(messages: list) -> set:
+    """Ids of tool calls the model only ever emitted MALFORMED (invalid_tool_calls).
+
+    Nothing ran for them. create_agent (board #176) answers each with a synthetic
+    "could not be executed" ToolMessage so the next model call is well-formed; that
+    receipt is the loop's repair, not an execution, and must never count as one (the
+    honesty gate and the audit row read tool messages as "a tool ran")."""
+    valid, invalid = set(), set()
+    for m in messages:
+        for tc in (getattr(m, "tool_calls", None) or []):
+            valid.add(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+        for tc in (getattr(m, "invalid_tool_calls", None) or []):
+            invalid.add(tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None))
+    return (invalid - valid) - {None}
+
+
+def is_repair_receipt(message, invalid_ids: set) -> bool:
+    return getattr(message, "type", "") == "tool" and getattr(message, "tool_call_id", None) in invalid_ids
+
+
 def extract_tool_calls(messages: list) -> list[dict]:
     """Structured per-tool record from an action subgraph's message list.
 
@@ -251,8 +271,9 @@ def extract_tool_calls(messages: list) -> list[dict]:
                 id_to_name[tid] = name
 
     calls: list[dict] = []
+    repairs = invalid_call_ids(messages)
     for m in messages:
-        if getattr(m, "type", "") != "tool":
+        if getattr(m, "type", "") != "tool" or is_repair_receipt(m, repairs):
             continue
         content = m.content if isinstance(getattr(m, "content", None), str) else str(getattr(m, "content", ""))
         name = (
