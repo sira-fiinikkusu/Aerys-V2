@@ -157,6 +157,12 @@ class Settings(BaseSettings):
     # on a turn the router already decided needs one); later passes are free so
     # the loop can end. Env ACTION_FORCE_TOOL=false to bench without it.
     action_force_tool: bool = True
+    # ACTION_LOOP (board #176, Stage 1): which engine runs her action turns.
+    # "graph" = the hand-rolled act <-> tools graph (factory.build_action_graph);
+    # "agent" = the same turn on LangChain's create_agent (action_loop.py), built
+    # beside it and proven by parity before the flip. Flips need recreate.sh, not
+    # docker restart (the env file is baked at container creation).
+    action_loop: Literal["graph", "agent"] = "graph"
     # HISTORY_WINDOW_MESSAGES: maximum prior thread messages shown to the model
     # (chat includes the current human in this tail). The checkpointer keeps
     # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.
