@@ -76,3 +76,44 @@ def test_she_starts_without_the_names_and_warns_once():
     assert run.returncode == 0, run.stderr
     assert "started" in run.stdout
     assert run.stderr.count(f"{ENV} isn't set") == 1
+
+
+# --- Codex owed pass (11/09 15:05) ------------------------------------------------------------
+
+def test_deeply_nested_json_never_stops_her(caplog):
+    with caplog.at_level(logging.WARNING):
+        assert load({ENV: "[" * 3000 + "0" + "]" * 3000}) == NONE
+    assert "house names:" in caplog.text
+
+
+def test_the_names_load_from_the_env_file_settings_reads(tmp_path):
+    # The CLI's Settings reads .env from where it runs; a prompt module imported first must not
+    # freeze an empty snapshot. With the variable unset, the same file is read.
+    envf = tmp_path / ".env"
+    envf.write_text("OTHER=1\n# a comment\nAERYS_HOUSE_NAMES=" + json.dumps(
+        {"wife": "Robin", "friends": "Alex, Jordan", "friend": "Alex", "colleague": "Riley", "aside": "Morgan"})
+        + "\n", encoding="utf-8")
+    assert load({}, env_file=envf) == FULL
+    quoted = tmp_path / "quoted.env"
+    quoted.write_text("AERYS_HOUSE_NAMES='" + json.dumps({"wife": "Robin"}) + "'\n", encoding="utf-8")
+    assert load({}, env_file=quoted).wife == "Robin"
+
+
+def test_the_variable_wins_over_the_file(tmp_path):
+    envf = tmp_path / ".env"
+    envf.write_text("AERYS_HOUSE_NAMES=" + json.dumps({"wife": "Sam"}) + "\n", encoding="utf-8")
+    assert load({ENV: json.dumps({"wife": "Robin"})}, env_file=envf).wife == "Robin"
+
+
+def test_a_prompt_module_imported_before_settings_still_gets_the_names(tmp_path):
+    # Codex's repro shape, as the CLI meets it: a fresh process in a directory whose .env holds the
+    # names, the variable NOT exported, and reflex imported first.
+    (tmp_path / ".env").write_text("AERYS_HOUSE_NAMES=" + json.dumps(
+        {"wife": "Robin", "friends": "Alex, Jordan", "friend": "Alex", "colleague": "Riley", "aside": "Morgan"})
+        + "\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != ENV}
+    code = ("import aerys_v2.reflex as r, aerys_v2.house_names as h; "
+            "print(h.NAMES.wife, 'Robin' in r.VOICE_BACKGROUND)")
+    out = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True,
+                         timeout=120)
+    assert out.stdout.split() == ["Robin", "True"], out.stderr[-500:]

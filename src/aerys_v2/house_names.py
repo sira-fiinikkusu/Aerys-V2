@@ -23,11 +23,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
 
 ENV = "AERYS_HOUSE_NAMES"
+#: The env file Settings reads (config.Settings: env_file=".env", from where she runs).
+ENV_FILE = ".env"
 KEYS = ("wife", "friends", "friend", "colleague", "aside")
 
 
@@ -40,17 +43,40 @@ class HouseNames:
     aside: str = ""
 
 
-def load(env=None) -> HouseNames:
+def _from_env_file(path) -> str:
+    """AERYS_HOUSE_NAMES as the env file Settings reads would give it ('' when absent or
+    unreadable). Docker's --env-file puts it in the environment before she starts; a CLI run reads
+    .env through Settings, which a prompt module imported first never sees (Codex, 11/09)."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return ""
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip().removeprefix("export ").strip() == ENV:
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            return value
+    return ""
+
+
+def load(env=None, env_file=None) -> HouseNames:
     """The names from AERYS_HOUSE_NAMES; empty ones (and a warning) when it's missing or broken.
+    The variable wins; without it, the env file (Settings' .env when reading the real environment).
     Never raises: she starts without the names rather than not at all."""
-    raw = (os.environ if env is None else env).get(ENV, "")
+    if env is None:
+        env, env_file = os.environ, ENV_FILE if env_file is None else env_file
+    raw = env.get(ENV, "")
+    if (not isinstance(raw, str) or not raw.strip()) and env_file is not None:
+        raw = _from_env_file(env_file)
     if not isinstance(raw, str) or not raw.strip():
         log.warning("house names: %s isn't set; her prompts name nobody (no wife's name, no friends) "
                     "until it is", ENV)
         return HouseNames()
     try:
         data = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):        # deeply nested JSON raises RecursionError (Codex)
         log.warning("house names: %s isn't valid JSON; her prompts name nobody until it's fixed", ENV)
         return HouseNames()
     if not isinstance(data, dict):
