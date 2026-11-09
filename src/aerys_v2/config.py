@@ -480,6 +480,12 @@ class Settings(BaseSettings):
     # been read), "live", or "off". Off unless followups is true.
     followups: bool = False
     followup_plans: str = "shadow"
+    # THE OWNER'S APPROVAL BUTTON (approvals.py; D10 11/08, D12 11/09): things she may only do
+    # once he taps Approve on a Discord button (the Discord gateway posts it to his DMs; an HA
+    # notification says one is waiting). approvals_owner_discord_id overrides his linked Discord
+    # identity (the id stays in the environment). Off unless approvals is true.
+    approvals: bool = False
+    approvals_owner_discord_id: str = ""
     # HER HOME BODY SAYS "I'M DONE" (home_notices.py; board #176, Stage 3). The home server
     # POSTs a done-notice to /home-notice with home_webhook_token (its own token: the home body
     # never holds api_token); she tells the owner through the desk. home_url + home_api_token

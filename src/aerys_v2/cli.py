@@ -573,6 +573,17 @@ def main() -> None:
                 telegram_notify=telegram_notify_for(settings),
             )
             log.info("slash commands attached (guild %s)", settings.discord_guild_id)
+        # The owner's approval button (approvals.py): this gateway posts it to his DMs and
+        # records his tap. Off unless APPROVALS is set and there's a database, an owner, and the
+        # HA notification leg (approvals_for says which).
+        if settings.approvals:
+            from aerys_v2.approvals import approvals_for, attach_approvals, owner_id_for
+
+            asking = approvals_for(settings)
+            if asking is not None:
+                attach_approvals(client, store=asking.store, owner_id=owner_id_for(settings),
+                                 notify=asking.notify)
+                log.info("approval buttons attached")
         # The room reader needs the gateway that did not exist when the graph was
         # built; until this line it quietly answers from the turns table.
         room_context.attach(client)
