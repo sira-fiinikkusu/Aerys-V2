@@ -41,7 +41,10 @@ TAGGED = re.compile(r'^\s*\[[a-z][a-z ]*\]', re.I)
 
 #: What the quarantine is allowed to hold. Anything else is the detector drifting back
 #: into holding her own engineering reports (2026-09-13: five for five false).
-EXPECTED_HOLD_REASONS = ('judge:', 'non-owner transcript', 'future observation')
+EXPECTED_HOLD_REASONS = ('judge:', 'non-owner transcript', 'future observation', 'test body:')
+#: Held for an optional look, never owed a review: a test body's memory events (the door holds
+#: them since 11/09; Kael's gate body and the home body's test jobs are test traffic, not his).
+UNOWED_HOLD_REASONS = ('test body:',)
 
 #: A reply that settles the state of the whole house rather than one device. 2026-09-24:
 #: asked what was open she said "everything's shut except Kitchen Window 2" — three
@@ -202,6 +205,8 @@ def held_review_is_current(held, *, now) -> Signal:
     from datetime import datetime, timedelta
     dated = []
     for h in held:
+        if str(h.get('reason') or '').startswith(UNOWED_HOLD_REASONS):
+            continue
         try:
             dated.append((h, datetime.fromisoformat(str(h.get('observed_at')).replace('Z', '+00:00'))))
         except (TypeError, ValueError):

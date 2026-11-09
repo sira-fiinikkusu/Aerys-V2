@@ -355,3 +355,17 @@ def test_a_hold_nobody_reviewed_for_a_day_fails():
     assert stale.failed and 'b (judge:unclear)' in stale.detail and 'over 24 h' in stale.detail
     assert signals.held_review_is_current([], now=now).status == signals.SKIP
     assert signals.held_review_is_current([undated], now=now).status == signals.SKIP
+
+
+def test_a_test_body_memory_held_at_the_door_is_expected_and_never_overdue():
+    """11/09: the door now HOLDS a test body's memory events (Kael's gate body, the home body's test
+    jobs) instead of admitting them as Chris's. They are test traffic held for an optional look, so
+    neither check may flag them: one as an unexpected hold, the other as a review that's overdue."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime(2026, 11, 12, 15, 0, tzinfo=timezone.utc)
+    reason = "test body: ember is in PORTABLE_TEST_BODIES; its memories are test traffic, never admitted as the owner's"
+    held = [{'id': 't1', 'reason': reason, 'observed_at': (now - timedelta(days=3)).isoformat()}]
+    assert signals.quarantine_not_noisy(held).status == signals.PASS
+    assert not signals.held_review_is_current(held, now=now).failed
+    owed = [{'id': 'j1', 'reason': 'judge:unclear', 'observed_at': (now - timedelta(days=3)).isoformat()}]
+    assert signals.held_review_is_current(owed + held, now=now).failed      # a real hold still nags
