@@ -1,0 +1,490 @@
+"""What waits for his tap (board #176, Stage 4). D10 (11/08): "Voice can start anything text can but
+requires me to approve via discord button. Else read only jobs". D12 (11/09): the first message to
+anyone new waits for his button, which shows exactly who and where; no match or several: she asks.
+Fail closed: nothing is done without his Approve, and nothing he approved is done twice."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from aerys_v2.approvals import Approvals, MemoryApprovalStore
+from aerys_v2.hands_gate import (
+    HOME_JOB,
+    MESSAGE,
+    OTHER,
+    OWNER_TEXT,
+    OWNER_VOICE,
+    VOICE_UNSURE,
+    HandsGate,
+    HandsWatcher,
+    MemoryGatedActionStore,
+    asker,
+    hands_gate_for,
+    home_job_middleware,
+)
+from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+
+NOW = datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc)
+OWNER = "6e6bcbed-0000-4000-8000-000000000001"
+SAM = "ef6df13a-0000-4000-8000-000000000002"
+OWNER_THREAD = f"person:{OWNER}"
+
+TEXT = {"user_id": OWNER, "display_name": "Chris", "platform": "discord", "channel_kind": "dm"}
+STRONG = {"user_id": OWNER, "display_name": "Chris", "voice": True,
+          "speaker": {"id": "chris", "confidence": 0.82, "demoted": False}}
+UNTAGGED = {"user_id": OWNER, "display_name": "Chris", "voice": True, VOICE_OWNER_ASSUMED_KEY: True}
+UNSURE = {"user_id": OWNER, "display_name": "Chris", "voice": True, VOICE_OWNER_ASSUMED_KEY: True,
+          "speaker": {"id": "unknown", "confidence": 0.3, "demoted": False}}
+GUEST_VOICE = {"user_id": "guest-voice", "display_name": "Guest", "voice": True,
+               "speaker": {"id": "unknown", "confidence": 0.1, "demoted": True}}
+KAEL_ASK = {"user_id": OWNER, "display_name": "Kael", "privacy_context": "private"}
+SAM_TEXT = {"user_id": SAM, "display_name": "Sam", "platform": "discord", "channel_kind": "guild"}
+
+START_WRITE = {"description": "Build the fridge planner page", "subagent_type": "home"}
+START_READ = {"description": "Read the planner notes and summarize them", "subagent_type": "home-readonly"}
+
+PEOPLE = {
+    ("discord", "sam_42"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000042", "handle": "sam_42"}],
+    ("discord", "sam"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000042", "handle": "sam_42"}],
+    ("discord", "sira"): [{"person_id": OWNER, "name": "Chris", "address": "60426939629838336", "handle": "Sira"}],
+    ("email", "sam@example.net"): [{"person_id": SAM, "name": "Sam", "address": "sam@example.net",
+                                    "handle": "sam@example.net"}],
+    ("discord", "chris"): [{"person_id": OWNER, "name": "Chris", "address": "1", "handle": "Sira"},
+                           {"person_id": "orphan-chris", "name": "Chris", "address": "2", "handle": "chris2"}],
+}
+
+
+class Box:
+    """A gate over in-memory stores, with a clock and executors that record what they did."""
+
+    def __init__(self, *, executors=None, read_only=("home-readonly",), people=None):
+        self.clock = {"now": NOW}
+        self.approval_store = MemoryApprovalStore()
+        self.pinged = []
+        self.approvals = Approvals(self.approval_store, notify=lambda t, m: self.pinged.append((t, m)),
+                                   clock=lambda: self.clock["now"], sleep=lambda s: None)
+        self.store = MemoryGatedActionStore()
+        self.done = []
+        default = {HOME_JOB: lambda row: self.done.append(("job", row.args)) or "task_id: t-1",
+                   MESSAGE: lambda row: self.done.append(("msg", row.args)) or "sent"}
+        lookup = people if people is not None else (lambda platform, to: PEOPLE.get((platform, to.lower()), []))
+        self.gate = HandsGate(self.approvals, self.store, owner_person_id=OWNER, people=lookup,
+                              executors=default if executors is None else executors,
+                              read_only_agents=read_only, clock=lambda: self.clock["now"])
+        self.notes = []
+        self.watcher = HandsWatcher(self.gate, note=lambda thread, text: self.notes.append((thread, text)))
+
+    def tap(self, approve=True, approval_id=None):
+        approval_id = approval_id or max(self.approval_store.rows)
+        return self.approval_store.decide(approval_id, approve, 1, self.clock["now"])
+
+
+# --- who is asking --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("identity,expected", [
+    (TEXT, OWNER_TEXT),
+    ({**TEXT, "platform": "telegram"}, OWNER_TEXT),
+    (STRONG, OWNER_VOICE),
+    (UNTAGGED, VOICE_UNSURE),
+    (UNSURE, VOICE_UNSURE),
+    ({**STRONG, "speaker": {"id": "chris", "confidence": 0.5, "demoted": False}, VOICE_OWNER_ASSUMED_KEY: True},
+     VOICE_UNSURE),
+    ({"user_id": OWNER, "voice": True, "speaker": {"id": "unknown", "confidence": 0.5}}, VOICE_UNSURE),
+    ({"user_id": OWNER, "voice": True}, VOICE_UNSURE),          # the HA chat shim: no speaker verdict at all
+    (GUEST_VOICE, OTHER),
+    (KAEL_ASK, OTHER),                                          # /ask carries his id but isn't him typing
+    (SAM_TEXT, OTHER),
+    ({}, OTHER),
+    (None, OTHER),
+])
+def test_who_is_asking(identity, expected):
+    assert asker(identity, OWNER_THREAD, OWNER) == expected
+
+
+def test_without_an_owner_nobody_is_him():
+    assert asker(TEXT, OWNER_THREAD, None) == OTHER
+
+
+# --- D10: what voice may start at home --------------------------------------------------------
+
+
+def test_his_text_starts_any_job_without_a_button():
+    b = Box()
+    assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE).go
+    assert not b.approval_store.rows and not b.store.rows
+
+
+def test_his_voice_on_a_strong_match_starts_a_read_only_job_directly():
+    b = Box()
+    assert b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_READ).go
+    assert not b.approval_store.rows
+
+
+def test_his_voice_asking_for_a_job_that_can_write_waits_for_his_button():
+    b = Box()
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Waiting for Chris" in v.text and "Nothing has been done" in v.text
+    (a,) = b.approval_store.rows.values()
+    assert a.kind == "home job" and "Build the fridge planner page" in a.summary and a.status == "pending"
+    assert "strong match" in a.detail and "home" in a.detail
+    (row,) = b.store.rows.values()
+    assert row.action == HOME_JOB and row.status == "waiting" and row.approval_id == a.id
+    assert len(b.pinged) == 1 and not b.done
+
+
+def test_a_voice_it_wasnt_sure_of_waits_for_the_button_even_for_a_read_only_job():
+    for identity in (UNTAGGED, UNSURE):
+        b = Box()
+        v = b.gate.home_job(identity, OWNER_THREAD, "start_async_task", START_READ)
+        assert not v.go and len(b.approval_store.rows) == 1
+        assert "wasn't sure" in next(iter(b.approval_store.rows.values())).detail
+
+
+def test_read_only_is_the_agent_listed_never_her_word_for_it():
+    b = Box(read_only=())
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_READ)
+    assert not v.go and len(b.approval_store.rows) == 1
+
+
+def test_guests_unknown_voices_and_lines_that_arent_his_are_refused_with_no_button():
+    for identity in (GUEST_VOICE, KAEL_ASK, SAM_TEXT, None):
+        b = Box()
+        for tool in ("start_async_task", "update_async_task", "check_async_task", "cancel_async_task",
+                     "list_async_tasks"):
+            v = b.gate.home_job(identity, OWNER_THREAD, tool, START_WRITE)
+            assert not v.go and "only Chris" in v.text
+        assert not b.approval_store.rows and not b.store.rows
+
+
+def test_checking_listing_and_stopping_his_jobs_are_his_any_way_he_asks():
+    b = Box()
+    for identity in (TEXT, STRONG, UNTAGGED):
+        for tool in ("check_async_task", "list_async_tasks", "cancel_async_task"):
+            assert b.gate.home_job(identity, OWNER_THREAD, tool, {"task_id": "t-1"}).go
+    assert not b.approval_store.rows
+
+
+def test_changing_a_running_job_by_voice_follows_the_job_agent():
+    b = Box()
+    state = {"async_tasks": {"t-ro": {"agent_name": "home-readonly"}, "t-rw": {"agent_name": "home"}}}
+    assert b.gate.home_job(STRONG, OWNER_THREAD, "update_async_task",
+                           {"task_id": "t-ro", "message": "also check the calendar"}, state).go
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "update_async_task",
+                        {"task_id": "t-rw", "message": "make it blue"}, state)
+    assert not v.go
+    (a,) = b.approval_store.rows.values()
+    assert "Change a running home job (home)" in a.summary and "make it blue" in a.summary
+    # a task she has no record of is never taken for read-only
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "update_async_task", {"task_id": "nope", "message": "x"}, state)
+    assert not v.go and len(b.approval_store.rows) == 2
+
+
+def test_asking_again_before_he_answers_is_the_same_button():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Still waiting" in v.text
+    assert len(b.approval_store.rows) == 1 and len(b.store.rows) == 1 and len(b.pinged) == 1
+
+
+def test_his_approve_starts_the_job_once_and_she_hears_it_started():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert b.watcher.tick() == {"done": 0, "failed": 0, "dropped": 0} and not b.done
+    b.tap()
+    assert b.watcher.tick()["done"] == 1
+    assert b.done == [("job", {"tool": "start_async_task", **START_WRITE,
+                               "what": "the home job you asked for by voice"})]
+    assert b.notes and b.notes[0][0] == OWNER_THREAD and "has started" in b.notes[0][1] and "t-1" in b.notes[0][1]
+    assert b.watcher.tick()["done"] == 0 and len(b.done) == 1
+    # her asking again after the tap never starts it a second time
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "isn't done twice" in v.text and len(b.done) == 1
+    assert len(b.approval_store.rows) == 1
+
+
+def test_approved_but_not_yet_carried_out_is_never_started_by_her():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "being done now" in v.text and not b.done
+
+
+def test_declined_or_unanswered_is_dropped_never_done_and_she_hears_why():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap(approve=False)
+    assert b.watcher.tick()["dropped"] == 1 and not b.done
+    assert "declined" in b.notes[-1][1] and "wasn't done" in b.notes[-1][1]
+    (row,) = b.store.rows.values()
+    assert row.status == "dropped"
+    b2 = Box()
+    b2.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task", START_WRITE)
+    b2.clock["now"] = NOW + timedelta(minutes=31)
+    assert b2.watcher.tick()["dropped"] == 1 and not b2.done
+    assert "didn't answer in time" in b2.notes[-1][1]
+
+
+def test_after_a_no_asking_again_is_a_new_button_not_the_old_answer():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap(approve=False)
+    b.watcher.tick()
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Waiting for Chris" in v.text
+    assert len(b.approval_store.rows) == 2 and sorted(r.attempt for r in b.store.rows.values()) == [1, 2]
+
+
+def test_a_job_that_fails_after_his_ok_is_told_honestly_and_never_retried():
+    calls = []
+
+    def boom(row):
+        calls.append(row.id)
+        raise ConnectionError("home server down")
+
+    b = Box(executors={HOME_JOB: boom})
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    assert b.watcher.tick()["failed"] == 1
+    assert "didn't go through" in b.notes[-1][1] and "ConnectionError" in b.notes[-1][1]
+    assert "done" not in b.notes[-1][1].split("don't say it's done")[0]
+    b.watcher.tick()
+    assert len(calls) == 1
+
+
+def test_two_watchers_never_both_carry_it_out():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    other = HandsWatcher(b.gate)
+    (row,) = b.store.rows.values()
+    assert b.store.claim(row.id)                 # the other watcher got there first
+    assert b.watcher.tick()["done"] == 0 and not b.done
+    assert other.tick()["done"] == 0
+
+
+def test_an_answer_it_cant_read_is_never_an_approval():
+    b = Box()
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+
+    def down(_):
+        raise ConnectionError("nas")
+
+    b.approval_store.get = down
+    assert b.watcher.tick() == {"done": 0, "failed": 0, "dropped": 0} and not b.done
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "couldn't check" in v.text
+
+
+def test_nothing_to_carry_it_out_means_refused_not_queued():
+    b = Box(executors={})
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "waits until he types it" in v.text
+    assert not b.approval_store.rows and not b.store.rows
+
+
+def test_a_button_that_cant_be_backed_is_withdrawn():
+    b = Box()
+
+    def broken(*a, **k):
+        raise ConnectionError("nas")
+
+    b.store.add = broken
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "couldn't put this to Chris" in v.text
+    (a,) = b.approval_store.rows.values()
+    assert a.status == "withdrawn"
+
+
+def test_a_request_it_cant_write_is_a_no():
+    b = Box()
+
+    def broken(*a, **k):
+        raise ConnectionError("nas")
+
+    b.approval_store.request = broken
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and not b.store.rows
+
+
+# --- D12: her first message to anyone new -------------------------------------------------------
+
+
+def test_messages_to_him_go():
+    b = Box()
+    assert b.gate.message(OWNER_THREAD, "discord", "Sira", "hi").go
+    assert not b.approval_store.rows
+
+
+def test_a_first_message_waits_for_a_button_naming_exactly_who_and_where():
+    b = Box()
+    v = b.gate.message(OWNER_THREAD, "discord", "@sam_42", "Hey Sam, Chris asked me to send the list.")
+    assert not v.go and "Waiting for Chris" in v.text and "Nothing has been done" in v.text
+    (a,) = b.approval_store.rows.values()
+    assert a.kind == "first message" and a.summary == "First message to Sam · Discord: sam_42"
+    assert "Chris asked me to send the list" in a.detail
+    assert not b.done
+
+
+def test_a_name_is_resolved_to_the_person_and_the_tap_confirms_it():
+    b = Box()
+    v = b.gate.message(OWNER_THREAD, "discord", "Sam", "Hey Sam")
+    assert not v.go
+    (a,) = b.approval_store.rows.values()
+    assert a.summary == "First message to Sam · Discord: sam_42"
+    b.tap()
+    assert b.watcher.tick()["done"] == 1
+    kind, args = b.done[0]
+    assert kind == "msg" and args["address"] == "100000000000000042" and args["text"] == "Hey Sam"
+    assert "was sent" in b.notes[-1][1]
+    # confirmed: the next message to Sam on Discord goes without a button
+    assert b.gate.message(OWNER_THREAD, "discord", "sam_42", "one more thing").go
+    assert len(b.approval_store.rows) == 1
+
+
+def test_a_confirmed_contact_is_that_address_only():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi")
+    b.tap()
+    b.watcher.tick()
+    v = b.gate.message(OWNER_THREAD, "email", "sam@example.net", "hi by email")
+    assert not v.go and len(b.approval_store.rows) == 2
+    assert list(b.approval_store.rows.values())[-1].summary == "First message to Sam · email: sam@example.net"
+
+
+def test_an_address_that_matches_nobody_means_ask_him_and_no_button():
+    b = Box()
+    v = b.gate.message(OWNER_THREAD, "discord", "stranger99", "hi")
+    assert not v.go and "don't know who" in v.text and "Ask Chris" in v.text
+    assert not b.approval_store.rows and not b.store.rows
+
+
+def test_more_than_one_match_means_ask_him_which_and_no_button():
+    b = Box()
+    v = b.gate.message(OWNER_THREAD, "discord", "Chris", "hi")
+    assert not v.go and "more than one person" in v.text and "Sira" in v.text and "chris2" in v.text
+    assert not b.approval_store.rows
+
+
+def test_a_second_message_while_the_first_waits_is_not_a_second_button():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "first")
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "second")
+    assert not v.go and "Still waiting" in v.text and "first message to Sam" in v.text
+    assert len(b.approval_store.rows) == 1 and len(b.store.rows) == 1
+
+
+def test_a_declined_first_message_is_never_sent_and_the_contact_stays_unconfirmed():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "first")
+    b.tap(approve=False)
+    assert b.watcher.tick()["dropped"] == 1 and not b.done
+    assert not b.gate.message(OWNER_THREAD, "discord", "sam_42", "again").go
+
+
+def test_people_records_it_cant_read_mean_nothing_sent():
+    def down(platform, to):
+        raise ConnectionError("prod db")
+
+    b = Box(people=down)
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi")
+    assert not v.go and "can't check who" in v.text and not b.approval_store.rows
+    b2 = Box()
+    b2.gate.people = None
+    assert not b2.gate.message(OWNER_THREAD, "discord", "sam_42", "hi").go
+
+
+def test_a_message_needs_a_platform_and_a_recipient():
+    b = Box()
+    assert not b.gate.message(OWNER_THREAD, "sms", "sam_42", "hi").go
+    assert not b.gate.message(OWNER_THREAD, "discord", "  ", "hi").go
+    assert not b.approval_store.rows
+
+
+def test_confirmations_it_cant_read_mean_nothing_sent():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "first")
+    b.tap()
+    b.watcher.tick()
+
+    def down(_):
+        raise ConnectionError("nas")
+
+    b.approval_store.get = down
+    assert not b.gate.message(OWNER_THREAD, "discord", "sam_42", "again").go
+
+
+# --- the middleware: D10 at the moment a job is created -------------------------------------------
+
+
+def _request(name, args, identity, state=None, thread=OWNER_THREAD):
+    config = {"configurable": {"thread_id": thread, "identity": identity}}
+    return SimpleNamespace(tool_call={"name": name, "args": args, "id": "call-1"},
+                           runtime=SimpleNamespace(config=config), state=state or {})
+
+
+def test_the_middleware_lets_his_text_through_and_stops_everything_else():
+    b = Box()
+    mw = home_job_middleware(b.gate)
+    ran = []
+
+    def handler(req):
+        ran.append(req.tool_call["name"])
+        return "launched"
+
+    assert mw.wrap_tool_call(_request("start_async_task", START_WRITE, TEXT), handler) == "launched"
+    out = mw.wrap_tool_call(_request("start_async_task", START_WRITE, STRONG), handler)
+    assert out.tool_call_id == "call-1" and "Waiting for Chris" in out.content
+    out = mw.wrap_tool_call(_request("start_async_task", START_WRITE, GUEST_VOICE), handler)
+    assert "only Chris" in out.content
+    assert ran == ["start_async_task"]
+    # tools that aren't hers at home pass untouched, whoever asks
+    assert mw.wrap_tool_call(_request("web_search", {"q": "x"}, GUEST_VOICE), handler) == "launched"
+
+
+def test_the_middleware_refuses_when_the_gate_itself_breaks():
+    b = Box()
+
+    def broken(*a, **k):
+        raise RuntimeError("bug")
+
+    b.gate.home_job = broken
+    mw = home_job_middleware(b.gate)
+    out = mw.wrap_tool_call(_request("start_async_task", START_WRITE, TEXT), lambda req: "launched")
+    assert out != "launched" and "nothing happened" in out.content
+
+
+def test_the_middleware_async_path_gates_the_same():
+    b = Box()
+    mw = home_job_middleware(b.gate)
+
+    async def handler(req):
+        return "launched"
+
+    assert asyncio.run(mw.awrap_tool_call(_request("start_async_task", START_WRITE, TEXT), handler)) == "launched"
+    out = asyncio.run(mw.awrap_tool_call(_request("start_async_task", START_WRITE, UNTAGGED), handler))
+    assert "Waiting for Chris" in out.content
+
+
+# --- arming --------------------------------------------------------------------------------------
+
+
+def test_not_armed_unless_switched_on_with_the_button_armed():
+    base = dict(hands_gates=True, database_url="postgresql://x/aerys_v2", owner_person_id=OWNER,
+                approvals=True, reach_notify_service="mobile_app_phone", storm_notify_service="",
+                ha_token=SimpleNamespace(get_secret_value=lambda: "t"), ha_base_url="http://ha:8123",
+                memories_database_url="postgresql://x/aerys", home_read_only_agents=" home-readonly , ")
+    assert hands_gate_for(SimpleNamespace(**{**base, "hands_gates": False})) is None
+    assert hands_gate_for(SimpleNamespace(**{**base, "approvals": False})) is None
+    assert hands_gate_for(SimpleNamespace(**{**base, "reach_notify_service": ""})) is None
+    assert hands_gate_for(SimpleNamespace(**{**base, "owner_person_id": None})) is None
+    g = hands_gate_for(SimpleNamespace(**base))
+    assert g is not None and g.read_only_agents == frozenset({"home-readonly"}) and g.people is not None
+    assert g.executors == {}                    # nothing carries out an approved action until wired
