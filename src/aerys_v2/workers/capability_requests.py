@@ -39,13 +39,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 
 # The watermark + LIMIT-tie + failed-row-hold machinery is IDENTICAL to the
 # extraction worker's (the design says "inherit both _trim_tie_boundary AND
 # _safe_watermark"), so reuse it rather than fork a second copy that could drift.
 # These helpers are pure and offline (test_extraction proves them); importing them
 # does not connect to anything.
+from ..test_bodies import DEFAULT_PATTERNS as DEFAULT_TEST_BODY_PATTERNS
 from .extraction import (
     _safe_watermark,
     _trim_tie_boundary,
@@ -326,6 +327,8 @@ SELECT
   t.error
 FROM v2_turns t
 WHERE t.person_id = ANY(%(person_ids)s::uuid[])
+  -- A test body's turns (Kael's gate body, home test jobs) aren't hers to mine (11/09).
+  AND NOT (COALESCE(t.channel_id::text, '') LIKE ANY(%(test_bodies)s::text[]))
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC, t.id ASC
 LIMIT %(limit)s
@@ -450,6 +453,7 @@ def run_gap_mining(
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
     parity_window: int = PARITY_WINDOW,
+    test_bodies: Sequence[str] = DEFAULT_TEST_BODY_PATTERNS,
 ) -> dict:
     """One consolidation pass over NEW owner/allowlisted turns.
 
@@ -493,7 +497,8 @@ def run_gap_mining(
 
     after = read_watermark(conn, WATERMARK_SOURCE, lookback_hours=lookback_hours)
     raw_rows = conn.execute(
-        MINER_SQL, {"person_ids": allow, "after": after, "limit": batch_limit + 1}
+        MINER_SQL, {"person_ids": allow, "after": after, "limit": batch_limit + 1,
+                    "test_bodies": list(test_bodies)}
     ).fetchall()
     rows = [dict(zip(MINER_COLUMNS, r)) for r in raw_rows]
     rows = _trim_tie_boundary(rows, batch_limit)

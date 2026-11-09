@@ -670,6 +670,32 @@ def appointments_for(settings, *, get=None) -> Callable[[datetime], list]:
     return read
 
 
+#: His turns the plan miner reads: his own surfaces, never a sealed room, never a voice turn merely
+#: assumed to be him (D2), never a test body's turn recorded as his (test_bodies.py, 11/09).
+PLAN_MINER_TURNS_SQL = (
+    "SELECT id, created_at, input_text FROM v2_turns WHERE person_id = %s::uuid AND id > %s "
+    "AND channel NOT IN ('kael', 'sentinel', 'http') AND sealed_room IS NULL "
+    "AND NOT (degraded @> '[\"voice_owner_assumed\"]'::jsonb) "
+    "AND NOT (COALESCE(channel_id::text, '') LIKE ANY(%s::text[])) ORDER BY id LIMIT %s"
+)
+
+
+def plan_miner_turns(settings, after: int | None) -> list:
+    """The plan miner's next batch of his turns after `after` (the newest id when None)."""
+    import psycopg
+
+    from aerys_v2.test_bodies import patterns_for
+
+    owner = getattr(settings, "owner_person_id", None)
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+        conn.read_only = True
+        if after is None:
+            row = conn.execute("SELECT max(id) FROM v2_turns").fetchone()
+            return [(row[0] or 0, None, None)]
+        return conn.execute(PLAN_MINER_TURNS_SQL,
+                            (owner, after, patterns_for(settings), MINER_BATCH)).fetchall()
+
+
 def miner_for(settings, store, *, model=None, turns=None, live: bool = False) -> Callable[[datetime], int]:
     """The plan miner: his new turns since the watermark -> the fast model -> plans with a time.
     Shadow unless live: rows are written with status 'shadow' and nothing is said. Only his own
@@ -678,18 +704,7 @@ def miner_for(settings, store, *, model=None, turns=None, live: bool = False) ->
     owner = getattr(settings, "owner_person_id", None)
 
     def default_turns(after: int | None) -> list:
-        import psycopg
-
-        with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
-            conn.read_only = True
-            if after is None:
-                row = conn.execute("SELECT max(id) FROM v2_turns").fetchone()
-                return [(row[0] or 0, None, None)]
-            return conn.execute(
-                "SELECT id, created_at, input_text FROM v2_turns WHERE person_id = %s::uuid AND id > %s "
-                "AND channel NOT IN ('kael', 'sentinel', 'http') AND sealed_room IS NULL "
-                "AND NOT (degraded @> '[\"voice_owner_assumed\"]'::jsonb) ORDER BY id LIMIT %s",
-                (owner, after, MINER_BATCH)).fetchall()
+        return plan_miner_turns(settings, after)
 
     read_turns = turns or default_turns
 

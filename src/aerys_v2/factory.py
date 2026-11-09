@@ -1317,7 +1317,10 @@ def portable_context_fn_for(settings: Settings) -> PortableContextFn | None:
         format_portable_context,
     )
 
+    from aerys_v2.test_bodies import patterns_for
+
     limit = settings.portable_context_limit
+    test_bodies = patterns_for(settings)
 
     def portable(person_id: str) -> str:
         try:
@@ -1329,7 +1332,7 @@ def portable_context_fn_for(settings: Settings) -> PortableContextFn | None:
                 conn.read_only = True
                 rows = conn.execute(
                     PORTABLE_TURNS_SQL,
-                    {"person_id": person_id, "limit": limit},
+                    {"person_id": person_id, "limit": limit, "test_bodies": test_bodies},
                 ).fetchall()
             return format_portable_context(rows)
         except Exception:

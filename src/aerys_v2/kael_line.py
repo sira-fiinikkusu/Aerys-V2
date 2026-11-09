@@ -35,6 +35,7 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from aerys_v2.test_bodies import patterns_for
 from aerys_v2.tickets import TEXT_SURFACES, ask_surface  # ask_surface re-exported for callers
 
 log = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ _OWNER_LAST_SURFACE_SQL = (
     "EXTRACT(EPOCH FROM (now() - created_at)) AS age_s "
     "FROM v2_turns WHERE person_id = %s::uuid "
     "AND channel NOT IN ('kael', 'sentinel', 'http') "
+    # A test body's turn (Kael's gate body, home test jobs) is not him (test_bodies.py, 11/09).
+    "AND NOT (COALESCE(channel_id::text, '') LIKE ANY(%s::text[])) "
     "ORDER BY created_at DESC LIMIT 1"
 )
 
@@ -131,7 +134,7 @@ def _owner_last_surface(settings) -> tuple[str, str | None]:
         with psycopg.connect(db, connect_timeout=5) as conn:
             conn.read_only = True
             row = conn.execute(
-                _OWNER_LAST_SURFACE_SQL, (settings.owner_person_id,)
+                _OWNER_LAST_SURFACE_SQL, (settings.owner_person_id, patterns_for(settings))
             ).fetchone()
     except Exception:
         log.warning("owner last-surface lookup failed", exc_info=True)
@@ -823,8 +826,20 @@ def owner_notice_for(graph, settings, *, reach=None, desk=None) -> Callable[...,
 _OWNER_REPLIED_SQL = (
     "SELECT 1 FROM v2_turns WHERE person_id = %s::uuid "
     "AND COALESCE(started_at, created_at - make_interval(secs => COALESCE(latency_ms, 0) / 1000.0)) > %s "
-    "AND channel NOT IN ('kael', 'sentinel', 'http') LIMIT 1"
+    "AND channel NOT IN ('kael', 'sentinel', 'http') "
+    "AND NOT (COALESCE(channel_id::text, '') LIKE ANY(%s::text[])) LIMIT 1"
 )
+
+
+def owner_replied_since(settings, when) -> bool:
+    """A turn of HIS that started after `when` (a test body's turn never counts: it would end a
+    nap or wake him for a brief while he slept; test_bodies.py, 11/09)."""
+    import psycopg
+
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+        conn.read_only = True
+        return conn.execute(_OWNER_REPLIED_SQL,
+                            (settings.owner_person_id, when, patterns_for(settings))).fetchone() is not None
 
 
 def parse_room_devices(csv: str) -> dict:
@@ -943,11 +958,7 @@ def reach_desk_for(settings, graph):
             return False
 
     def replied_since(when: datetime) -> bool:
-        import psycopg
-
-        with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
-            conn.read_only = True
-            return conn.execute(_OWNER_REPLIED_SQL, (settings.owner_person_id, when)).fetchone() is not None
+        return owner_replied_since(settings, when)
 
     return ReachDesk(
         PostgresReachStore(settings.database_url),

@@ -269,6 +269,11 @@ class Settings(BaseSettings):
     # lmao". These are his own turns with her, not a whole room, so the count can be
     # generous; the door's own ceiling for the mirror direction is 100.
     portable_context_limit: int = 100
+    # PORTABLE_TEST_BODIES (test_bodies.py, 11/09): bodies whose door turns are tests,
+    # never his words (Kael's gate body, the home body's test jobs). Comma list; their
+    # turns stay in v2_turns but never reach her portable block, her memory, the plan
+    # miner, the gap miner or "his last surface / did he reply".
+    portable_test_bodies: str = "ember,home"
 
     # The owner's persons.id (UUID string). HTTP callers can't prove who they
     # are beyond the Bearer token, so when this is set, voice + /ask identities

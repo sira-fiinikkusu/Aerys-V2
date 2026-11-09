@@ -34,6 +34,7 @@ from typing import Callable
 
 from ..config import BootConfigError, Settings, run_boot_assertions
 from ..services.memory import openrouter_embedder
+from ..test_bodies import patterns_for as test_body_patterns
 from .capability_requests import (
     GapMiningRefused,
     format_gaps,
@@ -109,6 +110,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                         lookback_hours=settings.extraction_lookback_hours,
                         batch_limit=settings.extraction_batch_limit,
                         sealed_rooms=sealed_rooms,
+                        test_bodies=test_body_patterns(settings),
                     )
             else:
                 summary = run_extraction(
@@ -119,6 +121,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                     lookback_hours=settings.extraction_lookback_hours,
                     batch_limit=settings.extraction_batch_limit,
                     sealed_rooms=sealed_rooms,
+                    test_bodies=test_body_patterns(settings),
                 )
     log.info("extraction pass (%s): %s", "live" if live else "shadow", json.dumps(summary))
     _check_stalled(summary)
@@ -280,6 +283,7 @@ def _mine_gaps_once(settings: Settings, allowlist) -> dict:
             allowlist=allowlist,
             lookback_hours=settings.extraction_lookback_hours,
             batch_limit=settings.extraction_batch_limit,
+            test_bodies=test_body_patterns(settings),
         )
     log.info("gaps mining pass: %s", json.dumps(summary))
     return summary

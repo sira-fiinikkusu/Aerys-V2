@@ -91,6 +91,7 @@ from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from ..services.location_guard import location_shaped
+from ..test_bodies import DEFAULT_PATTERNS as DEFAULT_TEST_BODY_PATTERNS
 from ..services.memory import Embedder, embedding_to_pgvector
 
 log = logging.getLogger(__name__)
@@ -309,6 +310,8 @@ WHERE t.person_id IS NOT NULL
   -- D2 (Chris 2026-11-08): a voice turn that stayed the owner's only by default
   -- (untagged, or the recognizer unsure) never becomes his memory.
   AND NOT COALESCE(t.degraded, '[]'::jsonb) @> '["voice_owner_assumed"]'::jsonb
+  -- A test body's turns (Kael's gate body, home test jobs) were never his words (11/09).
+  AND NOT (COALESCE(t.channel_id::text, '') LIKE ANY(%(test_bodies)s::text[]))
   AND t.input_text != ''
   AND t.created_at > %(after)s::timestamptz
 ORDER BY t.created_at ASC
@@ -1126,6 +1129,7 @@ def run_extraction(
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
     sealed_rooms: frozenset[str] = frozenset(),
+    test_bodies: Sequence[str] = DEFAULT_TEST_BODY_PATTERNS,
 ) -> dict:
     """One shadow extraction pass over both conversation sources.
 
@@ -1156,7 +1160,7 @@ def run_extraction(
 
     for name, conn, sql in sources:
         after = read_watermark(staging_conn, name, lookback_hours=lookback_hours)
-        raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1}).fetchall()
+        raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1, "test_bodies": list(test_bodies)}).fetchall()
         rows = seal_rows([dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows], sealed_rooms)
         rows = _trim_tie_boundary(rows, batch_limit)
 
@@ -1257,6 +1261,7 @@ def run_live_extraction(
     lookback_hours: int = DEFAULT_LOOKBACK_H,
     batch_limit: int = DEFAULT_LIMIT,
     sealed_rooms: frozenset[str] = frozenset(),
+    test_bodies: Sequence[str] = DEFAULT_TEST_BODY_PATTERNS,
 ) -> dict:
     """The live counterpart of run_extraction(): same read -> group -> LLM ->
     embed pipeline, same watermark table (both modes share the high-water
@@ -1317,7 +1322,7 @@ def run_live_extraction(
 
     for name, conn, sql in sources:
         after = read_watermark(staging_conn, name, lookback_hours=lookback_hours)
-        raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1}).fetchall()
+        raw_rows = conn.execute(sql, {"after": after, "limit": batch_limit + 1, "test_bodies": list(test_bodies)}).fetchall()
         rows = seal_rows([dict(zip(SOURCE_COLUMNS, r)) for r in raw_rows], sealed_rooms)
         rows = _trim_tie_boundary(rows, batch_limit)
 

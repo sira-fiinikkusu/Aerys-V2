@@ -37,6 +37,8 @@ for anything else even if a future schema offered it.
 
 from __future__ import annotations
 
+# Test bodies (Kael's gate body, the home body's test jobs) never appear: their turns are
+# recorded as his but were never his words (test_bodies.py, 11/09).
 # Newest-first, re-ordered by the formatter, the same shape as ROOM_TURNS_SQL next
 # door. `channel_id LIKE 'portable:%%'` is the only structural marker a portable turn
 # carries — the extractor treats channel_id as opaque text — so the person filter is
@@ -47,6 +49,7 @@ SELECT input_text, emitted_reply, channel_id, created_at
 FROM v2_turns
 WHERE person_id = %(person_id)s
   AND channel_id LIKE 'portable:%%'
+  AND NOT (COALESCE(channel_id::text, '') LIKE ANY(%(test_bodies)s::text[]))
   AND input_text IS NOT NULL AND input_text <> ''
 ORDER BY created_at DESC
 LIMIT %(limit)s
