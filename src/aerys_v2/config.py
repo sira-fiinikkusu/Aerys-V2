@@ -486,6 +486,13 @@ class Settings(BaseSettings):
     # identity (the id stays in the environment). Off unless approvals is true.
     approvals: bool = False
     approvals_owner_discord_id: str = ""
+    # WHAT WAITS FOR HIS TAP (hands_gate.py; D10 11/08, D12 11/09), on that button: from voice,
+    # a home job starts directly only on a strong match AND an agent listed in
+    # home_read_only_agents (list one only once the home body enforces read-only for it); any
+    # other voice-started job, and her first message to anyone new, waits for his Approve. Off
+    # unless hands_gates is true and approvals is armed.
+    hands_gates: bool = False
+    home_read_only_agents: str = ""
     # HER HOME BODY SAYS "I'M DONE" (home_notices.py; board #176, Stage 3). The home server
     # POSTs a done-notice to /home-notice with home_webhook_token (its own token: the home body
     # never holds api_token); she tells the owner through the desk. home_url + home_api_token
