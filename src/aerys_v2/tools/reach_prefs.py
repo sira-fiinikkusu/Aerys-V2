@@ -20,7 +20,8 @@ from datetime import timedelta
 
 from dataclasses import replace
 
-from aerys_v2.reach import BUDGET_MAX, BUDGET_MIN, CHECKINS_MAX, CHECKINS_MIN, NAP_DEFAULT, NAP_MAX
+from aerys_v2.reach import (BUDGET_MAX, BUDGET_MIN, CHECKINS_MAX, CHECKINS_MIN, COMPANY_DEFAULT, COMPANY_MAX,
+                            NAP_DEFAULT, NAP_MAX)
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
     now = clock or (lambda: datetime.now(timezone.utc))
 
     @tool
-    def reach_prefs(action: str, topic: str = "", his_words: str = "", minutes: int = 0) -> str:
+    def reach_prefs(action: str, topic: str = "", his_words: str = "", minutes: int = 0, hours: int = 0) -> str:
         """Change how often you reach out to the owner on your own, or what about, because he
         told you to. CALL THIS when he asks for less or more, in whatever words he uses:
         "ease up", "chill out", "you're pinging me a lot" mean less; "keep me posted more",
@@ -47,10 +48,14 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
         he said he'd do) have their own dial: "check on me more", "check in on me more often"
         (checkins_more); "check on me less", "you don't have to check up on me so much"
         (checkins_less); "stop checking up on me" (mute follow-ups); "don't ask about my
-        appointments" (mute appointments); "don't chase my to-dos" (mute to-dos).
+        appointments" (mute appointments); "don't chase my to-dos" (mute to-dos). When he says
+        people are over ("we've got company", "my parents are here", "friends are over"):
+        company, so nothing you'd say aloud is said while they're here (it goes as text); when he
+        says they've left: company_gone.
 
-        action: "less", "more", "mute", "unmute", "show", "nap", "awake", "checkins_more" or
-          "checkins_less".
+        action: "less", "more", "mute", "unmute", "show", "nap", "awake", "checkins_more",
+          "checkins_less", "company" or "company_gone".
+        hours: for company, if he said how long (default 6, at most 24).
         minutes: for nap, if he said how long (default 60, at most 180).
         topic: for mute and unmute: kael (news from Kael), weather, calendar, email,
           follow-ups (all your unasked check-ins), appointments, to-dos, brief (your spoken
@@ -68,8 +73,11 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
                 muted = ", ".join(prefs.muted) if prefs.muted else "nothing"
                 nap = (f" A nap hold runs until {prefs.hold_until:%H:%M} UTC or until he talks to you."
                        if prefs.hold_until is not None and prefs.hold_until > now() else "")
+                company = (" People are over: nothing said aloud until they leave."
+                           if prefs.company_until is not None and prefs.company_until > now() else "")
                 return (f"Up to {prefs.budget} unprompted message(s) a day, plus the briefs and anything "
-                        f"he asked for; up to {prefs.checkins} unasked check-in(s) of those. Muted: {muted}.{nap}")
+                        f"he asked for; up to {prefs.checkins} unasked check-in(s) of those. Muted: {muted}."
+                        f"{nap}{company}")
             if act in ("less", "more"):
                 budget = max(BUDGET_MIN, min(BUDGET_MAX, prefs.budget + (1 if act == "more" else -1)))
                 if budget == prefs.budget:
@@ -111,8 +119,20 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
                     return f"Already at {edge} ({n} unasked check-ins a day); nothing changed."
                 store.set_prefs(replace(prefs, checkins=n), now(), f"check-ins {prefs.checkins} -> {n}", words)
                 return f"Changed: up to {n} unasked check-in(s) a day now (was {prefs.checkins})."
+            if act == "company":
+                span = min(timedelta(hours=int(hours)) if hours and int(hours) > 0 else COMPANY_DEFAULT, COMPANY_MAX)
+                start = now()
+                store.set_prefs(replace(prefs, company_until=start + span), start,
+                                f"company {int(span.total_seconds() // 3600)} h", words)
+                return (f"Discreet: nothing said aloud while people are over (it goes as text), until he says "
+                        f"they've left or {int(span.total_seconds() // 3600)} hours pass. Storm warnings still speak.")
+            if act == "company_gone":
+                if prefs.company_until is None or prefs.company_until <= now():
+                    return "There was no company setting on; nothing changed."
+                store.set_prefs(replace(prefs, company_until=None), now(), "company gone", words)
+                return "Company's gone: you can speak to him again."
             return ('NOT DONE: action must be "less", "more", "mute", "unmute", "show", "nap", "awake", '
-                    '"checkins_more" or "checkins_less".')
+                    '"checkins_more", "checkins_less", "company" or "company_gone".')
         except Exception:
             log.warning("reach_prefs %s failed", act, exc_info=True)
             return "NOT DONE: the reach settings couldn't be reached; nothing changed."

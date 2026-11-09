@@ -457,3 +457,67 @@ def test_a_check_back_on_its_way_can_still_be_listed_and_called_off():
     life.desk.tick()
     life.runner.tick()
     assert life.world.spoken == [] and life.world.texts == []
+
+
+# --- company: "i can let her know when people are here and when they leave" (11/08 21:40) ----------------
+
+def test_with_company_over_nothing_personal_is_said_aloud_it_goes_as_text():
+    life = Life()
+    out = life.prefs.invoke({"action": "company", "his_words": "my parents are here"})
+    assert out.startswith("Discreet")
+    life.appts = [appt("Meeting with therapist")]
+    life.words["appointment"] = "Your session just wrapped up. How did it go?"
+    assert life.runner.tick()["raised"] == 1
+    assert life.world.spoken == [] and life.world.texts == [("discord", "Your session just wrapped up. How did it go?", False)]
+    assert "company: as text" in life.desk.store.rows[1].reason or life.desk.store.rows[1].dm_at is not None
+
+
+def test_storm_warnings_still_speak_with_company_over():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    life.prefs.invoke({"action": "company"})
+    assert life.desk.reach_out(ReachEvent(source="storm_watch", topic="weather", headline="Tornado warning.",
+                                          urgency="safety")) == "sent"
+    assert life.world.spoken == [("Tornado warning.", "dev-office")]
+
+
+def test_company_ends_when_he_says_so_or_on_its_own():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    life.prefs.invoke({"action": "company", "hours": 2})
+    assert life.prefs.invoke({"action": "company_gone", "his_words": "they left"}).startswith("Company's gone")
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert life.world.spoken == [("Backup's green.", "dev-office")]
+    life2 = Life()
+    life2.prefs.invoke({"action": "company"})
+    life2.at(DAY + timedelta(hours=6, minutes=1))                      # he forgot: 6 hours, then it lifts
+    life2.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert life2.world.spoken == [("Backup's green.", "dev-office")]
+
+
+def test_company_starting_mid_delivery_still_keeps_it_quiet():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    locate = life.desk.deliverer.locate
+
+    def company_arrives():
+        life.desk.store.set_prefs(life.desk.store.prefs(3).__class__(budget=3, company_until=DAY + timedelta(hours=6)),
+                                  DAY, "company", "")
+        return locate()
+
+    life.desk.deliverer.locate = company_arrives
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert life.world.spoken == [] and life.world.texts and life.world.texts[0][1] == "Backup's green."
+
+
+def test_other_prefs_survive_company_and_back():
+    life = Life()
+    life.prefs.invoke({"action": "checkins_more"})
+    life.prefs.invoke({"action": "mute", "topic": "weather"})
+    life.prefs.invoke({"action": "company"})
+    life.prefs.invoke({"action": "company_gone"})
+    p = life.desk.store.prefs(3)
+    assert p.checkins == 3 and p.muted == ["weather"] and p.company_until is None

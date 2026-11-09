@@ -74,6 +74,8 @@ NAP_RECHECK = timedelta(minutes=2)     # a nap-held message is looked at again t
 NAP_GRACE = timedelta(seconds=10)      # clock skew only: replies are judged by when his turn STARTED
 NAP_DEFAULT = timedelta(hours=1)
 NAP_MAX = timedelta(hours=3)
+COMPANY_DEFAULT = timedelta(hours=6)  # "people are over" ends on its own if he forgets to say they left
+COMPANY_MAX = timedelta(hours=24)
 ROOM_WAIT = timedelta(minutes=1)      # a message pinned to a room he isn't in is looked at again this often
 DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went keeps trying this long
 TICK_S = 30
@@ -139,6 +141,7 @@ class Prefs:
     hold_since: datetime | None = None   # a nap: he said so at hold_since...
     hold_until: datetime | None = None   # ...and it lasts until he talks to her again, or this
     checkins: int = 2                    # unasked check-ins a day (migration 020)
+    company_until: datetime | None = None  # people are over: nothing said aloud until then (020)
 
 
 @dataclass
@@ -180,7 +183,21 @@ def local_day_start(now: datetime) -> datetime:
 
 def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
            quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str = "meeting",
-           safety_voice_at_night: bool = False) -> Decision:
+           safety_voice_at_night: bool = False, company: bool = False) -> Decision:
+    d = _decide_checks(event, now, prefs=prefs, sent_today=sent_today, duplicate=duplicate, quiet=quiet,
+                       meeting_until=meeting_until, morning_hour=morning_hour, hold=hold,
+                       safety_voice_at_night=safety_voice_at_night)
+    # People are over (he said so): whatever would be said aloud goes as text instead. Safety
+    # still speaks; the record says why the rest didn't.
+    if company and d.action == "send" and d.voice != "reroute" and not d.breaks_through:
+        return Decision("send", (d.reason + "; " if d.reason else "") + "company: as text", silent=d.silent,
+                        voice="reroute")
+    return d
+
+
+def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
+                   quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str,
+                   safety_voice_at_night: bool) -> Decision:
     """The desk's checks, in order (module docstring). Pure: every input is given.
     meeting_until is any hold that works like a meeting; `hold` names it in the record
     ("meeting" or "nap"). Safety breaks through every hold, a nap included: the owner's D4
@@ -463,20 +480,23 @@ class PostgresReachStore:
 
     def prefs(self, default_budget):
         with self._connect() as conn:
-            row = conn.execute("SELECT budget, muted, hold_since, hold_until, checkins FROM v2_reach_prefs "
-                               "WHERE id = 1").fetchone()
+            row = conn.execute("SELECT budget, muted, hold_since, hold_until, checkins, company_until "
+                               "FROM v2_reach_prefs WHERE id = 1").fetchone()
         if not row:
             return Prefs(budget=default_budget)
-        return Prefs(budget=row[0], muted=list(row[1]), hold_since=row[2], hold_until=row[3], checkins=row[4])
+        return Prefs(budget=row[0], muted=list(row[1]), hold_since=row[2], hold_until=row[3], checkins=row[4],
+                     company_until=row[5])
 
     def set_prefs(self, prefs, now, change, words):
         with self._connect() as conn:   # one transaction: the prefs and their record together
             conn.execute(
-                "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, checkins, updated_at) "
-                "VALUES (1, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, "
-                "muted = EXCLUDED.muted, hold_since = EXCLUDED.hold_since, hold_until = EXCLUDED.hold_until, "
-                "checkins = EXCLUDED.checkins, updated_at = EXCLUDED.updated_at",
-                (prefs.budget, list(prefs.muted), prefs.hold_since, prefs.hold_until, prefs.checkins, now))
+                "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, checkins, company_until, "
+                "updated_at) VALUES (1, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET "
+                "budget = EXCLUDED.budget, muted = EXCLUDED.muted, hold_since = EXCLUDED.hold_since, "
+                "hold_until = EXCLUDED.hold_until, checkins = EXCLUDED.checkins, "
+                "company_until = EXCLUDED.company_until, updated_at = EXCLUDED.updated_at",
+                (prefs.budget, list(prefs.muted), prefs.hold_since, prefs.hold_until, prefs.checkins,
+                 prefs.company_until, now))
             conn.execute("INSERT INTO v2_reach_pref_changes (at, change, words) VALUES (%s, %s, %s)",
                          (now, change, words))
 
@@ -614,8 +634,10 @@ class ReachDesk:
         now = self.clock()
         if row.expires_at is not None and not row.owed and now >= _utc(row.expires_at):
             return False
-        return ((row.brief or not self.quiet(now)) and self._meeting() is None
-                and self._nap(self.store.prefs(self.budget_default), now) is None)
+        prefs = self.store.prefs(self.budget_default)
+        company = prefs.company_until is not None and _utc(prefs.company_until) > now
+        return ((row.brief or not self.quiet(now)) and self._meeting() is None and not company
+                and self._nap(prefs, now) is None)
 
     def _meeting(self) -> datetime | None:
         try:
@@ -641,13 +663,14 @@ class ReachDesk:
         duplicate = bool(fresh and event.dedupe_key
                          and self.store.recently_sent(event.dedupe_key, now - DEDUPE_WINDOW))
         prefs = self.store.prefs(self.budget_default)
+        company = prefs.company_until is not None and _utc(prefs.company_until) > now
         meeting, nap = self._meeting(), self._nap(prefs, now)
         hold = "nap" if nap is not None and (meeting is None or nap >= _utc(meeting)) else "meeting"
         until = max(t for t in (_utc(meeting), nap) if t is not None) if (meeting or nap) else None
         return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
                       duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,
                       morning_hour=self.morning_hour, hold=hold,
-                      safety_voice_at_night=self.safety_voice_at_night)
+                      safety_voice_at_night=self.safety_voice_at_night, company=company)
 
     def voice_held(self, now: datetime | None = None) -> str | None:
         """Why her voice is held right now (a meeting or a nap), or None. The brief asks before

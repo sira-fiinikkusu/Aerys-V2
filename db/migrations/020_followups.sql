@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS v2_followup_state (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Company (the owner, 11/08: "i can let her know when people are here and when they leave in
+-- case we want to be discreet"): until this time nothing she'd say aloud is said; it goes as text.
+ALTER TABLE v2_reach_prefs ADD COLUMN IF NOT EXISTS company_until TIMESTAMPTZ;
+
 -- How many unasked check-ins a day he's said he wants (0-4): "check on me more/less".
 ALTER TABLE v2_reach_prefs ADD COLUMN IF NOT EXISTS checkins INTEGER NOT NULL DEFAULT 2
     CHECK (checkins BETWEEN 0 AND 4);

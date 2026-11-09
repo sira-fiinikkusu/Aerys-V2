@@ -1581,7 +1581,8 @@ REACH_PREFS_OVERLAY = (
     "lot', 'keep me posted more', 'stop telling me about X', or asks what you'll bring him "
     "unprompted, CALL reach_prefs (less / more / mute / unmute / show) and tell him plainly "
     "what changed. When he says he's taking a nap or lying down, CALL reach_prefs nap (with "
-    "minutes if he said how long); when he says he's up, CALL reach_prefs awake. Never claim "
+    "minutes if he said how long); when he says he's up, CALL reach_prefs awake. When he says "
+    "people are over, CALL reach_prefs company; when they've left, company_gone. Never claim "
     "a change the tool didn't confirm."
 )
 
