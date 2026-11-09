@@ -247,7 +247,9 @@ class ReachStore(Protocol):
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
     def decided(self, dedupe_key: str, since: datetime) -> bool: ...
-    def withdraw(self, dedupe_key: str, now: datetime) -> bool: ...
+    def withdraw(self, dedupe_key: str, now: datetime, reason: str = ...) -> bool: ...
+    def statuses(self, dedupe_key: str) -> set: ...
+    def carried(self, dedupe_key: str, since: datetime) -> str | None: ...
     def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
                 not_before: datetime | None) -> Reach | None: ...
     def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
@@ -291,12 +293,26 @@ class MemoryReachStore:
         """Any record under this key since `since`, whatever became of it (a quiet evening too)."""
         return any(r.dedupe_key == dedupe_key and r.created_at >= since for r in self.rows.values())
 
-    def withdraw(self, dedupe_key, now):
-        """Drop what's still queued under this key (he called it off). True if anything was."""
+    def withdraw(self, dedupe_key, now, reason="he called it off"):
+        """Drop what's still queued under this key (he called it off, or something else carries
+        it now). True if anything was."""
         hit = [r for r in self.rows.values() if r.dedupe_key == dedupe_key and r.status == "queued"]
         for r in hit:
-            r.status, r.reason = "dropped", "he called it off"
+            r.status, r.reason = "dropped", reason
         return bool(hit)
+
+    def statuses(self, dedupe_key):
+        """What became of every record under this key (empty if there's none)."""
+        return {r.status for r in self.rows.values() if r.dedupe_key == dedupe_key}
+
+    def carried(self, dedupe_key, since):
+        """A 'folded' marker under this key (since `since`) whose carrier, the row that holds it in
+        its folds, is still alive: 'sent', 'pending' (queued), or None (no marker, or its carrier
+        was dropped, failed or never written)."""
+        marks = {r.id for r in self.rows.values() if r.dedupe_key == dedupe_key and r.status == "folded"
+                 and r.created_at and r.created_at >= since}
+        states = {w.status for w in self.rows.values() if marks & set(w.folds) and w.status in ("queued", "sent")}
+        return "sent" if "sent" in states else "pending" if states else None
 
     def add_new(self, event, now, *, status, reason, not_before):
         if any(r.dedupe_key == event.dedupe_key for r in self.rows.values()):
@@ -412,11 +428,27 @@ class PostgresReachStore:
                 "SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s AND created_at >= %s LIMIT 1",
                 (dedupe_key, since)).fetchone() is not None
 
-    def withdraw(self, dedupe_key, now):
+    def withdraw(self, dedupe_key, now, reason="he called it off"):
         with self._connect() as conn:
             return conn.execute(
-                "UPDATE v2_reachouts SET status = 'dropped', reason = 'he called it off', updated_at = %s "
-                "WHERE dedupe_key = %s AND status = 'queued' RETURNING id", (now, dedupe_key)).fetchone() is not None
+                "UPDATE v2_reachouts SET status = 'dropped', reason = %s, updated_at = %s "
+                "WHERE dedupe_key = %s AND status = 'queued' RETURNING id",
+                (reason, now, dedupe_key)).fetchone() is not None
+
+    def statuses(self, dedupe_key):
+        with self._connect() as conn:
+            rows = conn.execute("SELECT DISTINCT status FROM v2_reachouts WHERE dedupe_key = %s",
+                                (dedupe_key,)).fetchall()
+        return {r[0] for r in rows}
+
+    def carried(self, dedupe_key, since):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT w.status FROM v2_reachouts m JOIN v2_reachouts w ON m.id = ANY(w.folds) "
+                "WHERE m.dedupe_key = %s AND m.status = 'folded' AND m.created_at >= %s "
+                "AND w.status IN ('queued', 'sent')", (dedupe_key, since)).fetchall()
+        states = {r[0] for r in rows}
+        return "sent" if "sent" in states else "pending" if states else None
 
     def foldable(self, since, until):
         with self._connect() as conn:
@@ -709,7 +741,8 @@ class ReachDesk:
             return "nap"
         return None
 
-    def reserve_for_brief(self, since: datetime, until: datetime) -> list[Reach]:
+    def reserve_for_brief(self, since: datetime, until: datetime, *, reason: str = "carried by the morning brief",
+                          skip_topics: tuple = ()) -> list[Reach]:
         """The routine items held since `since` that a brief may carry, reserved for it: each
         waits until `until` (the brief's cutoff), so the watcher can't also send it while she
         composes. Not what has expired or what he's muted since (those the watcher drops). If
@@ -719,17 +752,31 @@ class ReachDesk:
             muted = muted_topics(self.store.prefs(self.budget_default))
             out = []
             for r in self.store.foldable(since, until):
-                if self._delivered(r.id) or r.topic.strip().lower() in muted:
+                if self._delivered(r.id) or r.topic.strip().lower() in muted or r.topic in skip_topics:
                     continue
                 if r.expires_at is not None and now >= _utc(r.expires_at):
                     continue
                 try:
-                    self.store.mark(r.id, now, not_before=until, reason="carried by the morning brief")
+                    self.store.mark(r.id, now, not_before=until, reason=reason)
                 except Exception:
                     log.warning("reach %s: couldn't reserve it for the brief; it goes on its own", r.id)
                     continue
                 out.append(r)
             return out
+
+    def take_back(self, dedupe_key: str, now: datetime, reason: str) -> str:
+        """Something else will say what's under this key (the welcome-home hello asks an appointment's
+        question itself). Read and, if it's still waiting, withdrawn in ONE step under the delivery
+        lock, so it can't be said in between: 'free' (nothing was said or waits), 'taken' (it
+        waited and is withdrawn), or 'went' (it was said, or a delivery waiting for its record may
+        be it): then it isn't the other's to say."""
+        with self.lock:
+            states = self.store.statuses(dedupe_key)
+            if states & {"sent", "folded"} or ("queued" in states and self.unrecorded):
+                return "went"            # said, or carried by a brief that was said
+            if "queued" in states:
+                return "taken" if self.store.withdraw(dedupe_key, now, reason=reason) else "went"
+            return "free"
 
     def _delivered(self, rid: int) -> bool:
         """Delivered (or carried by a delivered brief) but not yet recorded: never send it again."""

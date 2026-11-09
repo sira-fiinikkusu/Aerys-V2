@@ -26,7 +26,8 @@ from aerys_v2.reach import (BUDGET_MAX, BUDGET_MIN, CHECKINS_MAX, CHECKINS_MIN, 
 log = logging.getLogger(__name__)
 
 #: Topics the desk knows. Safety warnings and answers he asked for can't be muted.
-TOPICS = ("kael", "weather", "calendar", "email", "follow-ups", "appointments", "to-dos", "brief", "evening")
+TOPICS = ("kael", "weather", "calendar", "email", "follow-ups", "appointments", "to-dos", "brief", "evening",
+          "welcome")
 
 
 def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
@@ -59,7 +60,8 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
         minutes: for nap, if he said how long (default 60, at most 180).
         topic: for mute and unmute: kael (news from Kael), weather, calendar, email,
           follow-ups (all your unasked check-ins), appointments, to-dos, brief (your spoken
-          morning brief in his office), or evening (your heads-up about tomorrow). Storm
+          morning brief in his office), evening (your heads-up about tomorrow), or welcome
+          (your hello when he gets home: "don't greet me when I get home"). Storm
           warnings, answers he asked for and check-backs he said yes to are never muted.
         his_words: what he said, briefly, for the record.
 

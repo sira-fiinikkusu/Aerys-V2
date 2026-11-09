@@ -480,6 +480,19 @@ class Settings(BaseSettings):
     # been read), "live", or "off". Off unless followups is true.
     followups: bool = False
     followup_plans: str = "shadow"
+    # HER WELCOME-HOME HELLO (welcome.py; board #178; the owner, 2026-11-09: "the 30+ minutes
+    # away works for me", and "she could be inquisitive if i left without anything on the
+    # schedule or she could ask how my appointment went"). When welcome_home_entity (his
+    # settled home/away sensor) turns home after welcome_home_away_minutes or more away (by
+    # HA's own history), and the house settles him in one of welcome_home_rooms (empty = every
+    # room with a speaker but the bedroom) within welcome_home_settle_minutes, she says hi
+    # there; it carries the morning brief when that's still due. Entity ids stay in the
+    # environment. Off unless welcome_home is true.
+    welcome_home: bool = False
+    welcome_home_entity: str = ""
+    welcome_home_away_minutes: int = 30
+    welcome_home_settle_minutes: int = 20
+    welcome_home_rooms: str = ""
     # THE OWNER'S APPROVAL BUTTON (approvals.py; D10 11/08, D12 11/09): things she may only do
     # once he taps Approve on a Discord button (the Discord gateway posts it to his DMs; an HA
     # notification says one is waiting). approvals_owner_discord_id overrides his linked Discord

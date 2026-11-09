@@ -50,7 +50,16 @@ ASK_HORIZON = timedelta(days=60)
 MINER_BATCH = 40
 HANDING_GRACE = timedelta(minutes=2)      # a row left 'handing' this long is reconciled with the desk
 UNASKED = ("appointment", "plan")
+#: A check-in a welcome-home hello holds (welcome.py): 'skipped' with this reason (and its arrival)
+#: until the hello is said. It counts toward the day's check-ins like a raised one.
+HELLO_KEPT = "kept for the welcome-home hello"
+#: Taken while the day's unasked check-ins are counted and one is reserved, by the runner here and
+#: by the welcome-home hello: the two can't both take the last one (one brain process runs both).
+CHECKIN_LOCK = threading.Lock()
 TOPIC = {"asked": "follow-ups", "appointment": "appointments", "plan": "to-dos"}
+#: The unasked check-ins' topics: questions with their own life here, never folded into a brief or
+#: the welcome-home hello as something that "came in" (they go on their own).
+CHECK_IN_TOPICS = (TOPIC["appointment"], TOPIC["plan"])
 SOURCE = {"asked": "follow-up", "appointment": "check-in", "plan": "check-in"}
 _HOLD = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
 
@@ -114,6 +123,14 @@ class MemoryFollowupStore:
     def has(self, source_key):
         return any(r.source_key == source_key for r in self.rows.values())
 
+    def by_key(self, source_key):
+        return next((r for r in self.rows.values() if r.source_key == source_key), None)
+
+    def kept_for(self, prefix):
+        """Rows a welcome-home hello holds ('skipped', reason starting with `prefix`)."""
+        return sorted((r for r in self.rows.values() if r.status == "skipped" and r.reason.startswith(prefix)),
+                      key=lambda r: r.id)
+
     def due(self, now):
         return sorted((r for r in self.rows.values() if r.status == "waiting" and r.due_at <= now),
                       key=lambda r: r.id)
@@ -138,7 +155,8 @@ class MemoryFollowupStore:
     def raised_since(self, since):
         """Unasked check-ins counted against the day: the ones the desk has, and the ones reserved
         for it (a failed record never makes room for one more)."""
-        return sum(1 for r in self.rows.values() if r.kind in UNASKED and r.status in ("handing", "raised")
+        return sum(1 for r in self.rows.values() if r.kind in UNASKED
+                   and (r.status in ("handing", "raised") or (r.status == "skipped" and r.reason.startswith(HELLO_KEPT)))
                    and r.updated_at and r.updated_at >= since)
 
     def get_state(self, key):
@@ -180,6 +198,18 @@ class PostgresFollowupStore:
         with self._connect() as conn:
             return conn.execute("SELECT 1 FROM v2_followups WHERE source_key = %s", (source_key,)).fetchone() is not None
 
+    def by_key(self, source_key):
+        with self._connect() as conn:
+            row = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE source_key = %s",
+                               (source_key,)).fetchone()
+        return self._row(row) if row else None
+
+    def kept_for(self, prefix):
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE status = 'skipped' "
+                                "AND starts_with(reason, %s) ORDER BY id", (prefix,)).fetchall()
+        return [self._row(r) for r in rows]
+
     def due(self, now):
         with self._connect() as conn:
             rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE status = 'waiting' AND due_at <= %s "
@@ -216,7 +246,8 @@ class PostgresFollowupStore:
     def raised_since(self, since):
         with self._connect() as conn:
             return conn.execute("SELECT count(*) FROM v2_followups WHERE kind IN ('appointment', 'plan') "
-                                "AND status IN ('handing', 'raised') AND updated_at >= %s", (since,)).fetchone()[0]
+                                "AND (status IN ('handing', 'raised') OR (status = 'skipped' AND starts_with(reason, %s))) "
+                                "AND updated_at >= %s", (HELLO_KEPT, since)).fetchone()[0]
 
     def get_state(self, key):
         with self._connect() as conn:
@@ -422,7 +453,12 @@ class FollowUps:
                 text = self._plain(f)
             try:
                 # Reserved first, with its words: the day's count and any recovery survive what follows.
-                self.store.mark(f.id, now, status="handing", message=text)
+                # Unasked: the dial is checked again as it's reserved (her words took a while).
+                with CHECKIN_LOCK:
+                    if f.kind in UNASKED and not self._room_for_one_more(now):
+                        self.store.mark(f.id, now, status="skipped", reason="today's check-ins were used")
+                        continue
+                    self.store.mark(f.id, now, status="handing", message=text)
             except Exception:
                 log.warning("follow-up %s: couldn't reserve it; tried again next pass", f.id, exc_info=True)
                 continue
@@ -456,11 +492,18 @@ class FollowUps:
                                reason="not worth a check-in", expires_at=expires)
                 out["held"] += 1
                 continue
-            # Made already reserved, with its words and its expiry, in one write.
-            f = self.store.add("appointment", a.title, now, now, status="handing", source_key=a.key,
-                               message=text, expires_at=expires)
+            # Made already reserved, with its words and its expiry, in one write; the dial checked
+            # again as it's reserved (her words took a while, and the welcome-home hello may have
+            # taken the last check-in meanwhile).
+            with CHECKIN_LOCK:
+                if not self._room_for_one_more(now):
+                    self.store.add("appointment", a.title, now, now, status="skipped", source_key=a.key,
+                                   reason="today's check-ins were used", expires_at=expires)
+                    continue
+                f = self.store.add("appointment", a.title, now, now, status="handing", source_key=a.key,
+                                   message=text, expires_at=expires)
             if f is None:
-                continue                                  # another pass got there first
+                continue                                  # another pass (or the hello) got there first
             try:
                 self._give(f, text, now)
                 out["raised"] += 1
@@ -571,6 +614,14 @@ def _local(dt: datetime) -> str:
     return dt.astimezone(EASTERN).strftime("%a %b %d, %I:%M %p").replace(" 0", " ")
 
 
+def appointment_key(entity: str, ev: dict, start: datetime) -> str:
+    """One calendar event's follow-up key: the welcome-home hello (welcome.py) claims the same key,
+    so an appointment is asked about once, by one of them."""
+    uid = str(ev.get("uid") or "").strip()
+    instance = str(ev.get("recurrence_id") or "").strip() or _utc(start).isoformat()
+    return f"appt:{entity}:{uid or str(ev.get('summary') or '').strip()}:{instance}"
+
+
 def appointments_for(settings, *, get=None) -> Callable[[datetime], list]:
     """Timed events on his PERSONAL calendars (brief_calendars, never owner_meeting_calendars)
     that ended between APPT_WITHIN and APPT_AFTER ago and started after APPT_FROM_HOUR. A
@@ -611,10 +662,7 @@ def appointments_for(settings, *, get=None) -> Callable[[datetime], list]:
                 end = end if end.tzinfo else end.replace(tzinfo=EASTERN)
                 if not (now - APPT_WITHIN <= end <= now - APPT_AFTER) or start.astimezone(EASTERN).hour < APPT_FROM_HOUR:
                     continue
-                uid = str(ev.get("uid") or "").strip()
-                instance = str(ev.get("recurrence_id") or "").strip() or _utc(start).isoformat()
-                key = f"appt:{entity}:{uid or str(ev.get('summary') or '').strip()}:{instance}"
-                out.append(Appointment(key=key, title=str(ev.get("summary") or "").strip() or "something",
+                out.append(Appointment(key=appointment_key(entity, ev, start), title=str(ev.get("summary") or "").strip() or "something",
                                        start=start, end=end, location=str(ev.get("location") or "").strip(),
                                        repeats=bool(ev.get("rrule") or ev.get("recurrence_id"))))
         return out

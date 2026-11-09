@@ -400,10 +400,16 @@ def main() -> None:
             from aerys_v2.brief import (evening_heads_up_for, morning_brief_for, start_evening_heads_up,
                                         start_morning_brief)
 
-            start_morning_brief(morning_brief_for(settings, reach_desk))
+            morning_brief = morning_brief_for(settings, reach_desk)
+            start_morning_brief(morning_brief)
             # Her evening heads-up: tomorrow, briefly, only when tomorrow earns it. Off unless
             # EVENING_HEADS_UP is set.
             start_evening_heads_up(evening_heads_up_for(settings, reach_desk))
+            # Her welcome-home hello (board #178): after 30+ minutes out, in the room he settles
+            # in; it carries the morning brief when that's still due. Off unless WELCOME_HOME is set.
+            from aerys_v2.welcome import start_welcome_home, welcome_home_for
+
+            start_welcome_home(welcome_home_for(settings, reach_desk, brief=morning_brief))
             # Follow-ups: check-backs he said yes to, and a few unasked check-ins. Off unless
             # FOLLOWUPS is set; the plan miner runs in shadow until promoted.
             from aerys_v2.followups import followups_for, start_followups

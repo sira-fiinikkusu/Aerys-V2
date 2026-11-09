@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable
 
+from aerys_v2.followups import CHECK_IN_TOPICS
 from aerys_v2.reach import EASTERN, Reach, ReachEvent
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,9 @@ class MorningBrief:
         self.start_hour, self.solo_hour, self.cutoff_hour = start_hour, solo_hour, cutoff_hour
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.done: date | None = None   # the day this process already handed a brief to the desk
+        # Shared with the welcome-home hello (welcome.py), which may carry the brief: one of them
+        # decides and composes at a time, so the brief is never said twice.
+        self.lock = threading.Lock()
 
     def _up(self, reading: Reading, since: datetime) -> bool:
         if reading.woke_at is not None and reading.woke_at >= since:
@@ -148,6 +152,10 @@ class MorningBrief:
             return False
 
     def tick(self) -> str:
+        with self.lock:
+            return self._tick()
+
+    def _tick(self) -> str:
         now = self.clock()
         local = now.astimezone(EASTERN)
         day = local.date()
@@ -161,6 +169,14 @@ class MorningBrief:
         if store.recently_sent(key, start):           # given (or waiting on a busy room) before a restart
             self.done = day
             return "done"
+        # Carried by the welcome-home hello (welcome.py): done once that's said; while it waits
+        # for its room the brief waits too; if it never goes, the brief is free to go on its own.
+        carried = store.carried(key, start)
+        if carried == "sent":
+            self.done = day
+            return "done"
+        if carried == "pending":
+            return "carried by the welcome-home hello"
         if TOPIC in {str(m).strip().lower() for m in store.prefs(self.desk.budget_default).muted}:
             return "muted"
         try:
@@ -177,7 +193,9 @@ class MorningBrief:
             return f"held: {held_by}"
         since = _at(day - timedelta(days=1), 18)       # "overnight": since yesterday evening
         # Reserved first: what it will carry can't also go out on its own while she composes.
-        held, quiet = self.desk.reserve_for_brief(since, cutoff), store.sent_quietly(since)
+        # Never a check-in (a question with its own life, followups.py): it goes on its own.
+        held = self.desk.reserve_for_brief(since, cutoff, skip_topics=CHECK_IN_TOPICS)
+        quiet = store.sent_quietly(since)
         quiet = [r for r in quiet if not r.text_only]   # never said out loud, not even in the brief (email)
         try:
             facts = self.gather(now, held, quiet)
