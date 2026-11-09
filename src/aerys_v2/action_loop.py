@@ -240,7 +240,9 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
     compiled = create_agent(
         default,
         tools=list(tools),
-        middleware=[_act_middleware(build_prompt, models)],
+        # extra_middleware: official middleware mounted after hers, e.g. her home body's long
+        # jobs (home_jobs.py, s3-02). Hers stays outermost: it builds the prompt and picks the model.
+        middleware=[_act_middleware(build_prompt, models), *kw.get("extra_middleware", ())],
         checkpointer=kw.get("checkpointer"),
     )
     compiled.presence_fn = presence_fn

@@ -416,6 +416,12 @@ def main() -> None:
 
             start_followups(followups_for(settings, reach_desk))
             start_home_notices(home_notices)
+            # Her long jobs at home (s3-02): a job he approved by button is started by this one
+            # watcher (the other transports only ask), and she's told in her thread how it went.
+            home_jobs = getattr(action_graph, "home_jobs", None)
+            if home_jobs is not None:
+                home_jobs.watcher.note = kael_note_fn
+                home_jobs.watcher.start()
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
