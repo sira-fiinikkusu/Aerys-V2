@@ -1086,7 +1086,7 @@ def discord_dm_notify_for(settings: Settings) -> Callable[[str], None] | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return _json.loads(resp.read().decode() or "{}")
 
-    def notify(text: str) -> None:
+    def notify(text: str, key: str | None = None) -> None:   # key: unused, a DM doesn't dedupe
         if not channel_id:
             dm = _post("https://discord.com/api/v10/users/@me/channels",
                        {"recipient_id": recipient})

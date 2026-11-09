@@ -21,6 +21,13 @@ Discord DM to the owner, plus (when configured) a Home Assistant phone
 notification with the imagery attached. Both legs are independent and
 fail-open — a dead Discord must not cost the phone ping, and vice versa.
 
+With the reach-out desk wired (board #176, Stage 2: "storm, Kael-note and email
+pings routed through it"), the Discord leg becomes the desk: it says the short
+line where the house places him and texts the rest, under the owner's rules (a
+WARNING breaks through the night, D4; anything else goes as quiet text at night
+and is never dropped by the budget). The phone leg with the imagery stays as it
+is: the desk has no image path. If the desk itself fails, the old Discord DM goes.
+
 Deliberately a dumb poll loop (60s base tick; alerts every 10 min, outlook
 every 6 h, both once at startup). All state is in-memory: a redeploy at worst
 repeats one nudge, which beats carrying a table for four events a season.
@@ -34,6 +41,7 @@ import logging
 import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable
 
 log = logging.getLogger(__name__)
@@ -129,6 +137,18 @@ def event_matches(event: str, families: tuple, exact: tuple) -> bool:
     return any(fam in event for fam in families) or event in exact
 
 
+@dataclass(frozen=True)
+class StormNotice:
+    """One message, with what the desk needs beside the legs' (title, message, image)."""
+
+    kind: str          # warning | alert | outlook | storm
+    key: str           # stable per thing announced: the desk's dedupe key
+    title: str
+    spoken: str        # the short line she may say out loud
+    message: str
+    image_url: str
+
+
 def compose_legs(*legs: Callable) -> Callable:
     """One deliver(title, message, image_url) fanned across legs, each leg
     independently fail-open — a dead Discord must not cost the phone ping."""
@@ -155,9 +175,11 @@ class StormWatcher:
         sleep_fn: Callable[[float], None] = time.sleep,
         tick_s: float = 60.0,
         store: "StormSeenStore | None" = None,
+        reach: "Callable[[StormNotice], None] | None" = None,
     ) -> None:
         self._point = point
         self._deliver = deliver
+        self._reach = reach
         self._fetch_json = fetch_json
         self._fetch_text = fetch_text
         self._sleep = sleep_fn
@@ -182,6 +204,12 @@ class StormWatcher:
         # Countdowns start at 0 so both polls run once immediately at startup.
         self._alert_countdown = 0
         self._outlook_countdown = 0
+
+    def _notify(self, notice: StormNotice) -> None:
+        """The legs (the phone, and Discord when there's no desk), then the desk."""
+        self._deliver(notice.title, notice.message, notice.image_url)
+        if self._reach is not None:
+            self._reach(notice)
 
     # -- tier ③: official alerts for the home point (fail-open) ------------
     def poll_alerts(self) -> None:
@@ -211,7 +239,10 @@ class StormWatcher:
             if detail:
                 message += f"\n{detail}"
             log.warning("NWS alert active: %s", event)
-            self._deliver(f"⚠️ {event}", message, RADAR_IMAGE_URL)
+            self._notify(StormNotice(
+                kind="warning" if "Warning" in event else "alert", key=f"storm:alert:{alert_id}",
+                title=f"⚠️ {event}", spoken=f"Heads up: the weather service has a {event} out for here.",
+                message=message, image_url=RADAR_IMAGE_URL))
         # Every current id is now either old news or just delivered; dropping
         # expired ids keeps the set from growing across a whole season.
         self._seen_alerts = current
@@ -256,12 +287,12 @@ class StormWatcher:
         if self._store is not None:
             self._store.set_outlook_high_water(band)
         log.info("tropical outlook crossed the %d%% band (max %d%%)", band, pct)
-        self._deliver(
-            "🌀 Tropical outlook",
-            f"An area is at {pct}% formation odds over the next 7 days — "
-            f"{sentence}. Worth staying ahead of the crowd.",
-            OUTLOOK_IMAGE_URL,
-        )
+        self._notify(StormNotice(
+            kind="outlook", key=f"storm:outlook:{band}", title="🌀 Tropical outlook",
+            spoken=f"Tropical outlook: an area out there is at {pct} percent odds of forming over the next week.",
+            message=(f"An area is at {pct}% formation odds over the next 7 days — "
+                     f"{sentence}. Worth staying ahead of the crowd."),
+            image_url=OUTLOOK_IMAGE_URL))
 
     def _check_new_storms(self, data: dict) -> None:
         for storm in data.get("activeStorms", []) or []:
@@ -281,13 +312,13 @@ class StormWatcher:
                 if part
             )
             log.info("new named system in the Atlantic: %s", name)
-            self._deliver(
-                f"🌀 {name}",
-                f"The NHC is now tracking {name}"
-                + (f" ({detail})" if detail else "")
-                + " in the Atlantic basin. Calm heads-up — track and cone attached.",
-                OUTLOOK_IMAGE_URL,
-            )
+            self._notify(StormNotice(
+                kind="storm", key=f"storm:new:{sid}", title=f"🌀 {name}",
+                spoken=f"The hurricane center is now tracking {name}.",
+                message=(f"The NHC is now tracking {name}"
+                         + (f" ({detail})" if detail else "")
+                         + " in the Atlantic basin. Calm heads-up — track and cone attached."),
+                image_url=OUTLOOK_IMAGE_URL))
 
     # -- loop --------------------------------------------------------------
     def tick(self) -> None:
@@ -315,8 +346,8 @@ class StormWatcher:
             self._sleep(self._tick_s)
 
 
-def _deliver_for(settings) -> Callable[[str, str, str], None]:
-    """The two real legs, composed. Discord = her own DM to the owner (the
+def _legs_for(settings) -> tuple[Callable, Callable]:
+    """The two real legs, (discord, phone). Discord = her own DM to the owner (the
     kael-line plumbing, owner id resolved fresh per event — storms are rare
     enough that a lookup per nudge is nothing, and it survives restarts of
     either side). Phone = an HA notify service with the imagery attached."""
@@ -353,7 +384,60 @@ def _deliver_for(settings) -> Callable[[str, str, str], None]:
             timeout=10.0,
         )
 
-    return compose_legs(discord_leg, phone_leg)
+    return discord_leg, phone_leg
+
+
+def _deliver_for(settings) -> Callable[[str, str, str], None]:
+    """Both legs, composed (no desk: today's delivery, unchanged)."""
+    return compose_legs(*_legs_for(settings))
+
+
+#: What each kind of storm message is to the desk (reach.py). A WARNING for the home
+#: point is safety: the owner's D4 lets storm warnings, and only those, break through
+#: the night, spoken where he is. A watch or other loud-family alert is timely: it goes
+#: now (quiet text at night or in a meeting) and the daily budget never drops it. The
+#: outlook band and a newly named storm are the days-ahead heads-ups this watcher
+#: exists for ("beating the crowd"): a handful a season, so timely too, never budgeted
+#: away; at night they go as quiet text rather than wait for the morning.
+URGENCY = {"warning": "safety", "alert": "timely", "outlook": "timely", "storm": "timely"}
+
+
+def storm_reach_for(desk, *, fallback: Callable[[str, str, str], None] | None = None
+                    ) -> Callable[[StormNotice], None]:
+    """notice -> the desk. If the desk can't take it (its record is the NAS), the old
+    Discord DM goes instead: a storm warning must never be lost to a database blink."""
+    from datetime import datetime, timezone
+
+    from aerys_v2.reach import DEDUPE_WINDOW, ReachEvent
+
+    def reach(notice: StormNotice) -> None:
+        try:
+            outcome = desk.reach_out(ReachEvent(
+                source="storm_watch", topic="weather", headline=notice.spoken,
+                detail=f"{notice.message}\n{notice.image_url}", urgency=URGENCY.get(notice.kind, "timely"),
+                dedupe_key=notice.key))
+            log.info("storm %s: %s by the desk", notice.kind, outcome)
+        except Exception:
+            # If its row landed, the desk has it and its watcher retries the delivery: a DM
+            # now would be a second copy. Only a notice the desk never took goes direct. If
+            # that can't be told (the ledger is unreachable), a WARNING goes direct anyway (a
+            # second copy beats a lost warning); anything else doesn't (the phone leg has it).
+            try:
+                taken = desk.store.recently_sent(notice.key, datetime.now(timezone.utc) - DEDUPE_WINDOW)
+            except Exception:
+                taken = URGENCY.get(notice.kind) != "safety"
+            if taken:
+                log.warning("storm %s: the desk has it (or can't say); not sending a direct DM",
+                            notice.kind, exc_info=True)
+                return
+            log.warning("storm %s: the desk failed; sending the DM directly", notice.kind, exc_info=True)
+            if fallback is not None:
+                try:
+                    fallback(notice.title, notice.message, notice.image_url)
+                except Exception:
+                    log.warning("storm %s: the direct DM failed too", notice.kind, exc_info=True)
+
+    return reach
 
 
 class StormSeenStore:
@@ -426,21 +510,24 @@ class StormSeenStore:
             log.warning("outlook seen-state write failed (harmless)", exc_info=True)
 
 
-def start_storm_watch(settings) -> threading.Thread | None:
+def start_storm_watch(settings, desk=None) -> threading.Thread | None:
     """Arm-and-forget: None unless a home point is configured — the standard
     optional-seam pattern. The point stays in the environment: it is a street
-    address in disguise and this repo is public."""
+    address in disguise and this repo is public. With the reach-out desk, it
+    replaces the Discord leg; the phone leg stays."""
     point = (settings.storm_watch_latlon or "").strip()
     if not point:
         return None
     store = None
     if settings.database_url:
         store = StormSeenStore(settings.database_url)
+    discord_leg, phone_leg = _legs_for(settings)
     watcher = StormWatcher(
         point=point,
-        deliver=_deliver_for(settings),
+        deliver=compose_legs(phone_leg) if desk is not None else compose_legs(discord_leg, phone_leg),
         event_csv=settings.storm_alert_events,
         store=store,
+        reach=storm_reach_for(desk, fallback=discord_leg) if desk is not None else None,
     )
     thread = threading.Thread(
         target=watcher.run_forever, daemon=True, name="storm-watch"

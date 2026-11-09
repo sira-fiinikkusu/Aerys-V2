@@ -371,7 +371,7 @@ def main() -> None:
             # --serve-only doctrine as the presence watcher.
             from aerys_v2.storm_watch import start_storm_watch
 
-            if start_storm_watch(settings) is not None:
+            if start_storm_watch(settings, desk=reach_desk) is not None:
                 log.info("storm watch armed | alerts=10m outlook=6h")
             # Kael check-ins (owner ask 2026-10-12): the recurring jobs that tap Kael.
             # Same one-daemon, --serve-only doctrine: the transports must not each tap.

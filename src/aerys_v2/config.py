@@ -616,6 +616,11 @@ class Settings(BaseSettings):
     # Where arrival pings land: the owner's Discord user id (DM via the bot's
     # REST API — the watcher is its own container and holds no gateway session).
     email_notify_discord_user_id: str | None = None
+    # Board #176, Stage 2: the watcher's pings go through the reach-out desk (a queued
+    # row in v2_reachouts the brain's desk delivers) instead of straight to a Discord
+    # DM. Needs database_url + owner_person_id; the email container must be recreated
+    # to pick it up (--env-file is read at creation).
+    reach_email_via_desk: bool = False
 
     # ---- EXTRACTION WORKER (shadow mode) --------------------------------------
     # The n8n batch extraction (IfqY4BrhBGeQrcTC) re-run as a V2 worker that reads

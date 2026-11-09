@@ -132,12 +132,14 @@ class BrokenConn:
 class Notify:
     def __init__(self, fail_at=None):
         self.sent = []
+        self.keys = []
         self.fail_at = fail_at  # 0-based index of the ping that raises
 
-    def __call__(self, text):
+    def __call__(self, text, key=None):
         if self.fail_at is not None and len(self.sent) == self.fail_at:
             raise RuntimeError("discord webhook down")
         self.sent.append(text)
+        self.keys.append(key)
 
 
 def conn_with_watermark(uidvalidity, last_uid):
