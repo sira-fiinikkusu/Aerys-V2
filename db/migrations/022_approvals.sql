@@ -23,3 +23,10 @@ CREATE TABLE IF NOT EXISTS v2_approvals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_approvals_pending ON v2_approvals (requested_at) WHERE status = 'pending';
+
+-- Columns added while this migration was being built: a table made by an earlier draft gains them
+-- here (Codex 11/09). Fresh installs already have them; these are no-ops then.
+ALTER TABLE v2_approvals ADD COLUMN IF NOT EXISTS message_id TEXT;
+ALTER TABLE v2_approvals ADD COLUMN IF NOT EXISTS channel_id TEXT;
+ALTER TABLE v2_approvals ADD COLUMN IF NOT EXISTS shown TEXT;
+ALTER TABLE v2_approvals ADD COLUMN IF NOT EXISTS pinged_at TIMESTAMPTZ;
