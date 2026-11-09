@@ -916,4 +916,33 @@ def test_a_greeting_check_that_trips_over_a_change_waits_rather_than_racing():
 
     h = House(brief=True)
     h.hello.left = Changing()
-    assert h.hello.greeting(utc(SETTLED)) is True
+    assert h.hello.greeting(utc(MORNING_HOME)) is True           # inside the brief's window
+
+
+# --- Codex owed pass (11/09 15:05): the brief's cutoff, and no claim store at all ---------------
+
+def test_the_brief_is_released_in_time_to_speak_before_its_cutoff():
+    # Arrives 12:50 and the hello's reading hasn't settled him; the brief's own reading has him in
+    # the office. The hello's wait must end early enough for the brief's next pass to speak by 1 PM.
+    home = datetime(2026, 11, 10, 12, 50, tzinfo=ET)
+    h = House(home + timedelta(minutes=1), left=home - timedelta(hours=2), home=home, brief=True)
+    h.reading = HomeReading(home="home", since=utc(home), room="", confirmed=False)
+    assert h.hello.tick() == "waiting to settle"
+    assert h.at(home + timedelta(minutes=3)).brief.tick() == "waiting for the welcome-home hello"
+    assert h.at(home + timedelta(minutes=6)).brief.tick() == "sent"            # 12:56, before 1 PM
+    assert h.world.spoken == [("Morning brief.", "dev-office")]
+
+
+def test_without_any_claim_store_an_appointment_is_never_asked_about():
+    # No follow-ups store means nothing can mark it asked: two trips during one long appointment
+    # would each ask. So with no store she doesn't ask at all; the hello itself still goes.
+    long_day = Appointment(key="appt:calendar.personal:long:q", title="the long one",
+                           start=datetime(2026, 11, 10, 8, 0, tzinfo=ET), end=datetime(2026, 11, 10, 12, 0, tzinfo=ET))
+    first = datetime(2026, 11, 10, 9, 0, tzinfo=ET)
+    h = House(first + timedelta(minutes=3), left=first - timedelta(hours=1), home=first)
+    h.appointments = [long_day]
+    assert h.hello.tick() == "sent" and not h.composed[0].visits[0].ask
+    second = datetime(2026, 11, 10, 11, 0, tzinfo=ET)
+    h.reading = HomeReading(home="home", since=utc(second), room="office", confirmed=True)
+    h.left = utc(second - timedelta(hours=1))
+    assert h.at(second + timedelta(minutes=3)).hello.tick() == "sent" and not h.composed[1].visits[0].ask

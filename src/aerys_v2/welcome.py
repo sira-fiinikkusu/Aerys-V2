@@ -186,6 +186,11 @@ def plain_welcome(facts: WelcomeFacts) -> str:
     return " ".join(p for p in parts if p)
 
 
+#: How long before the brief's cutoff a waiting hello lets the brief go on its own: its 60 s poll
+#: plus the time it takes to compose and speak.
+DEFER_MARGIN = timedelta(minutes=5)
+
+
 class WelcomeHome:
     """tick() -> what happened this pass (logged, never the words). Every leg is injected:
     read() -> HomeReading; away_since(arrived) -> when he left, or None (not a trip);
@@ -224,7 +229,14 @@ class WelcomeHome:
         """True while the hello waits for him to settle after a trip (not finished, inside
         settle_for): the morning brief waits, so the hello can carry it rather than race it to his
         room. Only that long, so a brief can't be held past its cutoff. Called from the brief's
-        thread: if the arrivals change under it, it says wait (the next pass asks again)."""
+        thread: if the arrivals change under it, it says wait (the next pass asks again).
+        Never within DEFER_MARGIN of the brief's cutoff: past that the brief goes on its own, so a
+        hello still waiting can't swallow it (Codex, 11/09: arriving 12:50 unsettled, nothing was
+        said by 1 PM)."""
+        b = self.brief
+        if b is not None:
+            if now >= _at(now.astimezone(EASTERN).date(), b.cutoff_hour) - DEFER_MARGIN:
+                return False
         try:
             trips = [(key, left, self.arrived.get(key)) for key, left in list(self.left.items())]
         except RuntimeError:
@@ -391,13 +403,12 @@ class WelcomeHome:
                 log.warning("welcome home: the check-in count couldn't be read; not asking", exc_info=True)
                 may_ask = False
         else:
-            may_ask = may_ask and prefs.checkins > 0
+            # No claim store: nothing can mark an appointment asked, so two trips during one long
+            # appointment would each ask (Codex, 11/09). Not asked at all; the hello still goes.
+            may_ask = False
         chosen: dict = {}
         for a in sorted(found, key=lambda a: a.end, reverse=True):
             if not may_ask:
-                break
-            if self.followups is None:
-                chosen[a.key] = None
                 break
             try:
                 claim = self._claim(a, now, kept)
