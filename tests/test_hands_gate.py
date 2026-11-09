@@ -753,3 +753,16 @@ def test_his_no_holds_for_the_same_job_asked_from_another_line_too():
     assert not v.go and "said no" in v.text and len(b.approval_store.rows) == 1
     v = b.gate.home_job(UNTAGGED, "person:elsewhere", "start_async_task", START_WRITE)
     assert not v.go and "said no" in v.text and len(b.approval_store.rows) == 1
+
+
+def test_a_request_already_waiting_on_his_button_isnt_asked_again_from_another_thread():
+    """Gemini recheck (11/09): one live button per request, whichever thread asks; both approved
+    would have run it twice."""
+    b = Box()
+    b.gate.home_job(KAEL_ASK, KAEL_THREAD, "start_async_task", START_WRITE)
+    v = b.gate.home_job(LENS_ASK, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Still waiting" in v.text and len(b.approval_store.rows) == 1
+    b.tap()
+    v = b.gate.home_job(UNTAGGED, "person:elsewhere", "start_async_task", START_WRITE)
+    assert not v.go and "being done now" in v.text and len(b.approval_store.rows) == 1
+    assert b.watcher.tick()["done"] == 1 and len(b.done) == 1
