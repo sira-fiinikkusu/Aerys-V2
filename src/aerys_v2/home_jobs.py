@@ -33,11 +33,14 @@ give her home machine). The job's words are the private part: never logged here.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
 import os
+import re
 import threading
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -63,10 +66,18 @@ HOME_AGENT = "home"
 HOME_GRAPH_ID = "hands"
 #: Environment keys the LangGraph SDK would send to her home machine as x-api-key.
 SDK_KEY_ENV = ("LANGGRAPH_API_KEY", "LANGSMITH_API_KEY", "LANGCHAIN_API_KEY")
-#: What a turn loads: every unfinished job, and finished ones from the last few days (newest first).
+#: What a turn loads: EVERY unfinished job (so none can become unreachable), and up to MAX_TASKS
+#: finished ones from the last few days, newest first.
 KEEP_FINISHED = timedelta(days=3)
 MAX_TASKS = 25
 _UNFINISHED = ("pending", "running", "waiting")
+#: How long a home tool waits for another call on his jobs to finish (they're quick HTTP calls).
+LOCK_WAIT_S = 30
+
+CANT_READ = ("Not done: I couldn't read his home jobs just now, so nothing happened. "
+             "Try again in a moment.")
+NOT_RECORDED = (" (I couldn't write this job down, so I may not be able to check on it or change it "
+                "later. He still hears when it's done.)")
 
 HOME_DESCRIPTION = (
     "Your own home machine (a VM that's yours): you there, on Opus, with your helpers and minions, "
@@ -99,28 +110,79 @@ def _parse(stamp) -> datetime | None:
 
 
 def _recent(tasks: dict, now: datetime) -> dict:
-    """The jobs a turn should know: unfinished ones, and finished ones from the last few days."""
-    keep = []
+    """The jobs a turn should know: every unfinished one, and the newest finished ones from the
+    last few days (Codex review 11/09: a cap on unfinished jobs made the oldest unreachable)."""
+    unfinished, finished = [], []
     for task in tasks.values():
         if not isinstance(task, dict) or not task.get("task_id"):
             continue
         when = _parse(task.get("last_updated_at")) or _parse(task.get("created_at"))
-        if task.get("status") in _UNFINISHED or (when is not None and now - when <= KEEP_FINISHED):
-            keep.append((when or now, task))
-    keep.sort(key=lambda pair: pair[0], reverse=True)
-    return {t["task_id"]: t for _, t in keep[:MAX_TASKS]}
+        if task.get("status") in _UNFINISHED:
+            unfinished.append(task)
+        elif when is not None and now - when <= KEEP_FINISHED:
+            finished.append((when, task))
+    finished.sort(key=lambda pair: pair[0], reverse=True)
+    return {t["task_id"]: t for t in [*unfinished, *(t for _, t in finished[:MAX_TASKS])]}
+
+
+def _plain_failure(text) -> str:
+    """A failed home call, said without the SDK's text (it can carry the server's response body,
+    and so the job's words): what failed, and the HTTP status when there is one."""
+    text = str(text or "")
+    code = re.search(r"\b([45]\d\d)\b", text)
+    status = f" (HTTP {code.group(1)})" if code else ""
+    if text.startswith("Failed to update"):
+        return f"her home machine didn't take the change{status}"
+    if text.startswith("Failed to cancel"):
+        return f"her home machine didn't take the cancel{status}"
+    if text.startswith("Failed to"):
+        return f"her home machine didn't take the job{status}"
+    return " ".join(text.split())[:160]
+
+
+class _NoSdkText(logging.Filter):
+    """The official tools log a failed launch or update with the SDK's exception text; keep the
+    line, drop that text (Codex review 11/09)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            said = record.getMessage()
+        except Exception:
+            return True
+        if said.startswith(("Failed to launch async subagent", "Failed to update async subagent")):
+            record.msg, record.args = "home jobs: %s", (_plain_failure(said),)
+        return True
+
+
+def _quiet_official_logs() -> None:
+    official = logging.getLogger("deepagents.middleware.async_subagents")
+    if not any(isinstance(f, _NoSdkText) for f in official.filters):
+        official.addFilter(_NoSdkText())
 
 
 # --- the ledger: his jobs, across turns and surfaces ----------------------------------------
 
 
 class MemoryHomeTaskLedger:
-    """In-process ledger (tests, dev boxes). Same semantics as the Postgres one."""
+    """In-process ledger (tests, dev boxes). Same semantics as the Postgres one: locked(owner)
+    holds his jobs for one load, call, save at a time."""
 
     def __init__(self, clock: Callable[[], datetime] | None = None):
         self.rows: dict[str, tuple[str, dict]] = {}
         self.clock = clock or _now
         self._lock = threading.Lock()
+        self._owners: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+    @contextlib.contextmanager
+    def locked(self, owner: str):
+        with self._lock:
+            mine = self._owners[owner]
+        if not mine.acquire(timeout=LOCK_WAIT_S):
+            raise TimeoutError("another call on his home jobs is still running")
+        try:
+            yield self
+        finally:
+            mine.release()
 
     def load(self, owner: str) -> dict:
         with self._lock:
@@ -136,22 +198,31 @@ class MemoryHomeTaskLedger:
 
 
 class PostgresHomeTaskLedger:
-    """v2_home_tasks (db/migrations/024): one row per job, the official task record as JSON."""
+    """v2_home_tasks (db/migrations/024): one row per job, the official task record as JSON.
+
+    locked(owner) is one session holding his advisory lock: every transport and the watcher take
+    it around load, call, save, so a slower call can never write an older run over a newer one
+    (Codex review 11/09: a check that read r-1 saved it after a change had moved the job to r-2,
+    and a cancel then stopped the wrong run)."""
+
+    LOAD = ("SELECT task FROM v2_home_tasks WHERE owner = %s AND task->>'status' = ANY(%s) "
+            "UNION ALL (SELECT task FROM v2_home_tasks WHERE owner = %s AND NOT (task->>'status' = ANY(%s)) "
+            "AND updated_at > now() - %s ORDER BY updated_at DESC LIMIT %s)")
+    SAVE = ("INSERT INTO v2_home_tasks (task_id, owner, task, updated_at) VALUES (%s, %s, %s, now()) "
+            "ON CONFLICT (task_id) DO UPDATE SET task = EXCLUDED.task, updated_at = now() "
+            "WHERE v2_home_tasks.owner = EXCLUDED.owner")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
 
-    def _connect(self):
+    def _connect(self, **kw):
         import psycopg
 
-        return psycopg.connect(self.database_url, connect_timeout=5, options="-c statement_timeout=5000")
+        return psycopg.connect(self.database_url, connect_timeout=5, options="-c statement_timeout=5000", **kw)
 
-    def load(self, owner: str) -> dict:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT task FROM v2_home_tasks WHERE owner = %s AND (task->>'status' = ANY(%s) "
-                "OR updated_at > now() - %s) ORDER BY updated_at DESC LIMIT %s",
-                (owner, list(_UNFINISHED), KEEP_FINISHED, MAX_TASKS)).fetchall()
+    def _load(self, conn, owner: str) -> dict:
+        rows = conn.execute(self.LOAD, (owner, list(_UNFINISHED), owner, list(_UNFINISHED),
+                                        KEEP_FINISHED, MAX_TASKS)).fetchall()
         tasks = {}
         for (task,) in rows:
             task = task if isinstance(task, dict) else json.loads(task)
@@ -159,19 +230,45 @@ class PostgresHomeTaskLedger:
                 tasks[task["task_id"]] = task
         return _recent(tasks, _now())
 
-    def save(self, owner: str, tasks: dict) -> None:
-        if not tasks:
-            return
-        with self._connect() as conn:
-            for tid, task in tasks.items():
-                if not isinstance(task, dict):
-                    continue
+    def _save(self, conn, owner: str, tasks: dict) -> None:
+        for tid, task in (tasks or {}).items():
+            if isinstance(task, dict):
                 # Upsert, but never across owners: a job is his alone.
-                conn.execute(
-                    "INSERT INTO v2_home_tasks (task_id, owner, task, updated_at) VALUES (%s, %s, %s, now()) "
-                    "ON CONFLICT (task_id) DO UPDATE SET task = EXCLUDED.task, updated_at = now() "
-                    "WHERE v2_home_tasks.owner = EXCLUDED.owner",
-                    (str(tid), owner, json.dumps(task)))
+                conn.execute(self.SAVE, (str(tid), owner, json.dumps(task)))
+
+    def load(self, owner: str) -> dict:
+        with self._connect() as conn:
+            return self._load(conn, owner)
+
+    def save(self, owner: str, tasks: dict) -> None:
+        if tasks:
+            with self._connect() as conn:
+                self._save(conn, owner, tasks)
+
+    @contextlib.contextmanager
+    def locked(self, owner: str):
+        conn = self._connect(autocommit=True)
+        try:
+            conn.execute(f"SET lock_timeout = '{LOCK_WAIT_S}s'")
+            conn.execute(f"SET statement_timeout = '{LOCK_WAIT_S + 5}s'")
+            conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (f"home-jobs:{owner}",))
+            conn.execute("SET statement_timeout = '5s'")
+            yield _Session(self, conn)
+        finally:
+            conn.close()                 # the session ends, and his lock with it
+
+
+class _Session:
+    """The ledger, on the one connection that holds his lock."""
+
+    def __init__(self, ledger: PostgresHomeTaskLedger, conn):
+        self.ledger, self.conn = ledger, conn
+
+    def load(self, owner: str) -> dict:
+        return self.ledger._load(self.conn, owner)
+
+    def save(self, owner: str, tasks: dict) -> None:
+        self.ledger._save(self.conn, owner, tasks)
 
 
 # --- the middleware ----------------------------------------------------------------------------
@@ -195,6 +292,7 @@ def home_subagent_middleware(url: str, token: str):
         wrap_model_call = AgentMiddleware.wrap_model_call
         awrap_model_call = AgentMiddleware.awrap_model_call
 
+    _quiet_official_logs()
     return HomeSubAgents(async_subagents=[{
         "name": HOME_AGENT,
         "description": HOME_DESCRIPTION,
@@ -208,9 +306,13 @@ def home_subagent_middleware(url: str, token: str):
 
 def home_ledger_middleware(ledger, owner_person_id: str):
     """Hands his jobs to the official home tools (through their runtime state) and writes back
-    every update they return. Only for him: for anyone else his ledger isn't even read (the D10
-    gate, next in line, refuses them)."""
+    every update they return, all under his lock: one load, call, save at a time, so nothing older
+    is ever written over something newer. What's on record wins over what the turn last saw. If
+    his jobs can't be read, nothing runs (fail closed); if a job went but couldn't be written down,
+    she's told so. Only for him: for anyone else his ledger isn't even read (the D10 gate, next in
+    line, refuses them)."""
     from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import ToolMessage
     from langgraph.types import Command
 
     def mine(request) -> bool:
@@ -220,49 +322,59 @@ def home_ledger_middleware(ledger, owner_person_id: str):
         thread_id = (config.get("configurable") or {}).get("thread_id")
         return asker(identity_from_config(config), thread_id, owner_person_id) != OTHER
 
-    def loaded(request):
-        try:
-            tasks = ledger.load(owner_person_id)
-        except Exception:
-            log.warning("home jobs: couldn't read his jobs; this call goes without them", exc_info=True)
-            return request
+    def refused(request):
+        call = request.tool_call or {}
+        return ToolMessage(content=CANT_READ, tool_call_id=call.get("id") or "", name=call.get("name"))
+
+    def with_jobs(request, tasks: dict):
         state = request.runtime.state if isinstance(request.runtime.state, dict) else {}
-        merged = {**state, "async_tasks": {**tasks, **(state.get("async_tasks") or {})}}
+        merged = {**state, "async_tasks": {**(state.get("async_tasks") or {}), **tasks}}
         return request.override(state=merged, runtime=dataclasses.replace(request.runtime, state=merged))
 
-    def kept(result) -> None:
-        update = getattr(result, "update", None) if isinstance(result, Command) else None
-        tasks = update.get("async_tasks") if isinstance(update, dict) else None
+    def kept(session, result):
+        update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
+        tasks = (update or {}).get("async_tasks")
         if not tasks:
-            return
+            return result
         try:
-            ledger.save(owner_person_id, tasks)
+            session.save(owner_person_id, tasks)
+            return result
         except Exception:
-            # The job itself went (or changed); only her record of it didn't. "I'm done" still
-            # reaches him through the done-notice.
+            # The job itself went (or changed); only her record of it didn't: say so.
             log.warning("home jobs: couldn't record %d job update(s)", len(tasks), exc_info=True)
+        messages = [m.model_copy(update={"content": f"{m.content}{NOT_RECORDED}"}) if isinstance(m, ToolMessage) else m
+                    for m in update.get("messages") or []]
+        return Command(update={**update, "messages": messages})
+
+    def guarded(request, handler):
+        with contextlib.ExitStack() as stack:
+            try:
+                session = stack.enter_context(ledger.locked(owner_person_id))
+                tasks = session.load(owner_person_id)
+            except Exception:
+                log.warning("home jobs: couldn't read his jobs; nothing runs", exc_info=True)
+                return refused(request)
+            return kept(session, handler(with_jobs(request, tasks)))
 
     class HomeTaskLedger(AgentMiddleware):
         def wrap_tool_call(self, request, handler):
-            if not mine(request):
-                return handler(request)
-            result = handler(loaded(request))
-            kept(result)
-            return result
+            return guarded(request, handler) if mine(request) else handler(request)
 
         async def awrap_tool_call(self, request, handler):
             if not mine(request):
                 return await handler(request)
-            result = await handler(await asyncio.to_thread(loaded, request))
-            await asyncio.to_thread(kept, result)
-            return result
+            loop = asyncio.get_running_loop()
+            # The lock and the ledger are blocking; the official tool's async path runs inside.
+            return await asyncio.to_thread(
+                guarded, request, lambda req: asyncio.run_coroutine_threadsafe(handler(req), loop).result())
 
     return HomeTaskLedger()
 
 
 def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
     """What carries out a home job he approved (HandsWatcher): the same official tool she'd have
-    called, with his jobs loaded and her thread as the parent, then the update written down."""
+    called, under his lock, with his jobs loaded and her thread as the parent, then the update
+    written down. Its outcome is plain words, never the SDK's text."""
     from langchain.tools import ToolRuntime
     from langgraph.types import Command
 
@@ -276,23 +388,30 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
         elif name == UPDATE:
             call = {"task_id": str(args.get("task_id") or ""), "message": str(args.get("message") or "")}
         else:
-            return False, f"not a home job tool: {name!r}"
-        state = {"messages": [], "async_tasks": ledger.load(owner_person_id)}
-        runtime = ToolRuntime(state=state, context=None, config={"configurable": {"thread_id": row.thread_id}},
-                              stream_writer=lambda *_: None, tool_call_id=f"approved-{row.id}", store=None)
-        result = tools[name].func(**call, runtime=runtime)
-        update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
-        tasks = (update or {}).get("async_tasks")
-        if not tasks:
-            return False, str(result)[:300]
-        try:
-            ledger.save(owner_person_id, tasks)
-        except Exception:
-            log.warning("home jobs: an approved job went, but recording it failed", exc_info=True)
+            return False, "not a home job"
+        with ledger.locked(owner_person_id) as session:
+            try:
+                state = {"messages": [], "async_tasks": session.load(owner_person_id)}
+            except Exception:
+                log.warning("home jobs: couldn't read his jobs; the approved job wasn't started", exc_info=True)
+                return False, "I couldn't read his home jobs, so nothing was started"
+            runtime = ToolRuntime(state=state, context=None, config={"configurable": {"thread_id": row.thread_id}},
+                                  stream_writer=lambda *_: None, tool_call_id=f"approved-{row.id}", store=None)
+            result = tools[name].func(**call, runtime=runtime)
+            update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
+            tasks = (update or {}).get("async_tasks")
+            if not tasks:
+                return False, _plain_failure(result)
+            recorded = ""
+            try:
+                session.save(owner_person_id, tasks)
+            except Exception:
+                log.warning("home jobs: an approved job went, but recording it failed", exc_info=True)
+                recorded = NOT_RECORDED
         (task,) = tasks.values()
         if name == START:
-            return True, f"It's running on her home machine (task {task['task_id']})."
-        return True, f"The change went to the running job (task {task['task_id']}); it adjusts in flight."
+            return True, f"It's running on your home machine (task {task['task_id']}).{recorded}"
+        return True, f"The change went to the running job (task {task['task_id']}); it adjusts in flight.{recorded}"
 
     return run
 
@@ -317,6 +436,11 @@ def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
     gate = gate_factory({HOME_JOB: home_job_executor(subagents, ledger, owner_person_id)})
     if gate is None:
         return None
+    if HOME_AGENT in gate.read_only_agents:
+        # "home" is her whole machine, writes and all: it can never be the read-only exception that
+        # lets his voice start a job without his button (Codex review 11/09).
+        log.warning("home jobs: HOME_READ_ONLY_AGENTS lists %r, which can write; ignored", HOME_AGENT)
+        gate.read_only_agents = frozenset(a for a in gate.read_only_agents if a != HOME_AGENT)
     # Order matters: his jobs are loaded first, so the gate can name the job a change is for;
     # then the gate decides; then the official tools run.
     return HomeJobs(middleware=[home_ledger_middleware(ledger, owner_person_id), home_job_middleware(gate), subagents],
