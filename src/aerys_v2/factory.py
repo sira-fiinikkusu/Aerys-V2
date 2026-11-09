@@ -2554,12 +2554,24 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     from aerys_v2.kael_line import family_notes_fn_for
 
     models, build = _action_engine(settings, tools)
+    # Her long jobs at home (home_jobs.py, s3-02): on the new loop only, behind the D10 gate.
+    # None (the usual case) changes nothing: same overlay, same middleware, same graph.
+    home_jobs = None
+    if getattr(settings, "home_jobs", False):
+        from aerys_v2.home_jobs import home_jobs_for
+
+        home_jobs = home_jobs_for(settings)
+    overlay = action_overlay_for(settings)
+    extra = {}
+    if home_jobs is not None:
+        overlay = "\n\n".join(part for part in (overlay, home_jobs.overlay) if part)
+        extra["extra_middleware"] = home_jobs.middleware
     action_graph = build(
         models,
         soul,  # used by voice banter turns; action routes swap in the charter per call
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
-        overlay=action_overlay_for(settings),
+        overlay=overlay,
         # Owner nit 8/05: voice/glasses ALWAYS run this graph — the family
         # splice must ride it or it misses the surfaces that matter most.
         # The fn owner-gates itself; the guest graph below stays unwired.
@@ -2573,7 +2585,10 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         voice_room_fn=voice_room_fn_for(settings),
         portable_context_fn=portable_context_fn,
         context_trailing=settings.prompt_context_trailing,
+        **extra,
     )
+    # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
+    action_graph.home_jobs = home_jobs
     # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
     # command through this same tool before the specialist speaks. Graph
     # configuration, never state — like history_window_messages.

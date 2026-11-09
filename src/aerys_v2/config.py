@@ -499,6 +499,10 @@ class Settings(BaseSettings):
     # unless hands_gates is true and approvals is armed.
     hands_gates: bool = False
     home_read_only_agents: str = ""
+    # HER LONG JOBS AT HOME (home_jobs.py; board #176, s3-02): her new loop (action_loop=agent)
+    # starts jobs on her home body through LangChain's AsyncSubAgentMiddleware, at home_url with
+    # home_api_token, behind the D10 gate above. Off unless home_jobs is true AND the gate is armed.
+    home_jobs: bool = False
     # HER HOME BODY SAYS "I'M DONE" (home_notices.py; board #176, Stage 3). The home server
     # POSTs a done-notice to /home-notice with home_webhook_token (its own token: the home body
     # never holds api_token); she tells the owner through the desk. home_url + home_api_token
