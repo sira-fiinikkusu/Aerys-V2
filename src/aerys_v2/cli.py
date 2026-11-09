@@ -396,6 +396,11 @@ def main() -> None:
             # Her evening heads-up: tomorrow, briefly, only when tomorrow earns it. Off unless
             # EVENING_HEADS_UP is set.
             start_evening_heads_up(evening_heads_up_for(settings, reach_desk))
+            # Follow-ups: check-backs he said yes to, and a few unasked check-ins. Off unless
+            # FOLLOWUPS is set; the plan miner runs in shadow until promoted.
+            from aerys_v2.followups import followups_for, start_followups
+
+            start_followups(followups_for(settings, reach_desk))
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 

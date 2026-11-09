@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable, Iterable, Protocol
 from zoneinfo import ZoneInfo
@@ -61,6 +61,7 @@ log = logging.getLogger(__name__)
 EASTERN = ZoneInfo("America/New_York")
 URGENCIES = ("routine", "timely", "safety")
 BUDGET_MIN, BUDGET_MAX = 0, 8
+CHECKINS_MIN, CHECKINS_MAX = 0, 4      # unasked check-ins a day he's said he wants (followups.py)
 DEDUPE_WINDOW = timedelta(hours=24)
 BUSY_RETRY = timedelta(minutes=1)
 FAIL_BACKOFF = (timedelta(minutes=1), timedelta(minutes=2), timedelta(minutes=5),
@@ -135,6 +136,7 @@ class Prefs:
     muted: list = field(default_factory=list)
     hold_since: datetime | None = None   # a nap: he said so at hold_since...
     hold_until: datetime | None = None   # ...and it lasts until he talks to her again, or this
+    checkins: int = 2                    # unasked check-ins a day (migration 020)
 
 
 @dataclass
@@ -303,12 +305,10 @@ class MemoryReachStore:
     def prefs(self, default_budget):
         if self._prefs is None:
             self._prefs = Prefs(budget=default_budget)
-        p = self._prefs
-        return Prefs(budget=p.budget, muted=list(p.muted), hold_since=p.hold_since, hold_until=p.hold_until)
+        return replace(self._prefs, muted=list(self._prefs.muted))
 
     def set_prefs(self, prefs, now, change, words):
-        self._prefs = Prefs(budget=prefs.budget, muted=list(prefs.muted), hold_since=prefs.hold_since,
-                            hold_until=prefs.hold_until)
+        self._prefs = replace(prefs, muted=list(prefs.muted))
         self.changes.append((now, change, words))
 
 
@@ -439,19 +439,20 @@ class PostgresReachStore:
 
     def prefs(self, default_budget):
         with self._connect() as conn:
-            row = conn.execute("SELECT budget, muted, hold_since, hold_until FROM v2_reach_prefs WHERE id = 1").fetchone()
+            row = conn.execute("SELECT budget, muted, hold_since, hold_until, checkins FROM v2_reach_prefs "
+                               "WHERE id = 1").fetchone()
         if not row:
             return Prefs(budget=default_budget)
-        return Prefs(budget=row[0], muted=list(row[1]), hold_since=row[2], hold_until=row[3])
+        return Prefs(budget=row[0], muted=list(row[1]), hold_since=row[2], hold_until=row[3], checkins=row[4])
 
     def set_prefs(self, prefs, now, change, words):
         with self._connect() as conn:   # one transaction: the prefs and their record together
             conn.execute(
-                "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, updated_at) "
-                "VALUES (1, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, "
+                "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, checkins, updated_at) "
+                "VALUES (1, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO UPDATE SET budget = EXCLUDED.budget, "
                 "muted = EXCLUDED.muted, hold_since = EXCLUDED.hold_since, hold_until = EXCLUDED.hold_until, "
-                "updated_at = EXCLUDED.updated_at",
-                (prefs.budget, list(prefs.muted), prefs.hold_since, prefs.hold_until, now))
+                "checkins = EXCLUDED.checkins, updated_at = EXCLUDED.updated_at",
+                (prefs.budget, list(prefs.muted), prefs.hold_since, prefs.hold_until, prefs.checkins, now))
             conn.execute("INSERT INTO v2_reach_pref_changes (at, change, words) VALUES (%s, %s, %s)",
                          (now, change, words))
 

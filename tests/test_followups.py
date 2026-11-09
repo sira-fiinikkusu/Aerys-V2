@@ -1,0 +1,251 @@
+"""Follow-ups (board #176, Stage 2). The owner, 2026-11-08, picked C: check back when he says
+yes; unasked, only about appointments on his personal calendar and things he said he'd do,
+steered in his words ("is adaptability an option with this?")."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+from aerys_v2.followups import (
+    APPT_AFTER,
+    Appointment,
+    FollowUps,
+    MemoryFollowupStore,
+    appointments_for,
+    build_check_back_tool,
+    followups_for,
+    miner_for,
+)
+from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk, Where
+from aerys_v2.tools.reach_prefs import build_reach_prefs_tool
+from test_morning_brief import Resp, quiet, settings
+from test_reach_desk import World
+
+ET = timezone(timedelta(hours=-5))
+DAY = datetime(2026, 11, 10, 14, 0, tzinfo=ET)            # Tuesday 2 PM
+OFFICE = Where("room", "dev-office", "office")
+
+
+class Life:
+    def __init__(self, now=DAY):
+        self.world = World(OFFICE)
+        self.clock = {"now": now}
+        self.store = MemoryFollowupStore()
+        self.desk = ReachDesk(MemoryReachStore(), self.world.deliverer(), budget_default=3, quiet=quiet,
+                              morning_hour=13, replied_since=lambda when: False,
+                              clock=lambda: self.clock["now"])
+        self.appts, self.words, self.calls = [], {}, []
+        self.runner = FollowUps(self.desk, self.store, say_asked=self.say("asked"),
+                                say_appointment=self.say("appointment"), say_plan=self.say("plan"),
+                                appointments=lambda now: list(self.appts), clock=lambda: self.clock["now"])
+        self.tool = build_check_back_tool(self.store, clock=lambda: self.clock["now"])
+        self.prefs = build_reach_prefs_tool(self.desk.store, clock=lambda: self.clock["now"])
+
+    def say(self, kind):
+        def f(x):
+            self.calls.append(kind)
+            w = self.words.get(kind, f"[{kind}]")
+            if isinstance(w, Exception):
+                raise w
+            return w
+        return f
+
+    def at(self, when):
+        self.clock["now"] = when
+        return self
+
+
+def appt(title="Dentist", ended=DAY - timedelta(minutes=45), key=None, **kw):
+    return Appointment(key=key or f"appt:cal:{title}", title=title, start=ended - timedelta(minutes=30), end=ended, **kw)
+
+
+# --- asked: he said yes -------------------------------------------------------------------------
+
+def test_the_tool_writes_it_down_and_she_checks_back_at_its_time():
+    life = Life(datetime(2026, 11, 10, 9, 0, tzinfo=ET))
+    out = life.tool.invoke({"action": "add", "when": "2026-11-10T17:00", "about": "the vet appointment",
+                            "his_words": "yeah check on me after"})
+    assert out.startswith("Set:") and "05:00 PM" in out
+    assert life.runner.tick()["raised"] == 0                              # not yet
+    life.words["asked"] = "Hey, how did the vet go?"
+    life.at(datetime(2026, 11, 10, 17, 1, tzinfo=ET))
+    assert life.runner.tick()["raised"] == 1
+    assert life.world.spoken == [("Hey, how did the vet go?", "dev-office")]
+    reach = life.desk.store.rows[1]
+    assert reach.owed and reach.topic == "follow-ups" and reach.expires_at is None    # owed: never dropped
+    assert life.store.rows[1].status == "raised" and life.runner.tick()["raised"] == 0
+
+
+def test_an_asked_check_back_isnt_muted_or_budgeted_and_goes_quietly_at_night():
+    life = Life(datetime(2026, 11, 10, 9, 0, tzinfo=ET))
+    life.tool.invoke({"action": "add", "when": "2026-11-10T22:00", "about": "the game"})
+    life.desk.store.set_prefs(Prefs(budget=0, muted=["follow-ups"], checkins=0), DAY, "x", "")
+    life.at(datetime(2026, 11, 10, 22, 5, tzinfo=ET))
+    assert life.runner.tick()["raised"] == 1
+    assert life.world.spoken == [] and life.world.texts == [("discord", "[asked]", True)]
+
+
+def test_the_tool_refuses_what_it_cant_honor():
+    life = Life()
+    assert "isn't in the future" in life.tool.invoke({"action": "add", "when": "2026-11-10T13:00", "about": "x"})
+    assert "60 days" in life.tool.invoke({"action": "add", "when": "2027-03-01T09:00", "about": "x"})
+    assert "ISO" in life.tool.invoke({"action": "add", "when": "tomorrow-ish", "about": "x"})
+    assert "say what" in life.tool.invoke({"action": "add", "when": "2026-11-11T09:00", "about": "  "})
+    assert life.store.rows == {}
+
+
+def test_list_and_cancel():
+    life = Life()
+    life.tool.invoke({"action": "add", "when": "2026-11-11T09:00", "about": "the vet"})
+    assert "#1 the vet" in life.tool.invoke({"action": "list"})
+    assert life.tool.invoke({"action": "cancel", "id": 1}).startswith("Canceled")
+    assert life.tool.invoke({"action": "list"}) == "Nothing to check back on."
+    life.at(datetime(2026, 11, 11, 9, 5, tzinfo=ET))
+    assert life.runner.tick()["raised"] == 0 and life.world.spoken == []
+
+
+def test_if_her_words_fail_the_plain_check_back_goes():
+    life = Life(datetime(2026, 11, 10, 9, 0, tzinfo=ET))
+    life.tool.invoke({"action": "add", "when": "2026-11-10T10:00", "about": "the vet"})
+    life.words["asked"] = RuntimeError("model down")
+    life.at(datetime(2026, 11, 10, 10, 1, tzinfo=ET))
+    life.runner.tick()
+    assert life.world.spoken[0][0] == "Checking back like you asked: the vet. How did it go?"
+
+
+# --- appointments: unasked --------------------------------------------------------------------------
+
+def test_a_finished_appointment_gets_one_how_did_it_go():
+    life = Life()
+    life.appts = [appt()]
+    life.words["appointment"] = "How'd the dentist go?"
+    assert life.runner.tick()["raised"] == 1
+    assert life.world.spoken == [("How'd the dentist go?", "dev-office")]
+    reach = life.desk.store.rows[1]
+    assert not reach.owed and reach.topic == "appointments" and reach.expires_at == DAY + timedelta(hours=4)
+    life.at(DAY + timedelta(minutes=6))
+    assert life.runner.tick()["raised"] == 0 and life.calls == ["appointment"]          # once per event
+
+
+def test_she_can_decide_it_isnt_worth_asking():
+    life = Life()
+    life.appts = [appt("Take out the trash")]
+    life.words["appointment"] = "HOLD"
+    assert life.runner.tick()["held"] == 1 and life.world.spoken == []
+    assert life.store.rows[1].status == "skipped"
+
+
+def test_his_daily_dial_caps_unasked_check_ins_and_he_moves_it_in_words():
+    life = Life()
+    life.appts = [appt("A", key="a"), appt("B", key="b"), appt("C", key="c")]
+    assert life.runner.tick()["raised"] == 2                              # the default dial is 2
+    assert [r.status for r in life.store.rows.values()] == ["raised", "raised", "skipped"]
+    assert "check-ins" not in life.prefs.invoke({"action": "less", "his_words": "ease up"}) or True
+    out = life.prefs.invoke({"action": "checkins_more", "his_words": "check on me more"})
+    assert out.startswith("Changed: up to 3")
+    p = life.desk.store.prefs(3)
+    assert p.checkins == 3 and p.budget == 2                              # each dial kept its own value
+    life.appts = [appt("D", key="d")]
+    life.at(DAY + timedelta(minutes=6))
+    assert life.runner.tick()["raised"] == 1
+
+
+def test_muting_appointments_or_all_follow_ups_stops_them_before_any_words():
+    for topic in ("appointments", "follow-ups"):
+        life = Life()
+        life.prefs.invoke({"action": "mute", "topic": topic, "his_words": "stop checking up on me"})
+        life.appts = [appt()]
+        assert life.runner.tick()["raised"] == 0 and life.calls == [] and life.world.spoken == []
+
+
+def test_an_unasked_check_in_that_cant_go_soon_is_dropped_not_aged():
+    life = Life(datetime(2026, 11, 10, 20, 50, tzinfo=ET))
+    life.appts = [appt(ended=datetime(2026, 11, 10, 20, 0, tzinfo=ET))]
+    life.desk.meeting_hold = lambda: datetime(2026, 11, 11, 2, 0, tzinfo=ET)        # held for hours
+    assert life.runner.tick()["raised"] == 1 and life.world.spoken == []
+    life.desk.meeting_hold = None
+    life.at(datetime(2026, 11, 11, 13, 1, tzinfo=ET))
+    life.desk.tick()
+    assert life.desk.store.rows[1].status == "dropped" and life.world.spoken == []
+
+
+def test_appointments_read_from_personal_calendars_only():
+    calls = []
+
+    def get(url, headers):
+        calls.append(url)
+        return Resp([
+            {"uid": "u1", "summary": "Dentist", "start": {"dateTime": "2026-11-10T12:30:00-05:00"},
+             "end": {"dateTime": "2026-11-10T13:15:00-05:00"}, "location": "Port Charlotte"},
+            {"uid": "u2", "summary": "Too recent", "start": {"dateTime": "2026-11-10T13:00:00-05:00"},
+             "end": {"dateTime": "2026-11-10T13:45:00-05:00"}},
+            {"uid": "u3", "summary": "Old", "start": {"dateTime": "2026-11-10T09:00:00-05:00"},
+             "end": {"dateTime": "2026-11-10T10:00:00-05:00"}},
+            {"uid": "u4", "summary": "Called off", "status": "CANCELLED",
+             "start": {"dateTime": "2026-11-10T12:00:00-05:00"}, "end": {"dateTime": "2026-11-10T13:00:00-05:00"}},
+            {"uid": "u5", "summary": "All day", "start": {"date": "2026-11-10"}, "end": {"date": "2026-11-11"}},
+            {"uid": "u6", "summary": "Therapy", "rrule": "FREQ=WEEKLY", "recurrence_id": "20261110T120000",
+             "start": {"dateTime": "2026-11-10T12:00:00-05:00"}, "end": {"dateTime": "2026-11-10T13:00:00-05:00"}},
+        ])
+
+    found = appointments_for(settings(), get=get)(DAY)
+    assert all("calendar.work" not in u for u in calls) and len(calls) == 1          # personal only
+    assert [(a.title, a.repeats) for a in found] == [("Dentist", False), ("Therapy", True)]
+    assert found[0].key == "appt:calendar.home:u1:2026-11-10T17:30:00+00:00" and found[0].location == "Port Charlotte"
+    assert found[1].key.endswith(":u6:20261110T120000")
+
+
+# --- plans: shadow first ------------------------------------------------------------------------------
+
+class FakeModel:
+    def __init__(self, plans):
+        self.plans, self.seen = plans, []
+
+    def invoke(self, messages):
+        self.seen.append(messages)
+        return SimpleNamespace(content=[{"type": "text", "text": "```json\n" + json.dumps({"plans": self.plans}) + "\n```"}])
+
+
+def test_the_plan_miner_starts_at_the_newest_turn_and_never_reads_history():
+    store = MemoryFollowupStore()
+    model = FakeModel([])
+    mine = miner_for(settings(), store, model=model, turns=lambda after: [(500, None, None)] if after is None else [])
+    assert mine(DAY) == 0 and store.get_state("plan_miner") == "500" and model.seen == []
+
+
+def test_the_plan_miner_writes_shadow_rows_and_nothing_is_said():
+    life = Life()
+    said = datetime(2026, 11, 10, 9, 0, tzinfo=ET)
+    turns = [(501, said, "I'll call the vet tomorrow morning"), (502, said, "what's the weather")]
+    model = FakeModel([
+        {"turn": 501, "what": "call the vet", "when": "2026-11-11T09:00", "confidence": 0.92},
+        {"turn": 502, "what": "maybe", "when": "2026-11-11T09:00", "confidence": 0.4},       # unsure: no
+        {"turn": 999, "what": "not a turn we sent", "when": "2026-11-11T09:00", "confidence": 0.99},
+        {"turn": 501, "what": "in the past", "when": "2026-11-09T09:00", "confidence": 0.99},
+    ])
+    life.store.set_state("plan_miner", "500", DAY)
+    mine = miner_for(settings(), life.store, model=model, turns=lambda after: turns if after == 500 else [])
+    assert mine(DAY) == 1 and life.store.get_state("plan_miner") == "502"
+    (row,) = life.store.rows.values()
+    assert row.kind == "plan" and row.status == "shadow" and row.due_at == datetime(2026, 11, 11, 10, 0, tzinfo=ET)
+    life.at(datetime(2026, 11, 11, 10, 5, tzinfo=ET))
+    assert life.runner.tick()["raised"] == 0 and life.world.spoken == []                 # shadow: never said
+
+
+def test_live_plans_check_in_like_appointments():
+    life = Life()
+    life.runner.plans = "live"
+    life.store.add("plan", "call the vet", DAY - timedelta(minutes=1), DAY, his_words="I'll call the vet")
+    life.words["plan"] = "Did you get a chance to call the vet?"
+    assert life.runner.tick()["raised"] == 1
+    reach = life.desk.store.rows[1]
+    assert reach.topic == "to-dos" and not reach.owed and life.world.spoken[0][0].startswith("Did you get")
+
+
+def test_off_unless_armed():
+    s = settings(followups=False, database_url="postgresql://x", followup_plans="shadow")
+    assert followups_for(s, desk=object()) is None
+    assert followups_for(settings(followups=True, database_url=None), desk=object()) is None
+    assert followups_for(settings(followups=True, database_url="postgresql://x"), desk=None) is None

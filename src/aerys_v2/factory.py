@@ -2360,6 +2360,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
 
         tools.append(build_reach_prefs_tool(PostgresReachStore(settings.database_url),
                                             default_budget=settings.reach_daily_budget))
+        if settings.followups:
+            # CHECK BACK (board #176, Stage 2; the owner's C, 11/08): when he says yes to her
+            # offer, or asks her to check on him, she writes it down here and the follow-ups
+            # runner (followups.py) brings it back at its time through the desk.
+            from aerys_v2.followups import PostgresFollowupStore, build_check_back_tool
+
+            tools.append(build_check_back_tool(PostgresFollowupStore(settings.database_url)))
 
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
@@ -2465,6 +2472,10 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(MESSAGE_KAEL_OVERLAY)
     if not guest and settings.database_url:
         parts.append(REACH_PREFS_OVERLAY)
+        if settings.followups:
+            from aerys_v2.followups import CHECK_BACK_OVERLAY
+
+            parts.append(CHECK_BACK_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:
         parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)

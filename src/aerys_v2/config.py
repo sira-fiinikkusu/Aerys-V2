@@ -470,6 +470,13 @@ class Settings(BaseSettings):
     evening_heads_up: bool = False
     evening_rooms: str = "office,kitchen"
     evening_start_hour: int = 19
+    # FOLLOW-UPS (followups.py; the owner's C, 2026-11-08): she checks back when he said yes to
+    # her offer, and checks in, unasked, about appointments on his personal calendars
+    # (brief_calendars; never the work ones) and things he said he'd do. followup_plans: the
+    # plan miner's mode, "shadow" (written, never said: the default until its extractions have
+    # been read), "live", or "off". Off unless followups is true.
+    followups: bool = False
+    followup_plans: str = "shadow"
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
