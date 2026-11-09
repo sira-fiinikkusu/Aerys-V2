@@ -228,6 +228,7 @@ class ReachStore(Protocol):
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
     def decided(self, dedupe_key: str, since: datetime) -> bool: ...
+    def withdraw(self, dedupe_key: str, now: datetime) -> bool: ...
     def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
                 not_before: datetime | None) -> Reach | None: ...
     def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
@@ -270,6 +271,13 @@ class MemoryReachStore:
     def decided(self, dedupe_key, since):
         """Any record under this key since `since`, whatever became of it (a quiet evening too)."""
         return any(r.dedupe_key == dedupe_key and r.created_at >= since for r in self.rows.values())
+
+    def withdraw(self, dedupe_key, now):
+        """Drop what's still queued under this key (he called it off). True if anything was."""
+        hit = [r for r in self.rows.values() if r.dedupe_key == dedupe_key and r.status == "queued"]
+        for r in hit:
+            r.status, r.reason = "dropped", "he called it off"
+        return bool(hit)
 
     def add_new(self, event, now, *, status, reason, not_before):
         if any(r.dedupe_key == event.dedupe_key for r in self.rows.values()):
@@ -384,6 +392,12 @@ class PostgresReachStore:
             return conn.execute(
                 "SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s AND created_at >= %s LIMIT 1",
                 (dedupe_key, since)).fetchone() is not None
+
+    def withdraw(self, dedupe_key, now):
+        with self._connect() as conn:
+            return conn.execute(
+                "UPDATE v2_reachouts SET status = 'dropped', reason = 'he called it off', updated_at = %s "
+                "WHERE dedupe_key = %s AND status = 'queued' RETURNING id", (now, dedupe_key)).fetchone() is not None
 
     def foldable(self, since, until):
         with self._connect() as conn:

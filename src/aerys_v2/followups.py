@@ -119,7 +119,7 @@ class MemoryFollowupStore:
                       key=lambda r: r.id)
 
     def open(self):
-        return sorted((r for r in self.rows.values() if r.status == "waiting" and r.kind == "asked"),
+        return sorted((r for r in self.rows.values() if r.status in ("waiting", "handing") and r.kind == "asked"),
                       key=lambda r: r.due_at)
 
     def handing(self, before):
@@ -188,8 +188,8 @@ class PostgresFollowupStore:
 
     def open(self):
         with self._connect() as conn:
-            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE status = 'waiting' AND kind = 'asked' "
-                                "ORDER BY due_at").fetchall()
+            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE status IN ('waiting', 'handing') "
+                                "AND kind = 'asked' ORDER BY due_at").fetchall()
         return [self._row(r) for r in rows]
 
     def handing(self, before):
@@ -250,7 +250,9 @@ def _parse_when(when: str) -> datetime | None:
     return dt if dt.tzinfo else dt.replace(tzinfo=EASTERN)
 
 
-def build_check_back_tool(store, *, clock=None):
+def build_check_back_tool(store, *, clock=None, withdraw: Callable[[str, datetime], bool] | None = None):
+    """withdraw(dedupe_key, now) -> True if the desk still held it queued and dropped it (a cancel of
+    a check-back already handed over); production passes the reach store's withdraw."""
     from langchain_core.tools import tool
 
     now_fn = clock or (lambda: datetime.now(timezone.utc))
@@ -282,9 +284,14 @@ def build_check_back_tool(store, *, clock=None):
                     f"#{r.id} {r.about} ({r.due_at.astimezone(EASTERN):%a %b %d, %I:%M %p})" for r in rows)
             if act == "cancel":
                 row = store.get(int(id or 0))
-                if row is None or row.kind != "asked" or row.status != "waiting":
+                if row is None or row.kind != "asked" or row.status not in ("waiting", "handing"):
                     return "NOT DONE: no waiting check-back with that id (use list)."
+                was = row.status
                 store.mark(row.id, now, status="canceled", reason="he called it off")
+                if was == "handing" and withdraw is not None:
+                    if not withdraw(f"followup:{row.id}", now):
+                        return (f"Canceled: you won't check back on {row.about} again, but it was already "
+                                "on its way; it may have just gone out.")
                 return f"Canceled: you won't check back on {row.about}."
             if act == "add":
                 what = " ".join((about or "").split())[:200]
@@ -368,11 +375,17 @@ class FollowUps:
         unasked one has expired."""
         for f in self.store.handing(now - HANDING_GRACE):
             try:
+                if f.kind in UNASKED and f.expires_at is not None and now >= f.expires_at:
+                    # Past its time: closed either way, even when the desk can't be asked; never re-handed.
+                    try:
+                        had = self.desk.store.decided(self._key(f), f.created_at or f.due_at)
+                    except Exception:
+                        had = False
+                    self.store.mark(f.id, now, status="raised" if had else "skipped",
+                                    reason="desk: had it (recovered)" if had else "expired before it could go")
+                    continue
                 if self.desk.store.decided(self._key(f), f.created_at or f.due_at):
                     self.store.mark(f.id, now, status="raised", reason="desk: had it (recovered)")
-                    continue
-                if f.kind in UNASKED and f.expires_at is not None and now >= f.expires_at:
-                    self.store.mark(f.id, now, status="skipped", reason="expired before it could go")
                     continue
                 self._give(f, f.message or self._plain(f), now)
                 out["raised"] += 1

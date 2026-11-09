@@ -416,3 +416,44 @@ def test_a_restart_never_renews_a_stale_check_in():
     life.at(DAY + timedelta(days=3))                      # back three days later
     life.runner.tick()
     assert life.world.spoken == [] and life.store.rows[1].status == "skipped"
+
+
+# --- Codex recheck 11/08 ---------------------------------------------------------------------------
+
+def test_an_expired_check_in_is_closed_even_when_the_desk_cant_be_asked():
+    life = Life()
+    life.appts = [appt()]
+    real = life.desk.reach_out
+    life.desk.reach_out = lambda event: (_ for _ in ()).throw(ConnectionError("desk down"))
+    life.runner.tick()
+    life.desk.store.decided = lambda key, since: (_ for _ in ()).throw(ConnectionError("still down"))
+    life.desk.reach_out = real
+    life.at(DAY + timedelta(days=3))
+    life.runner.tick()
+    assert life.store.rows[1].status == "skipped" and life.world.spoken == []
+
+
+def test_a_check_back_on_its_way_can_still_be_listed_and_called_off():
+    life = Life(datetime(2026, 11, 10, 9, 0, tzinfo=ET))
+    life.tool = build_check_back_tool(life.store, clock=lambda: life.clock["now"], withdraw=life.desk.store.withdraw)
+    life.tool.invoke({"action": "add", "when": "2026-11-10T10:00", "about": "the vet"})
+    life.desk.meeting_hold = lambda: datetime(2026, 11, 10, 11, 0, tzinfo=ET)   # it'll queue at the desk
+    life.at(datetime(2026, 11, 10, 10, 1, tzinfo=ET))
+    real_mark = life.store.mark
+
+    def no_raised(fid, now, **fields):            # the record after the desk call fails: stays 'handing'
+        if fields.get("status") == "raised":
+            raise ConnectionError("NAS blip")
+        return real_mark(fid, now, **fields)
+
+    life.store.mark = no_raised
+    life.runner.tick()
+    assert life.store.rows[1].status == "handing"
+    assert "#1 the vet" in life.tool.invoke({"action": "list"})
+    life.store.mark = real_mark
+    assert life.tool.invoke({"action": "cancel", "id": 1}).startswith("Canceled")
+    life.desk.meeting_hold = None
+    life.at(datetime(2026, 11, 10, 11, 15, tzinfo=ET))
+    life.desk.tick()
+    life.runner.tick()
+    assert life.world.spoken == [] and life.world.texts == []

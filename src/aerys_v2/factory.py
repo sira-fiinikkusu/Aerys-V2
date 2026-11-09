@@ -2366,7 +2366,8 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             # runner (followups.py) brings it back at its time through the desk.
             from aerys_v2.followups import PostgresFollowupStore, build_check_back_tool
 
-            tools.append(build_check_back_tool(PostgresFollowupStore(settings.database_url)))
+            tools.append(build_check_back_tool(PostgresFollowupStore(settings.database_url),
+                                               withdraw=PostgresReachStore(settings.database_url).withdraw))
 
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
