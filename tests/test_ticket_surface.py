@@ -238,3 +238,11 @@ def test_plain_for_voice_keeps_math_and_drops_code_fences():
     assert plain_for_voice("x**2 + y**2") == "x**2 + y**2"
     assert plain_for_voice("```py\nx = 1\n```") == "x = 1"
     assert plain_for_voice("***both***") == "both"
+
+
+def test_plain_for_voice_reads_code_spans_and_fences_exactly():
+    """Codex recheck 2: inline triple-backtick code, a closing run of the wrong length, and
+    emphasis inside a fenced block."""
+    assert plain_for_voice("```2*3``` is the expression.") == "2*3 is the expression."
+    assert plain_for_voice("Use `a``b`.") == "Use a``b."
+    assert plain_for_voice("```text\n**literal**\n```") == "**literal**"

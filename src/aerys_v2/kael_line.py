@@ -624,7 +624,9 @@ SPOKEN_MAX = 280
 _MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
 #: A code span: a run of backticks, its contents, the same run again (`x`, ``x``).
-_MD_CODE = re.compile(r"(`+)(.+?)\1")
+_MD_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+#: A fence line: only backticks (three or more) and an optional language tag.
+_MD_FENCE = re.compile(r"^\s*(`{3,})[\w+-]*\s*$")
 #: Emphasis comes in PAIRS around words (**strong**, __strong__, *em*); an unpaired star, or one
 #: inside a word (2*3) or between spaces (2 * 3), is a literal one and stays (Codex recheck).
 _MD_STRONG = re.compile(r"(?<![\w*])(\*\*|__)(?=[^\s*])(.+?)(?<=[^\s*])\1(?![\w*])")
@@ -650,10 +652,19 @@ def plain_for_voice(text: str) -> str:
     """Words a speaker can say: no markdown marks (**, __, emphasis *, backticks), no heading
     or list markers; the lines joined into sentences. Markdown never reaches a speaker (D20);
     what was inside code stays as written (Codex review: `0 * * * *` must not become '0')."""
-    out = []
+    out, fence = [], None
     for line in str(text or "").splitlines():
-        if line.strip().startswith("```"):
-            continue                          # a code fence's own line: the code inside is kept
+        m = _MD_FENCE.match(line)
+        if fence is None and m:
+            fence = m.group(1)                # a fenced block opens: its lines are code, read as written
+            continue
+        if fence is not None:
+            if m and len(m.group(1)) >= len(fence):
+                fence = None                  # ... and closes
+                continue
+            if line.strip():
+                out.append(line.strip())
+            continue
         line = _MD_BULLET.sub("", _MD_HEADING.sub("", line))
         line = _plain_line(line).strip()
         if line:
