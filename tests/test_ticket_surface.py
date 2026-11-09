@@ -217,6 +217,24 @@ def test_code_in_an_answer_is_never_lost():
     desk, _ = desk_for(world, now=DAY)
     relay = ticket_relay_for(None, owner_settings(), model=Says("Set the schedule to `0 * * * *`."), desk=desk)
     assert relay(answered("voice")) is True
-    assert "0 * * * *" in world.spoken[0][0] and "`" not in world.spoken[0][0]
-    assert world.texts and "`0 * * * *`" in world.texts[0][1]
+    assert world.spoken[0][0] == "Set the schedule to 0 * * * *."
     assert plain_for_voice("run *every* hour: `*/5 * * * *` or 2 * 3") == "run every hour: */5 * * * * or 2 * 3"
+    # Codex recheck: a literal star is kept, and a code span of any backtick length is read as code.
+    assert plain_for_voice("Use 2*3 for multiplication.") == "Use 2*3 for multiplication."
+    assert plain_for_voice("Use ``2*3``.") == "Use 2*3."
+
+
+def test_a_short_formatted_answer_is_said_once_with_no_duplicate_text():
+    """Codex recheck: '**Yes**, ...' sent the plain words AND the original as one text. Taking
+    the markup off loses nothing, so a short answer is just said, as before."""
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    relay = ticket_relay_for(None, owner_settings(), model=Says("**Yes**, the backup is `green`."), desk=desk)
+    assert relay(answered("voice")) is True
+    assert world.spoken[0][0] == "Yes, the backup is green." and world.texts == []
+
+
+def test_plain_for_voice_keeps_math_and_drops_code_fences():
+    assert plain_for_voice("x**2 + y**2") == "x**2 + y**2"
+    assert plain_for_voice("```py\nx = 1\n```") == "x = 1"
+    assert plain_for_voice("***both***") == "both"
