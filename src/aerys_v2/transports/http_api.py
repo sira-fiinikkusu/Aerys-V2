@@ -99,7 +99,7 @@ class KaelTicketUpdate(BaseModel):
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
               a2a_memory_fn=None, settings=None, speaker_redirect=None,
-              kael_tickets=None) -> FastAPI:
+              kael_tickets=None, home_notice_fn=None, home_webhook_token: str | None = None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -400,6 +400,30 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if ticket is None:
             raise HTTPException(status_code=404, detail="no such ticket")
         return ticket.public()
+
+    # Her home body's "I'm done" (board #176, Stage 3; home_notices.py). Its OWN token, not
+    # api_token: the home body only ever says a job ended, never drives /ask. Unarmed = 503.
+    # The notice is written down and answered at once (202); the worker tells the owner.
+    @app.post("/home-notice", status_code=202)
+    async def home_notice_route(request: Request) -> dict:
+        if home_notice_fn is None or not (home_webhook_token or "").strip():
+            raise HTTPException(status_code=503, detail="home notices not armed")
+        auth = request.headers.get("authorization", "")
+        if not hmac.compare_digest(auth, f"Bearer {home_webhook_token}"):
+            raise HTTPException(status_code=401, detail="bad token")
+        try:
+            payload = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="body must be JSON") from None
+        from starlette.concurrency import run_in_threadpool
+
+        try:
+            # Off the event loop: writing it down is a database round trip, and a slow
+            # database must never stall /ask or /health behind it.
+            outcome = await run_in_threadpool(home_notice_fn, payload)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from None
+        return {"ok": True, "notice": outcome}
 
     @app.get("/gaps")
     def gaps_route(_: None = Depends(require_token)) -> dict:

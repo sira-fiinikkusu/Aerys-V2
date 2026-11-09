@@ -308,6 +308,11 @@ def main() -> None:
 
             reach_desk = reach_desk_for(settings, graph)
             kael_note_fn = kael_note_for(graph, settings, desk=reach_desk)
+            # Her home body's "I'm done" (board #176, Stage 3): the /home-notice receiver
+            # writes each notice down; its worker (started below) tells the owner via the desk.
+            from aerys_v2.home_notices import home_notices_for, start_home_notices
+
+            home_notices = home_notices_for(settings, reach_desk)
             ticket_wake = threading.Event()
             app = build_app(
                 lambda text, identity, thread: ask(
@@ -340,6 +345,9 @@ def main() -> None:
                 # Kael tickets (board #176): he answers by ticket; the watcher below
                 # brings answers to the owner, woken early by each answer.
                 kael_tickets=ticket_door_for(settings, kael_note_fn, ticket_wake),
+                home_notice_fn=home_notices.receive if home_notices is not None else None,
+                home_webhook_token=(settings.home_webhook_token.get_secret_value()
+                                    if settings.home_webhook_token is not None else None),
                 # Gap #37: kael:* exchanges leave a durable memory (family
                 # memory door 1 — the only door approved to build solo).
                 a2a_memory_fn=a2a_memory_writer_for(settings),
@@ -396,6 +404,7 @@ def main() -> None:
             # Her evening heads-up: tomorrow, briefly, only when tomorrow earns it. Off unless
             # EVENING_HEADS_UP is set.
             start_evening_heads_up(evening_heads_up_for(settings, reach_desk))
+            start_home_notices(home_notices)
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
