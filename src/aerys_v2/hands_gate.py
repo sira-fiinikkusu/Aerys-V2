@@ -446,8 +446,24 @@ class HandsGate:
                 if last.status == "done" and action == HOME_JOB:
                     return Verdict(False, f"Chris approved that already and it was done ({last.outcome or 'started'}). "
                                           "It isn't done twice.")
+            # The same request from another thread (D17 Q5's "same request"): one live button for it,
+            # wherever it was asked, so two approvals can't do it twice (Gemini recheck).
+            same = self.store.same_request(action, args)
+            for r in same:
+                if r.base_key == base_key or r.status not in ("waiting", "running"):
+                    continue
+                state = self.approvals.status(r.approval_id)
+                if state == "unknown":
+                    return Verdict(False, GATE_DOWN)
+                if r.status == "waiting" and state == "pending":
+                    return Verdict(False, f"Still waiting: Chris hasn't answered the button for {r.args.get('what') or what} "
+                                          "yet (asked from another conversation). Nothing has been done; it goes the "
+                                          "moment he taps Approve.")
+                if state == "approved":
+                    return Verdict(False, f"Chris approved {r.args.get('what') or what}; it's being done now. "
+                                          "Don't ask again.")
             if not himself:
-                said_no = self._no_today(self.store.same_request(action, args), args)
+                said_no = self._no_today(same, args)
                 if said_no is not None:
                     return Verdict(False, f"Chris said no to {what} at {said_no}; I'll leave it for today unless he "
                                           "brings it up himself.")
