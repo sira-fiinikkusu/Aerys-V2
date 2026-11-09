@@ -442,6 +442,9 @@ class Settings(BaseSettings):
     reach_daily_budget: int = 3
     reach_room_devices: str = ""
     reach_follow_through_min: int = 5
+    # The quiet surface (company mode): an HA notify service ("mobile_app_<device>"), shown on his
+    # phone, watch and glasses. Empty = storm_notify_service's; neither = a Discord text instead.
+    reach_notify_service: str = ""
     # A safety warning (a storm WARNING) inside quiet hours breaks through as a text that
     # buzzes, not out loud in the bedroom; true speaks it where he is, as by day. The
     # owner's call (board #176); off until he makes it.

@@ -814,6 +814,17 @@ def reach_desk_for(settings, graph):
         else:
             _discord_dm_send(dc_token.get_secret_value(), chat_id, body, silent=silent)
 
+    notify_service = (str(getattr(settings, "reach_notify_service", "") or "").strip()
+                      or str(getattr(settings, "storm_notify_service", "") or "").strip())
+
+    def notify(headline: str, body: str) -> None:
+        import httpx
+
+        r = httpx.post(f"{str(settings.ha_base_url).rstrip('/')}/api/services/notify/{notify_service}",
+                       json={"title": "Aerys", "message": body},
+                       headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}, timeout=10.0)
+        r.raise_for_status()
+
     def busy(device_id: str) -> bool:
         # Never announce over a conversation in progress on that satellite.
         from aerys_v2.factory import satellite_map_from
@@ -842,7 +853,8 @@ def reach_desk_for(settings, graph):
 
     return ReachDesk(
         PostgresReachStore(settings.database_url),
-        Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface),
+        Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface,
+                  notify=notify if notify_service and getattr(settings, "ha_token", None) is not None else None),
         budget_default=int(getattr(settings, "reach_daily_budget", 3)),
         quiet=lambda now: in_quiet_hours(now, start_h, end_h),
         morning_hour=morning_h,

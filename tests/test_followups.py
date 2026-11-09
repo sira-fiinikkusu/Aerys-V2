@@ -521,3 +521,37 @@ def test_other_prefs_survive_company_and_back():
     life.prefs.invoke({"action": "company_gone"})
     p = life.desk.store.prefs(3)
     assert p.checkins == 3 and p.muted == ["weather"] and p.company_until is None
+
+
+def test_with_company_over_it_lands_as_a_notification_on_his_phone_and_glasses():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append((headline, body))
+    life.prefs.invoke({"action": "company"})
+    assert life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green.",
+                                          detail="All three.")) == "sent"
+    assert sent == [("Backup's green.", "Backup's green.\n\nAll three.")]
+    assert life.world.spoken == [] and life.world.texts == []
+    assert life.desk.store.rows[1].surface == "notify"
+
+
+def test_if_the_notification_fails_it_goes_as_text_never_aloud():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    life.desk.deliverer.notify = lambda headline, body: (_ for _ in ()).throw(ConnectionError("HA down"))
+    life.prefs.invoke({"action": "company"})
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert life.world.spoken == [] and life.world.texts == [("discord", "Backup's green.", False)]
+
+
+def test_without_company_the_notification_leg_is_never_used():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append(headline)
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert sent == [] and life.world.spoken == [("Backup's green.", "dev-office")]

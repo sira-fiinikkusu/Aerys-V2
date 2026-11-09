@@ -150,7 +150,7 @@ class Decision:
     reason: str = ""
     not_before: datetime | None = None
     silent: bool = False
-    voice: str = "ok"                 # ok | reroute (text instead) | wait (until not_before)
+    voice: str = "ok"                 # ok | reroute (text instead) | notify (a quiet HA notification) | wait
     breaks_through: bool = False      # safety: may speak at night or over a meeting (D4)
 
 
@@ -190,8 +190,10 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
     # People are over (he said so): whatever would be said aloud goes as text instead. Safety
     # still speaks; the record says why the rest didn't.
     if company and d.action == "send" and d.voice != "reroute" and not d.breaks_through:
-        return Decision("send", (d.reason + "; " if d.reason else "") + "company: as text", silent=d.silent,
-                        voice="reroute")
+        # A notification on his phone, watch and glasses (the owner: "i can make it so my G2
+        # see's the HA notifies"), or text when that leg isn't there.
+        return Decision("send", (d.reason + "; " if d.reason else "") + "company: as a notification",
+                        silent=d.silent, voice="notify")
     return d
 
 
@@ -525,8 +527,9 @@ class Deliverer:
 
     def __init__(self, *, locate: Callable[[], Where], speak: Callable[[str, str], None],
                  text: Callable[[str, str, bool], None], busy: Callable[[str], bool] | None = None,
-                 text_surface: str = "discord"):
+                 text_surface: str = "discord", notify: Callable[[str, str], None] | None = None):
         self.locate, self.speak, self.text = locate, speak, text
+        self.notify = notify          # (headline, body) -> an HA notification: phone, watch, glasses
         self.busy = busy or (lambda device_id: False)
         self.text_surface = text_surface
         # Set by the desk: may she speak this RIGHT NOW? Checked at the moment of speech, after
@@ -545,12 +548,20 @@ class Deliverer:
             where = Where(self.text_surface)
         if row.room and not (where.kind == "room" and where.label == row.room):
             return Delivery("away")        # pinned to a room he isn't in: it waits for him there
+        body = row.headline + (f"\n\n{row.detail}" if row.detail else "")
+        if decision.voice == "notify":     # discreet: a notification, else text; never said aloud
+            if self.notify is not None:
+                try:
+                    self.notify(row.headline, body)
+                    return Delivery("sent", "notify", texted=True)
+                except Exception as e:
+                    log.warning("reach: the notification failed (%s); texting instead", type(e).__name__)
+            where = Where(self.text_surface)
         spoken = where.kind in ("room", "device")
         if spoken and decision.voice == "wait":
             return Delivery("wait")
         if spoken and decision.voice == "reroute":
             where, spoken = Where(self.text_surface), False
-        body = row.headline + (f"\n\n{row.detail}" if row.detail else "")
         try:
             if spoken:
                 if self.busy(where.device_id):
