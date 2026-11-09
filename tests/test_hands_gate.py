@@ -34,7 +34,7 @@ OWNER_ASK = getattr(hands_gate, "OWNER_ASK", "owner_ask")
 
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc)
 OWNER = "6e6bcbed-0000-4000-8000-000000000001"
-SAM = "ef6df13a-0000-4000-8000-000000000002"
+SAM = "00000000-0000-4000-8000-000000000002"
 OWNER_THREAD = f"person:{OWNER}"
 
 TEXT = {"user_id": OWNER, "display_name": "Chris", "platform": "discord", "channel_kind": "dm"}
