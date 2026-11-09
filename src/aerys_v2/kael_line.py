@@ -626,7 +626,7 @@ _MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
 #: A code span: a run of backticks, its contents, the same run again (`x`, ``x``).
 _MD_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 #: A fence line: only backticks (three or more) and an optional language tag.
-_MD_FENCE = re.compile(r"^\s*(`{3,})[\w+-]*\s*$")
+_MD_FENCE = re.compile(r"^\s*(`{3,})\s*[\w+.#-]*\s*$")
 #: Emphasis comes in PAIRS around words (**strong**, __strong__, *em*); an unpaired star, or one
 #: inside a word (2*3) or between spaces (2 * 3), is a literal one and stays (Codex recheck).
 _MD_STRONG = re.compile(r"(?<![\w*])(\*\*|__)(?=[^\s*])(.+?)(?<=[^\s*])\1(?![\w*])")

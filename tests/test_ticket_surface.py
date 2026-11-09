@@ -246,3 +246,4 @@ def test_plain_for_voice_reads_code_spans_and_fences_exactly():
     assert plain_for_voice("```2*3``` is the expression.") == "2*3 is the expression."
     assert plain_for_voice("Use `a``b`.") == "Use a``b."
     assert plain_for_voice("```text\n**literal**\n```") == "**literal**"
+    assert plain_for_voice("``` python\n**literal**\n```") == "**literal**"      # Codex recheck 3
