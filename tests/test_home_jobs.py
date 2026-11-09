@@ -587,6 +587,23 @@ def test_the_sdks_error_text_never_reaches_the_logs_or_his_record(home, caplog):
     assert marker not in b2.notes[-1][1]
 
 
+def test_a_stop_that_couldnt_cancel_an_earlier_run_logs_the_line_without_the_sdks_text(caplog):
+    # The official cancel logs a failed earlier-run cancel with the SDK's traceback (Gemini, 11/09):
+    # keep the line, drop that text, as for a failed launch or update.
+    import logging
+
+    Box()                                                       # arming installs the filter
+    official = logging.getLogger("deepagents.middleware.async_subagents")
+    marker = "PRIVATE-SDK-TEXT-5512"
+    with caplog.at_level("DEBUG"):
+        try:
+            raise RuntimeError(f"Client error '400' body: {marker}")
+        except RuntimeError:
+            official.warning("Failed to cancel earlier run %s of task %s", "r-1", "t-1", exc_info=True)
+    assert "Failed to cancel earlier run r-1 of task t-1" in caplog.text
+    assert marker not in caplog.text
+
+
 def test_the_ledgers_async_hook_keeps_his_jobs_the_same_way():
     import asyncio
 
