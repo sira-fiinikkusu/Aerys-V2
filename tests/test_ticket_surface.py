@@ -193,3 +193,30 @@ def test_checking_a_closed_ticket_still_shows_kaels_latest_note():
     store.cancel(t.id, ANSWERED)
     out = build_kael_tickets_tool(store, send=lambda *a: True).invoke({"action": "check", "ticket": "T-1"})
     assert "The plan" in out and "Robin IS included" in out
+
+
+def test_a_long_still_open_notice_by_voice_never_claims_an_answer():
+    """Codex review 1: the short spoken line said 'Kael got back to you' for a notice that says
+    he hasn't answered."""
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    notice = owner_notice_for(None, owner_settings(), desk=desk)
+    t = answered("voice", ticket_id=9)
+    t.status, t.answer, t.answered_at = "working", None, None
+    t.ask = "x" * 160
+    t.created_at = t.waiting_since = datetime(2026, 11, 8, 15, 0, tzinfo=timezone.utc)
+    assert notice(t, True) is True
+    said = world.spoken[0][0]
+    assert "got back" not in said and "still open" in said
+    assert world.texts and "haven't heard back" in world.texts[0][1]
+
+
+def test_code_in_an_answer_is_never_lost():
+    """Codex review 1: `0 * * * *` became '0' and the original was gone."""
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    relay = ticket_relay_for(None, owner_settings(), model=Says("Set the schedule to `0 * * * *`."), desk=desk)
+    assert relay(answered("voice")) is True
+    assert "0 * * * *" in world.spoken[0][0] and "`" not in world.spoken[0][0]
+    assert world.texts and "`0 * * * *`" in world.texts[0][1]
+    assert plain_for_voice("run *every* hour: `*/5 * * * *` or 2 * 3") == "run every hour: */5 * * * * or 2 * 3"
