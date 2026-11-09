@@ -363,12 +363,22 @@ def _email_watch_once(settings: Settings, notify_fn) -> dict:
     return stats
 
 
+def _email_notify_for(settings: Settings):
+    """Through the reach-out desk when the owner's switch is on (board #176), else the
+    direct DM as before. A switch that can't be honoured (no owner) says so and DMs."""
+    from ..factory import discord_dm_notify_for
+    from .email_watch import reach_notify_for
+
+    notify_fn = reach_notify_for(settings) if settings.reach_email_via_desk else None
+    if settings.reach_email_via_desk and notify_fn is None:
+        log.warning("email watch: REACH_EMAIL_VIA_DESK is on but there's no ledger/owner; DMing directly")
+    return notify_fn or discord_dm_notify_for(settings)
+
+
 def _email_watch_main(settings: Settings, args: argparse.Namespace) -> int:
     """`email-watch [--once]` — her-inbox arrival pings (the notification half
     of n8n 05-03 Gmail Trigger, rebuilt on IMAP; scope decided 2026-07-11)."""
-    from ..factory import discord_dm_notify_for
-
-    notify_fn = discord_dm_notify_for(settings)
+    notify_fn = _email_notify_for(settings)
     missing = [
         name
         for name, value in (

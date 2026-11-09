@@ -202,6 +202,8 @@ class ReachStore(Protocol):
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
     def decided(self, dedupe_key: str, since: datetime) -> bool: ...
+    def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
+                not_before: datetime | None) -> Reach | None: ...
     def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
     def sent_quietly(self, since: datetime) -> list[Reach]: ...
     def sent_since(self, since: datetime) -> int: ...
@@ -242,6 +244,11 @@ class MemoryReachStore:
     def decided(self, dedupe_key, since):
         """Any record under this key since `since`, whatever became of it (a quiet evening too)."""
         return any(r.dedupe_key == dedupe_key and r.created_at >= since for r in self.rows.values())
+
+    def add_new(self, event, now, *, status, reason, not_before):
+        if any(r.dedupe_key == event.dedupe_key for r in self.rows.values()):
+            return None
+        return self.add(event, now, status=status, reason=reason, not_before=not_before)
 
     def foldable(self, since, until):
         return sorted((r for r in self.rows.values() if r.status == "queued" and not r.owed and not r.brief
@@ -324,6 +331,23 @@ class PostgresReachStore:
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
                  list(event.folds))).fetchone()
         return self._row(row)
+
+    def add_new(self, event, now, *, status, reason, not_before):
+        """add(), unless a row with this dedupe key exists in ANY state, ever: one statement,
+        for a producer outside the brain (the email watcher) whose key names one thing for
+        good. None when it's already there."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds) "
+                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+                "WHERE NOT EXISTS (SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s) "
+                # Two producers at once: the unique index (migration 019) turns the loser away.
+                f"ON CONFLICT DO NOTHING RETURNING {self.COLUMNS}",
+                (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
+                 event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
+                 list(event.folds), event.dedupe_key)).fetchone()
+        return self._row(row) if row else None
 
     def recently_sent(self, dedupe_key, since):
         with self._connect() as conn:
@@ -451,7 +475,11 @@ class Deliverer:
         self.may_speak: Callable[[Reach], bool] = lambda row: True
 
     def deliver(self, row: Reach, decision: Decision) -> Delivery:
-        where = self.locate()
+        try:
+            where = self.locate()
+        except Exception as e:      # can't place him: text (a pinned brief then waits for its room)
+            log.warning("reach: couldn't place him (%s); texting", type(e).__name__)
+            where = Where(self.text_surface)
         if row.room and not (where.kind == "room" and where.label == row.room):
             return Delivery("away")        # pinned to a room he isn't in: it waits for him there
         spoken = where.kind in ("room", "device")
@@ -463,6 +491,8 @@ class Deliverer:
         try:
             if spoken:
                 if self.busy(where.device_id):
+                    if decision.breaks_through:      # safety never waits on a room mid-conversation
+                        return self._text_now(body, decision)
                     return Delivery("busy")
                 if not decision.breaks_through and not self.may_speak(row):   # the night or a meeting began just now
                     return Delivery("recheck")
@@ -472,6 +502,8 @@ class Deliverer:
                 return Delivery("sent", where.kind, texted=True)
         except Exception as e:
             log.warning("reach: delivery via %s failed (%s)", where.kind, type(e).__name__)
+            if spoken and decision.breaks_through:   # the speaker failed: safety goes as text, now
+                return self._text_now(body, decision)
             return Delivery("failed", where.kind)
         # Spoken. The detail goes as text; if THAT fails the message still reached him (it is
         # never spoken twice): the watcher's follow-through sends the detail later.
@@ -484,6 +516,17 @@ class Deliverer:
         except Exception as e:
             log.warning("reach: spoken, but the detail text failed (%s); the follow-through sends it", type(e).__name__)
             return Delivery("sent", surface, spoken=True)
+
+
+    def _text_now(self, body: str, decision: Decision) -> Delivery:
+        """Safety that couldn't be said: one text attempt (a retry is the desk's, never a
+        second send here: a text whose answer timed out may have landed)."""
+        try:
+            self.text(self.text_surface, body, decision.silent)
+            return Delivery("sent", self.text_surface, texted=True)
+        except Exception as e:
+            log.warning("reach: safety couldn't be said, and the text failed too (%s)", type(e).__name__)
+            return Delivery("failed", self.text_surface)
 
 
 # --- the desk ----------------------------------------------------------------------------

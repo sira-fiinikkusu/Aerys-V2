@@ -17,9 +17,11 @@ Pure core + thin shell, same shape as every module here:
       (this module reads/writes ONLY v2_email_watermark — migration 006; it
       never touches prod `aerys`), `imap_factory()` constructs+logs-in the IMAP
       client (imaplib.IMAP4_SSL against imap.gmail.com in real life — but built
-      by the factory, so tests never dial), `notify_fn(str)` delivers one ping
-      (the integrator wires Discord DM delivery; the core never touches the
-      network). ANY IMAP/DB error here logs and returns cleanly — the scheduler
+      by the factory, so tests never dial), `notify_fn(text, key=...)` delivers
+      one ping (the integrator wires Discord DM delivery, or the reach-out desk;
+      the core never touches the network). `key` names the mail it's about
+      (mailbox:uidvalidity:uid, the server's own values), so a delivery path that
+      dedupes can tell a re-ping of the same message from a new one. ANY IMAP/DB error here logs and returns cleanly — the scheduler
       retries next tick. Polling cadence is the scheduler's knob: the integrator
       wires run_once as an interval job in workers/__main__ exactly like
       extraction/gaps-mine (_add_interval_job), so no poll loop lives here.
@@ -208,6 +210,56 @@ def parse_message(uid: int, raw: bytes, *, snippet_chars: int = SNIPPET_CHARS) -
                             subject="(unparseable message)", snippet="", date="")
 
 
+def split_ping(text: str) -> tuple[str, str]:
+    """A ping as the reach-out desk wants it: (what may be SAID, what goes as text).
+    Reads format_ping's own lines: said = who it's from (no address) and the subject;
+    text = the address and the snippet. Anything else (the backlog summary) says its
+    first line and texts the rest."""
+    lines = text.split("\n")
+    prefix = "New email from "
+    if len(lines) >= 2 and lines[0].startswith(prefix) and lines[1].startswith("Subject: "):
+        sender, subject = lines[0][len(prefix):], lines[1][len("Subject: "):]
+        name, addr = parseaddr(sender)
+        # Never an address out loud: the display name, else the domain it came from.
+        label = name.strip() or (addr.rpartition("@")[2] if "@" in addr else "")
+        said = (f"New email from {label}" if label else "New email") + (f": {subject}" if subject.strip() else ".")
+        return said, "\n".join([f"From: {sender}", *lines[2:]])
+    return lines[0], "\n".join(lines[1:])
+
+
+def reach_notify_for(settings, *, store=None, clock=None) -> Callable[..., None] | None:
+    """text, key -> a queued row in the reach-out ledger (board #176, Stage 2: "email
+    pings routed through it"). This watcher is its own container, so it doesn't hold the
+    desk: it writes the row and the brain's desk delivers it on its next pass, under
+    every rule the desk keeps (the night, his meetings, a nap, the budget, a muted topic;
+    what the night holds rides in the morning brief). RAISES when the row can't be
+    written, so the watermark holds below the message (run_once's posture). A message
+    already in the ledger (its key, in any state, ever: queued, sent, carried by a brief,
+    dropped) is not written again, in the same statement that would write it: the watcher
+    retries at-least-once, he hears it at most once. None when there's no ledger or owner.
+    """
+    if not getattr(settings, "database_url", None) or getattr(settings, "owner_person_id", None) is None:
+        return None
+    from datetime import datetime, timezone
+
+    from aerys_v2.reach import PostgresReachStore, ReachEvent
+
+    store = store or PostgresReachStore(settings.database_url)
+    now_fn = clock or (lambda: datetime.now(timezone.utc))
+
+    def notify(text: str, key: str | None = None) -> None:
+        now = now_fn()
+        said, detail = split_ping(text)
+        event = ReachEvent(source="email_watch", topic="email", headline=said[:300], detail=detail,
+                           dedupe_key=f"email:{key}" if key else None)
+        if event.dedupe_key is None:
+            store.add(event, now, status="queued", reason="from the email watcher", not_before=None)
+        elif store.add_new(event, now, status="queued", reason="from the email watcher", not_before=None) is None:
+            log.info("email watch: %s is already with the desk", key)
+
+    return notify
+
+
 def format_ping(msg: EmailSummary) -> str:
     """One notification per email: sender, subject, snippet. Plain and
     informative — this is a system notification, not her voice (scope decision:
@@ -337,7 +389,7 @@ def _close_quietly(client: Any) -> None:
 def run_once(
     conn: Any,
     imap_factory: Callable[[], Any],
-    notify_fn: Callable[[str], None],
+    notify_fn: Callable[..., None],
     mailbox: str = DEFAULT_MAILBOX,
 ) -> dict:
     """One watch pass: read watermark -> connect -> check -> ping -> advance.
@@ -415,7 +467,10 @@ def run_once(
         )
         top = {"uidvalidity": int(new_wm["uidvalidity"]), "last_uid": new_messages[-1].uid}
         try:
-            notify_fn(summary)
+            # Keyed on where the gap began (the stored mark, which only moves once a save
+            # lands), not on its end: a retry after a failed save is the same summary even
+            # if more mail arrived meanwhile, or the oldest was expunged.
+            notify_fn(summary, key=f"{mailbox}:{top['uidvalidity']}:after:{int(stored['last_uid'])}")
         except Exception as e:
             log.warning("email watch: backlog summary notify failed (%s) — retrying "
                         "next tick, watermark held", e, exc_info=True)
@@ -437,7 +492,7 @@ def run_once(
     # mark, so `stored` is a dict here). Ping ascending, advance per message.
     for msg in new_messages:
         try:
-            notify_fn(format_ping(msg))
+            notify_fn(format_ping(msg), key=f"{mailbox}:{int(new_wm['uidvalidity'])}:{msg.uid}")
         except Exception as e:
             remaining = stats["new"] - stats["pinged"]
             log.warning(
