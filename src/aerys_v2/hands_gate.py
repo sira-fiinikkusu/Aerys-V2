@@ -135,6 +135,11 @@ def _key(*parts) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
+def _request(args) -> dict:
+    """What was asked, without the gate's own wording ('what'): two asks for the same thing match."""
+    return {k: v for k, v in dict(args or {}).items() if k != "what"}
+
+
 def _tasks(state) -> dict:
     tasks = state.get("async_tasks") if isinstance(state, dict) else getattr(state, "async_tasks", None)
     return tasks if isinstance(tasks, dict) else {}
@@ -152,6 +157,12 @@ class MemoryGatedActionStore:
 
     def attempts(self, base_key):
         return sorted((r for r in self.rows.values() if r.base_key == base_key), key=lambda r: r.attempt)
+
+    def same_request(self, action, args):
+        """Every row asking for exactly this (the same action and args, from any thread), oldest first."""
+        want = _request(args)
+        return sorted((r for r in self.rows.values() if r.action == action and _request(r.args) == want),
+                      key=lambda r: r.id)
 
     def add(self, approval_id, action, base_key, attempt, thread_id, args, now):
         for r in self.rows.values():
@@ -213,6 +224,12 @@ class PostgresGatedActionStore:
     def attempts(self, base_key):
         return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE base_key = %s ORDER BY attempt",
                          (base_key,))
+
+    def same_request(self, action, args):
+        from psycopg.types.json import Jsonb
+
+        return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE action = %s AND (args - 'what') = %s "
+                         "ORDER BY id", (action, Jsonb(_request(args))))
 
     def add(self, approval_id, action, base_key, attempt, thread_id, args, now):
         from psycopg.types.json import Jsonb
@@ -386,11 +403,11 @@ class HandsGate:
     # the button --------------------------------------------------------------------------
 
     def _no_today(self, rows, args) -> str | None:
-        """When his latest answer to this same request (the same words) was a no today (Eastern):
+        """When his latest answer to this same request (the same words, from any thread) was a no
+        today (Eastern):
         the time he said it, e.g. "10:42 AM"; else None. Ran out or withdrawn isn't a no. Raises
         when an answer can't be read, so the caller fails closed."""
-        same = [r for r in rows if {k: v for k, v in r.args.items() if k != "what"}
-                == {k: v for k, v in args.items() if k != "what"}]
+        same = [r for r in rows if _request(r.args) == _request(args)]
         for r in reversed(same):
             state = self.approvals.status(r.approval_id)
             if state == "unknown":
@@ -430,7 +447,7 @@ class HandsGate:
                     return Verdict(False, f"Chris approved that already and it was done ({last.outcome or 'started'}). "
                                           "It isn't done twice.")
             if not himself:
-                said_no = self._no_today(rows, args)
+                said_no = self._no_today(self.store.same_request(action, args), args)
                 if said_no is not None:
                     return Verdict(False, f"Chris said no to {what} at {said_no}; I'll leave it for today unless he "
                                           "brings it up himself.")

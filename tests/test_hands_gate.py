@@ -743,3 +743,13 @@ def test_him_asking_for_the_same_message_again_gets_a_new_button():
         assert "said no" in b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam", identity=identity).text
     v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam", identity=TEXT)
     assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 2
+
+
+def test_his_no_holds_for_the_same_job_asked_from_another_line_too():
+    """Gemini review (11/09): the same request from another thread is still the same request."""
+    b = Box()
+    _declined(b, KAEL_ASK, KAEL_THREAD)
+    v = b.gate.home_job(LENS_ASK, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "said no" in v.text and len(b.approval_store.rows) == 1
+    v = b.gate.home_job(UNTAGGED, "person:elsewhere", "start_async_task", START_WRITE)
+    assert not v.go and "said no" in v.text and len(b.approval_store.rows) == 1
