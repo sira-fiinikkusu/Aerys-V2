@@ -1726,12 +1726,23 @@ def _chat_turn(
 
 ACTION_SEED_HUMAN_TURNS = 3      # prior requests kept for referent resolution
 ACTION_SEED_TRUNCATE_AT = 300    # chars per kept prior request
+#: A note from Kael (kael_line.NOTE_PREFIX) is information she needs whole, not a request to
+#: resolve "them" against: 11/09 an ~830-char ticket note was cut at 300 here and she told the
+#: owner it was cut off. Kept whole up to this; past it, it says so and where the rest is.
+KAEL_NOTE_KEEP = 4000
 
 
 def _trim_human_turn(m: HumanMessage) -> HumanMessage:
-    """A prior request, shortened for the specialist; tags and id preserved."""
+    """A prior request, shortened for the specialist; tags and id preserved. A note from Kael
+    is kept whole (up to KAEL_NOTE_KEEP, and then it says it was shortened)."""
+    from aerys_v2.kael_line import NOTE_PREFIX
+
     content = m.content
-    if isinstance(content, str) and len(content) > ACTION_SEED_TRUNCATE_AT:
+    if isinstance(content, str) and content.startswith(NOTE_PREFIX):
+        if len(content) > KAEL_NOTE_KEEP:
+            content = (content[:KAEL_NOTE_KEEP].rstrip() + " … [Kael's note was longer and is shortened "
+                       "here; the whole of it is on its ticket (kael_tickets) or with Kael.]")
+    elif isinstance(content, str) and len(content) > ACTION_SEED_TRUNCATE_AT:
         content = content[:ACTION_SEED_TRUNCATE_AT] + "…"
     return HumanMessage(
         content=content, id=getattr(m, "id", None),

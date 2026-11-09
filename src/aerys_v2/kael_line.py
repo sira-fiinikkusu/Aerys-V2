@@ -35,6 +35,8 @@ from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from aerys_v2.tickets import TEXT_SURFACES, ask_surface  # ask_surface re-exported for callers
+
 log = logging.getLogger(__name__)
 
 # Same key service._human_turn uses — the note rides the normal privacy plumbing.
@@ -617,6 +619,58 @@ def _said_to_owner(graph, settings, text: str) -> None:
         log.warning("owner thread append failed (message already delivered)", exc_info=True)
 
 
+#: The longest ticket answer she says aloud whole; past it she says one line and the text carries it.
+SPOKEN_MAX = 280
+_MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
+_MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
+
+
+def plain_for_voice(text: str) -> str:
+    """Words a speaker can say: no markdown marks (**, __, *, `), no heading or list markers;
+    the lines joined into sentences. Markdown never reaches a speaker (D20)."""
+    out = []
+    for line in str(text or "").splitlines():
+        line = _MD_BULLET.sub("", _MD_HEADING.sub("", line))
+        line = line.replace("**", "").replace("__", "").replace("`", "").replace("*", "").strip()
+        if line:
+            out.append(line)
+    joined = ""
+    for i, line in enumerate(out):
+        if i == 0:
+            joined = line
+        elif joined[-1] in ".!?:;,":
+            joined += " " + line
+        else:
+            joined += ". " + line
+    return " ".join(joined.split())
+
+
+def _text_surface_name(desk) -> str:
+    surface = getattr(getattr(desk, "deliverer", None), "text_surface", "discord") or "discord"
+    return "Telegram" if surface == "telegram" else "Discord"
+
+
+def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str):
+    """D20 (the owner, 11/09 14:53: "if i ask her in discord she should respond to tickets from
+    discord"). Asked on Discord or Telegram: the answer goes back THERE, as text, never aloud
+    (at night it's a silent text, D15). Asked by voice or anywhere else: the desk's follow-me
+    delivery as before, but only plain words reach a speaker, and a long answer is said as one
+    short line with the whole answer as the text copy."""
+    from aerys_v2.reach import ReachEvent
+
+    asked_on = getattr(ticket, "asked_on", None)
+    if asked_on in TEXT_SURFACES:
+        return ReachEvent(source=source, topic="kael", headline=text, owed=True, dedupe_key=dedupe_key,
+                          text_only=True, text_to=asked_on)
+    spoken = plain_for_voice(text)
+    if len(spoken) <= SPOKEN_MAX and spoken == " ".join(text.split()):
+        return ReachEvent(source=source, topic="kael", headline=text, owed=True, dedupe_key=dedupe_key)
+    if len(spoken) <= SPOKEN_MAX:
+        return ReachEvent(source=source, topic="kael", headline=spoken, owed=True, dedupe_key=dedupe_key)
+    line = f"Kael got back to you on that; the full answer is on {_text_surface_name(desk)}."
+    return ReachEvent(source=source, topic="kael", headline=line, detail=text, owed=True, dedupe_key=dedupe_key)
+
+
 def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> Callable[..., bool] | None:
     """fn(ticket) -> bool: bring Kael's answer on a ticket the owner opened back to him, in
     her words. If her words can't be had (model down, empty, a stray HOLD), Kael's answer
@@ -657,11 +711,9 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> C
         if not text or _HOLD_RE.match(text):
             text = f"Kael got back to you ({name}): {ticket.answer}"
         if desk is not None:
-            from aerys_v2.reach import ReachEvent
-
             answered = getattr(ticket, "answered_at", None)
-            return desk.reach_out(ReachEvent(
-                source="ticket", topic="kael", headline=text, owed=True,
+            return desk.reach_out(_owed_ticket_event(
+                desk, ticket, source="ticket", text=text,
                 dedupe_key=f"ticket:{ticket.id}:{answered.isoformat() if answered else ''}",
             )) in ("sent", "queued", "duplicate")
         if not reach(text):
@@ -711,11 +763,9 @@ def owner_notice_for(graph, settings, *, reach=None, desk=None) -> Callable[...,
                     f"{when}: \"{ask}\" ({label(ticket.id)}). His line has been down; it's "
                     "waiting on his ticket list and I'll keep trying.")
         if desk is not None:
-            from aerys_v2.reach import ReachEvent
-
             since = getattr(ticket, "waiting_since", None) or ticket.created_at
-            return desk.reach_out(ReachEvent(
-                source="ticket_notice", topic="kael", headline=text, owed=True,
+            return desk.reach_out(_owed_ticket_event(
+                desk, ticket, source="ticket_notice", text=text,
                 dedupe_key=f"ticket-notice:{ticket.id}:{since.isoformat() if since else ''}",
             )) in ("sent", "queued", "duplicate")
         if not reach(text):

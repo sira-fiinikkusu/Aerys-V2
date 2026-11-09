@@ -83,8 +83,10 @@ def build_kael_tickets_tool(store, send, *, clock=None):
                 out = _line(t)
                 if t.answer:
                     out += f"\nKael's answer: {t.answer}"
-                if t.progress and t.status == "working":
-                    out += f"\nKael's latest: {t.progress}"
+                # His latest note shows whatever the state: a correction he sends after an answer
+                # (as 'working') must still be readable once the ticket is closed (11/09).
+                if t.progress and t.progress != t.answer:
+                    out += f"\nKael's latest note: {t.progress}"
                 return out
             if act == "cancel":
                 if t.status not in OPEN:

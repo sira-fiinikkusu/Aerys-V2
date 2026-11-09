@@ -58,6 +58,29 @@ RESEND_FOR = timedelta(hours=72)
 RELAY_FOR = timedelta(hours=24)
 
 
+#: The surfaces a ticket's answer goes back to as text (D20).
+TEXT_SURFACES = ("discord", "telegram")
+
+
+def ask_surface(identity, thread_id) -> str | None:
+    """Where the turn that opened a ticket came from (D20, the owner 11/09: "if i ask her in
+    discord she should respond to tickets from discord"): 'discord' or 'telegram' for his text
+    doors, 'lens' for the glasses, 'voice' for a satellite, 'kael' for Kael's line, None otherwise."""
+    from aerys_v2.state import is_lens_surface, is_voice_turn
+
+    ident = identity if isinstance(identity, dict) else {}
+    if is_lens_surface(ident):
+        return "lens"
+    if is_voice_turn(ident, thread_id):
+        return "voice"
+    platform = str(ident.get("platform") or "").strip().lower()
+    if platform in TEXT_SURFACES:
+        return platform
+    if str(thread_id or "").startswith("kael:"):
+        return "kael"
+    return None
+
+
 def label(ticket_id: int) -> str:
     return f"T-{ticket_id}"
 
@@ -93,6 +116,7 @@ class Ticket:
     relayed_at: datetime | None = None
     nagged_at: datetime | None = None
     escalated_at: datetime | None = None
+    asked_on: str | None = None        # the surface the ask came from (D20, migration 025)
 
     @property
     def relay_owed(self) -> bool:
@@ -109,7 +133,8 @@ class Ticket:
 
 
 class TicketStore(Protocol):
-    def open(self, thread_id: str, ask: str, for_owner: bool, now: datetime) -> Ticket: ...
+    def open(self, thread_id: str, ask: str, for_owner: bool, now: datetime,
+             asked_on: str | None = None) -> Ticket: ...
     def get(self, ticket_id: int) -> Ticket | None: ...
     def recent(self, limit: int = 10, open_only: bool = False) -> list[Ticket]: ...
     def pending(self, now: datetime) -> list[Ticket]: ...
@@ -131,9 +156,9 @@ class MemoryTicketStore:
         self.items = {t.id: t for t in items}
         self._next = max(self.items, default=0) + 1
 
-    def open(self, thread_id, ask, for_owner, now):
+    def open(self, thread_id, ask, for_owner, now, asked_on=None):
         t = Ticket(id=self._next, thread_id=thread_id, ask=ask, for_owner=for_owner,
-                   created_at=now, outbox=ask, last_try_at=now, waiting_since=now)
+                   created_at=now, outbox=ask, last_try_at=now, waiting_since=now, asked_on=asked_on)
         self.items[t.id] = t
         self._next += 1
         return t
@@ -203,7 +228,7 @@ class PostgresTicketStore:
 
     COLUMNS = ("id, thread_id, ask, for_owner, status, created_at, outbox, last_try_at, "
                "delivered_at, waiting_since, answer, answered_at, relayed_at, nagged_at, escalated_at, "
-               "progress")
+               "progress, asked_on")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -219,7 +244,7 @@ class PostgresTicketStore:
         return Ticket(id=r[0], thread_id=r[1], ask=r[2], for_owner=r[3], status=r[4],
                       created_at=r[5], outbox=r[6], last_try_at=r[7], delivered_at=r[8],
                       waiting_since=r[9], answer=r[10], answered_at=r[11], relayed_at=r[12],
-                      nagged_at=r[13], escalated_at=r[14], progress=r[15])
+                      nagged_at=r[13], escalated_at=r[14], progress=r[15], asked_on=r[16])
 
     def _one(self, sql: str, params: tuple) -> Ticket | None:
         with self._connect() as conn:
@@ -231,12 +256,12 @@ class PostgresTicketStore:
             rows = conn.execute(sql, params).fetchall()
         return [self._ticket(r) for r in rows]
 
-    def open(self, thread_id, ask, for_owner, now):
+    def open(self, thread_id, ask, for_owner, now, asked_on=None):
         return self._one(
             "INSERT INTO v2_kael_tickets (thread_id, ask, for_owner, created_at, updated_at, outbox, "
-            "last_try_at, waiting_since) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "last_try_at, waiting_since, asked_on) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
             f"RETURNING {self.COLUMNS}",
-            (thread_id, ask, for_owner, now, now, ask, now, now))
+            (thread_id, ask, for_owner, now, now, ask, now, now, asked_on))
 
     def get(self, ticket_id):
         return self._one(f"SELECT {self.COLUMNS} FROM v2_kael_tickets WHERE id = %s", (ticket_id,))
