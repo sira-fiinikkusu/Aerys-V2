@@ -480,6 +480,24 @@ class Settings(BaseSettings):
     # been read), "live", or "off". Off unless followups is true.
     followups: bool = False
     followup_plans: str = "shadow"
+    # HER HOME BODY SAYS "I'M DONE" (home_notices.py; board #176, Stage 3). The home server
+    # POSTs a done-notice to /home-notice with home_webhook_token (its own token: the home body
+    # never holds api_token); she tells the owner through the desk. home_url + home_api_token
+    # let her read the job's task and report back from the home server (without them the
+    # notice goes on what it says itself). Addresses and tokens stay in the environment. Off
+    # unless home_notices is true.
+    home_notices: bool = False
+    home_webhook_token: SecretStr | None = None
+    home_url: str = ""
+    home_api_token: SecretStr | None = None
+
+    @field_validator("home_webhook_token", "home_api_token", mode="after")
+    @classmethod
+    def _blank_home_token_is_none(cls, v: SecretStr | None) -> SecretStr | None:
+        # Same fail-closed rule as api_token: a blank token is no token, never "Bearer ".
+        if v is not None and not v.get_secret_value().strip():
+            return None
+        return v
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,
