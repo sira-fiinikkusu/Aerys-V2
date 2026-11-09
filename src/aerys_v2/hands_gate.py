@@ -7,6 +7,14 @@ The owner's rulings:
       match, she may start a READ-ONLY job directly; anything that could write, and any voice turn
       the recognizer wasn't sure was him, waits for his Approve button. Guests and voices that
       aren't his are refused.
+  D17 (2026-11-09), the details: his typed words and his voice on a strong match stop a job
+      directly; a voice it wasn't sure of may check on and list his jobs, but stopping one waits
+      for his button ("it could be someone else in the house, and a cancel can end a long job"). His own lines that
+      carry his id through /ask (the G2 lens, the panel, Sticky, Kael's line) can't show he typed
+      it: starting, changing or stopping a job from them waits for his button instead of a no.
+      After he declines, the same request isn't put to him again that day (Eastern) unless he
+      raises it himself ("keep it adaptive. She can resurface it later if it makes sense to ask
+      again"); from the next day she may.
   D12 (2026-11-09): she may message people he's told her about; the first message to each waits
       for his button, which shows exactly who and where ("Sam · Discord: sam_42"), so his tap
       confirms the person too. An address that matches nobody, or more than one person: she asks
@@ -36,23 +44,31 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for
-from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_voice_turn
+from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_lens_surface, is_voice_turn
 
 log = logging.getLogger(__name__)
 
 # Who is asking. OWNER_TEXT: him, typing, on Discord or Telegram (the doors that resolve the
-# account; an /ask caller like Kael's line or a test is not him typing). OWNER_VOICE: his voice on
-# a strong match. VOICE_UNSURE: a voice turn that is his only by default (untagged, or the
-# recognizer unsure). OTHER: everyone and everything else.
-OWNER_TEXT, OWNER_VOICE, VOICE_UNSURE, OTHER = "owner_text", "owner_voice", "voice_unsure", "other"
+# account). OWNER_VOICE: his voice on a strong match. VOICE_UNSURE: a voice turn that is his only by
+# default (untagged, or the recognizer unsure). OWNER_ASK: his id through /ask without voice (the
+# G2 lens, the panel, Sticky, Kael's line): his own infrastructure, but not proof he typed it.
+# OTHER: everyone and everything else.
+OWNER_TEXT, OWNER_VOICE, VOICE_UNSURE, OWNER_ASK, OTHER = (
+    "owner_text", "owner_voice", "voice_unsure", "owner_ask", "other")
+#: Whoever this is, it's him raising it himself: never held by an earlier no (D17 Q5).
+HIMSELF = (OWNER_TEXT, OWNER_VOICE)
 TEXT_PLATFORMS = ("discord", "telegram")
 
 # deepagents' async-subagent tools (AsyncSubAgentMiddleware): the two that set a home job working
-# are gated by D10; the rest only read or stop his jobs, so they're his any way he asks.
-START, UPDATE = "start_async_task", "update_async_task"
-HOME_TOOLS = (START, UPDATE, "check_async_task", "list_async_tasks", "cancel_async_task")
+# are gated by D10; stopping one is gated by D17 Q3; checking and listing only read his jobs, so
+# they're his any way he asks.
+START, UPDATE, CANCEL = "start_async_task", "update_async_task", "cancel_async_task"
+READS = ("check_async_task", "list_async_tasks")
+HOME_TOOLS = (START, UPDATE, *READS, CANCEL)
+EASTERN = ZoneInfo("America/New_York")
 
 HOME_JOB, MESSAGE = "home_job", "message"
 PLATFORMS = {"discord": "Discord", "telegram": "Telegram", "email": "email"}
@@ -103,7 +119,16 @@ def asker(identity, thread_id, owner_person_id) -> str:
         return OWNER_VOICE if strong else VOICE_UNSURE
     if str(ident.get("platform") or "").strip().lower() in TEXT_PLATFORMS:
         return OWNER_TEXT
-    return OTHER
+    return OWNER_ASK        # his id, no voice, no Discord/Telegram account: an /ask caller (D17 Q4)
+
+
+def _line(identity, thread_id) -> str:
+    """Which of his own lines an /ask turn came on, in his words, for his button."""
+    if str(thread_id or "").startswith("kael:"):
+        return "Kael's line"
+    if is_lens_surface(identity if isinstance(identity, dict) else None):
+        return "the G2 lens"
+    return "the panel or Sticky"
 
 
 def _key(*parts) -> str:
@@ -243,26 +268,38 @@ class HandsGate:
 
     def home_job(self, identity, thread_id, name: str, args: dict, state=None) -> Verdict:
         who = asker(identity, thread_id, self.owner)
-        if who == OTHER:
+        if who == OTHER or name not in HOME_TOOLS:
             return Verdict(False, REFUSED_HOME)
-        if name not in (START, UPDATE) or who == OWNER_TEXT:
+        if who == OWNER_TEXT or name in READS:
             return GO
         agent = self._agent(name, args, state)
-        if who == OWNER_VOICE and agent in self.read_only_agents:
+        if who == OWNER_VOICE and (name == CANCEL or agent in self.read_only_agents):
             return GO
-        heard = "a strong match on his voice" if who == OWNER_VOICE else "a voice I wasn't sure was his"
+        if who == OWNER_ASK:
+            line = _line(identity, thread_id)
+            how, heard = f"asked on {line}", f"Asked on {line}, which can't show it was him typing"
+        else:
+            how = "asked by voice"
+            heard = ("Asked by a strong match on his voice" if who == OWNER_VOICE
+                     else "Asked by a voice I wasn't sure was his")
         if name == START:
             words = str(args.get("description") or "").strip()
-            summary = f"Start a home job, asked by voice: {words}"
-            what = "the home job you asked for by voice"
-        else:
+            summary = f"Start a home job, {how}: {words}"
+            what = f"the home job you {how.replace('asked', 'asked for')}"
+        elif name == UPDATE:
             words = str(args.get("message") or "").strip()
-            summary = f"Change a running home job ({agent or 'unknown job'}), asked by voice: {words}"
-            what = "the change to the home job you asked for by voice"
-        detail = f"Asked by {heard}. Home agent: {agent or 'unknown'}.\n\n{words}"
+            summary = f"Change a running home job ({agent or 'unknown job'}), {how}: {words}"
+            what = f"the change to the home job you {how.replace('asked', 'asked for')}"
+        else:
+            task = str(args.get("task_id") or "").strip()
+            words = f"Stop task {task or 'unknown'}."
+            summary = f"Stop a running home job ({agent or 'unknown job'}), {how}"
+            what = f"stopping the home job, {how}"
+        detail = f"{heard}. Home agent: {agent or 'unknown'}.\n\n{words}"
         base_key = f"home:{_key(str(thread_id or ''), name, args)}"
         return self._ask(HOME_JOB, base_key, str(thread_id or ""), {"tool": name, **args, "what": what},
-                         kind="home job", summary=summary, detail=detail, what=what)
+                         kind="home job", summary=summary, detail=detail, what=what,
+                         himself=who in HIMSELF)
 
     @staticmethod
     def _agent(name, args, state) -> str:
@@ -273,7 +310,7 @@ class HandsGate:
 
     # D12 ---------------------------------------------------------------------------------
 
-    def message(self, thread_id, platform: str, to: str, text: str) -> Verdict:
+    def message(self, thread_id, platform: str, to: str, text: str, identity=None) -> Verdict:
         """Before she messages anyone: GO for him and for anyone he's already confirmed at this
         exact address; otherwise his button (one match) or a question for him (none, or several)."""
         platform = str(platform or "").strip().lower()
@@ -332,6 +369,7 @@ class HandsGate:
                 return self._ask(MESSAGE, base_key, str(thread_id or ""),
                                  {"platform": platform, "address": address, "person_id": pid, "name": name,
                                   "handle": handle, "text": str(text or ""), "what": what},
+                                 himself=asker(identity, thread_id, self.owner) in HIMSELF,
                                  kind="message again",
                                  summary=f"Send again to {name} · {label}: {handle} (the last try may have gone through)",
                                  detail=f"{to_line}\nThe last try may have gone through; this sends the same "
@@ -341,12 +379,34 @@ class HandsGate:
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
                          {"platform": platform, "address": address, "person_id": str(pid), "name": name,
                           "handle": handle, "text": str(text or ""), "what": what},
+                         himself=asker(identity, thread_id, self.owner) in HIMSELF,
                          kind="first message", summary=f"First message to {name} · {label}: {handle}",
                          detail=f"{to_line}\n\nWhat she'd send:\n{text}", what=what)
 
     # the button --------------------------------------------------------------------------
 
-    def _ask(self, action, base_key, thread_id, args, *, kind, summary, detail, what) -> Verdict:
+    def _no_today(self, rows, args) -> str | None:
+        """When his latest answer to this same request (the same words) was a no today (Eastern):
+        the time he said it, e.g. "10:42 AM"; else None. Ran out or withdrawn isn't a no. Raises
+        when an answer can't be read, so the caller fails closed."""
+        same = [r for r in rows if {k: v for k, v in r.args.items() if k != "what"}
+                == {k: v for k, v in args.items() if k != "what"}]
+        for r in reversed(same):
+            state = self.approvals.status(r.approval_id)
+            if state == "unknown":
+                raise RuntimeError("an earlier answer can't be read")
+            if state not in ("approved", "declined"):
+                continue                                   # unanswered, ran out, or withdrawn: not his word
+            if state == "approved":
+                return None
+            decided = self.approvals.store.get(r.approval_id).decided_at
+            today = self.clock().astimezone(EASTERN).date()
+            if decided is None or decided.astimezone(EASTERN).date() != today:
+                return None
+            return decided.astimezone(EASTERN).strftime("%-I:%M %p")
+        return None
+
+    def _ask(self, action, base_key, thread_id, args, *, kind, summary, detail, what, himself=False) -> Verdict:
         if action not in self.executors:
             return Verdict(False, CANT_ASK_HOME if action == HOME_JOB else CANT_ASK_MESSAGE)
         if len(detail) > DETAIL_CHARS:
@@ -369,6 +429,11 @@ class HandsGate:
                 if last.status == "done" and action == HOME_JOB:
                     return Verdict(False, f"Chris approved that already and it was done ({last.outcome or 'started'}). "
                                           "It isn't done twice.")
+            if not himself:
+                said_no = self._no_today(rows, args)
+                if said_no is not None:
+                    return Verdict(False, f"Chris said no to {what} at {said_no}; I'll leave it for today unless he "
+                                          "brings it up himself.")
             attempt = last.attempt + 1 if last is not None else 1
             # The button is keyed by exactly what it shows: two turns asking different things at
             # once get two buttons, and only the one whose row is recorded stays.
