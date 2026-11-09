@@ -766,3 +766,63 @@ def test_a_request_already_waiting_on_his_button_isnt_asked_again_from_another_t
     v = b.gate.home_job(UNTAGGED, "person:elsewhere", "start_async_task", START_WRITE)
     assert not v.go and "being done now" in v.text and len(b.approval_store.rows) == 1
     assert b.watcher.tick()["done"] == 1 and len(b.done) == 1
+
+
+# --- Codex owed pass (11/09 15:05): one execution per request, and a "." can't escape a no ------
+
+def test_his_typed_twin_of_an_approved_queued_job_runs_once():
+    # Codex's blocker: a voice start he approved, then the same job typed before the watcher ticks.
+    b = Box()
+    assert not b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE).go
+    b.tap()                                                    # approved; the watcher hasn't run it yet
+    direct = b.gate.home_job(TEXT, "telegram:thread-2", "start_async_task", START_WRITE)
+    b.watcher.tick()
+    runs = (1 if direct.go else 0) + len(b.done)
+    assert runs == 1
+    assert direct.go and not b.done                            # his typed words are the one execution
+    assert next(iter(b.store.rows.values())).status == "dropped"
+
+
+def test_his_typed_twin_while_the_queued_one_is_already_running_is_refused():
+    b = Box()
+    b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    row = next(iter(b.store.rows.values()))
+    assert b.store.claim(row.id)                               # the watcher has it, mid-run
+    direct = b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not direct.go and "already" in direct.text
+
+
+def test_his_typed_twin_of_a_job_still_waiting_for_his_tap_takes_its_place():
+    b = Box()
+    b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE).go
+    approval = b.approval_store.rows[max(b.approval_store.rows)]
+    assert approval.status == "withdrawn"                      # a later tap does nothing
+    b.tap()
+    b.watcher.tick()
+    assert not b.done
+
+
+def test_an_approved_unsure_voice_cancel_and_his_strong_voice_cancel_stop_it_once():
+    b = Box()
+    cancel = {"task_id": "t-1"}
+    assert not b.gate.home_job(UNSURE, OWNER_THREAD, "cancel_async_task", cancel).go
+    b.tap()
+    direct = b.gate.home_job(STRONG, OWNER_THREAD, "cancel_async_task", cancel)
+    b.watcher.tick()
+    assert (1 if direct.go else 0) + len(b.done) == 1
+
+
+def test_a_no_isnt_escaped_by_punctuation_case_or_spacing():
+    b = Box()
+    _declined(b, PANEL_ASK, OWNER_THREAD)
+    for words in ("Build the fridge planner page.", "build the fridge  planner page!", "“Build the fridge planner page”"):
+        v = b.gate.home_job(PANEL_ASK, "panel:thread-9", "start_async_task",
+                            {"description": words, "subagent_type": "home"})
+        assert not v.go and "said no" in v.text, words
+    assert len(b.approval_store.rows) == 1
+    # a genuinely different job still gets its own button
+    v = b.gate.home_job(PANEL_ASK, "panel:thread-9", "start_async_task",
+                        {"description": "Build the fridge planner page for Sam", "subagent_type": "home"})
+    assert "Waiting for Chris" in v.text

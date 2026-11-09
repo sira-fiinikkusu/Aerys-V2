@@ -135,9 +135,26 @@ def _key(*parts) -> str:
     return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:32]
 
 
+_QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
+_EDGES = " \t\n.,!?;:'\"-\u2026"
+
+
+def _norm(value):
+    """The same words however they're dressed: case, spacing, curly quotes and the punctuation at
+    either end don't make a new request (Codex, 11/09: a trailing '.' escaped his no)."""
+    if isinstance(value, str):
+        return " ".join(value.translate(_QUOTES).split()).casefold().strip(_EDGES)
+    if isinstance(value, dict):
+        return {k: _norm(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_norm(v) for v in value]
+    return value
+
+
 def _request(args) -> dict:
-    """What was asked, without the gate's own wording ('what'): two asks for the same thing match."""
-    return {k: v for k, v in dict(args or {}).items() if k != "what"}
+    """What was asked, without the gate's own wording ('what'), normalized: two asks for the same
+    thing match, from any thread, however they're punctuated."""
+    return {k: _norm(v) for k, v in dict(args or {}).items() if k != "what"}
 
 
 def _tasks(state) -> dict:
@@ -226,10 +243,13 @@ class PostgresGatedActionStore:
                          (base_key,))
 
     def same_request(self, action, args):
-        from psycopg.types.json import Jsonb
-
-        return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE action = %s AND (args - 'what') = %s "
-                         "ORDER BY id", (action, Jsonb(_request(args))))
+        """Candidates by action and tool, matched in Python: the match is normalized (_request), which
+        a JSONB equality can't do."""
+        want = _request(args)
+        rows = self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE action = %s "
+                         "AND (args ->> 'tool') IS NOT DISTINCT FROM %s ORDER BY id",
+                         (action, (args or {}).get("tool")))
+        return [r for r in rows if _request(r.args) == want]
 
     def add(self, approval_id, action, base_key, attempt, thread_id, args, now):
         from psycopg.types.json import Jsonb
@@ -287,11 +307,13 @@ class HandsGate:
         who = asker(identity, thread_id, self.owner)
         if who == OTHER or name not in HOME_TOOLS:
             return Verdict(False, REFUSED_HOME)
-        if who == OWNER_TEXT or name in READS:
+        if name in READS:
             return GO
+        if who == OWNER_TEXT:
+            return self._direct(name, args)
         agent = self._agent(name, args, state)
         if who == OWNER_VOICE and (name == CANCEL or agent in self.read_only_agents):
-            return GO
+            return self._direct(name, args)
         if who == OWNER_ASK:
             line = _line(identity, thread_id)
             how, heard = f"asked on {line}", f"Asked on {line}, which can't show it was him typing"
@@ -317,6 +339,36 @@ class HandsGate:
         return self._ask(HOME_JOB, base_key, str(thread_id or ""), {"tool": name, **args, "what": what},
                          kind="home job", summary=summary, detail=detail, what=what,
                          himself=who in HIMSELF)
+
+    def _direct(self, name: str, args: dict) -> Verdict:
+        """He asked directly for something that may already be queued for his tap (Codex, 11/09: an
+        approved voice start and the same job typed before the watcher ticked both ran). One of
+        them runs, never both: a queued twin still waiting is retired atomically (its button
+        withdrawn) and this request is the one execution; a twin the watcher already took is in
+        hand, and this one is refused. Unreadable: refused, never run blind."""
+        try:
+            twins = self.store.same_request(HOME_JOB, {"tool": name, **dict(args or {})})
+        except Exception:
+            log.warning("hands gate: couldn't check what's queued for %s; refused", name, exc_info=True)
+            return Verdict(False, GATE_DOWN)
+        now = self.clock()
+        for row in twins:
+            if row.status == "running":
+                return Verdict(False, f"That's already being done ({row.args.get('what') or 'the job he approved'}); "
+                                      "it isn't done twice.")
+            if row.status != "waiting":
+                continue
+            try:
+                retired = self.store.drop(row.id, "asked for directly; done that way", now)
+            except Exception:
+                log.warning("hands gate: couldn't retire queued action %s; refused", row.id, exc_info=True)
+                return Verdict(False, GATE_DOWN)
+            if not retired:                                # the watcher took it between the read and now
+                return Verdict(False, f"That's already being done ({row.args.get('what') or 'the job he approved'}); "
+                                      "it isn't done twice.")
+            self.approvals.withdraw(row.approval_id)        # pending: a later tap does nothing
+            log.info("hands gate: %s asked for directly; queued action %s retired", name, row.id)
+        return GO
 
     @staticmethod
     def _agent(name, args, state) -> str:
