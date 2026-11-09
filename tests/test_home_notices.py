@@ -399,3 +399,19 @@ def test_the_spoken_line_stops_at_the_answer():
     from aerys_v2.home_notices import HOME_JOB_PROMPT
     assert "Stop once the answer is said" in HOME_JOB_PROMPT
     assert "unless something was changed" in HOME_JOB_PROMPT
+
+
+def test_her_plan_bookkeeping_stays_out_of_his_copy():
+    """Kael's call, 11/09 (Chris: "i will let you decide"): the text copy is her full report, the
+    record, but her plan bookkeeping ("the one plan item is closed") is hers. A line about what she
+    did or didn't change stays: on a job meant to change something, that line matters."""
+    report = ("This machine has 5.8 GiB of RAM in total, and 4.7 GiB of it is available right now. "
+              "Swap: none set up. I made no changes, and the one plan item is closed. Both plan items are "
+              "closed as read-only.")
+    home = Home(job=Job(task="Check memory", result=report))
+    home.notices.receive(note())
+    home.notices.tick()
+    detail = home.desk.store.rows[1].detail
+    assert "plan item" not in detail
+    assert detail.startswith("This machine has 5.8 GiB of RAM in total")
+    assert "Swap: none set up." in detail and "I made no changes" in detail

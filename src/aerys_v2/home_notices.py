@@ -103,9 +103,19 @@ class Job:
 _WORKING_NOTE = re.compile(r"(?is)\s*\bnote to self\b.*?(?=\n\s*\n|\Z)")
 
 
+#: Her plan bookkeeping ("the one plan item is closed"): a sentence of only that, or a trailing clause.
+#: Kael's call, 11/09 (Chris: "i will let you decide"). What she did or didn't change stays.
+_PLAN_SENTENCE = re.compile(r"(?i)(?:^|(?<=[.!?])\s+)(?:both |all |the )?(?:one |two |\d+ )?(?:of the )?"
+                            r"plan items? (?:is|are|was|were) (?:now )?closed[^.!?]*[.!?]")
+_PLAN_CLAUSE = re.compile(r"(?i),? and (?:both |all |the )?(?:one |two |\d+ )?(?:of the )?"
+                          r"plan items? (?:is|are|was|were) (?:now )?closed[^.!?]*(?=[.!?])")
+
+
 def without_working_notes(text) -> str:
-    """Her report without her notes to herself."""
-    return _WORKING_NOTE.sub("", str(text or "")).strip()
+    """Her report without her notes to herself and her plan bookkeeping."""
+    text = _WORKING_NOTE.sub("", str(text or ""))
+    text = _PLAN_SENTENCE.sub("", text)
+    return _PLAN_CLAUSE.sub("", text).strip()
 
 
 def clip(text, n: int) -> str:
