@@ -555,3 +555,15 @@ def test_without_company_the_notification_leg_is_never_used():
     life.desk.deliverer.notify = lambda headline, body: sent.append(headline)
     life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
     assert sent == [] and life.world.spoken == [("Backup's green.", "dev-office")]
+
+
+def test_a_notification_that_may_have_landed_is_never_sent_again_as_text():
+    from aerys_v2.reach import AmbiguousDelivery, ReachEvent
+
+    for err in (AmbiguousDelivery("ReadTimeout"), TimeoutError("read")):
+        life = Life()
+        life.desk.deliverer.notify = lambda headline, body, err=err: (_ for _ in ()).throw(err)
+        life.prefs.invoke({"action": "company"})
+        life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+        assert life.world.texts == [] and life.world.spoken == []
+        assert life.desk.store.rows[1].surface == "notify?" and life.desk.store.rows[1].status == "sent"

@@ -506,6 +506,11 @@ class PostgresReachStore:
 # --- delivery ----------------------------------------------------------------------------
 
 
+class AmbiguousDelivery(Exception):
+    """A leg sent it but couldn't hear back (a timeout after the request went): it may have landed,
+    so nothing is sent a second time."""
+
+
 @dataclass
 class Where:
     kind: str                         # room | device | discord | telegram
@@ -554,6 +559,10 @@ class Deliverer:
                 try:
                     self.notify(row.headline, body)
                     return Delivery("sent", "notify", texted=True)
+                except (AmbiguousDelivery, TimeoutError) as e:
+                    # It may have landed: a second copy as text would be a double. Recorded as unsure.
+                    log.warning("reach: the notification may have landed (%s); no second copy", type(e).__name__)
+                    return Delivery("sent", "notify?", texted=True)
                 except Exception as e:
                     log.warning("reach: the notification failed (%s); texting instead", type(e).__name__)
             where = Where(self.text_surface)

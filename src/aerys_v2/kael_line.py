@@ -820,10 +820,15 @@ def reach_desk_for(settings, graph):
     def notify(headline: str, body: str) -> None:
         import httpx
 
-        r = httpx.post(f"{str(settings.ha_base_url).rstrip('/')}/api/services/notify/{notify_service}",
-                       json={"title": "Aerys", "message": body},
-                       headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}, timeout=10.0)
-        r.raise_for_status()
+        from aerys_v2.reach import AmbiguousDelivery
+
+        try:
+            r = httpx.post(f"{str(settings.ha_base_url).rstrip('/')}/api/services/notify/{notify_service}",
+                           json={"title": "Aerys", "message": body},
+                           headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}, timeout=10.0)
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError) as e:
+            raise AmbiguousDelivery(type(e).__name__) from e       # it went out; the answer didn't come back
+        r.raise_for_status()                                        # refused: it didn't land, text instead
 
     def busy(device_id: str) -> bool:
         # Never announce over a conversation in progress on that satellite.
