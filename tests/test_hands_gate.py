@@ -48,12 +48,12 @@ START_WRITE = {"description": "Build the fridge planner page", "subagent_type": 
 START_READ = {"description": "Read the planner notes and summarize them", "subagent_type": "home-readonly"}
 
 PEOPLE = {
-    ("discord", "sam_42"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000042", "handle": "sam_42"}],
-    ("discord", "sam"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000042", "handle": "sam_42"}],
-    ("discord", "sira"): [{"person_id": OWNER, "name": "Chris", "address": "60426939629838336", "handle": "Sira"}],
+    ("discord", "sam_42"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000002", "handle": "sam_42"}],
+    ("discord", "sam"): [{"person_id": SAM, "name": "Sam", "address": "100000000000000002", "handle": "sam_42"}],
+    ("discord", "chris_h"): [{"person_id": OWNER, "name": "Chris", "address": "100000000000000001", "handle": "chris_h"}],
     ("email", "sam@example.net"): [{"person_id": SAM, "name": "Sam", "address": "sam@example.net",
                                     "handle": "sam@example.net"}],
-    ("discord", "chris"): [{"person_id": OWNER, "name": "Chris", "address": "1", "handle": "Sira"},
+    ("discord", "chris"): [{"person_id": OWNER, "name": "Chris", "address": "1", "handle": "chris_h"},
                            {"person_id": "orphan-chris", "name": "Chris", "address": "2", "handle": "chris2"}],
 }
 
@@ -319,7 +319,7 @@ def test_a_request_it_cant_write_is_a_no():
 
 def test_messages_to_him_go():
     b = Box()
-    assert b.gate.message(OWNER_THREAD, "discord", "Sira", "hi").go
+    assert b.gate.message(OWNER_THREAD, "discord", "chris_h", "hi").go
     assert not b.approval_store.rows
 
 
@@ -342,7 +342,7 @@ def test_a_name_is_resolved_to_the_person_and_the_tap_confirms_it():
     b.tap()
     assert b.watcher.tick()["done"] == 1
     kind, args = b.done[0]
-    assert kind == "msg" and args["address"] == "100000000000000042" and args["text"] == "Hey Sam"
+    assert kind == "msg" and args["address"] == "100000000000000002" and args["text"] == "Hey Sam"
     assert "was sent" in b.notes[-1][1]
     # confirmed: the next message to Sam on Discord goes without a button
     assert b.gate.message(OWNER_THREAD, "discord", "sam_42", "one more thing").go
@@ -369,7 +369,7 @@ def test_an_address_that_matches_nobody_means_ask_him_and_no_button():
 def test_more_than_one_match_means_ask_him_which_and_no_button():
     b = Box()
     v = b.gate.message(OWNER_THREAD, "discord", "Chris", "hi")
-    assert not v.go and "more than one person" in v.text and "Sira" in v.text and "chris2" in v.text
+    assert not v.go and "more than one person" in v.text and "chris_h" in v.text and "chris2" in v.text
     assert not b.approval_store.rows
 
 
