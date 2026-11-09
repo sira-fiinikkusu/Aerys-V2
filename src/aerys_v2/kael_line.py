@@ -765,6 +765,12 @@ def reach_desk_for(settings, graph):
     rooms = parse_room_devices(getattr(settings, "reach_room_devices", ""))
     start_h = int(getattr(settings, "owner_quiet_start_hour", 21))
     end_h = int(getattr(settings, "owner_quiet_end_hour", 9))
+    # With her morning brief armed (brief.py), what the night holds waits for the brief, which
+    # carries it, until the brief's cutoff; past that it goes on its own (D4: "routine waits
+    # for the morning brief"). Without one, the night ends at end_h as before.
+    brief_on = (bool(getattr(settings, "morning_brief", False)) and getattr(settings, "ha_token", None) is not None
+                and str(getattr(settings, "brief_room", "office") or "office").strip().lower() in rooms)
+    morning_h = int(getattr(settings, "brief_cutoff_hour", 13)) if brief_on else end_h
     text_surface = "discord" if dc_token is not None else "telegram"
     presence = None
     try:
@@ -839,7 +845,7 @@ def reach_desk_for(settings, graph):
         Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface),
         budget_default=int(getattr(settings, "reach_daily_budget", 3)),
         quiet=lambda now: in_quiet_hours(now, start_h, end_h),
-        morning_hour=end_h,
+        morning_hour=morning_h,
         meeting_hold=meeting_hold_fn_for(settings),
         replied_since=replied_since,
         said=lambda row, body: _said_to_owner(graph, settings, body),

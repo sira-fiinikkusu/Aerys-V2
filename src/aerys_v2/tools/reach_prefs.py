@@ -23,7 +23,7 @@ from aerys_v2.reach import BUDGET_MAX, BUDGET_MIN, NAP_DEFAULT, NAP_MAX, Prefs
 log = logging.getLogger(__name__)
 
 #: Topics the desk knows. Safety warnings and answers he asked for can't be muted.
-TOPICS = ("kael", "weather", "calendar", "email", "follow-ups")
+TOPICS = ("kael", "weather", "calendar", "email", "follow-ups", "brief")
 
 
 def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
@@ -45,8 +45,9 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
 
         action: "less", "more", "mute", "unmute", "show", "nap" or "awake".
         minutes: for nap, if he said how long (default 60, at most 180).
-        topic: for mute and unmute: kael (news from Kael), weather, calendar, email or
-          follow-ups. Storm warnings and answers he asked for are never muted.
+        topic: for mute and unmute: kael (news from Kael), weather, calendar, email,
+          follow-ups, or brief (your spoken morning brief in his office). Storm warnings and
+          answers he asked for are never muted.
         his_words: what he said, briefly, for the record.
 
         Returns what changed, or what's set now. Tell him plainly what you changed.

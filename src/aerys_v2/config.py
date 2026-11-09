@@ -442,6 +442,22 @@ class Settings(BaseSettings):
     reach_daily_budget: int = 3
     reach_room_devices: str = ""
     reach_follow_through_min: int = 5
+    # HER MORNING BRIEF (brief.py; the owner, 2026-11-08: "her voice morning brief hits in the
+    # office when she first detects me in there after waking"). Spoken once a day in brief_room
+    # (it needs a speaker in reach_room_devices), between brief_start_hour and
+    # brief_cutoff_hour Eastern; before brief_solo_hour it also needs proof he's up: one of
+    # brief_wake_entities moved this morning (an automation's last run, or a sensor that's on
+    # and came on), or he talked to her. brief_calendars: personal calendars (titles spoken);
+    # the work ones are owner_meeting_calendars (times only). Entity ids stay in the
+    # environment. Off unless morning_brief is true.
+    morning_brief: bool = False
+    brief_room: str = "office"
+    brief_start_hour: int = 5
+    brief_solo_hour: int = 8
+    brief_cutoff_hour: int = 13
+    brief_wake_entities: str = ""
+    brief_calendars: str = ""
+    brief_weather_entity: str = "weather.forecast_home"
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,

@@ -29,6 +29,15 @@ The record (v2_reachouts, migration 016) holds every decision with its reason, s
 did she go quiet?" has an answer. Everything she queues is delivered by the watcher when
 its window opens; an answer he asked for is never dropped, only delayed.
 
+A brief (migration 018) is the one thing the desk treats differently: her morning brief
+(brief.py) only exists once he's up and in the room it's for, so the night doesn't hold it and
+it isn't counted against the budget (D4 "plus briefs"). It's pinned to that room: it waits for
+him there and is never spoken anywhere else. It carries the routine items held overnight: they're
+reserved for it before she composes (so they can't also go out on their own meanwhile) and
+marked 'folded' in the same write that records the brief as sent; if it never goes, they go on
+their own at its cutoff. With a brief armed, the night holds them until that cutoff, not 9.
+Its text part (the carried items in full) is retried until it lands, like any detail.
+
 What she says is the private part: never logged (logs carry ids, sources and statuses).
 """
 
@@ -56,6 +65,7 @@ NAP_RECHECK = timedelta(minutes=2)     # a nap-held message is looked at again t
 NAP_GRACE = timedelta(seconds=10)      # clock skew only: replies are judged by when his turn STARTED
 NAP_DEFAULT = timedelta(hours=1)
 NAP_MAX = timedelta(hours=3)
+ROOM_WAIT = timedelta(minutes=1)      # a message pinned to a room he isn't in is looked at again this often
 DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went keeps trying this long
 TICK_S = 30
 MISSED_PREFIX = "In case you missed what I said:"
@@ -71,6 +81,9 @@ class ReachEvent:
     owed: bool = False                # an answer he asked for: never dropped, never budgeted
     dedupe_key: str | None = None
     expires_at: datetime | None = None
+    room: str | None = None           # spoken only in this room; it waits for him there
+    brief: bool = False               # a brief: outside the budget; the night doesn't hold it
+    folds: tuple = ()                 # ids of held items it carries (marked 'folded' when it goes)
 
 
 @dataclass
@@ -97,11 +110,14 @@ class Reach:
     acked_at: datetime | None = None
     attempts: int = 0
     created_at: datetime | None = None
+    room: str | None = None
+    brief: bool = False
+    folds: tuple = ()
 
     def event(self) -> ReachEvent:
         return ReachEvent(source=self.source, topic=self.topic, headline=self.headline, detail=self.detail,
                           urgency=self.urgency, owed=self.owed, dedupe_key=self.dedupe_key,
-                          expires_at=self.expires_at)
+                          expires_at=self.expires_at, room=self.room, brief=self.brief, folds=tuple(self.folds))
 
 
 @dataclass
@@ -148,12 +164,14 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
     lets storm warnings break through the night, and a nap is lighter than the night."""
     if duplicate:
         return Decision("drop", "already sent")
+    if event.expires_at is not None and not event.owed and now >= _utc(event.expires_at):
+        return Decision("drop", "expired before its window")
     if event.urgency == "safety":
         return Decision("send", "safety", breaks_through=True)
     muted = {str(m).strip().lower() for m in prefs.muted}
     if not event.owed and event.topic.strip().lower() in muted:
         return Decision("drop", f"you muted {event.topic}")
-    if quiet:
+    if quiet and not event.brief:      # a brief exists only once he's up and in its room
         if event.owed or event.urgency == "timely":
             return Decision("send", "night: as quiet text", silent=True, voice="reroute")
         return Decision("queue", "night: waits for the morning", not_before=next_local(now, morning_hour))
@@ -169,7 +187,7 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
                             silent=True, voice="wait", not_before=meeting_until)
         after = "until 10 minutes after" if hold == "meeting" else "until he's up"
         return Decision("queue", f"{hold}: waits {after}", not_before=meeting_until)
-    if not event.owed and sent_today >= prefs.budget:
+    if not event.owed and not event.brief and sent_today >= prefs.budget:
         if event.urgency == "timely":
             return Decision("send", f"over today's budget ({prefs.budget}), but timely")
         return Decision("drop", f"over today's budget ({prefs.budget})")
@@ -183,10 +201,13 @@ class ReachStore(Protocol):
     def add(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
+    def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
+    def sent_quietly(self, since: datetime) -> list[Reach]: ...
     def sent_since(self, since: datetime) -> int: ...
     def due(self, now: datetime) -> list[Reach]: ...
     def awaiting_reply(self, before: datetime, after: datetime, detail_after: datetime | None = None) -> list[Reach]: ...
     def mark(self, reach_id: int, now: datetime, **fields) -> None: ...
+    def settle(self, reach_id: int, now: datetime, *, folds: tuple = (), **fields) -> None: ...
     def prefs(self, default_budget: int) -> Prefs: ...
     def set_prefs(self, prefs: Prefs, now: datetime, change: str, words: str) -> None: ...
 
@@ -207,7 +228,8 @@ class MemoryReachStore:
     def add(self, event, now, *, status, reason, not_before):
         r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
                   headline=event.headline, detail=event.detail, dedupe_key=event.dedupe_key, status=status,
-                  not_before=not_before, expires_at=event.expires_at, reason=reason, created_at=now)
+                  not_before=not_before, expires_at=event.expires_at, reason=reason, created_at=now,
+                  room=event.room, brief=event.brief, folds=tuple(event.folds))
         self.rows[r.id] = r
         self._next += 1
         return r
@@ -216,8 +238,17 @@ class MemoryReachStore:
         return any(r.dedupe_key == dedupe_key and r.status in ("sent", "queued") and r.created_at >= since
                    for r in self.rows.values())
 
+    def foldable(self, since, until):
+        return sorted((r for r in self.rows.values() if r.status == "queued" and not r.owed and not r.brief
+                       and r.urgency == "routine" and r.created_at and r.created_at >= since
+                       and (r.not_before is None or r.not_before <= until)), key=lambda r: r.id)
+
+    def sent_quietly(self, since):
+        return sorted((r for r in self.rows.values() if r.status == "sent" and r.silent
+                       and r.delivered_at and r.delivered_at >= since), key=lambda r: r.id)
+
     def sent_since(self, since):
-        return sum(1 for r in self.rows.values() if r.status == "sent" and not r.owed
+        return sum(1 for r in self.rows.values() if r.status == "sent" and not r.owed and not r.brief
                    and r.urgency != "safety" and r.delivered_at and r.delivered_at >= since)
 
     def due(self, now):
@@ -227,7 +258,7 @@ class MemoryReachStore:
     def awaiting_reply(self, before, after, detail_after=None):
         lower = lambda r: detail_after if (r.detail and detail_after is not None) else after
         return [r for r in self.rows.values() if r.status == "sent" and r.spoken_at and r.dm_at is None
-                and r.acked_at is None and lower(r) <= r.spoken_at <= before]
+                and r.acked_at is None and (not r.brief or r.detail) and lower(r) <= r.spoken_at <= before]
 
     def mark(self, reach_id, now, **fields):
         bad = set(fields) - MARKABLE
@@ -235,6 +266,13 @@ class MemoryReachStore:
             raise ValueError(f"not markable: {bad}")
         for k, v in fields.items():
             setattr(self.rows[reach_id], k, v)
+
+    def settle(self, reach_id, now, *, folds=(), **fields):
+        self.mark(reach_id, now, **fields)
+        for fid in folds:                    # only what's still waiting: never re-mark what went
+            r = self.rows.get(fid)
+            if r is not None and r.status == "queued":
+                r.status, r.reason, r.delivered_at = "folded", f"in the brief (#{reach_id})", now
 
     def prefs(self, default_budget):
         if self._prefs is None:
@@ -253,7 +291,8 @@ class PostgresReachStore:
     connections per call, the tickets store's stance. Times are the brain's clock."""
 
     COLUMNS = ("id, source, topic, urgency, owed, headline, detail, dedupe_key, status, not_before, expires_at, "
-               "reason, surface, silent, spoken_at, dm_at, delivered_at, acked_at, attempts, created_at")
+               "reason, surface, silent, spoken_at, dm_at, delivered_at, acked_at, attempts, created_at, "
+               "room, brief, folds")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -268,16 +307,17 @@ class PostgresReachStore:
         return Reach(id=r[0], source=r[1], topic=r[2], urgency=r[3], owed=r[4], headline=r[5], detail=r[6],
                      dedupe_key=r[7], status=r[8], not_before=r[9], expires_at=r[10], reason=r[11], surface=r[12],
                      silent=r[13], spoken_at=r[14], dm_at=r[15], delivered_at=r[16], acked_at=r[17],
-                     attempts=r[18], created_at=r[19])
+                     attempts=r[18], created_at=r[19], room=r[20], brief=r[21], folds=tuple(r[22] or ()))
 
     def add(self, event, now, *, status, reason, not_before):
         with self._connect() as conn:
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
-                "dedupe_key, status, not_before, expires_at, reason) VALUES "
-                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds) VALUES "
+                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
                 (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
-                 event.dedupe_key, status, not_before, event.expires_at, reason)).fetchone()
+                 event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
+                 list(event.folds))).fetchone()
         return self._row(row)
 
     def recently_sent(self, dedupe_key, since):
@@ -286,11 +326,26 @@ class PostgresReachStore:
                 "SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s AND status IN ('sent', 'queued') "
                 "AND created_at >= %s LIMIT 1", (dedupe_key, since)).fetchone() is not None
 
+    def foldable(self, since, until):
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND NOT owed AND NOT brief "
+                "AND urgency = 'routine' AND created_at >= %s AND (not_before IS NULL OR not_before <= %s) "
+                "ORDER BY id", (since, until)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def sent_quietly(self, since):
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'sent' AND silent "
+                "AND delivered_at >= %s ORDER BY id", (since,)).fetchall()
+        return [self._row(r) for r in rows]
+
     def sent_since(self, since):
         with self._connect() as conn:
             return conn.execute(
-                "SELECT count(*) FROM v2_reachouts WHERE status = 'sent' AND NOT owed AND urgency <> 'safety' "
-                "AND delivered_at >= %s", (since,)).fetchone()[0]
+                "SELECT count(*) FROM v2_reachouts WHERE status = 'sent' AND NOT owed AND NOT brief "
+                "AND urgency <> 'safety' AND delivered_at >= %s", (since,)).fetchone()[0]
 
     def due(self, now):
         with self._connect() as conn:
@@ -303,7 +358,7 @@ class PostgresReachStore:
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'sent' AND spoken_at IS NOT NULL "
-                "AND dm_at IS NULL AND acked_at IS NULL AND spoken_at <= %s "
+                "AND dm_at IS NULL AND acked_at IS NULL AND (NOT brief OR detail <> '') AND spoken_at <= %s "
                 "AND spoken_at >= CASE WHEN detail <> '' THEN %s ELSE %s END ORDER BY id",
                 (before, detail_after or after, after)).fetchall()
         return [self._row(r) for r in rows]
@@ -316,6 +371,22 @@ class PostgresReachStore:
         with self._connect() as conn:
             conn.execute(f"UPDATE v2_reachouts SET {cols}, updated_at = %s WHERE id = %s",
                          (*fields.values(), now, reach_id))
+
+    def settle(self, reach_id, now, *, folds=(), **fields):
+        """The record and the items it carried, in ONE transaction: a brief can't be recorded
+        as sent while what it carried still waits to go out again on its own."""
+        bad = set(fields) - MARKABLE
+        if bad:
+            raise ValueError(f"not markable: {bad}")
+        cols = ", ".join(f"{k} = %s" for k in fields)
+        with self._connect() as conn:
+            if fields:
+                conn.execute(f"UPDATE v2_reachouts SET {cols}, updated_at = %s WHERE id = %s",
+                             (*fields.values(), now, reach_id))
+            if folds:
+                conn.execute("UPDATE v2_reachouts SET status = 'folded', reason = %s, delivered_at = %s, "
+                             "updated_at = %s WHERE id = ANY(%s) AND status = 'queued'",
+                             (f"in the brief (#{reach_id})", now, now, list(folds)))
 
     def prefs(self, default_budget):
         with self._connect() as conn:
@@ -348,7 +419,7 @@ class Where:
 
 @dataclass
 class Delivery:
-    status: str                       # sent | busy | wait | failed
+    status: str                       # sent | busy | wait | away | recheck | failed
     surface: str = ""
     spoken: bool = False
     texted: bool = False
@@ -364,12 +435,14 @@ class Deliverer:
         self.locate, self.speak, self.text = locate, speak, text
         self.busy = busy or (lambda device_id: False)
         self.text_surface = text_surface
-        # Set by the desk: may she speak RIGHT NOW? Checked at the moment of speech, after the
-        # location and busy checks, because the night or a meeting can begin while those run.
-        self.may_speak: Callable[[], bool] = lambda: True
+        # Set by the desk: may she speak this RIGHT NOW? Checked at the moment of speech, after
+        # the location and busy checks, because the night or a meeting can begin while those run.
+        self.may_speak: Callable[[Reach], bool] = lambda row: True
 
     def deliver(self, row: Reach, decision: Decision) -> Delivery:
         where = self.locate()
+        if row.room and not (where.kind == "room" and where.label == row.room):
+            return Delivery("away")        # pinned to a room he isn't in: it waits for him there
         spoken = where.kind in ("room", "device")
         if spoken and decision.voice == "wait":
             return Delivery("wait")
@@ -380,7 +453,7 @@ class Deliverer:
             if spoken:
                 if self.busy(where.device_id):
                     return Delivery("busy")
-                if not decision.breaks_through and not self.may_speak():   # the night or a meeting began just now
+                if not decision.breaks_through and not self.may_speak(row):   # the night or a meeting began just now
                     return Delivery("recheck")
                 self.speak(row.headline, where.device_id)
             else:
@@ -430,8 +503,17 @@ class ReachDesk:
         # Rows delivered whose record didn't land (the store hiccuped after the send): only
         # the record is retried, never the delivery (the check-ins' stance; Codex 11/08).
         self.unrecorded: dict = {}
-        deliverer.may_speak = lambda: (not self.quiet(self.clock()) and self._meeting() is None
-                                       and self._nap(self.store.prefs(self.budget_default), self.clock()) is None)
+        deliverer.may_speak = self._may_speak
+
+    def _may_speak(self, row: Reach) -> bool:
+        """May she say this RIGHT NOW (the deliverer asks at the moment of speech)? Never past
+        its expiry (a brief composed at 12:59 doesn't speak at 13:01, nor at night); the night
+        holds everything but a brief; a meeting or a nap holds everything."""
+        now = self.clock()
+        if row.expires_at is not None and not row.owed and now >= _utc(row.expires_at):
+            return False
+        return ((row.brief or not self.quiet(now)) and self._meeting() is None
+                and self._nap(self.store.prefs(self.budget_default), now) is None)
 
     def _meeting(self) -> datetime | None:
         try:
@@ -463,6 +545,52 @@ class ReachDesk:
         return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
                       duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,
                       morning_hour=self.morning_hour, hold=hold)
+
+    def voice_held(self, now: datetime | None = None) -> str | None:
+        """Why her voice is held right now (a meeting or a nap), or None. The brief asks before
+        it composes, so a held morning doesn't spend a model call on words that would wait."""
+        now = now or self.clock()
+        if self._meeting() is not None:
+            return "meeting"
+        if self._nap(self.store.prefs(self.budget_default), now) is not None:
+            return "nap"
+        return None
+
+    def reserve_for_brief(self, since: datetime, until: datetime) -> list[Reach]:
+        """The routine items held since `since` that a brief may carry, reserved for it: each
+        waits until `until` (the brief's cutoff), so the watcher can't also send it while she
+        composes. Not what has expired or what he's muted since (those the watcher drops). If
+        the brief never goes, they go on their own at `until`."""
+        with self.lock:
+            now = self.clock()
+            muted = {str(m).strip().lower() for m in self.store.prefs(self.budget_default).muted}
+            out = []
+            for r in self.store.foldable(since, until):
+                if self._delivered(r.id) or r.topic.strip().lower() in muted:
+                    continue
+                if r.expires_at is not None and now >= _utc(r.expires_at):
+                    continue
+                try:
+                    self.store.mark(r.id, now, not_before=until, reason="carried by the morning brief")
+                except Exception:
+                    log.warning("reach %s: couldn't reserve it for the brief; it goes on its own", r.id)
+                    continue
+                out.append(r)
+            return out
+
+    def _delivered(self, rid: int) -> bool:
+        """Delivered (or carried by a delivered brief) but not yet recorded: never send it again."""
+        return rid in self.unrecorded or any(rid in folds for _, folds in self.unrecorded.values())
+
+    def _settle(self, rid: int, now: datetime, record: dict, folds: tuple = ()) -> None:
+        """Record a delivery (and what it carried). Noted first in `unrecorded`, so a failed
+        write is retried by the watcher and the delivery itself is never repeated."""
+        self.unrecorded[rid] = (record, folds)
+        try:
+            self.store.settle(rid, now, folds=folds, **record)
+            self.unrecorded.pop(rid, None)
+        except Exception:
+            log.warning("reach %s: delivered, but recording it failed; only the record is retried", rid)
 
     def reach_out(self, event: ReachEvent) -> str:
         if event.urgency not in URGENCIES or not event.headline.strip():
@@ -505,12 +633,7 @@ class ReachDesk:
             record = dict(status="sent", delivered_at=now, surface=result.surface, silent=d.silent,
                           spoken_at=now if result.spoken else None, dm_at=now if result.texted else None,
                           attempts=row.attempts + 1)
-            self.unrecorded[row.id] = record          # first: a failed record must not mean a resend
-            try:
-                self.store.mark(row.id, now, **record)
-                self.unrecorded.pop(row.id, None)
-            except Exception:
-                log.warning("reach %s: delivered, but recording it failed; only the record is retried", row.id)
+            self._settle(row.id, now, record, tuple(row.folds))   # the items it carried went with it
             try:
                 self.said(row, row.headline + (f"\n\n{row.detail}" if row.detail else ""))
             except Exception:
@@ -522,6 +645,9 @@ class ReachDesk:
             return "queued"
         if result.status == "busy":
             self.store.mark(row.id, now, not_before=now + BUSY_RETRY, reason="the room was mid-conversation")
+            return "queued"
+        if result.status == "away":
+            self.store.mark(row.id, now, not_before=now + ROOM_WAIT, reason=f"waits for him in the {row.room}")
             return "queued"
         attempts = row.attempts + 1
         if attempts >= GIVE_UP_AFTER and not row.owed:
@@ -538,14 +664,14 @@ class ReachDesk:
         out = {"sent": 0, "queued": 0, "dropped": 0, "duplicate": 0, "copied": 0, "heard": 0}
         with self.lock:
             now = self.clock()
-            for rid, record in list(self.unrecorded.items()):   # delivered; only the record is owed
+            for rid, (record, folds) in list(self.unrecorded.items()):   # delivered; only the record is owed
                 try:
-                    self.store.mark(rid, now, **record)
+                    self.store.settle(rid, now, folds=folds, **record)
                     self.unrecorded.pop(rid, None)
                 except Exception:
                     log.warning("reach %s: the record still won't land; retried next pass", rid)
             for row in self.store.due(now):
-                if row.id in self.unrecorded:          # sent already: never delivered twice
+                if self._delivered(row.id):            # sent already (or carried): never delivered twice
                     continue
                 now = self.clock()                     # per row: a slow delivery can cross 21:00
                 if row.expires_at and _utc(row.expires_at) <= now and not row.owed:
@@ -564,10 +690,12 @@ class ReachDesk:
             if self.replied_since is not None:
                 for row in self.store.awaiting_reply(now - self.follow_through_after, now - FOLLOW_THROUGH_FOR,
                                                      detail_after=now - DETAIL_FOR):
-                    if row.id in self.unrecorded:
+                    if self._delivered(row.id):
                         continue
                     try:
-                        heard = self.replied_since(_utc(row.spoken_at))
+                        # A brief is never re-sent as "in case you missed it" (his phone has
+                        # Kael's); only its text part, if that didn't land.
+                        heard = True if row.brief else self.replied_since(_utc(row.spoken_at))
                     except Exception:
                         log.warning("reach: reply check failed; no copy this pass", exc_info=True)
                         continue
@@ -584,13 +712,8 @@ class ReachDesk:
                     except Exception:
                         log.warning("reach %s: the text copy failed; retried next pass", row.id)
                         continue
-                    record = {"dm_at": now, **({"acked_at": now} if heard else {})}
-                    self.unrecorded[row.id] = record    # first: a failed record must not mean a second copy
-                    try:
-                        self.store.mark(row.id, now, **record)
-                        self.unrecorded.pop(row.id, None)
-                    except Exception:
-                        log.warning("reach %s: copy sent, but recording it failed; only the record is retried", row.id)
+                    # first noted: a failed record must not mean a second copy
+                    self._settle(row.id, now, {"dm_at": now, **({"acked_at": now} if heard else {})})
                     out["copied"] += 1
         return out
 
