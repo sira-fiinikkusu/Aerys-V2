@@ -442,6 +442,10 @@ class Settings(BaseSettings):
     reach_daily_budget: int = 3
     reach_room_devices: str = ""
     reach_follow_through_min: int = 5
+    # A safety warning (a storm WARNING) inside quiet hours breaks through as a text that
+    # buzzes, not out loud in the bedroom; true speaks it where he is, as by day. The
+    # owner's call (board #176); off until he makes it.
+    reach_safety_voice_at_night: bool = False
     # HER MORNING BRIEF (brief.py; the owner, 2026-11-08: "her voice morning brief hits in the
     # office when she first detects me in there after waking"). Spoken once a day in brief_room
     # (it needs a speaker in reach_room_devices), between brief_start_hour and

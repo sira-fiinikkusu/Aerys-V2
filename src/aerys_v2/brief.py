@@ -178,6 +178,7 @@ class MorningBrief:
         since = _at(day - timedelta(days=1), 18)       # "overnight": since yesterday evening
         # Reserved first: what it will carry can't also go out on its own while she composes.
         held, quiet = self.desk.reserve_for_brief(since, cutoff), store.sent_quietly(since)
+        quiet = [r for r in quiet if not r.text_only]   # never said out loud, not even in the brief (email)
         try:
             facts = self.gather(now, held, quiet)
         except Exception:

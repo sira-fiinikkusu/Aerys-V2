@@ -51,7 +51,12 @@ def test_a_repeat_is_dropped():
 def test_safety_always_goes_even_at_night_in_a_meeting_over_budget_and_muted():
     out = d(ev(urgency="safety", topic="weather"), NIGHT, prefs=Prefs(budget=0, muted=["weather"]),
             sent_today=9, quiet=True, meeting_until=DAY)
-    assert out.action == "send" and out.voice == "ok"
+    # At night: a text that buzzes (not silent), not out loud in the bedroom, by default.
+    assert out.action == "send" and out.breaks_through and out.voice == "reroute" and not out.silent
+    spoken = decide(ev(urgency="safety"), NIGHT, prefs=Prefs(), sent_today=0, duplicate=False, quiet=True,
+                    meeting_until=None, morning_hour=9, safety_voice_at_night=True)
+    assert spoken.action == "send" and spoken.voice == "ok"
+    assert d(ev(urgency="safety"), DAY).voice == "ok"                          # by day: spoken
 
 
 def test_a_muted_topic_is_dropped_but_an_answer_he_asked_for_never_is():
@@ -450,7 +455,8 @@ def test_a_safety_warning_speaks_through_the_night_without_looping():
     store = MemoryReachStore()
     desk = ReachDesk(store, Deliverer(locate=lambda: Where("room", "dev"), speak=lambda t, d: spoken.append(t),
                                       text=lambda *a: None),
-                     quiet=lambda t: True, meeting_hold=lambda: DAY, clock=lambda: NIGHT)
+                     quiet=lambda t: True, meeting_hold=lambda: DAY, clock=lambda: NIGHT,
+                     safety_voice_at_night=True)
     assert desk.reach_out(ev(urgency="safety", headline="Tornado warning for Rotonda.")) == "sent"
     assert spoken == ["Tornado warning for Rotonda."]
 

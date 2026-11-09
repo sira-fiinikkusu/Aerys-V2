@@ -850,4 +850,5 @@ def reach_desk_for(settings, graph):
         replied_since=replied_since,
         said=lambda row, body: _said_to_owner(graph, settings, body),
         follow_through_after=timedelta(minutes=int(getattr(settings, "reach_follow_through_min", 5))),
+        safety_voice_at_night=bool(getattr(settings, "reach_safety_voice_at_night", False)),
     )

@@ -38,6 +38,12 @@ marked 'folded' in the same write that records the brief as sent; if it never go
 their own at its cutoff. With a brief armed, the night holds them until that cutoff, not 9.
 Its text part (the carried items in full) is retried until it lands, like any detail.
 
+Two more knobs (migration 019): a text_only message is never spoken, wherever he is (email:
+today he gets a DM per mail, and the desk adds its rules without moving mail into the
+speakers); and a safety warning inside quiet hours goes as a text that DOES buzz rather than
+out loud, unless the owner turns safety_voice_at_night on (it breaks through either way; by
+day it's spoken where he is).
+
 What she says is the private part: never logged (logs carry ids, sources and statuses).
 """
 
@@ -84,6 +90,7 @@ class ReachEvent:
     room: str | None = None           # spoken only in this room; it waits for him there
     brief: bool = False               # a brief: outside the budget; the night doesn't hold it
     folds: tuple = ()                 # ids of held items it carries (marked 'folded' when it goes)
+    text_only: bool = False           # never spoken, wherever he is (email)
 
 
 @dataclass
@@ -113,11 +120,13 @@ class Reach:
     room: str | None = None
     brief: bool = False
     folds: tuple = ()
+    text_only: bool = False
 
     def event(self) -> ReachEvent:
         return ReachEvent(source=self.source, topic=self.topic, headline=self.headline, detail=self.detail,
                           urgency=self.urgency, owed=self.owed, dedupe_key=self.dedupe_key,
-                          expires_at=self.expires_at, room=self.room, brief=self.brief, folds=tuple(self.folds))
+                          expires_at=self.expires_at, room=self.room, brief=self.brief, folds=tuple(self.folds),
+                          text_only=self.text_only)
 
 
 @dataclass
@@ -157,16 +166,21 @@ def local_day_start(now: datetime) -> datetime:
 
 
 def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
-           quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str = "meeting") -> Decision:
+           quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str = "meeting",
+           safety_voice_at_night: bool = False) -> Decision:
     """The desk's checks, in order (module docstring). Pure: every input is given.
     meeting_until is any hold that works like a meeting; `hold` names it in the record
     ("meeting" or "nap"). Safety breaks through every hold, a nap included: the owner's D4
-    lets storm warnings break through the night, and a nap is lighter than the night."""
+    lets storm warnings break through the night, and a nap is lighter than the night. At
+    night it breaks through as a text that buzzes, not out loud in the bedroom, unless
+    safety_voice_at_night says to speak it."""
     if duplicate:
         return Decision("drop", "already sent")
     if event.expires_at is not None and not event.owed and now >= _utc(event.expires_at):
         return Decision("drop", "expired before its window")
     if event.urgency == "safety":
+        if quiet and not safety_voice_at_night:
+            return Decision("send", "safety at night: as text that buzzes", voice="reroute", breaks_through=True)
         return Decision("send", "safety", breaks_through=True)
     muted = {str(m).strip().lower() for m in prefs.muted}
     if not event.owed and event.topic.strip().lower() in muted:
@@ -232,7 +246,7 @@ class MemoryReachStore:
         r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
                   headline=event.headline, detail=event.detail, dedupe_key=event.dedupe_key, status=status,
                   not_before=not_before, expires_at=event.expires_at, reason=reason, created_at=now,
-                  room=event.room, brief=event.brief, folds=tuple(event.folds))
+                  room=event.room, brief=event.brief, folds=tuple(event.folds), text_only=event.text_only)
         self.rows[r.id] = r
         self._next += 1
         return r
@@ -304,7 +318,7 @@ class PostgresReachStore:
 
     COLUMNS = ("id, source, topic, urgency, owed, headline, detail, dedupe_key, status, not_before, expires_at, "
                "reason, surface, silent, spoken_at, dm_at, delivered_at, acked_at, attempts, created_at, "
-               "room, brief, folds")
+               "room, brief, folds, text_only")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -319,17 +333,17 @@ class PostgresReachStore:
         return Reach(id=r[0], source=r[1], topic=r[2], urgency=r[3], owed=r[4], headline=r[5], detail=r[6],
                      dedupe_key=r[7], status=r[8], not_before=r[9], expires_at=r[10], reason=r[11], surface=r[12],
                      silent=r[13], spoken_at=r[14], dm_at=r[15], delivered_at=r[16], acked_at=r[17],
-                     attempts=r[18], created_at=r[19], room=r[20], brief=r[21], folds=tuple(r[22] or ()))
+                     attempts=r[18], created_at=r[19], room=r[20], brief=r[21], folds=tuple(r[22] or ()), text_only=bool(r[23]))
 
     def add(self, event, now, *, status, reason, not_before):
         with self._connect() as conn:
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
-                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds) VALUES "
-                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only) VALUES "
+                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
                 (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
-                 list(event.folds))).fetchone()
+                 list(event.folds), event.text_only)).fetchone()
         return self._row(row)
 
     def add_new(self, event, now, *, status, reason, not_before):
@@ -339,14 +353,14 @@ class PostgresReachStore:
         with self._connect() as conn:
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
-                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds) "
-                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only) "
+                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
                 "WHERE NOT EXISTS (SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s) "
                 # Two producers at once: the unique index (migration 019) turns the loser away.
                 f"ON CONFLICT DO NOTHING RETURNING {self.COLUMNS}",
                 (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
-                 list(event.folds), event.dedupe_key)).fetchone()
+                 list(event.folds), event.text_only, event.dedupe_key)).fetchone()
         return self._row(row) if row else None
 
     def recently_sent(self, dedupe_key, since):
@@ -473,10 +487,14 @@ class Deliverer:
         # Set by the desk: may she speak this RIGHT NOW? Checked at the moment of speech, after
         # the location and busy checks, because the night or a meeting can begin while those run.
         self.may_speak: Callable[[Reach], bool] = lambda row: True
+        # Set by the desk: may a safety warning (which no hold stops) be SAID right now, or
+        # only texted? Checked at the moment of speech too: a warning decided at 20:59 must
+        # not be spoken at 21:00 unless the owner turned night voice on.
+        self.safety_voice: Callable[[Reach], bool] = lambda row: True
 
     def deliver(self, row: Reach, decision: Decision) -> Delivery:
         try:
-            where = self.locate()
+            where = Where(self.text_surface) if row.text_only else self.locate()
         except Exception as e:      # can't place him: text (a pinned brief then waits for its room)
             log.warning("reach: couldn't place him (%s); texting", type(e).__name__)
             where = Where(self.text_surface)
@@ -494,6 +512,8 @@ class Deliverer:
                     if decision.breaks_through:      # safety never waits on a room mid-conversation
                         return self._text_now(body, decision)
                     return Delivery("busy")
+                if decision.breaks_through and not self.safety_voice(row):   # the night began just now
+                    return self._text_now(body, decision)
                 if not decision.breaks_through and not self.may_speak(row):   # the night or a meeting began just now
                     return Delivery("recheck")
                 self.speak(row.headline, where.device_id)
@@ -543,8 +563,10 @@ class ReachDesk:
                  replied_since: Callable[[datetime], bool] | None = None,
                  said: Callable[[Reach, str], None] | None = None,
                  follow_through_after: timedelta = timedelta(minutes=5),
+                 safety_voice_at_night: bool = False,
                  clock: Callable[[], datetime] | None = None):
         self.store, self.deliverer = store, deliverer
+        self.safety_voice_at_night = safety_voice_at_night
         self.budget_default, self.morning_hour = budget_default, morning_hour
         self.quiet = quiet or (lambda now: False)
         self.meeting_hold = meeting_hold
@@ -558,6 +580,7 @@ class ReachDesk:
         # the record is retried, never the delivery (the check-ins' stance; Codex 11/08).
         self.unrecorded: dict = {}
         deliverer.may_speak = self._may_speak
+        deliverer.safety_voice = lambda row: self.safety_voice_at_night or not self.quiet(self.clock())
 
     def _may_speak(self, row: Reach) -> bool:
         """May she say this RIGHT NOW (the deliverer asks at the moment of speech)? Never past
@@ -598,7 +621,8 @@ class ReachDesk:
         until = max(t for t in (_utc(meeting), nap) if t is not None) if (meeting or nap) else None
         return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
                       duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,
-                      morning_hour=self.morning_hour, hold=hold)
+                      morning_hour=self.morning_hour, hold=hold,
+                      safety_voice_at_night=self.safety_voice_at_night)
 
     def voice_held(self, now: datetime | None = None) -> str | None:
         """Why her voice is held right now (a meeting or a nap), or None. The brief asks before
@@ -762,7 +786,9 @@ class ReachDesk:
                     copy = (row.detail if heard else
                             f"{MISSED_PREFIX} {row.headline}" + (f"\n\n{row.detail}" if row.detail else ""))
                     try:
-                        self.deliverer.text(self.deliverer.text_surface, copy, self.quiet(now))
+                        # quiet at night, except a safety warning: it still buzzes
+                        self.deliverer.text(self.deliverer.text_surface, copy,
+                                            self.quiet(now) and row.urgency != "safety")
                     except Exception:
                         log.warning("reach %s: the text copy failed; retried next pass", row.id)
                         continue

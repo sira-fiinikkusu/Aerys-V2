@@ -230,13 +230,14 @@ def split_ping(text: str) -> tuple[str, str]:
 def reach_notify_for(settings, *, store=None, clock=None) -> Callable[..., None] | None:
     """text, key -> a queued row in the reach-out ledger (board #176, Stage 2: "email
     pings routed through it"). This watcher is its own container, so it doesn't hold the
-    desk: it writes the row and the brain's desk delivers it on its next pass, under
-    every rule the desk keeps (the night, his meetings, a nap, the budget, a muted topic;
-    what the night holds rides in the morning brief). RAISES when the row can't be
-    written, so the watermark holds below the message (run_once's posture). A message
-    already in the ledger (its key, in any state, ever: queued, sent, carried by a brief,
-    dropped) is not written again, in the same statement that would write it: the watcher
-    retries at-least-once, he hears it at most once. None when there's no ledger or owner.
+    desk: it writes the row and the brain's desk delivers it on its next pass, under the
+    rules the desk keeps for it (the night, his meetings, a muted topic). Text only, never
+    spoken, and "timely": never dropped by the budget, a quiet DM at night (the owner's
+    D4), just as every mail was a DM before. RAISES when the row can't be written, so the
+    watermark holds below the message (run_once's posture). A message already in the
+    ledger (its key, in any state, ever: queued, sent, dropped) is not written again, in
+    the same statement that would write it: the watcher retries at-least-once, he hears
+    it at most once. None when there's no ledger or owner.
     """
     if not getattr(settings, "database_url", None) or getattr(settings, "owner_person_id", None) is None:
         return None
@@ -250,8 +251,10 @@ def reach_notify_for(settings, *, store=None, clock=None) -> Callable[..., None]
     def notify(text: str, key: str | None = None) -> None:
         now = now_fn()
         said, detail = split_ping(text)
+        # Text only, and timely: today every mail is a DM, never spoken and never dropped by a
+        # budget; the desk adds the night (a quiet DM), his meetings and a muted topic.
         event = ReachEvent(source="email_watch", topic="email", headline=said[:300], detail=detail,
-                           dedupe_key=f"email:{key}" if key else None)
+                           dedupe_key=f"email:{key}" if key else None, urgency="timely", text_only=True)
         if event.dedupe_key is None:
             store.add(event, now, status="queued", reason="from the email watcher", not_before=None)
         elif store.add_new(event, now, status="queued", reason="from the email watcher", not_before=None) is None:

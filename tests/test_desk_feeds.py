@@ -27,12 +27,12 @@ def quiet(t):
     return hour >= 21 or hour < 9
 
 
-def desk_at(now, world=None, *, store=None, budget=3, muted=()):
+def desk_at(now, world=None, *, store=None, budget=3, muted=(), voice_at_night=False):
     world = world or World(Where("room", "dev-bedroom", "bedroom"))
     store = store or MemoryReachStore(prefs=Prefs(budget=budget, muted=list(muted)))
     clock = {"now": now}
     desk = ReachDesk(store, world.deliverer(), budget_default=budget, quiet=quiet, morning_hour=13,
-                     replied_since=lambda when: world.replied,
+                     replied_since=lambda when: world.replied, safety_voice_at_night=voice_at_night,
                      said=lambda row, body: world.said.append(body), clock=lambda: clock["now"])
     return desk, world, clock
 
@@ -53,15 +53,28 @@ def watcher(desk, legs, *, alerts=None, storms=None, fallback=None):
                         reach=storm_reach_for(desk, fallback=fallback))
 
 
-def test_a_storm_warning_breaks_through_the_night_spoken_where_he_is_and_the_phone_keeps_its_picture():
+def test_a_storm_warning_at_night_breaks_through_as_a_buzzing_text_not_in_the_bedroom():
     desk, world, _ = desk_at(NIGHT)
     phone = []
     watcher(desk, phone, alerts=ALERT).poll_alerts()
-    assert world.spoken == [("Heads up: the weather service has a Hurricane Warning out for here.", "dev-bedroom")]
-    assert "Finish preparations." in world.texts[0][1] and RADAR_IMAGE_URL in world.texts[0][1]
+    assert world.spoken == []
+    (surface, body, silent), = world.texts
+    assert silent is False and "Finish preparations." in body and RADAR_IMAGE_URL in body   # it buzzes
     assert phone == [("⚠️ Hurricane Warning", phone[0][1], RADAR_IMAGE_URL)]      # the image leg, unchanged
     row = desk.store.rows[1]
     assert row.urgency == "safety" and row.topic == "weather" and row.dedupe_key == "storm:alert:urn:nws:1"
+
+
+def test_with_his_switch_on_a_night_warning_is_spoken_where_he_is():
+    desk, world, _ = desk_at(NIGHT, voice_at_night=True)
+    watcher(desk, [], alerts=ALERT).poll_alerts()
+    assert world.spoken == [("Heads up: the weather service has a Hurricane Warning out for here.", "dev-bedroom")]
+
+
+def test_by_day_a_warning_is_spoken_where_he_is():
+    desk, world, _ = desk_at(DAY)
+    watcher(desk, [], alerts=ALERT).poll_alerts()
+    assert len(world.spoken) == 1 and world.spoken[0][1] == "dev-bedroom"
 
 
 def test_a_watch_at_night_goes_as_quiet_text_never_spoken():
@@ -138,7 +151,7 @@ def test_the_watcher_queues_each_mail_once_for_the_desk():
     assert stats["ok"] and stats["pinged"] == 2
     rows = sorted(store.rows.values(), key=lambda r: r.id)
     assert [r.dedupe_key for r in rows] == [f"email:INBOX:{UV}:3", f"email:INBOX:{UV}:4"]
-    assert all(r.status == "queued" and r.topic == "email" and r.urgency == "routine" for r in rows)
+    assert all(r.status == "queued" and r.topic == "email" and r.urgency == "timely" and r.text_only for r in rows)
     notify(format_ping(EmailSummary(uid=3, sender="x", subject="first", snippet="", date="")), key=f"INBOX:{UV}:3")
     assert len(store.rows) == 2                                # a re-ping of the same mail isn't queued twice
 
@@ -153,25 +166,39 @@ def test_a_ledger_that_cant_be_written_holds_the_watermark():
     assert not stats["ok"] and stats["pinged"] == 0
 
 
-def test_the_desk_delivers_it_by_day():
+def test_by_day_it_comes_as_a_dm_never_spoken_even_in_a_room_with_a_speaker():
     desk, world, _ = desk_at(DAY, World())
     reach_notify_for(email_settings(), store=desk.store, clock=lambda: DAY)(
         "New email from Chris Perry <chris@example.com>\nSubject: Dinner?\nare we still on", key="INBOX:1:3")
     assert desk.tick()["sent"] == 1
-    assert world.spoken == [("New email from Chris Perry: Dinner?", "dev-office")]
-    assert "chris@example.com" in world.texts[0][1]
+    assert world.spoken == []
+    (surface, body, silent), = world.texts
+    assert surface == "discord" and not silent and "chris@example.com" in body and "are we still on" in body
 
 
-def test_at_night_it_waits_and_rides_in_the_morning_brief():
+def test_over_the_budget_it_still_comes_like_every_mail_did():
+    desk, world, _ = desk_at(DAY, World(), budget=0)
+    reach_notify_for(email_settings(), store=desk.store, clock=lambda: DAY)(
+        "New email from a <a@x.com>\nSubject: s\nbody", key="INBOX:1:3")
+    assert desk.tick()["sent"] == 1 and len(world.texts) == 1
+
+
+def test_at_night_it_comes_as_a_quiet_dm_not_held_for_the_brief():
     h = House(NIGHT)
     reach_notify_for(email_settings(), store=h.desk.store, clock=lambda: NIGHT)(
         "New email from Chris Perry <chris@example.com>\nSubject: Dinner?\nare we still on", key="INBOX:1:3")
-    h.desk.tick()
-    assert h.world.spoken == [] and h.desk.store.rows[1].not_before == datetime(2026, 11, 10, 13, 0, tzinfo=ET)
+    assert h.desk.tick()["sent"] == 1
+    assert h.world.spoken == [] and h.world.texts[0][2] is True                 # silent
     h.at(IN_OFFICE)
-    assert h.brief.tick() == "sent"
-    assert [r.headline for r in h.composed[0].held] == ["New email from Chris Perry: Dinner?"]
-    assert h.desk.store.rows[1].status == "folded" and "are we still on" in h.world.texts[0][1]
+    assert h.brief.tick() == "sent" and h.composed[0].held == []
+
+
+def test_muted_email_is_dropped():
+    desk, world, _ = desk_at(DAY, World(), muted=["email"])
+    reach_notify_for(email_settings(), store=desk.store, clock=lambda: DAY)(
+        "New email from a <a@x.com>\nSubject: s\nbody", key="INBOX:1:3")
+    desk.tick()
+    assert world.texts == [] and desk.store.rows[1].status == "dropped"
 
 
 @pytest.mark.parametrize("on, has_owner, want", [(True, True, "desk"), (False, True, "dm"), (True, False, "dm")])
@@ -188,7 +215,7 @@ def test_the_switch_picks_the_path(monkeypatch, on, has_owner, want):
 # --- Codex review 11/08: each of these failed on the first cut ---------------------------------
 
 def test_a_warning_never_waits_on_a_busy_speaker_it_goes_as_text_now():
-    desk, world, _ = desk_at(NIGHT)
+    desk, world, _ = desk_at(DAY)
     world.busy = True
     watcher(desk, [], alerts=ALERT).poll_alerts()
     assert world.spoken == [] and len(world.texts) == 1 and "Finish preparations." in world.texts[0][1]
@@ -196,7 +223,7 @@ def test_a_warning_never_waits_on_a_busy_speaker_it_goes_as_text_now():
 
 
 def test_a_warning_whose_speaker_fails_goes_as_text_now():
-    desk, world, _ = desk_at(NIGHT)
+    desk, world, _ = desk_at(DAY)
     world.fail = 99
     watcher(desk, [], alerts=ALERT).poll_alerts()
     assert len(world.texts) == 1 and desk.store.rows[1].status == "sent"
@@ -264,7 +291,7 @@ def test_a_bare_address_is_never_said_out_loud():
 # --- Codex recheck 11/08 -----------------------------------------------------------------------
 
 def test_a_busy_speaker_warning_is_texted_once_even_when_that_text_fails():
-    desk, world, _ = desk_at(NIGHT)
+    desk, world, _ = desk_at(DAY)
     world.busy = True
     attempts = []
 
@@ -291,3 +318,58 @@ def test_when_the_ledger_cant_say_only_a_warning_goes_direct(alerts, direct):
     dms, phone = [], []
     watcher(Dark(), phone, alerts=alerts, fallback=lambda t, m, i: dms.append(t)).poll_alerts()
     assert bool(dms) is direct and len(phone) == 1          # the phone leg went either way
+
+
+# --- Codex recheck of the two adjustments 11/08 ------------------------------------------------
+
+def test_an_email_is_never_said_even_inside_the_morning_brief():
+    h = House(NIGHT)
+    reach_notify_for(email_settings(), store=h.desk.store, clock=lambda: NIGHT)(
+        "New email from Chris Perry <chris@example.com>\nSubject: Dinner?\nare we still on", key="INBOX:1:3")
+    h.desk.tick()
+    h.at(IN_OFFICE)
+    assert h.brief.tick() == "sent" and h.composed[0].quiet == [] and h.composed[0].held == []
+
+
+def test_a_warning_decided_by_day_isnt_spoken_once_the_night_begins():
+    late = datetime(2026, 11, 9, 20, 59, 50, tzinfo=ET)
+    desk, world, clock = desk_at(late)
+    locate = desk.deliverer.locate
+
+    def slow_locate():
+        clock["now"] = datetime(2026, 11, 9, 21, 0, 5, tzinfo=ET)          # the night began while placing him
+        return locate()
+
+    desk.deliverer.locate = slow_locate
+    watcher(desk, [], alerts=ALERT).poll_alerts()
+    assert world.spoken == [] and len(world.texts) == 1 and world.texts[0][2] is False   # it still buzzes
+
+
+def test_a_safety_copy_at_night_still_buzzes():
+    evening = datetime(2026, 11, 9, 20, 50, tzinfo=ET)
+    desk, world, clock = desk_at(evening)
+    real_text, down = desk.deliverer.text, {"on": True}
+
+    def text(surface, body, silent):
+        if down["on"]:
+            raise ConnectionError("discord down")
+        real_text(surface, body, silent)
+
+    desk.deliverer.text = text
+    watcher(desk, [], alerts=ALERT).poll_alerts()          # spoken at 20:50; its text part failed
+    assert len(world.spoken) == 1 and world.texts == []
+    down["on"] = False
+    clock["now"] = datetime(2026, 11, 9, 21, 10, tzinfo=ET)
+    assert desk.tick()["copied"] == 1 and world.texts[0][2] is False
+
+
+def test_a_warning_isnt_spoken_if_the_night_begins_during_the_busy_check():
+    desk, world, clock = desk_at(datetime(2026, 11, 9, 20, 59, 50, tzinfo=ET))
+
+    def slow_busy(device):
+        clock["now"] = datetime(2026, 11, 9, 21, 0, 5, tzinfo=ET)
+        return False
+
+    desk.deliverer.busy = slow_busy
+    watcher(desk, [], alerts=ALERT).poll_alerts()
+    assert world.spoken == [] and len(world.texts) == 1 and world.texts[0][2] is False
