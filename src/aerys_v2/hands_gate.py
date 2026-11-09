@@ -229,7 +229,7 @@ class HandsGate:
     his to approve, the button already asked)."""
 
     def __init__(self, approvals, store, *, owner_person_id, people=None,
-                 executors: dict[str, Callable[[GatedAction], str]] | None = None,
+                 executors: dict[str, Callable[[GatedAction], tuple[bool, str]]] | None = None,
                  read_only_agents=(), clock: Callable[[], datetime] | None = None,
                  ask_for: timedelta = DEFAULT_FOR):
         self.approvals, self.store, self.owner = approvals, store, owner_person_id
@@ -287,21 +287,23 @@ class HandsGate:
         except Exception:
             log.warning("hands gate: the people lookup failed; nothing sent", exc_info=True)
             return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.")
-        persons: dict[str, dict] = {}
-        for p in found or []:
-            persons.setdefault(str(p.get("person_id") or ""), p)
-        persons.pop("", None)
+        # One destination is one person at one address; anything more is his to pick.
+        found = [p for p in found or [] if str(p.get("person_id") or "")]
+        destinations: dict[tuple[str, str], dict] = {}
+        for p in found:
+            destinations.setdefault((str(p["person_id"]), str(p.get("address") or "").strip().lower()), p)
         label = PLATFORMS[platform]
-        if not persons:
+        if not destinations:
             return Verdict(False, f"Not sent: I don't know who {label} {to} is. Ask Chris who it is before "
                                   "sending anything.")
-        if len(persons) > 1:
+        if len(destinations) > 1:
             names = ", ".join(f"{p.get('name') or 'someone'} ({label}: {p.get('handle') or p.get('address')})"
-                              for p in persons.values())
-            return Verdict(False, f"Not sent: {to} could be more than one person ({names}). Ask Chris which "
-                                  "one he means.")
-        (pid, p), = persons.items()
-        if str(pid) == str(self.owner):
+                              for p in destinations.values())
+            return Verdict(False, f"Not sent: {to} could be more than one person or address ({names}). Ask "
+                                  "Chris which one he means.")
+        (p,) = destinations.values()
+        pid = str(p["person_id"])
+        if pid == str(self.owner):
             return GO
         address = str(p.get("address") or "").strip()
         if not address:
@@ -309,11 +311,20 @@ class HandsGate:
         name, handle = str(p.get("name") or "someone"), str(p.get("handle") or address)
         base_key = f"contact:{pid}:{platform}:{address.lower()}"
         try:
-            if any(self.approvals.status(r.approval_id) == "approved" for r in self.store.attempts(base_key)):
-                return GO
+            rows = self.store.attempts(base_key)
+            approved = [r for r in rows if self.approvals.status(r.approval_id) == "approved"]
         except Exception:
             log.warning("hands gate: couldn't read the contact's confirmations; nothing sent", exc_info=True)
             return Verdict(False, GATE_DOWN)
+        if approved:
+            # Confirmed. The approved first message itself is the watcher's to send, before and
+            # after it goes: her asking again never sends it a second time.
+            if any(r.status in ("waiting", "running") for r in approved):
+                return Verdict(False, f"Chris approved {approved[-1].args.get('what')}; it's being done now. "
+                                      "Don't send it again.")
+            if any(r.status == "done" and r.args.get("text") == str(text or "") for r in approved):
+                return Verdict(False, "That exact message already went when Chris approved it; it isn't sent twice.")
+            return GO
         what = f"your first message to {name} ({label}: {handle})"
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
                          {"platform": platform, "address": address, "person_id": str(pid), "name": name,
@@ -343,13 +354,19 @@ class HandsGate:
                     return Verdict(False, f"Chris approved that already and it was done ({last.outcome or 'started'}). "
                                           "It isn't done twice.")
             attempt = last.attempt + 1 if last is not None else 1
+            # The button is keyed by exactly what it shows: two turns asking different things at
+            # once get two buttons, and only the one whose row is recorded stays.
             approval_id = self.approvals.request(kind, summary, detail, expires_in=self.ask_for,
-                                                 key=f"{base_key}:{attempt}")
+                                                 key=f"{base_key}:{attempt}:{_key(args)}")
             try:
-                self.store.add(approval_id, action, base_key, attempt, thread_id, args, self.clock())
+                row = self.store.add(approval_id, action, base_key, attempt, thread_id, args, self.clock())
             except Exception:
                 self.approvals.withdraw(approval_id)    # a button with nothing behind it would be a lie
                 raise
+            if row.approval_id != approval_id:          # another turn's request got there first
+                self.approvals.withdraw(approval_id)
+                return Verdict(False, f"Still waiting: Chris hasn't answered the button for {row.args.get('what') or what} "
+                                      "yet. Nothing has been done; ask again after he answers.")
         except Exception:
             log.warning("hands gate: couldn't put %s to him; nothing done", action, exc_info=True)
             return Verdict(False, "Not done: I couldn't put this to Chris for his OK just now, so nothing happened.")
@@ -379,7 +396,9 @@ def _note_for(row: GatedAction, status: str, outcome: str = "") -> str:
 
 class HandsWatcher:
     """tick(): every waiting action whose button was answered is done (approved, once) or dropped
-    (declined, expired, withdrawn); she's told either way. Pending or unreadable: it waits."""
+    (declined, expired, withdrawn); she's told either way. Pending or unreadable: it waits.
+    An executor returns (True, what happened) when it went and (False, why) when it didn't;
+    anything else, a refusal string included, counts as not done."""
 
     def __init__(self, gate: HandsGate, *, note: Callable[[str, str], None] | None = None, tick_s: float = TICK_S):
         self.gate, self.note, self.tick_s = gate, note, tick_s
@@ -406,11 +425,14 @@ class HandsWatcher:
                 if not g.store.claim(row.id):
                     continue                                # another watcher has it
                 try:
-                    outcome = " ".join(str(run(row) or "").split())[:OUTCOME_CHARS]
-                    status = "done"
+                    result = run(row)
+                    ok, said = result if isinstance(result, tuple) and len(result) == 2 else (False, "no clear result")
+                    outcome = " ".join(str(said or "").split())[:OUTCOME_CHARS]
+                    status = "done" if ok is True else "failed"
                 except Exception as e:
                     outcome, status = f"{type(e).__name__}", "failed"
-                    log.warning("hands watcher: action %s (%s) failed: %s", row.id, row.action, type(e).__name__)
+                if status == "failed":
+                    log.warning("hands watcher: action %s (%s) didn't go through", row.id, row.action)
                 try:
                     g.store.finish(row.id, status, outcome, now)
                 except Exception:
@@ -519,7 +541,8 @@ def people_lookup_for(settings) -> Callable[[str, str], list[dict]] | None:
     return lookup
 
 
-def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], str]] | None = None) -> HandsGate | None:
+def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], tuple[bool, str]]] | None = None
+                   ) -> HandsGate | None:
     """None unless armed: hands_gates on, the approval button armed, a database and an owner. The
     executors (what carries out an approved home job or message) come from whatever wires the job
     and message paths in; without one, that kind of request is refused rather than asked."""

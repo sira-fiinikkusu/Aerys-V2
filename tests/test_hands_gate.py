@@ -69,8 +69,8 @@ class Box:
                                    clock=lambda: self.clock["now"], sleep=lambda s: None)
         self.store = MemoryGatedActionStore()
         self.done = []
-        default = {HOME_JOB: lambda row: self.done.append(("job", row.args)) or "task_id: t-1",
-                   MESSAGE: lambda row: self.done.append(("msg", row.args)) or "sent"}
+        default = {HOME_JOB: lambda row: self.done.append(("job", row.args)) or (True, "task_id: t-1"),
+                   MESSAGE: lambda row: self.done.append(("msg", row.args)) or (True, "sent")}
         lookup = people if people is not None else (lambda platform, to: PEOPLE.get((platform, to.lower()), []))
         self.gate = HandsGate(self.approvals, self.store, owner_person_id=OWNER, people=lookup,
                               executors=default if executors is None else executors,
@@ -488,3 +488,68 @@ def test_not_armed_unless_switched_on_with_the_button_armed():
     g = hands_gate_for(SimpleNamespace(**base))
     assert g is not None and g.read_only_agents == frozenset({"home-readonly"}) and g.people is not None
     assert g.executors == {}                    # nothing carries out an approved action until wired
+
+
+# --- Codex review 1 (11/09) -------------------------------------------------------------------
+
+
+def test_two_first_messages_racing_never_send_words_he_didnt_see():
+    b = Box()
+    real_add = b.store.add
+    raced, started = [], []
+
+    def add_after_the_other_turn(*a, **k):
+        if not started:                                  # her other turn gets in between ask and record
+            started.append(True)
+            raced.append(b.gate.message(OWNER_THREAD, "discord", "sam_42", "UNSHOWN replacement"))
+        return real_add(*a, **k)
+
+    b.store.add = add_after_the_other_turn
+    first = b.gate.message(OWNER_THREAD, "discord", "sam_42", "SHOWN original")
+    b.store.add = real_add
+    assert not first.go and not raced[0].go
+    for a in b.approval_store.rows.values():
+        if a.status == "pending":
+            b.tap(approval_id=a.id)
+    b.watcher.tick()
+    assert len(b.done) == 1
+    sent = b.done[0][1]["text"]
+    (row,) = [r for r in b.store.rows.values() if r.status == "done"]
+    assert sent in b.approval_store.rows[row.approval_id].detail      # what went is what he saw
+
+
+def test_retrying_an_approved_first_message_never_sends_it_twice():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    b.tap()
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")      # before the watcher sends it
+    assert not v.go and "being done now" in v.text
+    b.watcher.tick()
+    assert len(b.done) == 1
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")      # after: the same words again
+    assert not v.go and "already" in v.text
+    assert b.gate.message(OWNER_THREAD, "discord", "sam_42", "and a new thing").go
+    assert len(b.done) == 1
+
+
+def test_two_addresses_for_one_person_means_ask_which():
+    two = [{"person_id": SAM, "name": "Sam", "address": "111", "handle": "sam_old"},
+           {"person_id": SAM, "name": "Sam", "address": "222", "handle": "sam_42"},
+           {"person_id": SAM, "name": "Sam", "address": "222", "handle": "sam_42"}]
+    b = Box(people=lambda platform, to: two)
+    v = b.gate.message(OWNER_THREAD, "discord", "Sam", "hi")
+    assert not v.go and "more than one" in v.text and "sam_old" in v.text and "sam_42" in v.text
+    assert not b.approval_store.rows
+    same = Box(people=lambda platform, to: two[1:])                       # the same address twice is one
+    assert not same.gate.message(OWNER_THREAD, "discord", "Sam", "hi").go
+    assert next(iter(same.approval_store.rows.values())).summary == "First message to Sam · Discord: sam_42"
+
+
+@pytest.mark.parametrize("result", [(False, "Not done: refused by home server"), "Not done: refused", None, (True,)])
+def test_only_an_explicit_success_is_done(result):
+    b = Box(executors={HOME_JOB: lambda row: result})
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    out = b.watcher.tick()
+    assert out["failed"] == 1 and out["done"] == 0
+    assert "has started" not in b.notes[-1][1] and "didn't go through" in b.notes[-1][1]
