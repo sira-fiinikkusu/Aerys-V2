@@ -310,6 +310,8 @@ class HandsGate:
             return Verdict(False, f"Not sent: I don't have a {label} address for {p.get('name') or to}. Ask Chris.")
         name, handle = str(p.get("name") or "someone"), str(p.get("handle") or address)
         base_key = f"contact:{pid}:{platform}:{address.lower()}"
+        # Who and where ride in the detail, which is shown whole or refused (the summary may be cut).
+        to_line = f"To: {name} · {label}: {handle}" + (f" ({address})" if address != handle else "")
         try:
             rows = self.store.attempts(base_key)
             approved = [r for r in rows if self.approvals.status(r.approval_id) == "approved"]
@@ -332,14 +334,15 @@ class HandsGate:
                                   "handle": handle, "text": str(text or ""), "what": what},
                                  kind="message again",
                                  summary=f"Send again to {name} · {label}: {handle} (the last try may have gone through)",
-                                 detail=f"What she'd send again:\n{text}", what=what)
+                                 detail=f"{to_line}\nThe last try may have gone through; this sends the same "
+                                        f"words again.\n\nWhat she'd send again:\n{text}", what=what)
             return GO
         what = f"your first message to {name} ({label}: {handle})"
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
                          {"platform": platform, "address": address, "person_id": str(pid), "name": name,
                           "handle": handle, "text": str(text or ""), "what": what},
                          kind="first message", summary=f"First message to {name} · {label}: {handle}",
-                         detail=f"What she'd send:\n{text}", what=what)
+                         detail=f"{to_line}\n\nWhat she'd send:\n{text}", what=what)
 
     # the button --------------------------------------------------------------------------
 

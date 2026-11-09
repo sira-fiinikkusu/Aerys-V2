@@ -588,3 +588,24 @@ def test_a_first_message_that_may_have_gone_needs_his_tap_to_send_again():
     assert again.status == "pending" and "may" in again.summary and "sam_42" in again.summary
     assert sent == ["hi Sam"]
     assert b.gate.message(OWNER_THREAD, "discord", "sam_42", "something else").go   # still a known contact
+
+
+def test_who_and_where_are_shown_whole_on_the_button():
+    addr, name = "x" * 200 + "@example.net", "N" * 78
+    b = Box(people=lambda platform, to: [{"person_id": SAM, "name": name, "address": addr, "handle": addr}])
+    b.gate.message(OWNER_THREAD, "email", addr, "hi")
+    (a,) = b.approval_store.rows.values()
+    assert addr in a.detail and name in a.detail and "hi" in a.detail
+
+
+def test_the_resend_warning_is_in_what_he_reads_whole():
+    def flaky(row):
+        raise TimeoutError("no ack")
+
+    b = Box(executors={MESSAGE: flaky})
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    b.tap()
+    b.watcher.tick()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    again = max(b.approval_store.rows.values(), key=lambda a: a.id)
+    assert "may have gone through" in again.detail and "sam_42" in again.detail
