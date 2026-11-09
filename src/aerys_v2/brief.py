@@ -139,7 +139,7 @@ class MorningBrief:
         # Shared with the welcome-home hello (welcome.py), which may carry the brief: one of them
         # decides and composes at a time, so the brief is never said twice.
         self.lock = threading.Lock()
-        # defer(now) -> True while the welcome-home hello is still deciding on an arrival (welcome.py
+        # defer(now) -> True while the welcome-home hello waits for him to settle after a trip (welcome.py
         # sets it): the hello carries the brief, so the brief doesn't race it to his room.
         self.defer: Callable[[datetime], bool] | None = None
 

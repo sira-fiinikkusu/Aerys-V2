@@ -221,13 +221,18 @@ class WelcomeHome:
         self.arrived.pop(key, None)
 
     def greeting(self, now: datetime) -> bool:
-        """True while a trip's arrival is still being greeted (not finished, inside HELLO_FOR): the
-        morning brief waits, so the hello can carry it rather than race it to his room."""
-        for key, left in list(self.left.items()):
-            arrived = self.arrived.get(key)
+        """True while the hello waits for him to settle after a trip (not finished, inside
+        settle_for): the morning brief waits, so the hello can carry it rather than race it to his
+        room. Only that long, so a brief can't be held past its cutoff. Called from the brief's
+        thread: if the arrivals change under it, it says wait (the next pass asks again)."""
+        try:
+            trips = [(key, left, self.arrived.get(key)) for key, left in list(self.left.items())]
+        except RuntimeError:
+            return True
+        for key, left, arrived in trips:
             if left is None or arrived is None or key in self.finished:
                 continue
-            if arrived - left >= self.away_for and now - arrived <= HELLO_FOR:
+            if arrived - left >= self.away_for and now - arrived <= self.settle_for:
                 return True
         return False
 

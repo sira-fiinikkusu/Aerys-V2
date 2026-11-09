@@ -896,3 +896,24 @@ def test_a_hello_that_lets_the_arrival_go_frees_the_brief():
     h.at(EARLY_HOME + timedelta(minutes=25))                  # never settled in the settle window
     assert h.hello.tick() == "never settled"
     assert h.brief.tick() == "sent"                          # the brief's own reading: the office
+
+
+def test_the_brief_waits_only_while_the_hello_waits_for_him_to_settle():
+    # Gemini review: waiting for the whole hour after he got home could carry the brief past its
+    # cutoff when the two readings disagree. It waits only for the hello's settle window.
+    home = datetime(2026, 11, 10, 12, 30, tzinfo=ET)
+    h = House(home + timedelta(minutes=1), left=home - timedelta(hours=2), home=home, brief=True)
+    h.reading = HomeReading(home="home", since=utc(home), room="", confirmed=False)   # the hello's reading lags
+    assert h.hello.tick() == "waiting to settle"
+    assert h.at(home + timedelta(minutes=10)).brief.tick() == "waiting for the welcome-home hello"
+    assert h.at(home + timedelta(minutes=21)).brief.tick() == "sent"                   # before its 1 PM cutoff
+
+
+def test_a_greeting_check_that_trips_over_a_change_waits_rather_than_racing():
+    class Changing(dict):
+        def items(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    h = House(brief=True)
+    h.hello.left = Changing()
+    assert h.hello.greeting(utc(SETTLED)) is True
