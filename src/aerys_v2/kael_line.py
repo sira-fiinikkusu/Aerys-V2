@@ -623,15 +623,27 @@ def _said_to_owner(graph, settings, text: str) -> None:
 SPOKEN_MAX = 280
 _MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
-_MD_CODE = re.compile(r"(`[^`]*`)")
-#: An emphasis star hugs a word ("*every*"); a star with space on both sides is a literal one.
-_MD_EMPHASIS_STAR = re.compile(r"\*(?=\w)|(?<=\w)\*")
+#: A code span: a run of backticks, its contents, the same run again (`x`, ``x``).
+_MD_CODE = re.compile(r"(`+)(.+?)\1")
+#: Emphasis comes in PAIRS around words (**strong**, __strong__, *em*); an unpaired star, or one
+#: inside a word (2*3) or between spaces (2 * 3), is a literal one and stays (Codex recheck).
+_MD_STRONG = re.compile(r"(?<![\w*])(\*\*|__)(?=[^\s*])(.+?)(?<=[^\s*])\1(?![\w*])")
+_MD_STRONG_EM = re.compile(r"(?<![\w*])\*\*\*(?=[^\s*])(.+?)(?<=[^\s*])\*\*\*(?![\w*])")
+_MD_EM = re.compile(r"(?<![\w*])\*(?=[^\s*])([^*]+?)(?<=[^\s*])\*(?![\w*])")
 
 
-def _plain_segment(segment: str) -> str:
-    if segment.startswith("`") and segment.endswith("`") and len(segment) >= 2:
-        return segment[1:-1]                  # code: the marks go, the contents stay as written
-    return _MD_EMPHASIS_STAR.sub("", segment.replace("**", "").replace("__", ""))
+def _plain_text(segment: str) -> str:
+    return _MD_EM.sub(r"\1", _MD_STRONG.sub(r"\2", _MD_STRONG_EM.sub(r"\1", segment)))
+
+
+def _plain_line(line: str) -> str:
+    out, at = [], 0
+    for m in _MD_CODE.finditer(line):
+        out.append(_plain_text(line[at:m.start()]))
+        out.append(m.group(2).strip())       # code: the marks go, the contents stay as written
+        at = m.end()
+    out.append(_plain_text(line[at:]))
+    return "".join(out)
 
 
 def plain_for_voice(text: str) -> str:
@@ -640,8 +652,10 @@ def plain_for_voice(text: str) -> str:
     what was inside code stays as written (Codex review: `0 * * * *` must not become '0')."""
     out = []
     for line in str(text or "").splitlines():
+        if line.strip().startswith("```"):
+            continue                          # a code fence's own line: the code inside is kept
         line = _MD_BULLET.sub("", _MD_HEADING.sub("", line))
-        line = "".join(_plain_segment(seg) for seg in _MD_CODE.split(line)).strip()
+        line = _plain_line(line).strip()
         if line:
             out.append(line)
     joined = ""
@@ -676,9 +690,8 @@ def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str)
     if len(spoken) <= SPOKEN_MAX and spoken == " ".join(text.split()):
         return ReachEvent(source=source, topic="kael", headline=text, owed=True, dedupe_key=dedupe_key)
     if len(spoken) <= SPOKEN_MAX:
-        # Said plainly; the words as written ride along as the text copy, so nothing is lost.
-        return ReachEvent(source=source, topic="kael", headline=spoken, detail=text, owed=True,
-                          dedupe_key=dedupe_key)
+        # Said plainly: only markup came off (nothing is lost), so no duplicate text copy.
+        return ReachEvent(source=source, topic="kael", headline=spoken, owed=True, dedupe_key=dedupe_key)
     where = _text_surface_name(desk)
     line = (f"Your ask to Kael is still open; the details are on {where}." if source == "ticket_notice"
             else f"Kael got back to you on that; the full answer is on {where}.")
