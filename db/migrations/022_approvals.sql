@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS v2_approvals (
     decided_by   TEXT,                             -- the Discord user id that tapped (only ever his)
     request_key  TEXT NOT NULL UNIQUE,             -- asking twice for the same thing is one request
     message_id   TEXT,                             -- the DM carrying the buttons ('posting:<token>' while claimed)
+    channel_id   TEXT,                             -- the DM channel it went to (edits go there, whoever the owner is now)
     shown        TEXT,                             -- the status that DM last showed (edits retried until it matches)
     pinged_at    TIMESTAMPTZ                       -- when the HA notification went (retried until it does)
 );

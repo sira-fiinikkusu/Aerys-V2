@@ -17,6 +17,7 @@ from aerys_v2.approvals import (
     approvals_for,
     attach_approvals,
     custom_id,
+    edit_dm,
     PING_RETRY_AFTER,
     handle_click,
     message_text,
@@ -143,13 +144,13 @@ def test_the_poller_posts_each_button_once_and_closes_what_expired():
 
     async def send(row):
         sent.append(row.id)
-        return f"m{row.id}"
+        return "dm", f"m{row.id}"
 
-    async def edit(message_id, text):
-        edits.append((message_id, text))
+    async def edit(row, text):
+        edits.append((row.message_id, text))
 
     out = asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW))
-    assert out["posted"] == 2 and sent == [a, b]
+    assert out["posted"] == 2 and sent == [a, b] and d.store.rows[a].channel_id == "dm"
     assert asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW))["posted"] == 0      # never twice
     asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW + timedelta(minutes=11)))
     assert edits == [(f"m{a}", outcome_text(d.store.rows[a]))] and d.store.rows[a].status == "expired"
@@ -167,9 +168,9 @@ def test_a_button_that_couldnt_be_posted_is_tried_again():
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionError("discord down")
-        return "m1"
+        return "dm", "m1"
 
-    async def edit(message_id, text):
+    async def edit(row, text):
         pass
 
     assert asyncio.run(poll_once(d.store, send=flaky, edit=edit, now=NOW))["posted"] == 0
@@ -292,13 +293,13 @@ def test_a_tap_from_anyone_else_is_told_privately_and_changes_nothing():
 def test_a_tap_whose_edit_failed_is_corrected_by_the_poller():
     d = Desk()
     aid = d.approvals.request("job", "x")
-    d.store.rows[aid].message_id = "m1"
+    d.store.rows[aid].message_id, d.store.rows[aid].channel_id = "m1", "dm"
     asyncio.run(on_tap(Tap(OWNER, edit_fails=True), aid, False, store=d.store, owner_id=lambda: OWNER))
     assert d.store.rows[aid].status == "declined" and d.store.rows[aid].shown is None
     edits = []
 
-    async def edit(message_id, text):
-        edits.append((message_id, text))
+    async def edit(row, text):
+        edits.append((row.message_id, text))
 
     async def send(row):
         raise AssertionError("nothing to post")
@@ -310,11 +311,11 @@ def test_a_tap_whose_edit_failed_is_corrected_by_the_poller():
 def test_an_expiry_edit_that_failed_is_tried_again_until_it_takes():
     d = Desk()
     aid = d.approvals.request("job", "x", expires_in=timedelta(minutes=10))
-    d.store.rows[aid].message_id = "m1"
+    d.store.rows[aid].message_id, d.store.rows[aid].channel_id = "m1", "dm"
     tries = []
 
-    async def edit(message_id, text):
-        tries.append(message_id)
+    async def edit(row, text):
+        tries.append(row.message_id)
         if len(tries) == 1:
             raise ConnectionError("discord down")
 
@@ -337,9 +338,9 @@ def test_two_passes_at_once_send_one_dm():
     async def send(row):
         sent.append(row.id)
         await asyncio.sleep(0.05)                   # the other pass runs meanwhile
-        return "m1"
+        return "dm", "m1"
 
-    async def edit(message_id, text):
+    async def edit(row, text):
         pass
 
     async def both():
@@ -357,9 +358,9 @@ def test_a_dm_that_went_but_wasnt_recorded_is_never_sent_again():
 
     async def send(row):
         sent.append(row.id)
-        return "m1"
+        return "dm", "m1"
 
-    async def edit(message_id, text):
+    async def edit(row, text):
         pass
 
     d.store.posted = lambda *a: (_ for _ in ()).throw(ConnectionError("NAS down"))
@@ -377,9 +378,9 @@ def test_a_ping_that_didnt_land_is_sent_again_until_it_does():
     pings = []
 
     async def send(row):
-        return f"m{row.id}"
+        return "dm", f"m{row.id}"
 
-    async def edit(message_id, text):
+    async def edit(row, text):
         pass
 
     def notify(title, msg):
@@ -397,3 +398,58 @@ def test_a_ping_that_landed_is_recorded():
     d = Desk()
     aid = d.approvals.request("job", "x")
     assert len(d.pinged) == 1 and d.store.rows[aid].pinged_at == NOW
+
+
+def test_a_dm_whose_record_failed_is_recorded_later_and_still_shows_its_outcome():
+    d = Desk()
+    aid = d.approvals.request("job", "x", expires_in=timedelta(minutes=10))
+    sent, edits, unrecorded = [], [], {}
+    real_posted = d.store.posted
+    d.store.posted = lambda *a: (_ for _ in ()).throw(ConnectionError("NAS down"))
+
+    async def send(row):
+        sent.append(row.id)
+        return "dm", "m1"
+
+    async def edit(row, text):
+        edits.append((row.channel_id, row.message_id, text))
+
+    asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW, unrecorded=unrecorded))
+    assert d.store.rows[aid].message_id.startswith("posting:") and aid in unrecorded
+    d.store.posted = real_posted                             # the NAS is back
+    later = NOW + timedelta(minutes=11)
+    asyncio.run(poll_once(d.store, send=send, edit=edit, now=later, unrecorded=unrecorded))
+    assert sent == [aid] and unrecorded == {}
+    assert edits == [("dm", "m1", outcome_text(d.store.rows[aid]))] and d.store.rows[aid].shown == "expired"
+
+
+def test_an_outcome_edit_goes_to_the_dm_it_was_posted_in():
+    """Not to whoever the owner is now: a corrected owner (or a failed lookup) can't strand it."""
+    calls = []
+
+    class Message:
+        def __init__(self, mid):
+            self.mid = mid
+
+        async def edit(self, content=None, view="unset"):
+            calls.append(("edit", self.mid, content, view))
+
+    class Channel:
+        def __init__(self, cid):
+            self.cid = cid
+
+        def get_partial_message(self, mid):
+            calls.append(("message", self.cid, mid))
+            return Message(mid)
+
+    class Client:
+        def get_partial_messageable(self, cid, *, type=None):
+            calls.append(("channel", cid))
+            return Channel(cid)
+
+    d = Desk()
+    aid = d.approvals.request("job", "x")
+    row = d.store.rows[aid]
+    row.channel_id, row.message_id = "222", "333"
+    asyncio.run(edit_dm(Client(), row, "**Approved** (job)"))
+    assert calls == [("channel", 222), ("message", 222, 333), ("edit", 333, "**Approved** (job)", None)]

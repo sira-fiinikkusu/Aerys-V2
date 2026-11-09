@@ -59,6 +59,7 @@ class Approval:
     decided_by: str | None = None
     request_key: str = ""
     message_id: str | None = None
+    channel_id: str | None = None
     shown: str | None = None
     pinged_at: datetime | None = None
 
@@ -107,11 +108,11 @@ class MemoryApprovalStore:
         r.message_id = token
         return True
 
-    def posted(self, approval_id, token, message_id):
+    def posted(self, approval_id, token, channel_id, message_id):
         r = self.rows.get(approval_id)
         if r is None or r.message_id != token:
             return False
-        r.message_id = str(message_id)
+        r.message_id, r.channel_id = str(message_id), str(channel_id)
         return True
 
     def release(self, approval_id, token):
@@ -142,7 +143,7 @@ class MemoryApprovalStore:
         return out
 
     def unshown(self, since):
-        return sorted((r for r in self.rows.values() if r.status != "pending" and r.message_id
+        return sorted((r for r in self.rows.values() if r.status != "pending" and r.message_id and r.channel_id
                        and not r.message_id.startswith(CLAIM) and r.shown != r.status
                        and r.decided_at is not None and r.decided_at >= since), key=lambda r: r.id)
 
@@ -154,7 +155,7 @@ class PostgresApprovalStore:
     """v2_approvals (db/migrations/022). Fresh short connections per call."""
 
     COLUMNS = ("id, kind, summary, detail, requested_at, expires_at, status, decided_at, decided_by, "
-               "request_key, message_id, shown, pinged_at")
+               "request_key, message_id, channel_id, shown, pinged_at")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -207,9 +208,10 @@ class PostgresApprovalStore:
         return self._one("UPDATE v2_approvals SET message_id = %s WHERE id = %s AND message_id IS NULL "
                          "RETURNING id", (token, approval_id)) is not None
 
-    def posted(self, approval_id, token, message_id):
-        return self._one("UPDATE v2_approvals SET message_id = %s WHERE id = %s AND message_id = %s RETURNING id",
-                         (str(message_id), approval_id, token)) is not None
+    def posted(self, approval_id, token, channel_id, message_id):
+        return self._one("UPDATE v2_approvals SET message_id = %s, channel_id = %s "
+                         "WHERE id = %s AND message_id = %s RETURNING id",
+                         (str(message_id), str(channel_id), approval_id, token)) is not None
 
     def release(self, approval_id, token):
         self._one("UPDATE v2_approvals SET message_id = NULL WHERE id = %s AND message_id = %s RETURNING id",
@@ -233,7 +235,7 @@ class PostgresApprovalStore:
 
     def unshown(self, since):
         return self._all(f"SELECT {self.COLUMNS} FROM v2_approvals WHERE status <> 'pending' "
-                         "AND message_id IS NOT NULL AND message_id NOT LIKE 'posting:%%' "
+                         "AND message_id IS NOT NULL AND message_id NOT LIKE 'posting:%%' AND channel_id IS NOT NULL "
                          "AND shown IS DISTINCT FROM status AND decided_at >= %s ORDER BY id", (since,))
 
     def set_shown(self, approval_id, status):
@@ -431,20 +433,28 @@ async def on_tap(interaction, approval_id: int, approve: bool, *, store, owner_i
                     row.id, type(e).__name__)
 
 
-async def poll_once(store, *, send: Callable, edit: Callable, notify=None, now: datetime) -> dict:
+async def poll_once(store, *, send: Callable, edit: Callable, notify=None, now: datetime,
+                    unrecorded: dict | None = None) -> dict:
     """One pass of the gateway's poller:
-      1. close what expired;
-      2. make every decided DM show its outcome (retried until it does, for a week);
-      3. ping again for any request whose HA notification didn't land;
-      4. post a button for each new request, claimed first so it's never sent twice.
-    send(approval) -> message id; edit(message_id, text)."""
+      1. record any DM that went out last time but whose record failed (kept in unrecorded);
+      2. close what expired;
+      3. make every decided DM show its outcome (retried until it does, for a week);
+      4. ping again for any request whose HA notification didn't land;
+      5. post a button for each new request, claimed first so it's never sent twice.
+    send(approval) -> (channel id, message id); edit(approval, text) edits the DM it was posted in."""
     import asyncio
 
     out = {"posted": 0, "expired": 0, "shown": 0, "pinged": 0}
+    for aid, (token, channel_id, message_id) in list((unrecorded or {}).items()):
+        try:
+            await asyncio.to_thread(store.posted, aid, token, channel_id, message_id)
+        except Exception:
+            continue
+        unrecorded.pop(aid)
     out["expired"] = len(await asyncio.to_thread(store.expire, now))
     for a in await asyncio.to_thread(store.unshown, now - SHOW_FOR):
         try:
-            await edit(a.message_id, outcome_text(a))
+            await edit(a, outcome_text(a))
         except Exception as e:
             log.warning("approval %s: its message won't take the outcome yet (%s)", a.id, type(e).__name__)
             continue
@@ -459,19 +469,30 @@ async def poll_once(store, *, send: Callable, edit: Callable, notify=None, now: 
         if not await asyncio.to_thread(store.claim, a.id, token):
             continue                                      # another pass or gateway has it
         try:
-            message_id = await send(a)
+            channel_id, message_id = await send(a)
         except Exception as e:
             log.warning("approval %s: couldn't post the button (%s); tried again next pass", a.id, type(e).__name__)
             await asyncio.to_thread(store.release, a.id, token)
             continue
         try:
-            await asyncio.to_thread(store.posted, a.id, token, message_id)
+            await asyncio.to_thread(store.posted, a.id, token, channel_id, message_id)
         except Exception:
             # Sent: the button works regardless (its id rides in the button); the claim stays so
-            # it's never sent again. Only the outcome edit is lost for this one.
-            log.warning("approval %s: posted, but recording the message failed", a.id)
+            # it's never sent again, and the record is retried next pass (until a restart).
+            log.warning("approval %s: posted, but recording the message failed; retried", a.id)
+            if unrecorded is not None:
+                unrecorded[a.id] = (token, channel_id, message_id)
         out["posted"] += 1
     return out
+
+
+async def edit_dm(client, a: Approval, text: str) -> None:
+    """Edit the DM a button was posted in, by the channel it went to (not whoever the owner is now),
+    without fetching it first."""
+    import discord
+
+    channel = client.get_partial_messageable(int(a.channel_id), type=discord.ChannelType.private)
+    await channel.get_partial_message(int(a.message_id)).edit(content=text, view=None)
 
 
 def attach_approvals(client, *, store, owner_id: Callable[[], int | None], notify=None, poll_s: float = POLL_S):
@@ -508,22 +529,22 @@ def attach_approvals(client, *, store, owner_id: Callable[[], int | None], notif
             raise RuntimeError("no owner Discord account")
         return client.get_user(int(oid)) or await client.fetch_user(int(oid))
 
-    async def send(a: Approval) -> str:  # pragma: no cover - live only
+    async def send(a: Approval) -> tuple[str, str]:  # pragma: no cover - live only
         message = await (await owner_user()).send(message_text(a), view=buttons(a))
-        return str(message.id)
+        return str(message.channel.id), str(message.id)
 
-    async def edit(message_id: str, text: str) -> None:  # pragma: no cover - live only
-        user = await owner_user()
-        channel = user.dm_channel or await user.create_dm()
-        message = await channel.fetch_message(int(message_id))
-        await message.edit(content=text, view=None)
+    async def edit(a: Approval, text: str) -> None:  # pragma: no cover - live only (edit_dm is tested)
+        await edit_dm(client, a, text)
+
+    unrecorded: dict = {}                        # DMs sent whose record failed, retried each pass
 
     async def poller() -> None:  # pragma: no cover - thin loop over poll_once
         await client.wait_until_ready()
         log.info("approval buttons armed | every %ss", poll_s)
         while not client.is_closed():
             try:
-                await poll_once(store, send=send, edit=edit, notify=notify, now=datetime.now(timezone.utc))
+                await poll_once(store, send=send, edit=edit, notify=notify, now=datetime.now(timezone.utc),
+                                unrecorded=unrecorded)
             except Exception:
                 log.warning("approvals poll failed", exc_info=True)
             await asyncio.sleep(poll_s)
