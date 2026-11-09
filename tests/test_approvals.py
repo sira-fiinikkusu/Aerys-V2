@@ -276,7 +276,7 @@ def test_a_tap_is_acknowledged_before_anything_slow():
         assert tap.calls == [("defer",)], "Discord gets its answer before the owner lookup or the database"
         return OWNER
 
-    asyncio.run(on_tap(tap, aid, True, store=d.store, owner_id=owner))
+    asyncio.run(on_tap(tap, aid, True, store=d.store, owner_id=owner, clock=lambda: NOW))
     assert tap.calls[1] == ("edit", outcome_text(d.store.rows[aid]), None)       # buttons gone
     assert d.store.rows[aid].status == "approved" and d.store.rows[aid].shown == "approved"
 
@@ -294,7 +294,8 @@ def test_a_tap_whose_edit_failed_is_corrected_by_the_poller():
     d = Desk()
     aid = d.approvals.request("job", "x")
     d.store.rows[aid].message_id, d.store.rows[aid].channel_id = "m1", "dm"
-    asyncio.run(on_tap(Tap(OWNER, edit_fails=True), aid, False, store=d.store, owner_id=lambda: OWNER))
+    asyncio.run(on_tap(Tap(OWNER, edit_fails=True), aid, False, store=d.store, owner_id=lambda: OWNER,
+                       clock=lambda: NOW))
     assert d.store.rows[aid].status == "declined" and d.store.rows[aid].shown is None
     edits = []
 

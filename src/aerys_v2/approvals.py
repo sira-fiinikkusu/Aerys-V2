@@ -412,7 +412,8 @@ def handle_click(store, approval_id: int, approve: bool, clicker_id: int, owner_
     return ("Approved." if approve else "Declined."), row
 
 
-async def on_tap(interaction, approval_id: int, approve: bool, *, store, owner_id: Callable[[], int | None]) -> None:
+async def on_tap(interaction, approval_id: int, approve: bool, *, store, owner_id: Callable[[], int | None],
+                 clock: Callable[[], datetime] | None = None) -> None:
     """A button tap: acknowledged FIRST (Discord allows three seconds), then decided off the event
     loop, then the message edited. A failed edit is fixed by the poller (the record says what the
     message should show)."""
@@ -420,8 +421,8 @@ async def on_tap(interaction, approval_id: int, approve: bool, *, store, owner_i
 
     await interaction.response.defer()
     oid = await asyncio.to_thread(owner_id)
-    reply, row = await asyncio.to_thread(handle_click, store, approval_id, approve, interaction.user.id, oid,
-                                         datetime.now(timezone.utc))
+    now = (clock or (lambda: datetime.now(timezone.utc)))()
+    reply, row = await asyncio.to_thread(handle_click, store, approval_id, approve, interaction.user.id, oid, now)
     if row is None:
         await interaction.followup.send(reply, ephemeral=True)
         return
