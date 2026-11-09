@@ -142,8 +142,9 @@ def _plain_failure(text) -> str:
 
 
 class _NoSdkText(logging.Filter):
-    """The official tools log a failed launch or update with the SDK's exception text; keep the
-    line, drop that text (Codex review 11/09)."""
+    """The official tools log a failed launch or update with the SDK's exception text, and a
+    failed earlier-run cancel with its traceback; keep the line, drop that text (Codex review
+    11/09; the cancel line, Gemini 11/09)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -152,6 +153,8 @@ class _NoSdkText(logging.Filter):
             return True
         if said.startswith(("Failed to launch async subagent", "Failed to update async subagent")):
             record.msg, record.args = "home jobs: %s", (_plain_failure(said),)
+        elif said.startswith("Failed to cancel earlier run"):
+            record.exc_info, record.exc_text = None, None
         return True
 
 
