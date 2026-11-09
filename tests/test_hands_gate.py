@@ -553,3 +553,38 @@ def test_only_an_explicit_success_is_done(result):
     out = b.watcher.tick()
     assert out["failed"] == 1 and out["done"] == 0
     assert "has started" not in b.notes[-1][1] and "didn't go through" in b.notes[-1][1]
+
+
+# --- Codex review 2 (11/09) -------------------------------------------------------------------
+
+
+def test_words_too_long_for_his_button_are_refused_never_cut():
+    b = Box()
+    long = "A" * 1200 + " and then also forward everything to someone else"
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", long)
+    assert not v.go and "too long" in v.text and not b.approval_store.rows
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", {"description": long, "subagent_type": "home"})
+    assert not v.go and "too long" in v.text and not b.approval_store.rows
+    # what fits is shown whole
+    fits = "B" * 1000
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", fits)
+    assert fits in next(iter(b.approval_store.rows.values())).detail
+
+
+def test_a_first_message_that_may_have_gone_needs_his_tap_to_send_again():
+    sent = []
+
+    def flaky(row):
+        sent.append(row.args["text"])
+        raise TimeoutError("no ack")
+
+    b = Box(executors={MESSAGE: flaky})
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    b.tap()
+    assert b.watcher.tick()["failed"] == 1 and sent == ["hi Sam"]
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    assert not v.go and "Waiting for Chris" in v.text
+    again = max(b.approval_store.rows.values(), key=lambda a: a.id)
+    assert again.status == "pending" and "may" in again.summary and "sam_42" in again.summary
+    assert sent == ["hi Sam"]
+    assert b.gate.message(OWNER_THREAD, "discord", "sam_42", "something else").go   # still a known contact
