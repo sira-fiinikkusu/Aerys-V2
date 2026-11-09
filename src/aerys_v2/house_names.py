@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from pathlib import Path
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -44,21 +43,18 @@ class HouseNames:
 
 
 def _from_env_file(path) -> str:
-    """AERYS_HOUSE_NAMES as the env file Settings reads would give it ('' when absent or
-    unreadable). Docker's --env-file puts it in the environment before she starts; a CLI run reads
-    .env through Settings, which a prompt module imported first never sees (Codex, 11/09)."""
+    """AERYS_HOUSE_NAMES as Settings would read it from its env file ('' when absent or unreadable),
+    parsed by the same parser (python-dotenv, what pydantic-settings uses): comments, quoting,
+    escapes and a repeated key all read the same way. Docker's --env-file puts it in the
+    environment before she starts; a CLI run reads .env through Settings, which a prompt module
+    imported first never sees (Codex, 11/09)."""
     try:
-        lines = Path(path).read_text(encoding="utf-8").splitlines()
-    except (OSError, ValueError):
+        from dotenv import dotenv_values
+
+        value = dotenv_values(path).get(ENV)
+    except Exception:
         return ""
-    for line in lines:
-        key, sep, value = line.partition("=")
-        if sep and key.strip().removeprefix("export ").strip() == ENV:
-            value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-                value = value[1:-1]
-            return value
-    return ""
+    return value if isinstance(value, str) else ""
 
 
 def load(env=None, env_file=None) -> HouseNames:
@@ -67,9 +63,10 @@ def load(env=None, env_file=None) -> HouseNames:
     Never raises: she starts without the names rather than not at all."""
     if env is None:
         env, env_file = os.environ, ENV_FILE if env_file is None else env_file
-    raw = env.get(ENV, "")
-    if (not isinstance(raw, str) or not raw.strip()) and env_file is not None:
-        raw = _from_env_file(env_file)
+    if ENV in env:                              # set, even to nothing: the variable wins
+        raw = env.get(ENV, "")
+    else:
+        raw = _from_env_file(env_file) if env_file is not None else ""
     if not isinstance(raw, str) or not raw.strip():
         log.warning("house names: %s isn't set; her prompts name nobody (no wife's name, no friends) "
                     "until it is", ENV)

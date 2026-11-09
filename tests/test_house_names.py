@@ -117,3 +117,22 @@ def test_a_prompt_module_imported_before_settings_still_gets_the_names(tmp_path)
     out = subprocess.run([sys.executable, "-c", code], cwd=tmp_path, env=env, capture_output=True, text=True,
                          timeout=120)
     assert out.stdout.split() == ["Robin", "True"], out.stderr[-500:]
+
+
+def test_the_env_file_is_read_the_way_settings_reads_it(tmp_path):
+    names = json.dumps({"wife": "Robin"})
+    cases = {
+        "comment": f"AERYS_HOUSE_NAMES='{names}' # the names\n",
+        "escaped": 'AERYS_HOUSE_NAMES="' + names.replace('"', '\\"') + '"\n',
+        "repeated": "AERYS_HOUSE_NAMES=" + json.dumps({"wife": "Alex"}) + "\nAERYS_HOUSE_NAMES=" + names + "\n",
+    }
+    for label, text in cases.items():
+        envf = tmp_path / f"{label}.env"
+        envf.write_text(text, encoding="utf-8")
+        assert load({}, env_file=envf).wife == "Robin", label
+
+
+def test_an_explicitly_empty_variable_wins_over_the_file(tmp_path):
+    envf = tmp_path / ".env"
+    envf.write_text("AERYS_HOUSE_NAMES=" + json.dumps({"wife": "Robin"}) + "\n", encoding="utf-8")
+    assert load({ENV: ""}, env_file=envf) == NONE
