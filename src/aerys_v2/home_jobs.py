@@ -74,8 +74,8 @@ _UNFINISHED = ("pending", "running", "waiting")
 #: How long a home tool waits for another call on his jobs to finish (they're quick HTTP calls).
 LOCK_WAIT_S = 30
 
-CANT_READ = ("Not done: I couldn't read his home jobs just now, so nothing happened. "
-             "Try again in a moment.")
+CANT_READ = ("Not done: I couldn't get to his home jobs just now (they couldn't be read, or another "
+             "request on them was still going), so nothing happened. Try again in a moment.")
 NOT_RECORDED = (" (I couldn't write this job down, so I may not be able to check on it or change it "
                 "later. He still hears when it's done.)")
 
