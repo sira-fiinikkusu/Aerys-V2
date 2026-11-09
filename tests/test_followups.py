@@ -603,3 +603,27 @@ def test_a_copy_of_something_he_missed_also_pings_his_phone():
     life.at(DAY + timedelta(minutes=6))
     assert life.desk.tick()["copied"] == 1
     assert sent and sent[0].startswith("In case you missed what I said:")
+
+
+def test_email_never_takes_the_notification_path_even_in_company():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append(headline)
+    life.prefs.invoke({"action": "company"})
+    life.desk.reach_out(ReachEvent(source="email_watch", topic="email", headline="New email from X.",
+                                   urgency="timely", text_only=True))
+    assert sent == [] and life.world.texts == [("discord", "New email from X.", False)]
+
+
+def test_a_failed_text_is_never_recorded_as_texted():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    life.desk.deliverer.notify = lambda headline, body: None
+    life.desk.deliverer.text = lambda surface, body, silent: (_ for _ in ()).throw(ConnectionError("discord down"))
+    life.prefs.invoke({"action": "company"})
+    assert life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green.")) == "sent"
+    row = life.desk.store.rows[1]
+    assert row.surface == "notify" and row.dm_at is None

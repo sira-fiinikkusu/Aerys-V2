@@ -557,7 +557,7 @@ class Deliverer:
         # A notification on his phone, watch and glasses, AS WELL AS the text (the owner, 11/08: "and
         # not instead of, she can discord me too"): in company (never aloud) and when he's away ("if im
         # not home she can use that channel too"). Not for a quiet one: a notification buzzes.
-        if decision.voice == "notify" or where.kind == "notify":
+        if (decision.voice == "notify" or where.kind == "notify") and not row.text_only:   # email stays a text
             notified = False
             if self.notify is not None and not decision.silent:
                 try:
@@ -570,7 +570,7 @@ class Deliverer:
                 return Delivery("sent", ("notify+" if notified else "") + self.text_surface, texted=True)
             except Exception as e:
                 if notified:
-                    return Delivery("sent", "notify", texted=True)
+                    return Delivery("sent", "notify")        # it reached him; the text didn't (no dm_at)
                 log.warning("reach: delivery via %s failed (%s)", self.text_surface, type(e).__name__)
                 return Delivery("failed", self.text_surface)
         spoken = where.kind in ("room", "device")
