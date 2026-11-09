@@ -139,6 +139,9 @@ class MorningBrief:
         # Shared with the welcome-home hello (welcome.py), which may carry the brief: one of them
         # decides and composes at a time, so the brief is never said twice.
         self.lock = threading.Lock()
+        # defer(now) -> True while the welcome-home hello is still deciding on an arrival (welcome.py
+        # sets it): the hello carries the brief, so the brief doesn't race it to his room.
+        self.defer: Callable[[datetime], bool] | None = None
 
     def _up(self, reading: Reading, since: datetime) -> bool:
         if reading.woke_at is not None and reading.woke_at >= since:
@@ -179,6 +182,13 @@ class MorningBrief:
             return "carried by the welcome-home hello"
         if TOPIC in {str(m).strip().lower() for m in store.prefs(self.desk.budget_default).muted}:
             return "muted"
+        try:
+            deferring = self.defer is not None and self.defer(now)
+        except Exception:
+            log.warning("brief: couldn't ask the welcome-home hello; going on", exc_info=True)
+            deferring = False
+        if deferring:
+            return "waiting for the welcome-home hello"
         try:
             reading = self.read()
         except Exception:

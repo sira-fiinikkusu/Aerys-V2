@@ -821,3 +821,78 @@ def test_two_trips_during_one_long_event_ask_about_it_once():
     assert h.at(second_home + timedelta(minutes=3)).hello.tick() == "sent"
     assert not h.composed[1].visits[0].ask
     assert fs.by_key(long_day.key).reason == "asked in the welcome-home hello"
+
+
+# --- before 9 (the owner's D18 #3, 11/09: "ok"): home inside quiet hours with the brief still due,
+# the hello is said in the brief's room, carrying it, as the brief itself speaks there before 9 ---
+
+EARLY_LEFT = datetime(2026, 11, 10, 7, 0, tzinfo=ET)
+EARLY_HOME = datetime(2026, 11, 10, 8, 20, tzinfo=ET)
+
+
+def test_before_nine_with_the_brief_due_she_says_hello_in_the_office_carrying_it():
+    h = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
+    assert h.hello.tick() == "sent"
+    assert h.composed[0].brief is not None and h.world.spoken == [(h.words, "dev-office")]
+    assert h.brief.tick() == "done" and h.brief_composed == []           # never twice
+
+
+def test_before_eight_coming_home_counts_as_being_up():
+    home = datetime(2026, 11, 10, 7, 10, tzinfo=ET)       # before the brief's solo hour, no wake signal
+    h = House(home + timedelta(minutes=4), left=home - timedelta(hours=1), home=home, brief=True)
+    assert h.hello.tick() == "sent" and h.composed[0].brief is not None
+
+
+def test_before_nine_it_waits_for_him_to_settle_and_says_it_in_the_office():
+    h = House(EARLY_HOME + timedelta(minutes=1), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
+    h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="", confirmed=False)
+    assert h.hello.tick() == "waiting to settle"
+    h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="office", confirmed=True)
+    assert h.at(EARLY_HOME + timedelta(minutes=5)).hello.tick() == "sent"
+    assert h.composed[0].brief is not None
+
+
+def test_before_nine_settled_anywhere_but_the_office_no_hello_and_the_brief_goes_alone_later():
+    h = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
+    h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="kitchen", confirmed=True)
+    assert h.hello.tick() == "quiet hours" and h.composed == [] and h.world.spoken == []
+    assert h.at(EARLY_HOME + timedelta(minutes=12)).brief.tick() == "sent"
+    assert h.world.spoken == [("Morning brief.", "dev-office")]
+
+
+def test_before_nine_without_a_brief_to_carry_it_is_still_dropped():
+    h = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
+    h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning.", brief=True,
+                                dedupe_key="brief:2026-11-10"), utc(datetime(2026, 11, 10, 6, 50, tzinfo=ET)),
+                     status="sent", reason="", not_before=None)
+    assert h.hello.tick() == "quiet hours" and h.composed == [] and h.world.spoken == []
+    plain = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME)    # no brief armed
+    assert plain.hello.tick() == "quiet hours" and plain.world.spoken == []
+
+
+def test_before_five_the_brief_isnt_due_so_nothing_is_said():
+    home = datetime(2026, 11, 10, 4, 30, tzinfo=ET)
+    h = House(home + timedelta(minutes=4), left=home - timedelta(hours=2), home=home, brief=True)
+    assert h.hello.tick() == "quiet hours" and h.world.spoken == []
+
+
+def test_the_brief_waits_while_a_hello_is_still_deciding_so_the_hello_carries_it():
+    h = House(MORNING_HOME + timedelta(minutes=1), left=datetime(2026, 11, 10, 7, 30, tzinfo=ET),
+              home=MORNING_HOME, brief=True)
+    h.reading = HomeReading(home="home", since=utc(MORNING_HOME), room="", confirmed=False)
+    assert h.hello.tick() == "waiting to settle"
+    # He settles in the office; the brief's thread happens to look first.
+    h.reading = HomeReading(home="home", since=utc(MORNING_HOME), room="office", confirmed=True)
+    h.at(MORNING_HOME + timedelta(minutes=4))
+    assert h.brief.tick() == "waiting for the welcome-home hello" and h.brief_composed == []
+    assert h.hello.tick() == "sent" and h.composed[0].brief is not None
+    assert h.brief.tick() == "done" and len(h.world.spoken) == 1
+
+
+def test_a_hello_that_lets_the_arrival_go_frees_the_brief():
+    h = House(EARLY_HOME + timedelta(minutes=1), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
+    h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="", confirmed=False)
+    assert h.hello.tick() == "waiting to settle"
+    h.at(EARLY_HOME + timedelta(minutes=25))                  # never settled in the settle window
+    assert h.hello.tick() == "never settled"
+    assert h.brief.tick() == "sent"                          # the brief's own reading: the office

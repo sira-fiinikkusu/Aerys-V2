@@ -15,7 +15,11 @@ So, once per arrival:
   2. the house settles him in a room with a speaker (never the bedroom unless configured) within
      settle_minutes of getting home; if it doesn't, nothing is said (a dropped row says why);
   3. not in quiet hours (a welcome home the next morning is wrong: it's dropped), and nothing
-     holds her voice (a meeting or a nap: it waits, up to HELLO_FOR after he got home).
+     holds her voice (a meeting or a nap: it waits, up to HELLO_FOR after he got home). The one
+     exception, his D18 #3 (11/09, "ok"): home inside quiet hours with the morning brief still due,
+     it's said in the brief's room, carrying the brief, the way the brief itself speaks there
+     before 9 (both are brief rows at the desk). Coming home counts as being up. Settled anywhere
+     else, it's dropped and the brief goes on its own when he reaches its room.
 She composes it from facts only: how long he was out; what was on his personal calendars while
 he was out (she asks how it went unless a check-in already asked, he muted appointments, or his
 check-in dial is used up today); what was held for him; and the morning brief's facts when that's
@@ -205,12 +209,27 @@ class WelcomeHome:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.lock = brief.lock if brief is not None else threading.Lock()
         self.left: dict = {}          # arrival key -> when he left (None: not a trip)
+        self.arrived: dict = {}       # arrival key -> when he got home
         self.finished: list = []      # arrival keys this process is done with (the last few)
         self.last_reconcile: datetime | None = None
+        if brief is not None:
+            brief.defer = self.greeting   # the brief waits while an arrival is still being greeted
 
     def _finish(self, key: str) -> None:
         self.finished = [*self.finished[-19:], key]
         self.left.pop(key, None)
+        self.arrived.pop(key, None)
+
+    def greeting(self, now: datetime) -> bool:
+        """True while a trip's arrival is still being greeted (not finished, inside HELLO_FOR): the
+        morning brief waits, so the hello can carry it rather than race it to his room."""
+        for key, left in list(self.left.items()):
+            arrived = self.arrived.get(key)
+            if left is None or arrived is None or key in self.finished:
+                continue
+            if arrived - left >= self.away_for and now - arrived <= HELLO_FOR:
+                return True
+        return False
 
     def _drop(self, key: str, now: datetime, reason: str) -> None:
         """Recorded, so a restart doesn't take it up again: 'why didn't she say hi?' has an answer."""
@@ -247,6 +266,7 @@ class WelcomeHome:
         if key not in self.left:
             try:
                 self.left[key] = self.away_since(arrived)
+                self.arrived[key] = arrived
             except Exception:
                 log.warning("welcome home: couldn't read when he left; tried again next pass", exc_info=True)
                 return "no history"
@@ -261,7 +281,9 @@ class WelcomeHome:
             self._drop(key, now, f"you muted {TOPIC}")
             self._finish(key)
             return "muted"
-        if self.desk.quiet(now):
+        # Inside quiet hours only a hello that carries the morning brief is said, in the brief's room.
+        night = self.desk.quiet(now)
+        if night and not (self.brief is not None and self._brief_due(now, now.astimezone(EASTERN).date())):
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
@@ -271,11 +293,15 @@ class WelcomeHome:
                 self._finish(key)
                 return "never settled"
             return "waiting to settle"
+        if night and r.room != self.brief.room:
+            self._drop(key, now, "quiet hours")
+            self._finish(key)
+            return "quiet hours"
         held_by = self.desk.voice_held(now)
         if held_by:
             return f"held: {held_by}"
         with self.lock:
-            return self._say(key, arrived, left, r.room, now)
+            return self._say(key, arrived, left, r.room, now, must_carry=night)
 
     def _brief_due(self, now: datetime, day: date) -> bool:
         b = self.brief
@@ -428,7 +454,8 @@ class WelcomeHome:
         except Exception:
             log.warning("welcome home: reconciling held check-ins failed; tried again later", exc_info=True)
 
-    def _say(self, key: str, arrived: datetime, left: datetime, room: str, now: datetime) -> str:
+    def _say(self, key: str, arrived: datetime, left: datetime, room: str, now: datetime, *,
+             must_carry: bool = False) -> str:
         day = now.astimezone(EASTERN).date()
         # Never said at night, and not long after he got home (the desk drops it past this).
         expires = min(arrived + HELLO_FOR, next_local(arrived, self.quiet_start_hour))
@@ -444,6 +471,12 @@ class WelcomeHome:
                                    reason="carried by the welcome-home hello", not_before=None)
             except Exception:
                 log.warning("welcome home: couldn't mark the brief as carried; it goes on its own", exc_info=True)
+        if must_carry and marker is None:
+            # Before 9 it's said only as the brief's carrier (D18 #3); the brief went meanwhile, or
+            # couldn't be marked: a plain hello stays out of quiet hours.
+            self._drop(key, now, "quiet hours")
+            self._finish(key)
+            return "quiet hours"
         if marker is not None:
             since, cutoff = _at(day - timedelta(days=1), 18), _at(day, self.brief.cutoff_hour)
             expires = min(expires, cutoff)
