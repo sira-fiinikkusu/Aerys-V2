@@ -623,15 +623,25 @@ def _said_to_owner(graph, settings, text: str) -> None:
 SPOKEN_MAX = 280
 _MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+")
 _MD_BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
+_MD_CODE = re.compile(r"(`[^`]*`)")
+#: An emphasis star hugs a word ("*every*"); a star with space on both sides is a literal one.
+_MD_EMPHASIS_STAR = re.compile(r"\*(?=\w)|(?<=\w)\*")
+
+
+def _plain_segment(segment: str) -> str:
+    if segment.startswith("`") and segment.endswith("`") and len(segment) >= 2:
+        return segment[1:-1]                  # code: the marks go, the contents stay as written
+    return _MD_EMPHASIS_STAR.sub("", segment.replace("**", "").replace("__", ""))
 
 
 def plain_for_voice(text: str) -> str:
-    """Words a speaker can say: no markdown marks (**, __, *, `), no heading or list markers;
-    the lines joined into sentences. Markdown never reaches a speaker (D20)."""
+    """Words a speaker can say: no markdown marks (**, __, emphasis *, backticks), no heading
+    or list markers; the lines joined into sentences. Markdown never reaches a speaker (D20);
+    what was inside code stays as written (Codex review: `0 * * * *` must not become '0')."""
     out = []
     for line in str(text or "").splitlines():
         line = _MD_BULLET.sub("", _MD_HEADING.sub("", line))
-        line = line.replace("**", "").replace("__", "").replace("`", "").replace("*", "").strip()
+        line = "".join(_plain_segment(seg) for seg in _MD_CODE.split(line)).strip()
         if line:
             out.append(line)
     joined = ""
@@ -666,8 +676,12 @@ def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str)
     if len(spoken) <= SPOKEN_MAX and spoken == " ".join(text.split()):
         return ReachEvent(source=source, topic="kael", headline=text, owed=True, dedupe_key=dedupe_key)
     if len(spoken) <= SPOKEN_MAX:
-        return ReachEvent(source=source, topic="kael", headline=spoken, owed=True, dedupe_key=dedupe_key)
-    line = f"Kael got back to you on that; the full answer is on {_text_surface_name(desk)}."
+        # Said plainly; the words as written ride along as the text copy, so nothing is lost.
+        return ReachEvent(source=source, topic="kael", headline=spoken, detail=text, owed=True,
+                          dedupe_key=dedupe_key)
+    where = _text_surface_name(desk)
+    line = (f"Your ask to Kael is still open; the details are on {where}." if source == "ticket_notice"
+            else f"Kael got back to you on that; the full answer is on {where}.")
     return ReachEvent(source=source, topic="kael", headline=line, detail=text, owed=True, dedupe_key=dedupe_key)
 
 
