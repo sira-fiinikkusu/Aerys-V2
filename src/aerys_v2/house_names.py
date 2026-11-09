@@ -44,7 +44,7 @@ def load(env=None) -> HouseNames:
     """The names from AERYS_HOUSE_NAMES; empty ones (and a warning) when it's missing or broken.
     Never raises: she starts without the names rather than not at all."""
     raw = (os.environ if env is None else env).get(ENV, "")
-    if not str(raw).strip():
+    if not isinstance(raw, str) or not raw.strip():
         log.warning("house names: %s isn't set; her prompts name nobody (no wife's name, no friends) "
                     "until it is", ENV)
         return HouseNames()

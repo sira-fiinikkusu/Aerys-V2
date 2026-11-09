@@ -24,7 +24,7 @@ def test_the_names_come_from_one_json_object():
 
 def test_missing_or_broken_names_never_stop_her_and_say_so(caplog):
     caplog.set_level(logging.WARNING)
-    for env in ({}, {ENV: ""}, {ENV: "{not json"}, {ENV: '["Robin"]'}):
+    for env in ({}, {ENV: ""}, {ENV: "{not json"}, {ENV: '["Robin"]'}, {ENV: None}, {ENV: 7}):
         caplog.clear()
         assert load(env) == NONE
         assert caplog.records and ENV in caplog.text
