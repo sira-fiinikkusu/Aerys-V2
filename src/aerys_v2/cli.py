@@ -389,9 +389,13 @@ def main() -> None:
                          settings.reach_daily_budget, len(parse_room_devices(settings.reach_room_devices)))
             # Her morning brief (board #176): spoken in the office the first time the house
             # places him there after he's up. Off unless MORNING_BRIEF is set.
-            from aerys_v2.brief import morning_brief_for, start_morning_brief
+            from aerys_v2.brief import (evening_heads_up_for, morning_brief_for, start_evening_heads_up,
+                                        start_morning_brief)
 
             start_morning_brief(morning_brief_for(settings, reach_desk))
+            # Her evening heads-up: tomorrow, briefly, only when tomorrow earns it. Off unless
+            # EVENING_HEADS_UP is set.
+            start_evening_heads_up(evening_heads_up_for(settings, reach_desk))
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 

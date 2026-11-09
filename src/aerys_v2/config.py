@@ -458,6 +458,14 @@ class Settings(BaseSettings):
     brief_wake_entities: str = ""
     brief_calendars: str = ""
     brief_weather_entity: str = "weather.forecast_home"
+    # HER EVENING HEADS-UP (brief.py): a sentence or three about tomorrow, once an evening from
+    # evening_start_hour until five minutes before quiet hours, in one of evening_rooms (never
+    # the bedroom) when the house places him there, and only when tomorrow has an early start,
+    # something personal, or rain. Same calendars and forecast as the brief. Off unless
+    # evening_heads_up is true.
+    evening_heads_up: bool = False
+    evening_rooms: str = "office,kitchen"
+    evening_start_hour: int = 19
 
     # ---- PANEL FACE (reTerminal desk avatar) ---------------------------------
     # The panel's state endpoint (e.g. "http://<panel-ip>:8300/state"). When set,

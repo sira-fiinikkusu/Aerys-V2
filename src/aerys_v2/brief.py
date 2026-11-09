@@ -18,6 +18,12 @@ desk pinned to that room, outside the budget, carrying the items held overnight 
 don't also go out one by one. If her words can't be had, a plain version goes. Past CUTOFF
 there's no brief; anything still held then goes on its own.
 
+Her evening heads-up (EveningHeadsUp, below) is the brief's short sibling: once an evening,
+before quiet hours, the first time the house places him in a room with a speaker that isn't
+the bedroom, a sentence or three about TOMORROW, and only when tomorrow has something worth
+the words (an early start, something personal on the calendar, rain). A quiet tomorrow gets
+no heads-up at all: the owner's word for the brief he liked was "not noisy".
+
 What she says is the private part: never logged.
 """
 
@@ -61,6 +67,10 @@ class Facts:
     events: list = field(default_factory=list)    # "10:00 AM to 10:30 AM: a work meeting", ...
     held: list = field(default_factory=list)      # Reach rows held overnight: the brief carries them
     quiet: list = field(default_factory=list)     # Reach rows already sent as quiet text overnight
+    first_at: datetime | None = None              # the day's first timed event
+    personal: int = 0                             # events from his personal calendars
+    wet: bool = False                             # rain (or worse) in the forecast
+    complete: bool = True                         # every source answered (else "quiet" may be a gap)
 
 
 def _at(day: date, hour: int) -> datetime:
@@ -189,19 +199,149 @@ class MorningBrief:
 
     def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
         log.info("morning brief armed | %s, %02d:00-%02d:00", self.room, self.start_hour, self.cutoff_hour)
-        pause = threading.Event()
-        while True:
-            try:
-                self.tick()
-            except Exception:
-                log.warning("brief tick failed", exc_info=True)
-            pause.wait(TICK_S)
+        _loop(self.tick, "brief")
+
+
+def _loop(tick: Callable[[], str], name: str) -> None:  # pragma: no cover - thin loop
+    pause = threading.Event()
+    while True:
+        try:
+            tick()
+        except Exception:
+            log.warning("%s tick failed", name, exc_info=True)
+        pause.wait(TICK_S)
 
 
 def start_morning_brief(brief: "MorningBrief | None") -> threading.Thread | None:
     if brief is None:
         return None
     thread = threading.Thread(target=brief.run_forever, daemon=True, name="morning-brief")
+    thread.start()
+    return thread
+
+
+# --- the evening heads-up --------------------------------------------------------------------
+
+EVENING_SOURCE = "evening"
+EVENING_TOPIC = "evening"
+
+EVENING_PROMPT = (
+    "\n\n[Your evening heads-up] It's evening and Chris is home. Give him a heads-up about "
+    "TOMORROW, out loud: one to three short sentences, warm, first person, your own voice, the "
+    "thing he'd most want to know first (an early start, something personal on the calendar, "
+    "rain). Use ONLY the facts below and never add any. Say times the way people say them. Work "
+    "meetings: how many and when, never what they're about. Nothing to read off a screen: no "
+    "lists, no markdown, no emoji. Reply with ONLY what to say."
+)
+
+
+def worth_saying(facts: Facts, *, early_hour: int = 10) -> bool:
+    """Tomorrow earns a heads-up with an early start, anything personal, or rain."""
+    early = facts.first_at is not None and facts.first_at.astimezone(EASTERN).hour < early_hour
+    return early or facts.personal > 0 or facts.wet
+
+
+def plain_evening(facts: Facts) -> str:
+    parts = ["Heads-up for tomorrow:"]
+    if facts.events:
+        when, _, what = facts.events[0].partition(": ")
+        parts.append((f"{what} at {when.split(' to ')[0]}" if what and not when.startswith("all day")
+                      else facts.events[0]) + (f", and {len(facts.events) - 1} more." if len(facts.events) > 1 else "."))
+    if facts.weather:
+        parts.append(f"Weather: {facts.weather.rstrip('.')}.")
+    return " ".join(parts)
+
+
+def evening_facts_text(facts: Facts) -> str:
+    lines = [f"Tomorrow's weather: {facts.weather or 'unknown (say nothing about it)'}"]
+    lines.append("Tomorrow's calendar:" if facts.events else "Tomorrow's calendar: nothing")
+    lines += [f"- {e}" for e in facts.events]
+    return "\n".join(lines)
+
+
+class EveningHeadsUp:
+    """tick() -> what happened this pass. Once an evening, in a room with a speaker that isn't
+    the bedroom, before quiet hours, and only when tomorrow is worth a heads-up."""
+
+    def __init__(self, desk, *, read: Callable[[], Reading], gather: Callable[..., Facts],
+                 compose: Callable[[Facts], str], rooms: tuple = ("office", "kitchen"),
+                 start_hour: int = 19, quiet_start_hour: int = 21, early_hour: int = 10,
+                 clock: Callable[[], datetime] | None = None):
+        self.desk, self.read, self.gather, self.compose = desk, read, gather, compose
+        self.rooms = tuple(r.strip().lower() for r in rooms if r.strip() and r.strip().lower() != "bedroom")
+        self.start_hour, self.quiet_start_hour, self.early_hour = start_hour, quiet_start_hour, early_hour
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.done: date | None = None
+
+    def tick(self) -> str:
+        now = self.clock()
+        local = now.astimezone(EASTERN)
+        day = local.date()
+        # Never into quiet hours: it must be SAID by five minutes before they start.
+        cutoff = _at(day, self.quiet_start_hour) - timedelta(minutes=5)
+        if not (_at(day, self.start_hour) <= now < cutoff):
+            return "outside the window"
+        if self.done == day:
+            return "done"
+        key = f"{EVENING_SOURCE}:{day.isoformat()}"
+        store = self.desk.store
+        if store.recently_sent(key, _at(day, 0)) or store.decided(key, _at(day, 0)):
+            self.done = day
+            return "done"
+        if EVENING_TOPIC in {str(m).strip().lower() for m in store.prefs(self.desk.budget_default).muted}:
+            return "muted"
+        try:
+            reading = self.read()
+        except Exception:
+            log.warning("evening: can't read the house this pass", exc_info=True)
+            return "no reading"
+        if reading.room not in self.rooms or not reading.confirmed:
+            return "not in a room for it"
+        held_by = self.desk.voice_held(now)
+        if held_by:
+            return f"held: {held_by}"
+        try:
+            facts = self.gather(now, [], [], day=day + timedelta(days=1))
+        except Exception:
+            log.warning("evening: gathering tomorrow failed; no heads-up tonight", exc_info=True)
+            self.done = day
+            return "no facts"
+        if not worth_saying(facts, early_hour=self.early_hour):
+            if not facts.complete:                # a source didn't answer: a gap, not a quiet day
+                return "incomplete reading"
+            # A quiet tomorrow: nothing said, and recorded so a restart doesn't ask again.
+            try:
+                store.add(ReachEvent(source=EVENING_SOURCE, topic=EVENING_TOPIC, headline="(a quiet tomorrow)",
+                                     brief=True, dedupe_key=key), now, status="dropped",
+                          reason="nothing worth a heads-up", not_before=None)
+            except Exception:
+                log.warning("evening: couldn't record the quiet evening; this process remembers it", exc_info=True)
+            self.done = day
+            log.info("evening %s: nothing worth a heads-up", day)
+            return "nothing worth saying"
+        text = ""
+        try:
+            text = (self.compose(facts) or "").strip()
+        except Exception:
+            log.warning("evening: her words failed; the plain version goes", exc_info=True)
+        if not text:
+            text = plain_evening(facts)
+        outcome = self.desk.reach_out(ReachEvent(
+            source=EVENING_SOURCE, topic=EVENING_TOPIC, headline=text, room=reading.room, brief=True,
+            dedupe_key=key, expires_at=cutoff))
+        self.done = day
+        log.info("evening %s: %s", day, outcome)
+        return outcome
+
+    def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
+        log.info("evening heads-up armed | %s, %02d:00 until quiet hours", "/".join(self.rooms), self.start_hour)
+        _loop(self.tick, "evening")
+
+
+def start_evening_heads_up(heads_up: "EveningHeadsUp | None") -> threading.Thread | None:
+    if heads_up is None:
+        return None
+    thread = threading.Thread(target=heads_up.run_forever, daemon=True, name="evening-heads-up")
     thread.start()
     return thread
 
@@ -255,6 +395,9 @@ def reader_for(settings, *, post=None) -> Callable[[], Reading]:
     return read
 
 
+#: Conditions worth a heads-up the evening before.
+WET = {"rainy", "pouring", "lightning", "lightning-rainy", "hail", "snowy", "snowy-rainy", "exceptional"}
+
 #: HA's condition codes, as a person would say them.
 CONDITIONS = {"partlycloudy": "partly cloudy", "clear-night": "clear", "lightning": "thunderstorms",
               "lightning-rainy": "thunderstorms", "pouring": "heavy rain", "rainy": "rain",
@@ -290,56 +433,90 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
     fetch = get or (lambda url, hdrs: httpx.get(url, headers=hdrs, timeout=5.0))
     send = post or (lambda url, hdrs, body: httpx.post(url, headers=hdrs, json=body, timeout=10.0))
 
-    def weather() -> str:
+    def forecast_for(day: date, today: date) -> dict:
+        """The daily forecast entry for `day` (entries are dated in UTC; matched in local time)."""
         if not weather_entity:
-            return ""
+            return {}
         r = send(f"{base}/api/services/weather/get_forecasts?return_response", headers,
                  {"entity_id": weather_entity, "type": "daily"})
         r.raise_for_status()
         forecast = ((r.json().get("service_response") or {}).get(weather_entity) or {}).get("forecast") or []
-        return _weather_line(forecast[0]) if forecast else ""
+        for entry in forecast:
+            try:
+                if datetime.fromisoformat(str(entry.get("datetime"))).astimezone(EASTERN).date() == day:
+                    return entry
+            except (TypeError, ValueError):
+                continue
+        # Undated entries only: the first is today's (HA lists from today on). A dated list that
+        # lacks the day is no answer for it; tomorrow always needs a date.
+        undated = forecast and not any(e.get("datetime") for e in forecast)
+        return forecast[0] if undated and day == today else {}
 
-    def events(now: datetime) -> list[str]:
-        local = now.astimezone(EASTERN)
-        end = datetime.combine(local.date() + timedelta(days=1), time(0), tzinfo=EASTERN)
-        window = urlencode({"start": now.isoformat(), "end": end.astimezone(timezone.utc).isoformat()})
+    def events(start_at: datetime, day: date, failed: list) -> list[tuple[datetime, str, bool]]:
+        """(start, line, personal) for what's on `day` from start_at on, in time order. A
+        calendar that can't be read is skipped and noted in `failed`."""
+        end = datetime.combine(day + timedelta(days=1), time(0), tzinfo=EASTERN)
+        window = urlencode({"start": start_at.isoformat(), "end": end.astimezone(timezone.utc).isoformat()})
         out = []
         for entity in [*work, *personal]:
-            try:
+            mine = []
+            try:          # the read, the shape and every event: one calendar's failure boundary
                 r = fetch(f"{base}/api/calendars/{entity}?{window}", headers)
                 r.raise_for_status()
                 items = r.json()
+                if not isinstance(items, list):
+                    raise ValueError("not a list of events")
+                for ev in items:
+                    if not isinstance(ev, dict):
+                        raise ValueError("not an event")
+                    start, start_day = _parse_when(ev.get("start"))
+                    end_at, _ = _parse_when(ev.get("end"))
+                    title = "a work meeting" if entity in work else (str(ev.get("summary") or "").strip() or "something")
+                    if start is None:
+                        if start_day is not None and entity not in work:      # all-day: personal only
+                            mine.append((datetime.combine(start_day, time(0), tzinfo=EASTERN), f"all day: {title}", True))
+                        continue
+                    start = start if start.tzinfo else start.replace(tzinfo=EASTERN)
+                    when = _fmt_time(start.astimezone(EASTERN))
+                    if end_at is not None:
+                        end_at = end_at if end_at.tzinfo else end_at.replace(tzinfo=EASTERN)
+                        when += f" to {_fmt_time(end_at.astimezone(EASTERN))}"
+                    mine.append((start, f"{when}: {title}", entity not in work))
             except Exception as e:
                 log.warning("brief: a calendar read failed (%s); going without it", type(e).__name__)
+                failed.append(entity)
                 continue
-            for ev in items if isinstance(items, list) else []:
-                start, start_day = _parse_when((ev or {}).get("start"))
-                end_at, _ = _parse_when((ev or {}).get("end"))
-                title = "a work meeting" if entity in work else (str((ev or {}).get("summary") or "").strip() or "something")
-                if start is None:
-                    if start_day is not None and entity not in work:      # all-day: personal only
-                        out.append((datetime.combine(start_day, time(0), tzinfo=EASTERN), f"all day: {title}"))
-                    continue
-                start = start if start.tzinfo else start.replace(tzinfo=EASTERN)
-                when = _fmt_time(start.astimezone(EASTERN))
-                if end_at is not None:
-                    end_at = end_at if end_at.tzinfo else end_at.replace(tzinfo=EASTERN)
-                    when += f" to {_fmt_time(end_at.astimezone(EASTERN))}"
-                out.append((start, f"{when}: {title}"))
-        return [line for _, line in sorted(out, key=lambda x: x[0])]
+            out += mine
+        return sorted(out, key=lambda x: x[0])
 
-    def gather(now: datetime, held: list, quiet: list) -> Facts:
-        try:
-            wx = weather()
+    def gather(now: datetime, held: list, quiet: list, day: date | None = None) -> Facts:
+        """Today from now on, or (day given) all of that day: the evening heads-up's tomorrow."""
+        target = day or now.astimezone(EASTERN).date()
+        start_at = now if day is None else datetime.combine(day, time(0), tzinfo=EASTERN)
+        failed: list = []
+        weather, wet = "", False
+        try:                      # the read AND the reading: a malformed forecast costs only the weather
+            entry = forecast_for(target, now.astimezone(EASTERN).date())
+            if entry:
+                weather = _weather_line(entry)
+                rain = entry.get("precipitation_probability")
+                wet = str(entry.get("condition") or "") in WET or (rain is not None and float(rain) >= 40)
+            elif weather_entity:
+                failed.append(weather_entity)          # no entry for the day is a gap, not a quiet sky
         except Exception as e:
             log.warning("brief: the forecast read failed (%s); going without it", type(e).__name__)
-            wx = ""
-        return Facts(weather=wx, events=events(now), held=held, quiet=quiet)
+            failed.append(weather_entity)
+        found = events(start_at, target, failed)
+        timed = [t for t, line, _ in found if not line.startswith("all day")]
+        return Facts(weather=weather, events=[line for _, line, _ in found], held=held, quiet=quiet,
+                     first_at=min(timed) if timed else None, personal=sum(1 for *_, mine in found if mine),
+                     wet=wet, complete=not failed)
 
     return gather
 
 
-def composer_for(settings, *, model=None) -> Callable[[Facts], str]:
+def composer_for(settings, *, model=None, prompt: str | None = None,
+                 text_of: Callable[[Facts], str] | None = None) -> Callable[[Facts], str]:
     from langchain_core.messages import HumanMessage, SystemMessage
 
     def compose(facts: Facts) -> str:
@@ -348,12 +525,31 @@ def composer_for(settings, *, model=None) -> Callable[[Facts], str]:
 
         soul = load_soul(settings.soul_file_path)
         reply = (model or build_model(settings)).invoke([
-            SystemMessage(content=soul + BRIEF_PROMPT),
-            HumanMessage(content=facts_text(facts)),
+            SystemMessage(content=soul + (prompt or BRIEF_PROMPT)),
+            HumanMessage(content=(text_of or facts_text)(facts)),
         ])
         return _reply_text(reply).strip()
 
     return compose
+
+
+def evening_heads_up_for(settings, desk) -> EveningHeadsUp | None:
+    """None unless armed: evening_heads_up on, a desk, HA, and a speaker in one of its rooms."""
+    if not getattr(settings, "evening_heads_up", False) or desk is None or getattr(settings, "ha_token", None) is None:
+        return None
+    from aerys_v2.kael_line import parse_room_devices
+
+    speakers = parse_room_devices(getattr(settings, "reach_room_devices", ""))
+    rooms = tuple(r for r in (x.strip().lower() for x in _csv(getattr(settings, "evening_rooms", "office,kitchen")))
+                  if r in speakers and r != "bedroom")
+    if not rooms:
+        log.warning("evening heads-up: no speaker in any of its rooms; not armed")
+        return None
+    return EveningHeadsUp(
+        desk, read=reader_for(settings), gather=gatherer_for(settings),
+        compose=composer_for(settings, prompt=EVENING_PROMPT, text_of=evening_facts_text), rooms=rooms,
+        start_hour=int(getattr(settings, "evening_start_hour", 19)),
+        quiet_start_hour=int(getattr(settings, "owner_quiet_start_hour", 21)))
 
 
 def morning_brief_for(settings, desk, *, replied_since=None) -> MorningBrief | None:
