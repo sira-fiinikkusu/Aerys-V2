@@ -370,3 +370,32 @@ def test_a_newer_run_that_starts_mid_read_is_caught_too():
 
     job = fetcher_for(settings(), get=get)(SimpleNamespace(thread_id="t", run_id="run-A", status="success"))
     assert job == Job() and seen["runs"] == 2
+
+
+def test_her_working_notes_never_reach_him():
+    """Chris, 11/09: her 'Note to self' line came through in his text copy. It's hers, not his:
+    it never goes to him, neither as text nor into what her spoken words are made from."""
+    report = ("Kael, the home machine runs Python 3.12.3; 58G free of 61G. Both plan items are closed as "
+              "read-only. Note to self: inspect toolchain and disk answer this in one step each.\n\n"
+              "NOTE TO SELF - keep the inspect tool first next time.")
+    home = Home(job=Job(task="Check Python and free disk", result=report))
+    home.notices.receive(note())
+    home.notices.tick()
+    detail = home.desk.store.rows[1].detail
+    assert detail.startswith("Kael, the home machine runs Python 3.12.3; 58G free of 61G.")
+    assert "note to self" not in detail.lower() and "inspect" not in detail
+    assert "note to self" not in home.composed[0].result.lower()
+
+
+def test_a_report_with_no_notes_is_untouched():
+    home = Home()
+    home.notices.receive(note())
+    home.notices.tick()
+    assert home.desk.store.rows[1].detail == "Built it. Three flights today."
+
+
+def test_the_spoken_line_stops_at_the_answer():
+    """Chris, 11/09: 'it was all read-only, so I didn't change anything' after the numbers is noise."""
+    from aerys_v2.home_notices import HOME_JOB_PROMPT
+    assert "Stop once the answer is said" in HOME_JOB_PROMPT
+    assert "unless something was changed" in HOME_JOB_PROMPT
