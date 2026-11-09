@@ -784,12 +784,17 @@ def reach_desk_for(settings, graph):
         # D6: wherever the house places him (his phone's Bluetooth + the room sensors,
         # settled). A room without a speaker, or no place at all, falls back to his last
         # surface, and from there to a DM.
-        if presence is not None and rooms:
+        if presence is not None:
             snap = presence()
             whereabouts = getattr(snap, "whereabouts", None) or ("", "")
             room = str(whereabouts[1] or "").strip().lower()
             if whereabouts[0] == "home" and room in rooms:
                 return Where("room", rooms[room], room)
+            # Out of the house (the owner, 11/08: "if im not home she can use that channel too"):
+            # a notification on his phone, watch and glasses. Unknown isn't away.
+            away = str(whereabouts[0] or "").strip().lower() not in ("", "home", "unknown", "unavailable")
+            if away and notify_service and getattr(settings, "ha_token", None) is not None:
+                return Where("notify")
         surface, device_id = _owner_last_surface(settings)
         if surface == "device" and device_id:
             return Where("device", device_id)

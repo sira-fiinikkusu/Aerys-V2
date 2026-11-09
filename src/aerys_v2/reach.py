@@ -513,7 +513,7 @@ class AmbiguousDelivery(Exception):
 
 @dataclass
 class Where:
-    kind: str                         # room | device | discord | telegram
+    kind: str                         # room | device | notify (he's away: phone, watch, glasses) | discord | telegram
     device_id: str | None = None
     label: str = ""
 
@@ -554,18 +554,25 @@ class Deliverer:
         if row.room and not (where.kind == "room" and where.label == row.room):
             return Delivery("away")        # pinned to a room he isn't in: it waits for him there
         body = row.headline + (f"\n\n{row.detail}" if row.detail else "")
-        if decision.voice == "notify":     # discreet: a notification, else text; never said aloud
-            if self.notify is not None:
+        # A notification on his phone, watch and glasses, AS WELL AS the text (the owner, 11/08: "and
+        # not instead of, she can discord me too"): in company (never aloud) and when he's away ("if im
+        # not home she can use that channel too"). Not for a quiet one: a notification buzzes.
+        if decision.voice == "notify" or where.kind == "notify":
+            notified = False
+            if self.notify is not None and not decision.silent:
                 try:
                     self.notify(row.headline, body)
+                    notified = True
+                except Exception as e:      # ambiguous or not: the text below carries it either way
+                    log.warning("reach: the notification didn't confirm (%s); the text still goes", type(e).__name__)
+            try:
+                self.text(self.text_surface, body, decision.silent)
+                return Delivery("sent", ("notify+" if notified else "") + self.text_surface, texted=True)
+            except Exception as e:
+                if notified:
                     return Delivery("sent", "notify", texted=True)
-                except (AmbiguousDelivery, TimeoutError) as e:
-                    # It may have landed: a second copy as text would be a double. Recorded as unsure.
-                    log.warning("reach: the notification may have landed (%s); no second copy", type(e).__name__)
-                    return Delivery("sent", "notify?", texted=True)
-                except Exception as e:
-                    log.warning("reach: the notification failed (%s); texting instead", type(e).__name__)
-            where = Where(self.text_surface)
+                log.warning("reach: delivery via %s failed (%s)", self.text_surface, type(e).__name__)
+                return Delivery("failed", self.text_surface)
         spoken = where.kind in ("room", "device")
         if spoken and decision.voice == "wait":
             return Delivery("wait")
@@ -853,13 +860,19 @@ class ReachDesk:
                     # after the speech): the detail alone, he heard the headline.
                     copy = (row.detail if heard else
                             f"{MISSED_PREFIX} {row.headline}" + (f"\n\n{row.detail}" if row.detail else ""))
+                    quiet_copy = self.quiet(now) and row.urgency != "safety"   # a warning still buzzes
                     try:
-                        # quiet at night, except a safety warning: it still buzzes
-                        self.deliverer.text(self.deliverer.text_surface, copy,
-                                            self.quiet(now) and row.urgency != "safety")
+                        self.deliverer.text(self.deliverer.text_surface, copy, quiet_copy)
                     except Exception:
                         log.warning("reach %s: the text copy failed; retried next pass", row.id)
                         continue
+                    # He doesn't get Discord notifications (11/08): a copy of something he missed also
+                    # pings his phone, watch and glasses, unless it's meant to be quiet.
+                    if not heard and not quiet_copy and self.deliverer.notify is not None:
+                        try:
+                            self.deliverer.notify(row.headline, copy)
+                        except Exception:
+                            log.warning("reach %s: the copy's notification didn't confirm (the text went)", row.id)
                     # first noted: a failed record must not mean a second copy
                     self._settle(row.id, now, {"dm_at": now, **({"acked_at": now} if heard else {})})
                     out["copied"] += 1

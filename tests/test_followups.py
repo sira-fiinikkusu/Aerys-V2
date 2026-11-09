@@ -533,8 +533,8 @@ def test_with_company_over_it_lands_as_a_notification_on_his_phone_and_glasses()
     assert life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green.",
                                           detail="All three.")) == "sent"
     assert sent == [("Backup's green.", "Backup's green.\n\nAll three.")]
-    assert life.world.spoken == [] and life.world.texts == []
-    assert life.desk.store.rows[1].surface == "notify"
+    assert life.world.spoken == [] and life.world.texts == [("discord", "Backup's green.\n\nAll three.", False)]
+    assert life.desk.store.rows[1].surface == "notify+discord"
 
 
 def test_if_the_notification_fails_it_goes_as_text_never_aloud():
@@ -547,7 +547,7 @@ def test_if_the_notification_fails_it_goes_as_text_never_aloud():
     assert life.world.spoken == [] and life.world.texts == [("discord", "Backup's green.", False)]
 
 
-def test_without_company_the_notification_leg_is_never_used():
+def test_at_home_without_company_the_notification_leg_is_never_used():
     from aerys_v2.reach import ReachEvent
 
     life = Life()
@@ -557,13 +557,49 @@ def test_without_company_the_notification_leg_is_never_used():
     assert sent == [] and life.world.spoken == [("Backup's green.", "dev-office")]
 
 
-def test_a_notification_that_may_have_landed_is_never_sent_again_as_text():
+def test_the_text_always_goes_whatever_the_notification_did():
     from aerys_v2.reach import AmbiguousDelivery, ReachEvent
 
-    for err in (AmbiguousDelivery("ReadTimeout"), TimeoutError("read")):
+    for err in (AmbiguousDelivery("ReadTimeout"), TimeoutError("read"), ConnectionError("down")):
         life = Life()
         life.desk.deliverer.notify = lambda headline, body, err=err: (_ for _ in ()).throw(err)
         life.prefs.invoke({"action": "company"})
         life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
-        assert life.world.texts == [] and life.world.spoken == []
-        assert life.desk.store.rows[1].surface == "notify?" and life.desk.store.rows[1].status == "sent"
+        assert life.world.texts == [("discord", "Backup's green.", False)] and life.world.spoken == []
+        assert life.desk.store.rows[1].surface == "discord" and life.desk.store.rows[1].status == "sent"
+
+
+def test_away_from_home_it_comes_as_a_notification_and_a_text():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append(headline)
+    life.world.where = Where("notify")                     # the house says he's out
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert sent == ["Backup's green."] and life.world.texts == [("discord", "Backup's green.", False)]
+    assert life.world.spoken == [] and life.desk.store.rows[1].surface == "notify+discord"
+
+
+def test_a_quiet_one_never_buzzes_his_phone_even_away():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life(datetime(2026, 11, 10, 23, 0, tzinfo=ET))   # night: owed goes as quiet text
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append(headline)
+    life.world.where = Where("notify")
+    life.desk.reach_out(ReachEvent(source="ticket", topic="kael", headline="Kael says yes.", owed=True))
+    assert sent == [] and life.world.texts == [("discord", "Kael says yes.", True)]
+
+
+def test_a_copy_of_something_he_missed_also_pings_his_phone():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life()
+    sent = []
+    life.desk.deliverer.notify = lambda headline, body: sent.append(body)
+    life.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."))
+    assert life.world.spoken and sent == []                  # said aloud at home: no ping
+    life.at(DAY + timedelta(minutes=6))
+    assert life.desk.tick()["copied"] == 1
+    assert sent and sent[0].startswith("In case you missed what I said:")
