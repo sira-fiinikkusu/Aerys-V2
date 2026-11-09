@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from typing import Callable
 
-from aerys_v2.reach import EASTERN, ReachEvent
+from aerys_v2.reach import EASTERN, ReachEvent, muted_topics
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ PLAN_HORIZON = timedelta(days=14)
 PLAN_CONFIDENCE = 0.8
 ASK_HORIZON = timedelta(days=60)
 MINER_BATCH = 40
+HANDING_GRACE = timedelta(minutes=2)      # a row left 'handing' this long is reconciled with the desk
 UNASKED = ("appointment", "plan")
 TOPIC = {"asked": "follow-ups", "appointment": "appointments", "plan": "to-dos"}
 SOURCE = {"asked": "follow-up", "appointment": "check-in", "plan": "check-in"}
@@ -66,6 +67,8 @@ class FollowUp:
     reason: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    expires_at: datetime | None = None    # unasked: fixed when it's made, never renewed
+    message: str = ""                     # the words handed to the desk, kept for a re-hand
 
 
 @dataclass
@@ -98,10 +101,12 @@ class MemoryFollowupStore:
         self.state: dict[str, str] = {}
         self._next = 1
 
-    def add(self, kind, about, due_at, now, *, status="waiting", his_words="", source_key=None):
+    def add(self, kind, about, due_at, now, *, status="waiting", his_words="", source_key=None,
+            reason="", message="", expires_at=None):
         if source_key is not None and any(r.source_key == source_key for r in self.rows.values()):
             return None
-        f = FollowUp(self._next, kind, about, due_at, status, his_words, source_key, "", now, now)
+        f = FollowUp(self._next, kind, about, due_at, status, his_words, source_key, reason, now, now,
+                     expires_at, message)
         self.rows[f.id] = f
         self._next += 1
         return f
@@ -117,6 +122,10 @@ class MemoryFollowupStore:
         return sorted((r for r in self.rows.values() if r.status == "waiting" and r.kind == "asked"),
                       key=lambda r: r.due_at)
 
+    def handing(self, before):
+        return sorted((r for r in self.rows.values() if r.status == "handing" and r.updated_at <= before),
+                      key=lambda r: r.id)
+
     def get(self, fid):
         return self.rows.get(fid)
 
@@ -127,7 +136,9 @@ class MemoryFollowupStore:
         r.updated_at = now
 
     def raised_since(self, since):
-        return sum(1 for r in self.rows.values() if r.kind in UNASKED and r.status == "raised"
+        """Unasked check-ins counted against the day: the ones the desk has, and the ones reserved
+        for it (a failed record never makes room for one more)."""
+        return sum(1 for r in self.rows.values() if r.kind in UNASKED and r.status in ("handing", "raised")
                    and r.updated_at and r.updated_at >= since)
 
     def get_state(self, key):
@@ -140,7 +151,8 @@ class MemoryFollowupStore:
 class PostgresFollowupStore:
     """v2_followups / v2_followup_state (db/migrations/020). Fresh short connections per call."""
 
-    COLUMNS = "id, kind, about, due_at, status, his_words, source_key, reason, created_at, updated_at"
+    COLUMNS = ("id, kind, about, due_at, status, his_words, source_key, reason, created_at, updated_at, "
+               "expires_at, message")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -154,12 +166,14 @@ class PostgresFollowupStore:
     def _row(r) -> FollowUp:
         return FollowUp(*r)
 
-    def add(self, kind, about, due_at, now, *, status="waiting", his_words="", source_key=None):
+    def add(self, kind, about, due_at, now, *, status="waiting", his_words="", source_key=None,
+            reason="", message="", expires_at=None):
         with self._connect() as conn:
             row = conn.execute(
-                "INSERT INTO v2_followups (created_at, updated_at, kind, about, his_words, due_at, status, source_key) "
-                f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (source_key) DO NOTHING RETURNING {self.COLUMNS}",
-                (now, now, kind, about, his_words, due_at, status, source_key)).fetchone()
+                "INSERT INTO v2_followups (created_at, updated_at, kind, about, his_words, due_at, status, source_key, "
+                "reason, message, expires_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                f"ON CONFLICT (source_key) DO NOTHING RETURNING {self.COLUMNS}",
+                (now, now, kind, about, his_words, due_at, status, source_key, reason, message, expires_at)).fetchone()
         return self._row(row) if row else None
 
     def has(self, source_key):
@@ -178,6 +192,12 @@ class PostgresFollowupStore:
                                 "ORDER BY due_at").fetchall()
         return [self._row(r) for r in rows]
 
+    def handing(self, before):
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE status = 'handing' "
+                                "AND updated_at <= %s ORDER BY id", (before,)).fetchall()
+        return [self._row(r) for r in rows]
+
     def get(self, fid):
         with self._connect() as conn:
             row = conn.execute(f"SELECT {self.COLUMNS} FROM v2_followups WHERE id = %s", (fid,)).fetchone()
@@ -186,7 +206,7 @@ class PostgresFollowupStore:
     def mark(self, fid, now, **fields):
         if not fields:
             return
-        bad = set(fields) - {"status", "reason", "due_at"}
+        bad = set(fields) - {"status", "reason", "due_at", "message", "expires_at"}
         if bad:
             raise ValueError(f"not markable: {bad}")
         cols = ", ".join(f"{k} = %s" for k in fields)
@@ -196,7 +216,7 @@ class PostgresFollowupStore:
     def raised_since(self, since):
         with self._connect() as conn:
             return conn.execute("SELECT count(*) FROM v2_followups WHERE kind IN ('appointment', 'plan') "
-                                "AND status = 'raised' AND updated_at >= %s", (since,)).fetchone()[0]
+                                "AND status IN ('handing', 'raised') AND updated_at >= %s", (since,)).fetchone()[0]
 
     def get_state(self, key):
         with self._connect() as conn:
@@ -309,31 +329,68 @@ class FollowUps:
 
     def _muted(self) -> tuple[set, int]:
         prefs = self.desk.store.prefs(self.desk.budget_default)
-        return {str(m).strip().lower() for m in prefs.muted}, prefs.checkins
+        return muted_topics(prefs), prefs.checkins      # "follow-ups" covers appointments and to-dos
 
     def _room_for_one_more(self, now: datetime) -> bool:
         _, cap = self._muted()
         return self.store.raised_since(_day_start(now)) < cap
 
-    def _hand(self, f: FollowUp, text: str, now: datetime) -> str:
-        """Hand one to the desk and record what it said. An asked one is owed; unasked ones
-        are routine, carry an expiry, and never age into tomorrow's brief."""
+    @staticmethod
+    def _key(f: FollowUp) -> str:
+        return f"followup:{f.id}"                        # one per follow-up, for its whole life
+
+    def _event(self, f: FollowUp, text: str) -> ReachEvent:
+        """An asked one is owed (never dropped, outside the budget). An unasked one is routine and
+        carries the expiry fixed when it was made, so a restart never renews it."""
         unasked = f.kind in UNASKED
-        outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE[f.kind], topic=TOPIC[f.kind], headline=text, owed=not unasked,
-            dedupe_key=f"followup:{f.id}", expires_at=(now + CHECKIN_FOR) if unasked else None))
+        return ReachEvent(source=SOURCE[f.kind], topic=TOPIC[f.kind], headline=text, owed=not unasked,
+                          dedupe_key=self._key(f), expires_at=f.expires_at if unasked else None)
+
+    def _give(self, f: FollowUp, text: str, now: datetime) -> str:
+        """Hand a reserved ('handing') row to the desk, then record what the desk said. If the record
+        fails, the row stays 'handing': it still counts, and the next pass reconciles it."""
+        outcome = self.desk.reach_out(self._event(f, text))
         went = outcome in ("sent", "queued", "duplicate")
-        self.store.mark(f.id, now, status="raised" if went else "skipped", reason=f"desk: {outcome}")
+        try:
+            self.store.mark(f.id, now, status="raised" if went else "skipped", reason=f"desk: {outcome}")
+        except Exception:
+            log.warning("follow-up %s: the desk has it, but the record failed; reconciled next pass", f.id)
         log.info("follow-up %s (%s): %s", f.id, f.kind, outcome)
         return outcome
 
+    def _plain(self, f: FollowUp) -> str:
+        return (f"Checking back like you asked: {f.about}. How did it go?" if f.kind == "asked"
+                else f"Did you get to {f.about}?" if f.kind == "plan" else f"How did {f.about} go?")
+
+    def _reconcile(self, now: datetime, out: dict) -> None:
+        """Rows left 'handing' (the desk call or its record failed): the desk's own record decides.
+        It has it (any status, ever) -> raised. It doesn't -> hand the same words again, unless an
+        unasked one has expired."""
+        for f in self.store.handing(now - HANDING_GRACE):
+            try:
+                if self.desk.store.decided(self._key(f), f.created_at or f.due_at):
+                    self.store.mark(f.id, now, status="raised", reason="desk: had it (recovered)")
+                    continue
+                if f.kind in UNASKED and f.expires_at is not None and now >= f.expires_at:
+                    self.store.mark(f.id, now, status="skipped", reason="expired before it could go")
+                    continue
+                self._give(f, f.message or self._plain(f), now)
+                out["raised"] += 1
+            except Exception:
+                log.warning("follow-up %s: reconciling failed; tried again next pass", f.id, exc_info=True)
+
     def _due(self, now: datetime, out: dict) -> None:
         for f in self.store.due(now):
+            if f.kind == "appointment":
+                continue              # never 'waiting' (made 'handing' or 'skipped'); never the plan path
             if f.kind == "plan" and self.plans != "live":
-                continue                                  # shadow rows are never 'waiting'; belt and braces
+                continue              # shadow rows are never 'waiting'; belt and braces
             if f.kind in UNASKED:
+                if f.expires_at is not None and now >= f.expires_at:
+                    self.store.mark(f.id, now, status="skipped", reason="expired before it could go")
+                    continue
                 muted, _ = self._muted()
-                if {"follow-ups", TOPIC[f.kind]} & muted:
+                if TOPIC[f.kind] in muted:
                     self.store.mark(f.id, now, status="skipped", reason="muted")
                     continue
                 if not self._room_for_one_more(now):
@@ -349,49 +406,61 @@ class FollowUps:
                 self.store.mark(f.id, now, status="skipped", reason="she held it")
                 continue
             if not text or _HOLD.match(text):
-                text = (f"Checking back like you asked: {f.about}. How did it go?" if f.kind == "asked"
-                        else f"Did you get to {f.about}?")
+                text = self._plain(f)
             try:
-                self._hand(f, text, now)
+                # Reserved first, with its words: the day's count and any recovery survive what follows.
+                self.store.mark(f.id, now, status="handing", message=text)
+            except Exception:
+                log.warning("follow-up %s: couldn't reserve it; tried again next pass", f.id, exc_info=True)
+                continue
+            try:
+                self._give(f, text, now)
                 out["raised"] += 1
             except Exception:
-                log.warning("follow-up %s: the desk didn't take it; retried next pass", f.id, exc_info=True)
+                log.warning("follow-up %s: the desk didn't take it; reconciled next pass", f.id, exc_info=True)
 
     def _appointments(self, now: datetime, out: dict) -> None:
         if self.appointments is None:
             return
         muted, _ = self._muted()
-        if {"follow-ups", "appointments"} & muted:
+        if "appointments" in muted:                       # also when he muted all follow-ups
             return
         for a in self.appointments(now):
             if self.store.has(a.key):
                 continue
+            expires = now + CHECKIN_FOR                   # fixed now; a restart never renews it
             if not self._room_for_one_more(now):
-                f = self.store.add("appointment", a.title, now, now, status="skipped", source_key=a.key)
-                if f is not None:
-                    self.store.mark(f.id, now, reason="today's check-ins were used")
+                self.store.add("appointment", a.title, now, now, status="skipped", source_key=a.key,
+                               reason="today's check-ins were used", expires_at=expires)
                 continue
             try:
                 text = (self.say_appointment(a) or "").strip()
             except Exception:
                 log.warning("appointment check-in: her words failed; looked at again next pass", exc_info=True)
                 continue
-            f = self.store.add("appointment", a.title, now, now, source_key=a.key)
-            if f is None:
-                continue                                      # another pass got there first
             if not text or _HOLD.match(text):
-                self.store.mark(f.id, now, status="skipped", reason="not worth a check-in")
+                self.store.add("appointment", a.title, now, now, status="skipped", source_key=a.key,
+                               reason="not worth a check-in", expires_at=expires)
                 out["held"] += 1
                 continue
+            # Made already reserved, with its words and its expiry, in one write.
+            f = self.store.add("appointment", a.title, now, now, status="handing", source_key=a.key,
+                               message=text, expires_at=expires)
+            if f is None:
+                continue                                  # another pass got there first
             try:
-                self._hand(f, text, now)
+                self._give(f, text, now)
                 out["raised"] += 1
             except Exception:
-                log.warning("follow-up %s: the desk didn't take it; it stays waiting", f.id, exc_info=True)
+                log.warning("follow-up %s: the desk didn't take it; reconciled next pass", f.id, exc_info=True)
 
     def tick(self) -> dict:
         out = {"raised": 0, "held": 0, "mined": 0}
         now = self.clock()
+        try:
+            self._reconcile(now, out)
+        except Exception:
+            log.warning("follow-ups: reconciling failed this pass", exc_info=True)
         self._due(now, out)
         if self.last_appts is None or now - self.last_appts >= APPT_EVERY:
             self.last_appts = now
@@ -613,7 +682,8 @@ def miner_for(settings, store, *, model=None, turns=None, live: bool = False) ->
             if not (said_at < due <= said_at + PLAN_HORIZON):
                 continue
             row = store.add("plan", what, due, now, status="waiting" if live else "shadow",
-                            his_words=" ".join(str(text).split())[:300], source_key=f"turn:{tid}:{k}")
+                            his_words=" ".join(str(text).split())[:300], source_key=f"turn:{tid}:{k}",
+                            expires_at=due + CHECKIN_FOR)
             if row is not None:
                 found += 1
                 log.info("plan miner%s: turn %s -> a plan, check-in due %s", "" if live else " (shadow)",

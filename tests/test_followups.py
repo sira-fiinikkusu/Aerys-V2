@@ -308,3 +308,111 @@ def test_outside_text_reaches_her_framed_as_data_and_clipped():
     assert seen["human"].startswith(followups.DATA_ONLY)
     title_line = [l for l in seen["human"].splitlines() if l.startswith("What: ")][0]
     assert len(title_line) <= len("What: ") + 120
+
+
+# --- Codex review 11/08: each of these failed on cc462df --------------------------------------------
+
+def test_muting_all_follow_ups_also_stops_a_check_in_already_queued():
+    life = Life()
+    life.desk.meeting_hold = lambda: DAY + timedelta(minutes=30)          # in a meeting: it queues
+    life.appts = [appt()]
+    assert life.runner.tick()["raised"] == 1 and life.world.spoken == []
+    life.prefs.invoke({"action": "mute", "topic": "follow-ups", "his_words": "stop checking up on me"})
+    life.desk.meeting_hold = None
+    life.at(DAY + timedelta(minutes=45))
+    life.desk.tick()
+    assert life.world.spoken == [] and life.desk.store.rows[1].status == "dropped"
+
+
+def test_an_umbrella_mute_keeps_check_ins_out_of_the_brief_too():
+    from aerys_v2.reach import ReachEvent
+
+    life = Life(datetime(2026, 11, 9, 23, 0, tzinfo=ET))
+    life.desk.reach_out(ReachEvent(source="check-in", topic="appointments", headline="How'd it go?"))
+    life.prefs.invoke({"action": "mute", "topic": "follow-ups"})
+    carried = life.desk.reserve_for_brief(datetime(2026, 11, 9, 18, 0, tzinfo=ET), datetime(2026, 11, 10, 13, 0, tzinfo=ET))
+    assert carried == []
+
+
+class FlakyRecord(MemoryFollowupStore):
+    """The 'raised' record fails (the desk already has it)."""
+
+    def __init__(self, fails=99):
+        super().__init__()
+        self.fails = fails
+
+    def mark(self, fid, now, **fields):
+        if fields.get("status") == "raised" and self.fails:
+            self.fails -= 1
+            raise ConnectionError("NAS blip")
+        return super().mark(fid, now, **fields)
+
+
+def life_with(store, now=DAY):
+    life = Life(now)
+    life.store = store
+    life.runner.store = store
+    life.tool = build_check_back_tool(store, clock=lambda: life.clock["now"])
+    return life
+
+
+def test_a_failed_record_never_makes_room_for_one_more_check_in():
+    life = life_with(FlakyRecord())
+    life.appts = [appt("A", key="a"), appt("B", key="b"), appt("C", key="c")]
+    life.runner.tick()
+    assert len(life.world.spoken) == 2                    # the dial is 2, records or not
+    assert sorted(r.status for r in life.store.rows.values()) == ["handing", "handing", "skipped"]
+
+
+def test_an_owed_check_back_is_never_said_twice_after_a_long_outage():
+    life = life_with(FlakyRecord(fails=1), datetime(2026, 11, 10, 9, 0, tzinfo=ET))
+    life.tool.invoke({"action": "add", "when": "2026-11-10T10:00", "about": "the vet"})
+    life.at(datetime(2026, 11, 10, 10, 1, tzinfo=ET))
+    life.runner.tick()
+    assert len(life.world.spoken) == 1 and life.store.rows[1].status == "handing"
+    life.at(datetime(2026, 11, 11, 11, 30, tzinfo=ET))      # 25 hours later, the record still owed
+    life.runner.tick()
+    assert len(life.world.spoken) == 1 and life.store.rows[1].status == "raised"
+
+
+def test_a_recovered_appointment_goes_with_its_own_words_never_the_plan_path():
+    life = Life()
+    life.appts = [appt()]
+    life.words["appointment"] = "How'd the dentist go?"
+    real, fail = life.desk.reach_out, {"n": 1}
+
+    def flaky(event):
+        if fail["n"]:
+            fail["n"] -= 1
+            raise ConnectionError("desk down")
+        return real(event)
+
+    life.desk.reach_out = flaky
+    life.runner.tick()
+    assert life.world.spoken == [] and life.store.rows[1].status == "handing"
+    life.at(DAY + timedelta(minutes=3))
+    life.runner.tick()
+    assert life.world.spoken == [("How'd the dentist go?", "dev-office")] and "plan" not in life.calls
+
+
+def test_an_appointment_she_held_is_never_said_later():
+    life = Life()
+    life.appts = [appt("Take out the trash")]
+    life.words["appointment"] = "HOLD"
+    life.runner.tick()
+    life.at(DAY + timedelta(minutes=6))
+    life.runner.tick()
+    assert life.world.spoken == [] and "plan" not in life.calls and life.store.rows[1].status == "skipped"
+
+
+def test_a_restart_never_renews_a_stale_check_in():
+    life = Life()
+    life.appts = [appt()]
+    real = life.desk.reach_out
+    life.desk.reach_out = lambda event: (_ for _ in ()).throw(ConnectionError("desk down"))
+    life.runner.tick()
+    assert life.store.rows[1].expires_at == DAY + timedelta(hours=4)
+    life.desk.reach_out = real
+    life.at(DAY + timedelta(days=3))                      # back three days later
+    life.runner.tick()
+    assert life.world.spoken == [] and life.store.rows[1].status == "skipped"

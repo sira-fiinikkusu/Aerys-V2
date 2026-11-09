@@ -62,6 +62,8 @@ EASTERN = ZoneInfo("America/New_York")
 URGENCIES = ("routine", "timely", "safety")
 BUDGET_MIN, BUDGET_MAX = 0, 8
 CHECKINS_MIN, CHECKINS_MAX = 0, 4      # unasked check-ins a day he's said he wants (followups.py)
+#: A topic he can mute that covers others: "stop checking up on me" mutes every unasked check-in.
+MUTE_COVERS = {"follow-ups": ("appointments", "to-dos")}
 DEDUPE_WINDOW = timedelta(hours=24)
 BUSY_RETRY = timedelta(minutes=1)
 FAIL_BACKOFF = (timedelta(minutes=1), timedelta(minutes=2), timedelta(minutes=5),
@@ -149,6 +151,15 @@ class Decision:
     breaks_through: bool = False      # safety: may speak at night or over a meeting (D4)
 
 
+def muted_topics(prefs: "Prefs") -> set:
+    """What he's muted, with each umbrella topic opened up (MUTE_COVERS)."""
+    muted = {str(m).strip().lower() for m in prefs.muted}
+    for umbrella, covers in MUTE_COVERS.items():
+        if umbrella in muted:
+            muted.update(covers)
+    return muted
+
+
 def _utc(dt: datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc) if dt is not None else None
 
@@ -184,8 +195,7 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
         if quiet and not safety_voice_at_night:
             return Decision("send", "safety at night: as text that buzzes", voice="reroute", breaks_through=True)
         return Decision("send", "safety", breaks_through=True)
-    muted = {str(m).strip().lower() for m in prefs.muted}
-    if not event.owed and event.topic.strip().lower() in muted:
+    if not event.owed and event.topic.strip().lower() in muted_topics(prefs):
         return Decision("drop", f"you muted {event.topic}")
     if quiet and not event.brief:      # a brief exists only once he's up and in its room
         if event.owed or event.urgency == "timely":
@@ -642,7 +652,7 @@ class ReachDesk:
         the brief never goes, they go on their own at `until`."""
         with self.lock:
             now = self.clock()
-            muted = {str(m).strip().lower() for m in self.store.prefs(self.budget_default).muted}
+            muted = muted_topics(self.store.prefs(self.budget_default))
             out = []
             for r in self.store.foldable(since, until):
                 if self._delivered(r.id) or r.topic.strip().lower() in muted:

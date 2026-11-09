@@ -6,7 +6,7 @@
 --   appointment  a personal calendar event that just ended: "how'd it go?"
 --   plan         something he said he'd do, mined from what he told her: SHADOW first (logged,
 --                never said) until its extractions have been read
--- about/his_words are the private part: never logged.
+-- about/his_words/message are the private part: never logged.
 CREATE TABLE IF NOT EXISTS v2_followups (
     id          BIGSERIAL PRIMARY KEY,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -15,8 +15,12 @@ CREATE TABLE IF NOT EXISTS v2_followups (
     about       TEXT NOT NULL CHECK (length(btrim(about)) > 0),
     his_words   TEXT NOT NULL DEFAULT '',
     due_at      TIMESTAMPTZ NOT NULL,
-    status      TEXT NOT NULL CHECK (status IN ('waiting', 'raised', 'canceled', 'skipped', 'shadow')),
+    expires_at  TIMESTAMPTZ,                       -- unasked: fixed when it's made, never renewed
+    -- handing = reserved (it counts toward the day's check-ins) and being handed to the desk;
+    -- raised = the desk has it. A row left 'handing' is reconciled against the desk's record.
+    status      TEXT NOT NULL CHECK (status IN ('waiting', 'handing', 'raised', 'canceled', 'skipped', 'shadow')),
     source_key  TEXT UNIQUE,                       -- one follow-up per calendar event / mined turn
+    message     TEXT NOT NULL DEFAULT '',          -- the words handed to the desk (re-handed as is)
     reason      TEXT NOT NULL DEFAULT ''           -- what became of it, in a few words
 );
 
