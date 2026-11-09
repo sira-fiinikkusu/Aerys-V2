@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 import httpx
 from langchain_core.runnables import RunnableConfig
 
-from aerys_v2.tickets import label, line_text
+from aerys_v2.tickets import ask_surface, label, line_text
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +117,9 @@ def build_message_kael_tool(url: str, token: str, client: httpx.Client | None = 
         ticket = None
         if tickets is not None and thread_id:
             try:
-                ticket = tickets.open(thread_id, clean, for_owner, now())
+                # Where he asked, so the answer comes back there (D20).
+                ticket = tickets.open(thread_id, clean, for_owner, now(),
+                                      asked_on=ask_surface(identity, thread_id))
             except Exception:
                 log.warning("message_kael: ticket ledger unreachable; sending without a ticket",
                             exc_info=True)

@@ -96,6 +96,7 @@ class ReachEvent:
     brief: bool = False               # a brief: outside the budget; the night doesn't hold it
     folds: tuple = ()                 # ids of held items it carries (marked 'folded' when it goes)
     text_only: bool = False           # never spoken, wherever he is (email)
+    text_to: str | None = None        # a text_only message's surface (discord | telegram); None = the desk's default
 
 
 @dataclass
@@ -126,12 +127,13 @@ class Reach:
     brief: bool = False
     folds: tuple = ()
     text_only: bool = False
+    text_to: str | None = None
 
     def event(self) -> ReachEvent:
         return ReachEvent(source=self.source, topic=self.topic, headline=self.headline, detail=self.detail,
                           urgency=self.urgency, owed=self.owed, dedupe_key=self.dedupe_key,
                           expires_at=self.expires_at, room=self.room, brief=self.brief, folds=tuple(self.folds),
-                          text_only=self.text_only)
+                          text_only=self.text_only, text_to=self.text_to)
 
 
 @dataclass
@@ -280,7 +282,8 @@ class MemoryReachStore:
         r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
                   headline=event.headline, detail=event.detail, dedupe_key=event.dedupe_key, status=status,
                   not_before=not_before, expires_at=event.expires_at, reason=reason, created_at=now,
-                  room=event.room, brief=event.brief, folds=tuple(event.folds), text_only=event.text_only)
+                  room=event.room, brief=event.brief, folds=tuple(event.folds), text_only=event.text_only,
+                  text_to=event.text_to)
         self.rows[r.id] = r
         self._next += 1
         return r
@@ -371,7 +374,7 @@ class PostgresReachStore:
 
     COLUMNS = ("id, source, topic, urgency, owed, headline, detail, dedupe_key, status, not_before, expires_at, "
                "reason, surface, silent, spoken_at, dm_at, delivered_at, acked_at, attempts, created_at, "
-               "room, brief, folds, text_only")
+               "room, brief, folds, text_only, text_to")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -386,17 +389,18 @@ class PostgresReachStore:
         return Reach(id=r[0], source=r[1], topic=r[2], urgency=r[3], owed=r[4], headline=r[5], detail=r[6],
                      dedupe_key=r[7], status=r[8], not_before=r[9], expires_at=r[10], reason=r[11], surface=r[12],
                      silent=r[13], spoken_at=r[14], dm_at=r[15], delivered_at=r[16], acked_at=r[17],
-                     attempts=r[18], created_at=r[19], room=r[20], brief=r[21], folds=tuple(r[22] or ()), text_only=bool(r[23]))
+                     attempts=r[18], created_at=r[19], room=r[20], brief=r[21], folds=tuple(r[22] or ()), text_only=bool(r[23]),
+                     text_to=r[24])
 
     def add(self, event, now, *, status, reason, not_before):
         with self._connect() as conn:
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
-                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only) VALUES "
-                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only, text_to) VALUES "
+                f"(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {self.COLUMNS}",
                 (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
-                 list(event.folds), event.text_only)).fetchone()
+                 list(event.folds), event.text_only, event.text_to)).fetchone()
         return self._row(row)
 
     def add_new(self, event, now, *, status, reason, not_before):
@@ -406,14 +410,14 @@ class PostgresReachStore:
         with self._connect() as conn:
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
-                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only) "
-                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
+                "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only, text_to) "
+                "SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s "
                 "WHERE NOT EXISTS (SELECT 1 FROM v2_reachouts WHERE dedupe_key = %s) "
                 # Two producers at once: the unique index (migration 019) turns the loser away.
                 f"ON CONFLICT DO NOTHING RETURNING {self.COLUMNS}",
                 (now, now, event.source, event.topic, event.urgency, event.owed, event.headline, event.detail,
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
-                 list(event.folds), event.text_only, event.dedupe_key)).fetchone()
+                 list(event.folds), event.text_only, event.text_to, event.dedupe_key)).fetchone()
         return self._row(row) if row else None
 
     def recently_sent(self, dedupe_key, since):
@@ -579,7 +583,9 @@ class Deliverer:
 
     def deliver(self, row: Reach, decision: Decision) -> Delivery:
         try:
-            where = Where(self.text_surface) if row.text_only else self.locate()
+            # A text_only message goes to its own surface when it names one (D20: a ticket asked on
+            # Telegram is answered on Telegram), else the desk's default text surface.
+            where = Where(row.text_to or self.text_surface) if row.text_only else self.locate()
         except Exception as e:      # can't place him: text (a pinned brief then waits for its room)
             log.warning("reach: couldn't place him (%s); texting", type(e).__name__)
             where = Where(self.text_surface)
