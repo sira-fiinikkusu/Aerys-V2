@@ -136,25 +136,30 @@ def _key(*parts) -> str:
 
 
 _QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"'})
-_EDGES = " \t\n.,!?;:'\"-\u2026"
+_EDGES = " \t\n.,!?;:'\"\u2026"
+#: A twin finished this recently is still "in hand": its job was just dispatched and is running at
+#: home, so the same words typed now would start it twice (Codex recheck, 11/09).
+RECENT_TWIN = timedelta(minutes=10)
 
 
-def _norm(value):
-    """The same words however they're dressed: case, spacing, curly quotes and the punctuation at
-    either end don't make a new request (Codex, 11/09: a trailing '.' escaped his no)."""
+def _norm(value, loose=False):
+    """The same words however they're dressed: spacing, curly quotes and the punctuation at either end
+    don't make a new request (Codex, 11/09: a trailing '.' escaped his no). Case counts (two paths
+    that differ only in case are different work) unless `loose`, which his-no uses."""
     if isinstance(value, str):
-        return " ".join(value.translate(_QUOTES).split()).casefold().strip(_EDGES)
+        text = " ".join(value.translate(_QUOTES).split()).strip(_EDGES)
+        return text.casefold() if loose else text
     if isinstance(value, dict):
-        return {k: _norm(v) for k, v in value.items()}
+        return {k: _norm(v, loose) for k, v in value.items()}
     if isinstance(value, list):
-        return [_norm(v) for v in value]
+        return [_norm(v, loose) for v in value]
     return value
 
 
-def _request(args) -> dict:
+def _request(args, loose=False) -> dict:
     """What was asked, without the gate's own wording ('what'), normalized: two asks for the same
-    thing match, from any thread, however they're punctuated."""
-    return {k: _norm(v) for k, v in dict(args or {}).items() if k != "what"}
+    thing match, from any thread, however they're punctuated (and, `loose`, however they're cased)."""
+    return {k: _norm(v, loose) for k, v in dict(args or {}).items() if k != "what"}
 
 
 def _tasks(state) -> dict:
@@ -175,10 +180,10 @@ class MemoryGatedActionStore:
     def attempts(self, base_key):
         return sorted((r for r in self.rows.values() if r.base_key == base_key), key=lambda r: r.attempt)
 
-    def same_request(self, action, args):
-        """Every row asking for exactly this (the same action and args, from any thread), oldest first."""
-        want = _request(args)
-        return sorted((r for r in self.rows.values() if r.action == action and _request(r.args) == want),
+    def same_request(self, action, args, loose=False):
+        """Every row asking for this (the same action and args, from any thread), oldest first."""
+        want = _request(args, loose)
+        return sorted((r for r in self.rows.values() if r.action == action and _request(r.args, loose) == want),
                       key=lambda r: r.id)
 
     def add(self, approval_id, action, base_key, attempt, thread_id, args, now):
@@ -242,14 +247,14 @@ class PostgresGatedActionStore:
         return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE base_key = %s ORDER BY attempt",
                          (base_key,))
 
-    def same_request(self, action, args):
+    def same_request(self, action, args, loose=False):
         """Candidates by action and tool, matched in Python: the match is normalized (_request), which
         a JSONB equality can't do."""
-        want = _request(args)
+        want = _request(args, loose)
         rows = self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE action = %s "
                          "AND (args ->> 'tool') IS NOT DISTINCT FROM %s ORDER BY id",
                          (action, (args or {}).get("tool")))
-        return [r for r in rows if _request(r.args) == want]
+        return [r for r in rows if _request(r.args, loose) == want]
 
     def add(self, approval_id, action, base_key, attempt, thread_id, args, now):
         from psycopg.types.json import Jsonb
@@ -353,9 +358,10 @@ class HandsGate:
             return Verdict(False, GATE_DOWN)
         now = self.clock()
         for row in twins:
-            if row.status == "running":
+            if row.status == "running" or (row.status == "done" and row.finished_at is not None
+                                           and now - row.finished_at < RECENT_TWIN):
                 return Verdict(False, f"That's already being done ({row.args.get('what') or 'the job he approved'}); "
-                                      "it isn't done twice.")
+                                      "it isn't done twice. Check on it instead.")
             if row.status != "waiting":
                 continue
             try:
@@ -459,7 +465,7 @@ class HandsGate:
         today (Eastern):
         the time he said it, e.g. "10:42 AM"; else None. Ran out or withdrawn isn't a no. Raises
         when an answer can't be read, so the caller fails closed."""
-        same = [r for r in rows if _request(r.args) == _request(args)]
+        same = [r for r in rows if _request(r.args, loose=True) == _request(args, loose=True)]
         for r in reversed(same):
             state = self.approvals.status(r.approval_id)
             if state == "unknown":
@@ -515,7 +521,7 @@ class HandsGate:
                     return Verdict(False, f"Chris approved {r.args.get('what') or what}; it's being done now. "
                                           "Don't ask again.")
             if not himself:
-                said_no = self._no_today(same, args)
+                said_no = self._no_today(self.store.same_request(action, args, loose=True), args)
                 if said_no is not None:
                     return Verdict(False, f"Chris said no to {what} at {said_no}; I'll leave it for today unless he "
                                           "brings it up himself.")

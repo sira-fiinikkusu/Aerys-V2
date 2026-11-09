@@ -826,3 +826,35 @@ def test_a_no_isnt_escaped_by_punctuation_case_or_spacing():
     v = b.gate.home_job(PANEL_ASK, "panel:thread-9", "start_async_task",
                         {"description": "Build the fridge planner page for Sam", "subagent_type": "home"})
     assert "Waiting for Chris" in v.text
+
+
+# --- Codex low recheck of the fixes (11/09 15:40) -------------------------------------------
+
+def test_a_twin_the_watcher_just_dispatched_isnt_started_again_by_his_typed_words():
+    # Codex's repro: the watcher finishes the queued twin between the gate's read and its decision.
+    b = Box()
+    b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    real = b.store.same_request
+
+    def racing(action, args, **kw):
+        b.watcher.tick()
+        return real(action, args, **kw)
+
+    b.store.same_request = racing
+    direct = b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert (1 if direct.go else 0) + len(b.done) == 1 and not direct.go and "already" in direct.text
+    # Later, the same job typed again is his to ask for: a new run.
+    b.store.same_request = real
+    b.clock["now"] = NOW + timedelta(minutes=11)
+    assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE).go
+
+
+def test_requests_that_differ_only_in_case_are_different_work():
+    b = Box()
+    b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task",
+                    {"description": "Create /tmp/Report.txt", "subagent_type": "home"})
+    b.tap()
+    assert b.store.claim(next(iter(b.store.rows.values())).id)        # the watcher has it, mid-run
+    assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task",
+                           {"description": "Create /tmp/report.txt", "subagent_type": "home"}).go
