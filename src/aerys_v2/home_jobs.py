@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from aerys_v2.hands_gate import (
+    CANCEL,
     HOME_JOB,
     HOME_TOOLS,
     OTHER,
@@ -387,14 +388,18 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
             call = {"description": str(args.get("description") or ""), "subagent_type": str(args.get("subagent_type") or "")}
         elif name == UPDATE:
             call = {"task_id": str(args.get("task_id") or ""), "message": str(args.get("message") or "")}
+        elif name == CANCEL:
+            # D17 Q3 (11/09): a stop from a voice she wasn't sure was his, once he tapped Approve.
+            call = {"task_id": str(args.get("task_id") or "")}
         else:
             return False, "not a home job"
         with ledger.locked(owner_person_id) as session:
             try:
                 state = {"messages": [], "async_tasks": session.load(owner_person_id)}
             except Exception:
-                log.warning("home jobs: couldn't read his jobs; the approved job wasn't started", exc_info=True)
-                return False, "I couldn't read his home jobs, so nothing was started"
+                log.warning("home jobs: couldn't read his jobs; the approved %s didn't run", name, exc_info=True)
+                return False, ("I couldn't read his home jobs, so nothing was stopped" if name == CANCEL
+                               else "I couldn't read his home jobs, so nothing was started")
             runtime = ToolRuntime(state=state, context=None, config={"configurable": {"thread_id": row.thread_id}},
                                   stream_writer=lambda *_: None, tool_call_id=f"approved-{row.id}", store=None)
             result = tools[name].func(**call, runtime=runtime)
@@ -411,6 +416,8 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
         (task,) = tasks.values()
         if name == START:
             return True, f"It's running on your home machine (task {task['task_id']}).{recorded}"
+        if name == CANCEL:
+            return True, f"The job was stopped (task {task['task_id']}).{recorded}"
         return True, f"The change went to the running job (task {task['task_id']}); it adjusts in flight.{recorded}"
 
     return run

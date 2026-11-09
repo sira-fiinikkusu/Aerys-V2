@@ -323,6 +323,43 @@ def test_cancelling_his_job_stops_it_on_her_home_body(home):
     assert b.ledger.load(OWNER)[task_id]["status"] == "cancelled"
 
 
+UNSURE = {"user_id": OWNER, "display_name": "Chris", "voice": True,
+          "speaker": {"id": "unknown", "confidence": 0.31, "demoted": False}}
+
+
+def test_a_stop_from_a_voice_she_isnt_sure_of_waits_for_his_button_then_stops_the_job_once(home):
+    # D17 Q3 (11/09): it could be someone else in the house, and a cancel can end a long job.
+    b = Box()
+    b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
+    (task_id,) = b.ledger.load(OWNER)
+    out, _ = b.turn([call("cancel_async_task", {"task_id": task_id}), AIMessage(content="Asked him.")], UNSURE,
+                    thread=VOICE_THREAD, text="stop that")
+    assert "Waiting for Chris" in tool_texts(out)[0]
+    assert home.runs["r-1"]["status"] == "running"                         # nothing stopped yet
+    assert b.ledger.load(OWNER)[task_id]["status"] != "cancelled"
+    (row,) = b.actions.waiting()
+    b.tap(row.approval_id)
+    assert b.jobs.watcher.tick()["done"] == 1
+    assert home.runs["r-1"]["status"] == "interrupted"
+    assert b.ledger.load(OWNER)[task_id]["status"] == "cancelled"
+    assert b.notes and "stopped" in b.notes[-1][1] and task_id in b.notes[-1][1]
+    cancels = [c for c in home.calls if c[0] == "POST" and c[1].endswith("/cancel")]
+    assert len(cancels) == 1
+    assert b.jobs.watcher.tick() == {"done": 0, "failed": 0, "dropped": 0}   # never twice
+    assert len([c for c in home.calls if c[0] == "POST" and c[1].endswith("/cancel")]) == 1
+
+
+def test_an_approved_stop_of_a_job_she_doesnt_know_fails_in_plain_words(home):
+    b = Box()
+    b.turn([call("cancel_async_task", {"task_id": "no-such-task"}), AIMessage(content="Asked him.")], UNSURE,
+           thread=VOICE_THREAD, text="stop that")
+    (row,) = b.actions.waiting()
+    b.tap(row.approval_id)
+    assert b.jobs.watcher.tick()["failed"] == 1
+    assert not [c for c in home.calls if c[1].endswith("/cancel")]
+    assert b.notes and "not a home job" not in b.notes[-1][1]
+
+
 def test_guests_never_see_or_touch_his_jobs(home):
     b = Box()
     b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
