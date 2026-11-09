@@ -28,6 +28,10 @@ from aerys_v2.hands_gate import (
 )
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
 
+import aerys_v2.hands_gate as hands_gate
+
+OWNER_ASK = getattr(hands_gate, "OWNER_ASK", "owner_ask")
+
 NOW = datetime(2026, 11, 9, 15, 0, tzinfo=timezone.utc)
 OWNER = "6e6bcbed-0000-4000-8000-000000000001"
 SAM = "ef6df13a-0000-4000-8000-000000000002"
@@ -42,6 +46,10 @@ UNSURE = {"user_id": OWNER, "display_name": "Chris", "voice": True, VOICE_OWNER_
 GUEST_VOICE = {"user_id": "guest-voice", "display_name": "Guest", "voice": True,
                "speaker": {"id": "unknown", "confidence": 0.1, "demoted": True}}
 KAEL_ASK = {"user_id": OWNER, "display_name": "Kael", "privacy_context": "private"}
+LENS_ASK = {"user_id": OWNER, "display_name": "Chris", "privacy_context": "private", "surface": "lens"}
+PANEL_ASK = {"user_id": OWNER, "display_name": "Chris", "privacy_context": "private", "device_id": "panel-1"}
+STRANGER_ASK = {"user_id": "someone-else", "display_name": "Someone", "privacy_context": "private"}
+KAEL_THREAD = "kael:escape-test"
 SAM_TEXT = {"user_id": SAM, "display_name": "Sam", "platform": "discord", "channel_kind": "guild"}
 
 START_WRITE = {"description": "Build the fridge planner page", "subagent_type": "home"}
@@ -97,7 +105,10 @@ class Box:
     ({"user_id": OWNER, "voice": True, "speaker": {"id": "unknown", "confidence": 0.5}}, VOICE_UNSURE),
     ({"user_id": OWNER, "voice": True}, VOICE_UNSURE),          # the HA chat shim: no speaker verdict at all
     (GUEST_VOICE, OTHER),
-    (KAEL_ASK, OTHER),                                          # /ask carries his id but isn't him typing
+    (KAEL_ASK, OWNER_ASK),                 # /ask carries his id: his own line, but not proof he typed it (D17 Q4)
+    (LENS_ASK, OWNER_ASK),
+    (PANEL_ASK, OWNER_ASK),
+    (STRANGER_ASK, OTHER),
     (SAM_TEXT, OTHER),
     ({}, OTHER),
     (None, OTHER),
@@ -152,7 +163,7 @@ def test_read_only_is_the_agent_listed_never_her_word_for_it():
 
 
 def test_guests_unknown_voices_and_lines_that_arent_his_are_refused_with_no_button():
-    for identity in (GUEST_VOICE, KAEL_ASK, SAM_TEXT, None):
+    for identity in (GUEST_VOICE, STRANGER_ASK, SAM_TEXT, None):
         b = Box()
         for tool in ("start_async_task", "update_async_task", "check_async_task", "cancel_async_task",
                      "list_async_tasks"):
@@ -161,12 +172,56 @@ def test_guests_unknown_voices_and_lines_that_arent_his_are_refused_with_no_butt
         assert not b.approval_store.rows and not b.store.rows
 
 
-def test_checking_listing_and_stopping_his_jobs_are_his_any_way_he_asks():
+def test_checking_and_listing_his_jobs_are_his_any_way_he_asks():
     b = Box()
-    for identity in (TEXT, STRONG, UNTAGGED):
-        for tool in ("check_async_task", "list_async_tasks", "cancel_async_task"):
+    for identity in (TEXT, STRONG, UNTAGGED, UNSURE, KAEL_ASK, LENS_ASK):
+        for tool in ("check_async_task", "list_async_tasks"):
             assert b.gate.home_job(identity, OWNER_THREAD, tool, {"task_id": "t-1"}).go
     assert not b.approval_store.rows
+
+
+def test_his_typed_words_and_his_voice_on_a_strong_match_stop_a_job_directly():
+    b = Box()
+    for identity in (TEXT, STRONG):
+        assert b.gate.home_job(identity, OWNER_THREAD, "cancel_async_task", {"task_id": "t-1"}).go
+    assert not b.approval_store.rows
+
+
+def test_a_voice_it_wasnt_sure_of_stopping_a_job_waits_for_his_button():
+    """D17 Q3 (11/09): it could be someone else in the house, and a cancel can end a job 40 minutes in."""
+    state = {"async_tasks": {"t-rw": {"agent_name": "home", "status": "running"}}}
+    for identity in (UNTAGGED, UNSURE):
+        b = Box()
+        v = b.gate.home_job(identity, OWNER_THREAD, "cancel_async_task", {"task_id": "t-rw"}, state)
+        assert not v.go and "Waiting for Chris" in v.text
+        (a,) = b.approval_store.rows.values()
+        assert a.kind == "home job" and a.summary.startswith("Stop a running home job (home)")
+        assert "wasn't sure" in a.detail and "t-rw" in a.detail
+        b.tap()
+        assert b.watcher.tick()["done"] == 1
+        assert b.done == [("job", {"tool": "cancel_async_task", "task_id": "t-rw",
+                                   "what": "stopping the home job, asked by voice"})]
+
+
+@pytest.mark.parametrize("identity,thread,source", [
+    (KAEL_ASK, KAEL_THREAD, "Kael's line"),
+    (LENS_ASK, OWNER_THREAD, "the G2 lens"),
+    (PANEL_ASK, OWNER_THREAD, "the panel or Sticky"),
+])
+def test_his_own_lines_get_his_button_instead_of_a_no(identity, thread, source):
+    """D17 Q4 (11/09): the G2 lens, the panel, Sticky and Kael's line carry his id but can't show
+    he typed it: starting, changing or stopping a job waits for his tap; nothing is refused."""
+    b = Box()
+    v = b.gate.home_job(identity, thread, "start_async_task", START_READ)
+    assert not v.go and "Waiting for Chris" in v.text            # even a read-only agent: not his voice
+    (a,) = b.approval_store.rows.values()
+    assert source in a.summary and source in a.detail
+    state = {"async_tasks": {"t-rw": {"agent_name": "home"}}}
+    assert not b.gate.home_job(identity, thread, "update_async_task", {"task_id": "t-rw", "message": "x"}, state).go
+    assert not b.gate.home_job(identity, thread, "cancel_async_task", {"task_id": "t-rw"}, state).go
+    assert len(b.approval_store.rows) == 3 and not b.done
+    b.tap(approval_id=a.id)
+    assert b.watcher.tick()["done"] == 1 and b.done[0][1]["tool"] == "start_async_task"
 
 
 def test_changing_a_running_job_by_voice_follows_the_job_agent():
@@ -609,3 +664,82 @@ def test_the_resend_warning_is_in_what_he_reads_whole():
     b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
     again = max(b.approval_store.rows.values(), key=lambda a: a.id)
     assert "may have gone through" in again.detail and "sam_42" in again.detail
+
+
+# --- D17 Q5 (11/09): after his no, she leaves it for the day ----------------------------------
+# "ok, keep it adaptive. She can resurface it later if it makes sense to ask again": a no holds
+# for the rest of that day (Eastern); from the next day she may ask again. Him raising it himself
+# (his typed words, or his voice on a strong match) is never held.
+
+
+def _declined(b, identity, thread=OWNER_THREAD, args=START_WRITE):
+    b.gate.home_job(identity, thread, "start_async_task", args)
+    b.tap(approve=False)
+    b.watcher.tick()
+
+
+def test_after_his_no_she_leaves_the_same_job_for_the_rest_of_the_day():
+    b = Box()
+    _declined(b, UNTAGGED)
+    b.clock["now"] = NOW + timedelta(hours=5)                    # 3 PM Eastern, same day
+    v = b.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "said no" in v.text and "10:00 AM" in v.text and "today" in v.text
+    assert len(b.approval_store.rows) == 1 and len(b.pinged) == 1 and not b.done
+    # a different job is a different request: it gets its own button
+    assert "Waiting for Chris" in b.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task",
+                                                  {"description": "Something else", "subagent_type": "home"}).text
+    # the next day she may bring it back
+    b.clock["now"] = NOW + timedelta(days=1)
+    v = b.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 3
+
+
+def test_the_day_is_his_eastern_day_not_utc():
+    b = Box()
+    b.clock["now"] = datetime(2026, 11, 10, 3, 30, tzinfo=timezone.utc)      # 10:30 PM Eastern, 11/9
+    _declined(b, KAEL_ASK, KAEL_THREAD)
+    b.clock["now"] = datetime(2026, 11, 10, 4, 30, tzinfo=timezone.utc)      # 11:30 PM Eastern: same day
+    v = b.gate.home_job(KAEL_ASK, KAEL_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "10:30 PM" in v.text and len(b.approval_store.rows) == 1
+    b.clock["now"] = datetime(2026, 11, 10, 5, 30, tzinfo=timezone.utc)      # 12:30 AM Eastern, 11/10
+    assert "Waiting for Chris" in b.gate.home_job(KAEL_ASK, KAEL_THREAD, "start_async_task", START_WRITE).text
+
+
+def test_him_raising_it_again_himself_is_never_held():
+    b = Box()
+    _declined(b, UNTAGGED)
+    assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", START_WRITE).go      # his typed words
+    v = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)            # his voice, strong match
+    assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 2
+
+
+def test_a_request_that_ran_out_or_was_withdrawn_isnt_a_no():
+    b = Box()
+    b.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.clock["now"] = NOW + timedelta(minutes=31)                 # expired unanswered
+    b.watcher.tick()
+    v = b.gate.home_job(UNTAGGED, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 2
+
+
+def test_a_declined_first_message_isnt_asked_again_today_but_new_words_are():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    b.tap(approve=False)
+    b.watcher.tick()
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    assert not v.go and "said no" in v.text and "today" in v.text and len(b.approval_store.rows) == 1
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "a different message")
+    assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 2
+
+
+def test_him_asking_for_the_same_message_again_gets_a_new_button():
+    b = Box()
+    b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam")
+    b.tap(approve=False)
+    b.watcher.tick()
+    # her own asking (no identity, a voice it wasn't sure of, one of his /ask lines) stays held
+    for identity in (None, UNSURE, KAEL_ASK):
+        assert "said no" in b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam", identity=identity).text
+    v = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hi Sam", identity=TEXT)
+    assert not v.go and "Waiting for Chris" in v.text and len(b.approval_store.rows) == 2
