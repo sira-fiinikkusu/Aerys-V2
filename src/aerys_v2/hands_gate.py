@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from aerys_v2.approvals import DEFAULT_FOR, approvals_for
+from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_voice_turn
 
 log = logging.getLogger(__name__)
@@ -324,6 +324,15 @@ class HandsGate:
                                       "Don't send it again.")
             if any(r.status == "done" and r.args.get("text") == str(text or "") for r in approved):
                 return Verdict(False, "That exact message already went when Chris approved it; it isn't sent twice.")
+            if any(r.status == "failed" and r.args.get("text") == str(text or "") for r in approved):
+                # It may have gone before it failed: sending the same words again is his call.
+                what = f"the resend of your message to {name} ({label}: {handle})"
+                return self._ask(MESSAGE, base_key, str(thread_id or ""),
+                                 {"platform": platform, "address": address, "person_id": pid, "name": name,
+                                  "handle": handle, "text": str(text or ""), "what": what},
+                                 kind="message again",
+                                 summary=f"Send again to {name} · {label}: {handle} (the last try may have gone through)",
+                                 detail=f"What she'd send again:\n{text}", what=what)
             return GO
         what = f"your first message to {name} ({label}: {handle})"
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
@@ -337,6 +346,10 @@ class HandsGate:
     def _ask(self, action, base_key, thread_id, args, *, kind, summary, detail, what) -> Verdict:
         if action not in self.executors:
             return Verdict(False, CANT_ASK_HOME if action == HOME_JOB else CANT_ASK_MESSAGE)
+        if len(detail) > DETAIL_CHARS:
+            # His button shows the words whole or not at all: what he approves is what goes.
+            return Verdict(False, f"Not done: that's too long to show Chris whole on his button (about "
+                                  f"{DETAIL_CHARS - 200} characters fit). Shorten it, or ask him in words.")
         try:
             rows = self.store.attempts(base_key)
             last = rows[-1] if rows else None
