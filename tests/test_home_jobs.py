@@ -143,9 +143,17 @@ def home(monkeypatch):
     def client_for(*, url=None, api_key=None, headers=None, timeout=None):
         assert url == HOME_URL
         return SyncLangGraphClient(httpx.Client(base_url=url, headers=dict(headers or {}),
-                                                transport=httpx.MockTransport(server.handler)))
+                                                transport=httpx.MockTransport(lambda request: server.handler(request))))
+
+    def async_client_for(*, url=None, api_key=None, headers=None, timeout=None):
+        from langgraph_sdk.client import LangGraphClient
+
+        assert url == HOME_URL
+        return LangGraphClient(httpx.AsyncClient(base_url=url, headers=dict(headers or {}),
+                                                 transport=httpx.MockTransport(lambda request: server.handler(request))))
 
     monkeypatch.setattr(official, "get_sync_client", client_for)
+    monkeypatch.setattr(official, "get_client", async_client_for)
     return server
 
 
@@ -436,3 +444,166 @@ def test_the_action_stack_mounts_home_jobs_on_the_new_loop_only_when_armed(home,
     _, graph = action_stack_for(settings(), soul="s")        # HOME_JOBS off: nothing changes
     assert graph.home_jobs is None and "extra_middleware" not in seen[-1]
     assert HOME_JOBS_OVERLAY not in seen[-1]["overlay"]
+
+
+# --- Codex review 1 (11/09) --------------------------------------------------------------------
+
+
+def test_listing_home_as_read_only_never_lets_his_voice_start_it_directly(home):
+    b = Box()
+    b.jobs = build_home_jobs(url=HOME_URL, token=TOKEN, ledger=b.ledger, owner_person_id=OWNER,
+                             gate_factory=lambda ex: HandsGate(b.approvals, b.actions, owner_person_id=OWNER,
+                                                               people=None, executors=ex,
+                                                               read_only_agents=(HOME_AGENT,), clock=lambda: NOW))
+    out, _ = b.turn([call("start_async_task", START), AIMessage(content="Asked him.")], STRONG, thread=VOICE_THREAD)
+    assert "Waiting for Chris" in tool_texts(out)[0] and home.created("run") == []
+
+
+def test_a_check_and_a_change_at_the_same_moment_never_leave_a_stale_run_on_record(home):
+    import threading
+
+    b = Box()
+    b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
+    (task_id,) = b.ledger.load(OWNER)
+    real = home.handler
+    hold, change_reached = threading.Event(), threading.Event()
+
+    def handler(request):
+        if request.method == "POST" and request.url.path == f"/threads/{task_id}/runs":
+            change_reached.set()
+        response = real(request)
+        if request.method == "GET" and request.url.path.endswith("/runs/r-1"):
+            hold.wait(5)                     # the check has read r-1 as running, and hasn't saved yet
+        return response
+
+    home.handler = handler
+    check = threading.Thread(target=b.turn, args=([call("check_async_task", {"task_id": task_id}),
+                                                   AIMessage(content="Running.")], TEXT), kwargs={"text": "how's it going?"})
+    change = threading.Thread(target=b.turn, args=([call("update_async_task", {"task_id": task_id, "message": "Blue."}),
+                                                    AIMessage(content="Adjusted.")], TEXT), kwargs={"text": "make it blue"})
+    check.start()
+    change.start()
+    change_reached.wait(1.0)        # only gets here if the change didn't have to wait for the check
+    hold.set()
+    check.join(10)
+    change.join(10)
+    assert b.ledger.load(OWNER)[task_id]["run_id"] == "r-2"
+    home.handler = real
+    b.turn([call("cancel_async_task", {"task_id": task_id}), AIMessage(content="Stopped.")], TEXT, text="stop")
+    assert home.runs["r-2"]["status"] == "interrupted"
+
+
+def test_when_his_jobs_cant_be_read_nothing_starts(home):
+    b = Box()
+
+    def down(owner):
+        raise RuntimeError("db down")
+
+    b.ledger.load = down
+    out, _ = b.turn([call("start_async_task", START), AIMessage(content="Couldn't.")], TEXT)
+    assert "nothing happened" in tool_texts(out)[0] and home.created("run") == []
+
+
+def test_a_job_that_started_but_couldnt_be_written_down_says_so(home):
+    b = Box()
+
+    def down(owner, tasks):
+        raise RuntimeError("db down")
+
+    b.ledger.save = down
+    out, _ = b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
+    (said,) = tool_texts(out)
+    assert "Launched" in said and "couldn't write" in said and len(home.created("run")) == 1
+
+
+def test_every_unfinished_job_stays_reachable_however_many_there_are():
+    from aerys_v2.home_jobs import MAX_TASKS
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    stamp = "2026-11-09T14:00:00Z"
+    running = {f"run-{i}": {"task_id": f"run-{i}", "agent_name": "home", "thread_id": f"run-{i}", "run_id": "r",
+                            "status": "running", "created_at": stamp, "last_checked_at": stamp,
+                            "last_updated_at": stamp} for i in range(MAX_TASKS + 5)}
+    done = {f"done-{i}": {**t, "task_id": f"done-{i}", "status": "success"} for i, t in enumerate(running.values())}
+    ledger.save(OWNER, {**running, **done})
+    got = ledger.load(OWNER)
+    assert set(running) <= set(got)
+    assert len([t for t in got.values() if t["status"] == "success"]) == MAX_TASKS
+
+
+def test_the_sdks_error_text_never_reaches_the_logs_or_his_record(home, caplog):
+    b = Box()
+    marker = "PRIVATE-JOB-WORDS-7731"
+    home.handler = lambda request: httpx.Response(400, json={"detail": f"echo: {marker}"})
+    with caplog.at_level("DEBUG"):
+        out, _ = b.turn([call("start_async_task", START), AIMessage(content="Couldn't.")], TEXT)
+    assert marker not in caplog.text
+    b2 = Box()
+    b2.turn([call("start_async_task", START), AIMessage(content="Asked him.")], STRONG, thread=VOICE_THREAD)
+    (row,) = b2.actions.waiting()
+    b2.tap(row.approval_id)
+    with caplog.at_level("DEBUG"):
+        assert b2.jobs.watcher.tick()["failed"] == 1
+    assert marker not in caplog.text
+    (finished,) = b2.actions.rows.values() if hasattr(b2.actions, "rows") else [None]
+    assert finished is None or marker not in (finished.outcome or "")
+    assert marker not in b2.notes[-1][1]
+
+
+def test_the_ledgers_async_hook_keeps_his_jobs_the_same_way():
+    import asyncio
+
+    from langchain.tools import ToolRuntime
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    stamp = "2026-11-09T15:00:00Z"
+    ledger.save(OWNER, {"t-1": {"task_id": "t-1", "agent_name": "home", "thread_id": "t-1", "run_id": "r-1",
+                                "status": "running", "created_at": stamp, "last_checked_at": stamp,
+                                "last_updated_at": stamp}})
+    mw = home_ledger_middleware(ledger, OWNER)
+
+    def request(identity):
+        rt = ToolRuntime(state={"messages": []}, context=None, stream_writer=lambda *_: None, store=None,
+                         config={"configurable": {"thread_id": DM_THREAD, "identity": identity}}, tool_call_id="c1")
+        return ToolCallRequest(tool_call={"id": "c1", "name": "check_async_task", "args": {"task_id": "t-1"}},
+                               tool=None, state={"messages": []}, runtime=rt)
+
+    async def handler(req):
+        seen = req.runtime.state["async_tasks"]["t-1"]
+        return Command(update={"messages": [ToolMessage("ok", tool_call_id="c1")],
+                               "async_tasks": {"t-1": {**seen, "status": "success", "run_id": "r-2"}}})
+
+    asyncio.run(mw.awrap_tool_call(request(TEXT), handler))
+    assert ledger.load(OWNER)["t-1"]["run_id"] == "r-2"
+
+    async def guest_handler(req):
+        assert "async_tasks" not in req.runtime.state       # his jobs never reach a guest's call
+        return "refused by the gate"
+
+    assert asyncio.run(mw.awrap_tool_call(request(GUEST), guest_handler)) == "refused by the gate"
+
+
+def test_what_is_on_record_wins_over_what_the_turn_last_saw():
+    from langchain.tools import ToolRuntime
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    stamp = "2026-11-09T15:00:00Z"
+    rec = {"task_id": "t-1", "agent_name": "home", "thread_id": "t-1", "status": "running",
+           "created_at": stamp, "last_checked_at": stamp, "last_updated_at": stamp}
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"t-1": {**rec, "run_id": "r-2"}})            # another surface moved it on
+    stale = {"messages": [], "async_tasks": {"t-1": {**rec, "run_id": "r-1"}}}
+    rt = ToolRuntime(state=stale, context=None, stream_writer=lambda *_: None, store=None, tool_call_id="c1",
+                     config={"configurable": {"thread_id": DM_THREAD, "identity": TEXT}})
+    req = ToolCallRequest(tool_call={"id": "c1", "name": "cancel_async_task", "args": {"task_id": "t-1"}},
+                          tool=None, state=stale, runtime=rt)
+    seen = []
+    home_ledger_middleware(ledger, OWNER).wrap_tool_call(
+        req, lambda r: seen.append(r.runtime.state["async_tasks"]["t-1"]["run_id"]) or "ok")
+    assert seen == ["r-2"]
