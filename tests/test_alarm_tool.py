@@ -89,7 +89,7 @@ def test_non_owner_refused_even_for_status_and_arm():
     captured = []
     tool = make_tool(captured)
     for action in ("status", "arm_home", "disarm"):
-        out = tool.invoke({"action": action}, config=cfg({"user_id": "megan-uuid"}))
+        out = tool.invoke({"action": action}, config=cfg({"user_id": "robin-uuid"}))
         assert "REFUSED" in out and "owner" in out
     assert captured == []  # nothing ever reached HA
 

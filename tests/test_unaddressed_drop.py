@@ -36,7 +36,7 @@ CHRIS = {"user_id": "person-1", "display_name": "Chris"}
 # v2 rule (live failure 2026-08-27): only DIRECT second-person address to
 # someone else, or an explicit wave-off, may drop. A story that merely MENTIONS
 # another person is ADDRESSED — this constant is the droppable kind.
-SIDE_CHATTER = "Megan, can you grab my towel real quick?"
+SIDE_CHATTER = "Robin, can you grab my towel real quick?"
 
 
 def fake_model(*replies) -> GenericFakeChatModel:
@@ -315,12 +315,12 @@ def test_round6_capture_log_feeds_the_next_turn(monkeypatch):
     svc._LAST_CAPTURE.clear(); svc._CAPTURE_LOG.clear()
     now = [1000.0]
     monkeypatch.setattr(svc.time, "monotonic", lambda: now[0])
-    assert svc._note_capture("t", "so I told Megan") == {"background_captures_5m": 0}
+    assert svc._note_capture("t", "so I told Robin") == {"background_captures_5m": 0}
     svc._note_outcome("t", "dropped as background speech")
     now[0] += 11
     ctx = svc._note_capture("t", "and then he left it in the driveway")
     assert ctx == {"background_captures_5m": 1,
-                   "previous_capture": {"text": "so I told Megan", "seconds_ago": 11.0, "outcome": "dropped as background speech"}}
+                   "previous_capture": {"text": "so I told Robin", "seconds_ago": 11.0, "outcome": "dropped as background speech"}}
     svc._note_reply_outcome("t", "That one didn't come through, what was the question?")
     now[0] += 5
     assert svc._note_capture("t", "hey Aerys how are you")["background_captures_5m"] == 2
@@ -340,7 +340,7 @@ def test_codex_capture_outcomes_land_on_their_own_capture_and_threads_expire(mon
     now = [5000.0]
     monkeypatch.setattr(svc.time, "monotonic", lambda: now[0])
     ctx_a = contextvars.copy_context(); ctx_b = contextvars.copy_context()
-    ctx_a.run(svc._note_capture, "t", "A: so I told Megan")
+    ctx_a.run(svc._note_capture, "t", "A: so I told Robin")
     now[0] += 2
     ctx_b.run(svc._note_capture, "t", "B: turn off the lights")
     ctx_a.run(svc._note_outcome, "t", "dropped as background speech")

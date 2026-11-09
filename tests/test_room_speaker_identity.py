@@ -18,7 +18,7 @@ is the one path that bypasses it. Resolved once when the gateway starts rather t
 per message, because a room read is thirty messages and this must not become thirty
 queries.
 
-What must NOT change: everyone else keeps their Discord name. Stratus reads as Stratus.
+What must NOT change: everyone else keeps their Discord name. Quinn reads as Quinn.
 The bug is only that one of those names is secretly him.
 """
 import pytest
@@ -59,7 +59,7 @@ class FakeClient:
 
 ROOM = [
     FakeMessage(60426939629838336, 'Sira', 'pickle'),
-    FakeMessage(999, 'Stratus', 'anything forming out there'),
+    FakeMessage(999, 'Quinn', 'anything forming out there'),
 ]
 
 
@@ -78,7 +78,7 @@ def test_his_own_room_lines_carry_his_canonical_name():
 
 def test_everyone_else_keeps_the_name_they_chose():
     rows = read(LiveRoomReader(speaker_names={'60426939629838336': 'Chris'}))
-    assert ('Stratus', 'anything forming out there') in rows, rows
+    assert ('Quinn', 'anything forming out there') in rows, rows
 
 
 def test_without_a_mapping_nothing_changes():
@@ -123,9 +123,9 @@ def test_a_linked_friend_reads_by_his_name_and_a_stranger_keeps_hers():
     reader = LiveRoomReader(speaker_names={'60426939629838336': 'Chris', '111222333444555666': 'Sam'})
     import asyncio
     room = [FakeMessage(111222333444555666, 'Nightjar', "That's perfect."),
-            FakeMessage(999, 'Stratus', 'anything forming out there')]
+            FakeMessage(999, 'Quinn', 'anything forming out there')]
     rows = asyncio.run(reader._read(FakeClient(FakeChannel(room)), '555'))
-    assert ('Sam', "That's perfect.") in rows and ('Stratus', 'anything forming out there') in rows, rows
+    assert ('Sam', "That's perfect.") in rows and ('Quinn', 'anything forming out there') in rows, rows
 
 
 def test_room_names_maps_every_linked_person_on_the_platform(monkeypatch):

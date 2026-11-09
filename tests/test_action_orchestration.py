@@ -863,7 +863,7 @@ def test_no_spoken_ack_means_no_voice_overlay():
 # only person_ids in the allowlist reach the tools; everyone else gets chat-only.
 
 STRANGER = {"user_id": "stranger:404", "display_name": "Nosy Guildmate"}
-MEGAN = {"user_id": "person-megan", "display_name": "Megan"}
+ROBIN = {"user_id": "person-robin", "display_name": "Robin"}
 
 
 def test_action_gate_blocks_non_allowlisted_caller():
@@ -889,12 +889,12 @@ def test_action_gate_allows_owner():
 
 
 def test_action_gate_allows_second_allowlisted_person():
-    # Adding Megan's person_id to the allowlist grants IDENTICAL house access —
+    # Adding Robin's person_id to the allowlist grants IDENTICAL house access —
     # the config-only extension path (house_control_person_ids), proven.
     graph = build_graph(fake_model("never spoken"), soul="s")
     stub = StubActionGraph("light is on")
-    allow = frozenset({CHRIS["user_id"], MEGAN["user_id"]})
-    out = ask(graph, "turn on the light", identity=MEGAN, thread_id="t1",
+    allow = frozenset({CHRIS["user_id"], ROBIN["user_id"]})
+    out = ask(graph, "turn on the light", identity=ROBIN, thread_id="t1",
               router=action_router, action_graph=stub, action_allowlist=allow)
     assert out == "light is on"
     assert stub.calls[0] == "turn on the light"  # reached the stack (gate bounces zero-tool once)

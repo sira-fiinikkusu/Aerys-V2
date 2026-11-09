@@ -10,7 +10,7 @@ Two things the sensors cannot do, which the wording here is careful about:
 
 1. They cannot name WHO. Several rooms read occupied at once (office and living room
    both on while this was written), and an occupancy sensor does not distinguish Chris
-   from Megan from a passing cat. So this reports OCCUPANCY, never "Chris is in the
+   from his wife from a passing cat. So this reports OCCUPANCY, never "Chris is in the
    sunroom" — claiming the latter would be the same error as treating a matching name
    as an identification.
 2. They cannot be trusted as a safety signal. Everything here is fail-open: a dark or
@@ -29,6 +29,8 @@ import contextvars
 import logging
 from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+from aerys_v2.house_names import NAMES, wife_or
 
 log = logging.getLogger(__name__)
 
@@ -145,7 +147,7 @@ def format_whereabouts(home: str | None, settled: str | None, city: dict | None 
 
     The BLE soak, 9/27-10/03: home/away never put him in a room while he was out (7
     nights), and his phone's settled room agreed with the office sensors 99.5% of the
-    time; the bedroom read 50% (Megan, the cats, a still sleeper), and the settled room
+    time; the bedroom read 50% (his wife, the cats, a still sleeper), and the settled room
     lags a move by about 6 minutes. So home/away and "most likely in the office" are
     stated; any other room is a soft guess she may mention lightly and never act on.
     """
@@ -201,7 +203,7 @@ def format_presence(occupied: list[str], spoken_from: str | None = None,
     if occupied:
         rooms = ", ".join(occupied)
         lines.append(f"Rooms showing occupancy right now: {rooms}.")
-        lines.append("Occupancy sensors do not say WHO — that could be Megan or a pet. "
+        lines.append(f"Occupancy sensors do not say WHO — that could be {wife_or(NAMES)} or a pet. "
                      "Use this as ambient awareness; never assert where someone is from occupancy alone"
                      + (" (this caveat is about the room sensors, not his phone)." if where else "."))
     elif spoken_from or not where:

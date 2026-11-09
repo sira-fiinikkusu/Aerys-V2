@@ -276,7 +276,7 @@ def test_voice_suspicious_fragment_waits_for_haiku_and_drops_when_both_agree():
 def test_voice_strong_agreement_marks_strong():
     # 12:52:11 today: the Italy fragment — Jev 0.76, Haiku unaddressed; strong (>= 0.6).
     router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.05)
-    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.8, reflex_unaddressed_strong_floor=0.65), lambda t, c: jev_result("chat", 0.9, unaddressed=0.76), router)("He interrupted Filibuster"))
+    d = _voice(lambda: live_router_for(settings(reflex_unaddressed_floor=0.8, reflex_unaddressed_strong_floor=0.65), lambda t, c: jev_result("chat", 0.9, unaddressed=0.76), router)("He interrupted Morgan"))
     assert d.unaddressed is True and d.unaddressed_strong is True
 
 
@@ -344,7 +344,7 @@ def test_round6_defaults_addressee_alone_above_085_band_to_haiku_below_06_alone(
     # Round 6 (2026-09-20): the default source is the addressee Choice; its background
     # mass gates. >= 0.85 Jev alone; [0.6, 0.85) Haiku decides; < 0.6 addressed.
     router = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
-    d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: {**jev_result("chat", 0.9, unaddressed=0.2), "addressee": _addr(0.96)}, router)("so I told Megan we would leave at nine"))
+    d = _voice(lambda: live_router_for(settings(reflex_router_sample=0.0), lambda t, c: {**jev_result("chat", 0.9, unaddressed=0.2), "addressee": _addr(0.96)}, router)("so I told Robin we would leave at nine"))
     assert d.unaddressed is True and d.unaddressed_strong is True and LAST_REFLEX.get().collect()["unaddressed_score"] == 0.96
     router2 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
     d2 = _voice(lambda: live_router_for(settings(), lambda t, c: {**jev_result("chat", 0.9), "addressee": _addr(0.7)}, router2)("Which is tomorrow."))
@@ -415,7 +415,7 @@ def test_codex_blocker1_low_confidence_fallback_keeps_the_bypass_and_selected_sc
     assert d.unaddressed is True and d.unaddressed_strong is False
     router3 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)
     low3 = lambda t, c: {**jev_result("chat", 0.3, unaddressed=0.2), "addressee": _addr(0.95, "another_person")}  # noqa: E731
-    d = _voice(lambda: live_router_for(settings(), low3, router3)("so I told Megan we would leave at nine"))
+    d = _voice(lambda: live_router_for(settings(), low3, router3)("so I told Robin we would leave at nine"))
     assert d.unaddressed is True and d.unaddressed_strong is True
     # a command shape is never dropped on the fallback branch either
     router4 = SlowRouter(RouteDecision(route="chat", ack="", unaddressed=True), delay=0.01)

@@ -54,7 +54,7 @@ class AskRequest(BaseModel):
     # 2026-08-26). Absent/None = no surface styling, byte-for-byte old behavior.
     surface: str | None = None
     # Speaker ID (2026-09-20): set by HA's aerys_conversation from the
-    # aerys_speaker_stt wrapper's verdict — {"id": "chris"|"megan"|"unknown",
+    # aerys_speaker_stt wrapper's verdict — {"id": "chris"|"<another enrolled voice>"|"unknown",
     # "confidence": 0.71}. Absent = untagged = the owner (pre-speaker-ID behavior).
     speaker: SpeakerTag | None = None
 
@@ -151,7 +151,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             # keeps his own turn rather than being answered as a guest in his house.
             # Only when the RECOGNIZER itself was unsure: a NAMED match knocked down
             # by voice_speaker_min_confidence must never land on the owner — that
-            # would hand Megan's uncertain turn to Chris, which is the worse error.
+            # would hand his wife's uncertain turn to Chris, which is the worse error.
             return None
         person = speaker_persons.get(name)
         if person is not None:

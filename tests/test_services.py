@@ -127,7 +127,7 @@ def test_profile_category_order_fixed_then_insertion():
                 claim_row("zeta.hobby", "Collects meteorites"),
                 claim_row("emotional.mood", "Optimistic under deadline"),
                 claim_row("basic.name", "Preferred name: Chris"),
-                claim_row("interests.gaming", "Playing Subnautica with Joe"),
+                claim_row("interests.gaming", "Playing Subnautica with Alex"),
                 claim_row("alpha.misc", "Alpha thing"),
             ]
         ]
@@ -136,7 +136,7 @@ def test_profile_category_order_fixed_then_insertion():
     # basic → interests → emotional (fixed order), then zeta, alpha (arrival order).
     assert profile["lines"] == [
         "• Preferred name: Chris",
-        "• Playing Subnautica with Joe",
+        "• Playing Subnautica with Alex",
         "• Optimistic under deadline",
         "• Collects meteorites",
         "• Alpha thing",
@@ -186,7 +186,7 @@ def test_pinned_identity_claims_beat_high_confidence_ephemera():
     # (unlocked here — no manual-lock crutch) and partner at 0.93.
     rows = ephemera(20) + [
         claim_row("basic.location", "basic.location: Rotonda West, Florida", confidence=0.93),
-        claim_row("relationship.partner", "In a relationship with Megan", confidence=0.93),
+        claim_row("relationship.partner", "In a relationship with Robin", confidence=0.93),
     ]
     selected = select_claims(claims_of(rows))
     labels = [c["key_label"] for c in selected]

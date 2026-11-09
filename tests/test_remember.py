@@ -104,7 +104,7 @@ def test_tool_schema_has_no_trust_or_confirmation_parameter():
 @pytest.mark.parametrize("text", [
     "remember that the pool guy comes Tuesdays", "Keep in mind I hate cilantro",
     "make a note that the gate code changed", "don't forget the vet is Friday",
-    "for next time, Megan takes oat milk", "note that for later", "remind me the gate code is 4411",
+    "for next time, Robin takes oat milk", "note that for later", "remind me the gate code is 4411",
     "remind me to call the vet on Friday",
     "remind me about the dentist at 3",  # Chris 10/23: a real reminder, so keep it
 ])

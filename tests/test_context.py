@@ -137,9 +137,9 @@ def test_context_private_when_explicitly_requested():
 
 
 def test_context_profile_only_when_no_memory_rows():
-    conn = FakeConn([[profile_row("interests.gaming", "Plays Subnautica with Joe")], []])
+    conn = FakeConn([[profile_row("interests.gaming", "Plays Subnautica with Alex")], []])
     assert build_context(PERSON, "hi", conn, embed=FAKE_EMBED) == (
-        "• Plays Subnautica with Joe"
+        "• Plays Subnautica with Alex"
     )
 
 
@@ -399,7 +399,7 @@ def test_an_expired_claim_is_not_who_he_is():
     2026-09-21, so a claim approved on 2026-04-10 — "Dad is visiting, arrived last
     night" — was still being injected as a standing fact five months later. The
     query must exclude a claim whose expiry has passed, and must keep the ones with
-    no expiry: age alone is not the discriminator ("married Megan in April" is
+    no expiry: age alone is not the discriminator ("married Robin in April" is
     permanent, "arrived last night" is not)."""
     from aerys_v2.services.profile import PROFILE_SQL
 

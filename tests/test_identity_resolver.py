@@ -54,7 +54,7 @@ def test_stranger_resolves_cold_and_never_owner():
 def test_second_user_gets_their_own_id_not_the_owner():
     # The resolver has no owner concept at all — a known second person resolves to
     # THEIR row, structurally incapable of inheriting Chris. This test documents it.
-    row = {"person_id": OTHER, "display_name": "Megan", "is_new": False}
+    row = {"person_id": OTHER, "display_name": "Robin", "is_new": False}
     ident = identity_from_lookup(row, event(platform_user_id="222"))
     assert ident["user_id"] == OTHER
     assert ident["user_id"] != OWNER

@@ -33,7 +33,7 @@ from aerys_v2.workers.extraction import (
 
 T0 = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
 CHRIS = "6e6bcbed-03ef-4d17-95d2-89c467414335"
-MEGAN = "11111111-2222-3333-4444-555555555555"
+ROBIN = "11111111-2222-3333-4444-555555555555"
 
 
 def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
@@ -127,7 +127,7 @@ def test_groups_by_person_before_extraction():
     """Interleaved two-person chat -> two LLM calls, each seeing ONLY its person."""
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram"),
-        row(MEGAN, "I collect SNES games"),
+        row(ROBIN, "I collect SNES games"),
         row(CHRIS, "and I live in Rotonda West"),
     ])])
     staging = FakeConn()
@@ -265,7 +265,7 @@ def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
     PERSON_C = "99999999-8888-7777-6666-555555555555"
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raw_a),
-        row(MEGAN, "I collect SNES games", id="b", at=T0 + timedelta(seconds=2), raw=raw_b),
+        row(ROBIN, "I collect SNES games", id="b", at=T0 + timedelta(seconds=2), raw=raw_b),
         row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
     ])])
     staging = FakeConn()
@@ -435,7 +435,7 @@ def test_limit_boundary_tie_is_trimmed_not_split():
     tie_at = T0 + timedelta(seconds=5)
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "first", id="1", at=T0, raw="2026-07-03 12:00:00.000000+00"),
-        row(MEGAN, "tied-a", id="2", at=tie_at, raw=tie_raw),
+        row(ROBIN, "tied-a", id="2", at=tie_at, raw=tie_raw),
         row(CHRIS, "tied-b", id="3", at=tie_at, raw=tie_raw),
     ])])
     staging = FakeConn()

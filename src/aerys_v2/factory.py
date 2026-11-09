@@ -27,6 +27,7 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.anthropic_model import build_metered_model
 from aerys_v2.config import Settings
+from aerys_v2.house_names import NAMES, wife_or
 from aerys_v2.history import prompt_with_context, window_messages
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config, is_lens_surface, is_voice_turn
@@ -260,7 +261,7 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
 
     def people(person_id: str, window_text: str, privacy_context: str = "public") -> str:
         # What she remembers about the people the conversation is ABOUT (owner 2026-10-22:
-        # on voice she "suddenly doesnt remember Joe"). Same fences as context_fn.
+        # on voice she "suddenly doesnt remember [a friend]"). Same fences as context_fn.
         from aerys_v2.services.people_memory import people_memory_block
         try:
             with psycopg.connect(settings.memories_database_url) as conn:
@@ -850,7 +851,7 @@ def _safe_display_name(name: object) -> str:
 def action_allowlist_for(settings: Settings) -> frozenset[str] | None:
     """Who may reach the ACTION stack (house control + every tool) — the auth gate
     ask() enforces. The owner is ALWAYS in the set; settings.house_control_person_ids
-    (CSV) adds more (Megan's person_id lands there once her identity is solutioned —
+    (CSV) adds more (his wife's person_id lands there once her identity is solutioned —
     identical house access to Chris). None when no owner is configured (dev boxes):
     the gate in ask() then stays UNENFORCED, same posture as deep_gate_for. Widening
     access is a config edit, never a code change.
@@ -2981,7 +2982,7 @@ def _parse_shared_surfaces(csv: str) -> dict:
 
 def _shared_surface_note(identity: dict, shared: dict) -> str:
     """Household-surface block (owner ask 8/16): a designated shared device
-    (the Stickies) speaks for the WHOLE house — Megan as much as Chris. The
+    (the Stickies) speaks for the WHOLE house — his wife as much as Chris. The
     device authenticates as owner infrastructure; the speaker does not."""
     if not shared:
         return ""
@@ -2996,7 +2997,7 @@ def _shared_surface_note(identity: dict, shared: dict) -> str:
     return (
         f"\n\nThis message arrived via a HOUSEHOLD surface — {surface}. "
         "The speaker is not necessarily Chris: it may "
-        "be Megan, or a guest. Never assume who is talking — reading the "
+        f"be {wife_or(NAMES)}, or a guest. Never assume who is talking — reading the "
         "words for who they sound like is fine, and warmly asking is always "
         "fine. Until the speaker is clearly Chris, stay identity-neutral (no "
         "names, no pet names) and keep his personal or private specifics — "

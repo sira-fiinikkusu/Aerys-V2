@@ -1,6 +1,6 @@
 -- 018: her morning brief (board #176, Stage 2). The owner, 2026-11-08: Kael's brief stays on
 -- his phone and watch; hers is spoken, "in the office when she first detects me in there after
--- waking", so he's more awake and it doesn't wake Megan. The brief goes through the desk like
+-- waking", so he's more awake and it doesn't wake his wife. The brief goes through the desk like
 -- everything else she starts, with three things only a brief needs:
 --   room   the one room it may be spoken in (it waits for him there, never follows him)
 --   brief  a brief: outside the daily budget (D4 "3 a day plus briefs"), and the night doesn't

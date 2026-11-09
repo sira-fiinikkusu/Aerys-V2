@@ -18,7 +18,7 @@ def _app(**kw):
         return "ok"
 
     settings = Settings(_env_file=None, anthropic_api_key="x", owner_person_id=OWNER,
-                        voice_speaker_persons=f"chris={OWNER},megan=22222222-2222-2222-2222-222222222222", **kw)
+                        voice_speaker_persons=f"chris={OWNER},robin=22222222-2222-2222-2222-222222222222", **kw)
     return TestClient(build_app(ask, "sekrit", owner_person_id=OWNER, settings=settings)), seen
 
 
@@ -40,7 +40,7 @@ def test_untagged_and_unsure_voice_turns_are_his_by_default_only():
 def test_a_clear_match_megan_and_guests_are_not_marked():
     c, seen = _app()
     _voice(c, {"id": "chris", "confidence": 0.7})          # a named match to his print
-    _voice(c, {"id": "megan", "confidence": 0.7})          # her own person, not his
+    _voice(c, {"id": "robin", "confidence": 0.7})          # her own person, not his
     _voice(c, {"id": "unknown", "confidence": 0.1})        # a stranger: a guest turn
     assert [bool(s.get(VOICE_OWNER_ASSUMED_KEY)) for s in seen] == [False, False, False]
 

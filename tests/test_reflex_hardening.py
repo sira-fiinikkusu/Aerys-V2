@@ -143,7 +143,7 @@ def test_confident_command_is_not_dropped_as_unaddressed():
                         "input_tokens": 1, "latency_ms": 5}
     d = live_router_for(settings(), jev, router)("turn off the office lights")
     assert d.unaddressed is False
-    d2 = live_router_for(settings(), jev, router)("Megan can you grab the towel")
+    d2 = live_router_for(settings(), jev, router)("Robin can you grab the towel")
     assert d2.unaddressed is True
 
 

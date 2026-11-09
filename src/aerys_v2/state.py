@@ -63,7 +63,7 @@ class Identity(TypedDict, total=False):
     # so the SAME person thread is a voice turn or a text turn purely by this flag.
     voice: bool
     # Speaker ID (2026-09-20): the voice recognizer's verdict for THIS turn —
-    # {"id": "chris"|"megan"|"unknown"|..., "confidence": float}. Set by /ask from
+    # {"id": "chris"|"<another enrolled voice>"|"unknown"|..., "confidence": float}. Set by /ask from
     # the HA wrapper's tag; absent = untagged. Per-call only, like `voice`. The /ask
     # door has ALREADY turned it into user_id/display_name; this is for audit and
     # for anything that wants to know how sure the voice match was.
@@ -88,7 +88,7 @@ VOICE_KEY = "voice"
 # DEFAULT (untagged, or the recognizer itself unsure) carries this flag. Chat keeps
 # answering it as his, on purpose (9/22), but it never becomes HIS memory: the
 # extractor skips the turn and the remember tool won't keep its facts, so a voice
-# that wasn't clearly his (Megan, a guest, the TV) can't be written in as him.
+# that wasn't clearly his (his wife, a guest, the TV) can't be written in as him.
 VOICE_OWNER_ASSUMED_KEY = "voice_owner_assumed"
 VOICE_OWNER_ASSUMED_MARKER = "voice_owner_assumed"
 

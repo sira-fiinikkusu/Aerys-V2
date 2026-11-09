@@ -39,7 +39,7 @@ def raw_email(sender="Chris Perry <chris@example.com>", subject="Hello there",
 
 def multipart_email(plain="the plain part", html="<b>the html part</b>"):
     msg = EmailMessage()
-    msg["From"] = "Megan <megan@example.com>"
+    msg["From"] = "Robin <robin@example.com>"
     msg["Subject"] = "Multipart"
     msg["Date"] = "Fri, 10 Jul 2026 12:00:00 -0400"
     msg.set_content(plain)

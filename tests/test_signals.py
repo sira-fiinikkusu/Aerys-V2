@@ -56,7 +56,7 @@ def test_absent_evidence_is_a_SKIP_not_a_PASS():
 # ── the six ────────────────────────────────────────────────────────────────
 
 def test_a_public_turn_missing_its_room_fails():
-    good = {'id': 1, 'channel': 'guild', 'room_context': 'Stratus: hi', 'emitted_reply': 'ok'}
+    good = {'id': 1, 'channel': 'guild', 'room_context': 'Quinn: hi', 'emitted_reply': 'ok'}
     bad = {'id': 2, 'channel': 'guild', 'room_context': None, 'emitted_reply': 'ok'}
     assert signals.room_on_public_turns(rows(good)).status == signals.PASS
     failure = signals.room_on_public_turns(rows(good, bad))
@@ -316,7 +316,7 @@ def test_answers_not_relays_catches_the_nine_twenty_eight_courier_replies():
 def test_answers_not_relays_passes_a_real_answer_and_an_asked_for_relay():
     from aerys_v2.workers.signals import answers_not_relays
     turns = [
-        dict(id=4, channel='dm', input_text='[a photo] look what Megan made',
+        dict(id=4, channel='dm', input_text='[a photo] look what Robin made',
              emitted_reply="Oh, she made that? The glaze on the rim is gorgeous."),
         dict(id=5, channel='dm', input_text='tell Kael the deploy is done',
              emitted_reply="Want me to pass that to Kael now, or hold it for his next check-in?"),
@@ -333,7 +333,7 @@ def test_her_offer_to_file_her_own_report_is_not_a_courier_slip():
     turns = [
         dict(id=7, channel='portable', input_text='why arent you checking long term if the attic doesnt have what you need?',
              emitted_reply='I can add this to the gap report for Kael: a tool to search long-term memory by keyword. Want me to send that?'),
-        dict(id=8, channel='portable', input_text='i just told him about it. For the record, Megan is my wife',
+        dict(id=8, channel='portable', input_text='i just told him about it. For the record, Robin is my wife',
              emitted_reply='Got it. Want me to send Kael the gap report about a keyword search for long-term memory?'),
     ]
     result = answers_not_relays(turns)

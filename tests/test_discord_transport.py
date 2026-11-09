@@ -142,7 +142,7 @@ def test_normalize_bare_mention_is_empty():
 
 # --- A dropped summon must not be silent (2026-09-13) ---------------------------
 #
-# Stratus asked her a direct question in a guild channel on 09-11 and nothing
+# Quinn asked her a direct question in a guild channel on 09-11 and nothing
 # happened: no turn, no reply, no refusal, and nothing in any log, because
 # on_message returns on a False gate without a word. Chris read the silence as her
 # choosing not to answer. Nobody could tell him otherwise, which is the actual

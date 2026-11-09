@@ -123,7 +123,7 @@ def test_what_earns_a_heads_up():
     assert not worth_saying(Facts())
     text = evening_facts_text(Facts(weather="rain", events=["9:30 AM: dentist"]))
     assert "Tomorrow's weather: rain" in text and "- 9:30 AM: dentist" in text
-    assert plain_evening(Facts(events=["all day: Megan's birthday"])) == "Heads-up for tomorrow: all day: Megan's birthday."
+    assert plain_evening(Facts(events=["all day: Robin's birthday"])) == "Heads-up for tomorrow: all day: Robin's birthday."
 
 
 def test_the_gatherer_reads_tomorrow_by_date():

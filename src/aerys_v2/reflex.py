@@ -11,6 +11,7 @@ import time
 from typing import Callable
 
 from aerys_v2.config import Settings
+from aerys_v2.house_names import NAMES, HouseNames, wife_or
 from aerys_v2.images import carries_image
 from aerys_v2.router import (FALLBACK_ACK, RouteDecision, fallback_decision, normalize_tier,
                              plausibly_asks_for_action)
@@ -77,25 +78,41 @@ QUESTIONS = {
 # captures caught, 9/111 real turns falsely dropped; 0.7 → 2/13, 3/111. The remaining
 # picture (who is speaking, how sure the satellite was about the wake word) is not in
 # the text yet — speaker ID and wake-word confidence are the inputs that finish this.
-VOICE_BACKGROUND = ("Household: Chris (the owner; speaks to the assistant Aerys in short casual sentences and often answers "
-                    "her previous line with a few words) and his wife Megan. Friends/colleagues who come up by name: Joe, "
-                    "Ben, Ricky, Marcus. Satellites are microphones in the office (Chris works and takes calls there) and "
-                    "the bedroom (TV often on); phone calls and other people happen near the mic; the wake word sometimes "
-                    "fires on background speech and captures a fragment nobody said to Aerys. Fragments tend to come in "
-                    "runs: after one false capture, the next capture within a minute is often also background speech. "
-                    "When Aerys just spoke seconds ago, a short reply is usually to her.")
+# The names in these come from the private .env (house_names.py; the owner, 11/09: "we dont air
+# out anyone but me"). With the real names the text is byte-identical to before.
+def voice_background(names: HouseNames) -> str:
+    wife = f" and his wife {names.wife}." if names.wife else " and his wife."
+    friends = f" Friends/colleagues who come up by name: {names.friends}." if names.friends else ""
+    return ("Household: Chris (the owner; speaks to the assistant Aerys in short casual sentences and often answers "
+            "her previous line with a few words)" + wife + friends + " Satellites are microphones in the office (Chris "
+            "works and takes calls there) and "
+            "the bedroom (TV often on); phone calls and other people happen near the mic; the wake word sometimes "
+            "fires on background speech and captures a fragment nobody said to Aerys. Fragments tend to come in "
+            "runs: after one false capture, the next capture within a minute is often also background speech. "
+            "When Aerys just spoke seconds ago, a short reply is usually to her.")
+
+
+def unaddressed_instructions(names: HouseNames) -> str:
+    not_addressed = [f"'so I told {wife_or(names, 'her')} we would probably leave around nine tomorrow'",
+                     "'and then he just left it in the driveway all weekend'"]
+    if names.aside:
+        not_addressed.append(f"'He interrupted {names.aside}. Let me ask him about his trip to Italy'")
+    if names.colleague:
+        not_addressed.append(f"'{names.colleague}, it's a, uh, a way to track outages'")
+    return ("The message was NOT said to the assistant: television, video or radio speech, someone else in the "
+            "room being spoken to, third-person narration, or a stray fragment that asks and answers nothing. "
+            "Examples of NOT addressed: " + " | ".join(not_addressed) + ". Examples of addressed (a "
+            "request, or a short answer/follow-up to the assistant's previous line): 'yes go ahead' | "
+            "'the sunroom' | 'never mind' | 'can you turn off the dressers please?' | 'what time is it' | "
+            "'So I just want to see if you can hear me on the.' | 'okay thanks' | 'sorry, that wasn't meant for you' | "
+            "'I wasn't talking to you' (a correction TO the assistant after she answered background talk is "
+            "addressed to her).")
+
+
+VOICE_BACKGROUND = voice_background(NAMES)
 UNADDRESSED_CTX_QUESTION = {
     'type': 'noul',
-    'instructions': ("The message was NOT said to the assistant: television, video or radio speech, someone else in the "
-                     "room being spoken to, third-person narration, or a stray fragment that asks and answers nothing. "
-                     "Examples of NOT addressed: 'so I told Megan we would probably leave around nine tomorrow' | "
-                     "'and then he just left it in the driveway all weekend' | 'He interrupted Filibuster. Let me ask him "
-                     "about his trip to Italy' | 'Marcus, it's a, uh, a way to track outages'. Examples of addressed (a "
-                     "request, or a short answer/follow-up to the assistant's previous line): 'yes go ahead' | "
-                     "'the sunroom' | 'never mind' | 'can you turn off the dressers please?' | 'what time is it' | "
-                     "'So I just want to see if you can hear me on the.' | 'okay thanks' | 'sorry, that wasn't meant for you' | "
-                     "'I wasn't talking to you' (a correction TO the assistant after she answered background talk is "
-                     "addressed to her)."),
+    'instructions': unaddressed_instructions(NAMES),
 }
 
 
@@ -105,7 +122,8 @@ UNADDRESSED_CTX_QUESTION = {
 # history HURT (background median 0.49 with it, 0.96 without). Time is handed over as words
 # computed in code (jaggedness #3), never as raw seconds.
 VOICE_BACKGROUND_SHORT = ("The microphone sometimes triggers on background speech (Chris on a work call, talking to his "
-                          "wife Megan, TV or a video) and captures a fragment nobody said to the assistant Aerys.")
+                          f"wife{' ' + NAMES.wife if NAMES.wife else ''}, TV or a video) and captures a fragment nobody "
+                          "said to the assistant Aerys.")
 ADDRESSEE_QUESTION = {
     'type': 'choice',
     'instructions': 'Who is this message for?',

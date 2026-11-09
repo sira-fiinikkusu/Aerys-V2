@@ -1,6 +1,6 @@
 """Her morning brief (board #176, Stage 2). The owner, 2026-11-08: Kael's brief stays on his
 phone and watch; hers is spoken "in the office when she first detects me in there after
-waking ... this way im more awake and it doesnt impact megan"."""
+waking ... this way im more awake and it doesnt impact robin"."""
 
 from __future__ import annotations
 
@@ -240,7 +240,7 @@ def test_the_plain_version_and_the_facts_she_reads():
     assert plain_brief(facts) == "Good morning. Today: rain, high 75. First up, dentist at 9:30 AM, and 1 more after that."
     work = Facts(events=["10:00 AM to 10:30 AM: a work meeting"])
     assert plain_brief(work) == "Good morning. First up, a work meeting at 10:00 AM."
-    assert plain_brief(Facts(events=["all day: Megan's birthday"])) == "Good morning. First up, all day: Megan's birthday."
+    assert plain_brief(Facts(events=["all day: Robin's birthday"])) == "Good morning. First up, all day: Robin's birthday."
     assert plain_brief(Facts()) == "Good morning. Nothing on the calendar for the rest of today."
     text = facts_text(facts)
     assert "Weather today: rain, high 75" in text and "- 9:30 AM: dentist" in text and "overnight: nothing" in text
@@ -295,7 +295,7 @@ def test_the_day_from_ha_work_meetings_as_times_only():
                          {"summary": "Out of office", "start": {"date": "2026-11-10"}, "end": {"date": "2026-11-11"}}])
         return Resp([{"summary": "Dentist", "start": {"dateTime": "2026-11-10T09:30:00-05:00"},
                       "end": {"dateTime": "2026-11-10T10:00:00-05:00"}},
-                     {"summary": "Megan's birthday", "start": {"date": "2026-11-10"}, "end": {"date": "2026-11-11"}}])
+                     {"summary": "Robin's birthday", "start": {"date": "2026-11-10"}, "end": {"date": "2026-11-11"}}])
 
     def post(url, headers, body):
         assert url.endswith("/api/services/weather/get_forecasts?return_response")
@@ -304,7 +304,7 @@ def test_the_day_from_ha_work_meetings_as_times_only():
 
     facts = gatherer_for(settings(), get=get, post=post)(IN_OFFICE, [], [])
     assert facts.weather == "partly cloudy, high 82, low 66, 20% chance of rain"
-    assert facts.events == ["all day: Megan's birthday", "9:30 AM to 10:00 AM: Dentist",
+    assert facts.events == ["all day: Robin's birthday", "9:30 AM to 10:00 AM: Dentist",
                             "10:00 AM to 10:30 AM: a work meeting"]
     assert not any("Quarterly" in e or "Out of office" in e for e in facts.events)
 

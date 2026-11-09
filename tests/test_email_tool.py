@@ -313,13 +313,13 @@ def test_read_empty_uid_never_opens_imap():
 def test_draft_returns_formatted_draft_and_touches_nothing():
     _, _, draft, _, imap_f, smtp_f = make_tools()
     out = draft.invoke({
-        "to": "megan@perry-home.dev",
+        "to": "robin@robin-home.dev",
         "subject": "Dinner Friday",
         "body": "Bringing wine — see you at 7.",
     })
     assert out.startswith("DRAFT (not sent):")
     assert f"From: {SELF}" in out
-    assert "To: megan@perry-home.dev" in out
+    assert "To: robin@robin-home.dev" in out
     assert "Subject: Dinner Friday" in out
     assert "Bringing wine — see you at 7." in out
     # the draft itself instructs the show-then-ask step

@@ -34,7 +34,7 @@ PUBLIC = {"user_id": "person-1", "display_name": "Chris", "privacy_context": "pu
 PRIVATE = {"user_id": "person-1", "display_name": "Chris", "privacy_context": "private",
            "platform": "discord", "channel_kind": "dm", "channel_id": "9"}
 
-ROOM = "Stratus: is anything forming in the Atlantic\nChris: probably worth a look"
+ROOM = "Quinn: is anything forming in the Atlantic\nChris: probably worth a look"
 
 
 def fake(*replies):
@@ -103,12 +103,12 @@ def test_clipping_never_leaves_half_a_line_attributed_to_someone():
     Adversarial review, 2026-09-14."""
     from aerys_v2.turns import ROOM_CONTEXT_LIMIT, build_turn_row
 
-    lines = [f"Stratus: message number {n} with some words after it" for n in range(400)]
+    lines = [f"Quinn: message number {n} with some words after it" for n in range(400)]
     row = build_turn_row(thread_id="t", identity={}, input_text="hi", latency_ms=1,
                          room_context="\n".join(lines))
     kept = row["room_context"]
     assert len(kept) <= ROOM_CONTEXT_LIMIT
-    assert kept.splitlines()[0].startswith("Stratus: message number "), kept.splitlines()[0]
+    assert kept.splitlines()[0].startswith("Quinn: message number "), kept.splitlines()[0]
     assert kept.splitlines()[-1] == lines[-1], 'the newest line survives'
 
 

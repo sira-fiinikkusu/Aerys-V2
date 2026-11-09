@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     # Speaker ID: a capture whose voice matched NO enrolled print ("unknown") drops at
     # this lower floor, alone, no Haiku band — a TV voice is not the household. 20:04–
     # 20:16 on 9/20: four show captures scored 0.07–0.17 against Chris's print; two got
-    # through at background 0.61 and 0.09. (Megan is 'unknown' until enrolled: her real
+    # through at background 0.61 and 0.09. (His wife is 'unknown' until enrolled: her real
     # requests score ~0.1 background, far under this.)
     reflex_unaddressed_guest_floor: float = Field(default=0.5, ge=0, le=1)
     # J10 (2026-09-19, Chris: "silent on voice"): "cancel" / "never mind" drops
@@ -281,7 +281,7 @@ class Settings(BaseSettings):
     # Additional person_ids (CSV) granted ACTION/house-control access beyond the
     # owner. The owner is ALWAYS included implicitly (factory.action_allowlist_for).
     # Extending access = add a person_id here, no code change — this is where
-    # Megan's person_id lands once her identity is solutioned (identical house
+    # His wife's person_id lands once her identity is solutioned (identical house
     # access to Chris). Empty = owner only.
     house_control_person_ids: str = ""
     # Speaker ID (2026-09-20): `name=person_uuid,...` — who each enrolled voice IS.
@@ -752,7 +752,7 @@ class BootConfigError(RuntimeError):
 
 
 def speaker_person_map(settings: "Settings") -> dict[str, str]:
-    """voice_speaker_persons ('chris=<uuid>,megan=<uuid>') -> {name: person_id}, names
+    """voice_speaker_persons ('chris=<uuid>,sam=<uuid>') -> {name: person_id}, names
     lower-cased. Malformed entries are skipped with a warning, never fatal — a bad
     line must not take the voice door down. The owner's name, when listed, must map
     to owner_person_id (anything else is a config error worth shouting about)."""

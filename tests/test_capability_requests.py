@@ -34,7 +34,7 @@ from aerys_v2.workers.capability_requests import (
 
 T0 = datetime(2026, 7, 3, 12, 0, 0, tzinfo=timezone.utc)
 CHRIS = "6e6bcbed-03ef-4d17-95d2-89c467414335"
-MEGAN = "11111111-2222-3333-4444-555555555555"
+ROBIN = "11111111-2222-3333-4444-555555555555"
 
 
 def _raw(at: datetime) -> str:
@@ -429,8 +429,8 @@ def test_autocommit_connection_refuses_before_any_write():
 
 def test_owner_filter_scopes_the_fetch():
     conn = GapConn(turns=[])
-    run_gap_mining(conn, allowlist={CHRIS, MEGAN})
-    assert conn.miner_params["person_ids"] == sorted([CHRIS, MEGAN])
+    run_gap_mining(conn, allowlist={CHRIS, ROBIN})
+    assert conn.miner_params["person_ids"] == sorted([CHRIS, ROBIN])
 
 
 def test_empty_window_is_a_noop():

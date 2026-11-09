@@ -114,7 +114,7 @@ class LiveRoomReader:
             if my_id is not None and getattr(author, 'id', None) == my_id:
                 known = SELF_LABEL
             # clean_content shows a mention the way Discord does (@Name), never as a raw
-            # <@id> token. Chris, 2026-10-03: "She tagged herself" -- Korvius's line read
+            # <@id> token. Chris, 2026-10-03: "She tagged herself" -- a friend's line read
             # `<@her-id> it turned out...`, she took the token for HIS tag, and used it to
             # ping him. A fake or older message without the property keeps .content.
             text = getattr(message, 'clean_content', None)

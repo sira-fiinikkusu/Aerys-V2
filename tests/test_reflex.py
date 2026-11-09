@@ -155,7 +155,7 @@ def test_round6_addressee_choice_on_a_trimmed_state():
                                'another_person': .8, 'media_speech': .04, 'work_meeting_talk': .05, 'fragment_nobody': .05})
             return r
     fake = Addr()
-    result = ReflexClient(client=fake)('so I told Megan we would probably leave around nine', {
+    result = ReflexClient(client=fake)('so I told Robin we would probably leave around nine', {
         'surface': 'voice', 'last_reply': 'Turning on the sunroom lights.', 'seconds_since_assistant_spoke': 400.0,
         'device': 'office satellite', 'local_time': 'Sunday 13:00',
         'previous_capture': {'text': 'hey how are you', 'seconds_ago': 400.0, 'outcome': 'answered normally'},

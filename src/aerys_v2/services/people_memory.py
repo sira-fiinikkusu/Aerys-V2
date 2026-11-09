@@ -11,7 +11,7 @@ So when a person she knows is NAMED in the recent conversation (the current line
 few messages, hers included), the speaker's own memories that mention that person come along,
 newest first, under their own header. Only the speaker's memories, at the privacy level the
 turn already allows: nothing is read across people. Names come from the persons table and
-match on word boundaries ("Joe" never matches "Joey").
+match on word boundaries ("Sam" never matches "Samuel").
 """
 from __future__ import annotations
 

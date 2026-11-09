@@ -142,7 +142,7 @@ def test_a_PUBLIC_turn_gets_NOTHING():
     content only reaches a public room after the content-privacy judge has said it is
     general (redact_private_history / content_privacy_fn). Injecting the stick
     verbatim into a public guild turn walked straight around that fence, and the
-    failure mode is her answering "what did I tell you earlier?" in front of Stratus.
+    failure mode is her answering "what did I tell you earlier?" in front of Quinn.
 
     Cost, stated plainly: a portable turn no longer reaches a public room at all. His
     counting test still passes — stick, then DM, then public — because her DM reply

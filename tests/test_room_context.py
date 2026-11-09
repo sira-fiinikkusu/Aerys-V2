@@ -49,13 +49,13 @@ def test_person_thread_key_is_cross_surface_and_per_person():
 def test_format_room_context_renders_chronologically_with_replies():
     # ROOM_TURNS_SQL returns NEWEST-first; the formatter reverses to chronological.
     rows = [
-        ("Megan", "uuid-m", "what's for dinner?", "Pizza, probably.", NOW),   # newest
+        ("Robin", "uuid-m", "what's for dinner?", "Pizza, probably.", NOW),   # newest
         ("Chris", "uuid-c", "hey room", None, NOW),                            # older
     ]
     block = format_room_context(rows)
     lines = block.split("\n")
     assert lines[0] == "Chris: hey room"                  # older turn first
-    assert "Megan: what's for dinner?" in block
+    assert "Robin: what's for dinner?" in block
     assert "Aerys: Pizza, probably." in block             # her reply rendered when present
 
 
@@ -142,7 +142,7 @@ def test_public_turn_injects_room_block_dm_does_not():
 
     def room_fn(channel_id, channel):
         calls.append((channel_id, channel))
-        return "Megan: anyone around?"
+        return "Robin: anyone around?"
 
     m = RecordingModel(messages=iter([AIMessage(content="a"), AIMessage(content="b")]))
     graph = build_graph(m, soul="s", room_context_fn=room_fn)
@@ -151,7 +151,7 @@ def test_public_turn_injects_room_block_dm_does_not():
     ask(graph, "hey", identity=PRIVATE_DM, thread_id="person:p2")     # DM -> no room block
 
     assert "Recent activity in this channel" in RecordingModel.seen[0]
-    assert "Megan: anyone around?" in RecordingModel.seen[0]
+    assert "Robin: anyone around?" in RecordingModel.seen[0]
     assert "Recent activity in this channel" not in RecordingModel.seen[1]
     # queried once (public only), with the raw channel_id + derived channel enum
     assert calls == [("555", "guild")]
@@ -275,7 +275,7 @@ def test_the_live_reader_shows_messages_nobody_addressed_to_her():
     # newest first, as discord.py history() yields
     channel = FakeChannel([message('Chris', 'Right ?'),
                            message('Chris', 'I just noticed this'),
-                           message('Stratus', 'unrelated chatter')])
+                           message('Quinn', 'unrelated chatter')])
     client = FakeClient(channel)
     run_loop(client)
     reader = LiveRoomReader(limit=10)
@@ -284,7 +284,7 @@ def test_the_live_reader_shows_messages_nobody_addressed_to_her():
         block = read_in_thread(reader)
     finally:
         client.loop.call_soon_threadsafe(client.loop.stop)
-    assert block.splitlines() == ['Stratus: unrelated chatter',
+    assert block.splitlines() == ['Quinn: unrelated chatter',
                                   'Chris: I just noticed this',
                                   'Chris: Right ?'], 'chronological, everything said'
 
@@ -369,7 +369,7 @@ def test_action_mind_survives_a_raising_room_fn():
 def test_both_minds_render_the_room_identically():
     """One helper, two call sites — so the two minds cannot drift apart."""
     RecordingModel.seen = []
-    room_fn = lambda _cid, _ch: "Megan: anyone around?"
+    room_fn = lambda _cid, _ch: "Robin: anyone around?"
     chat = RecordingModel(messages=iter([AIMessage(content="a")]))
     ask(build_graph(chat, soul="s", room_context_fn=room_fn),
         "hey", identity=PUBLIC_GUILD, thread_id="person:p1")
@@ -400,11 +400,11 @@ def test_the_room_can_never_become_a_second_caller():
 
 
 def test_the_live_reader_shows_a_mention_as_a_name_never_her_raw_tag():
-    """Chris, 2026-10-03: "She tagged herself." Korvius's line reached her as
+    """Chris, 2026-10-03: "She tagged herself." Rowan's line reached her as
     `<@her-id> it turned out...`; she took the token for HIS tag and pinged herself.
     The reader now uses discord.py's clean_content (mentions as @Name)."""
     from types import SimpleNamespace
-    raw = SimpleNamespace(author=SimpleNamespace(display_name='Korvius'),
+    raw = SimpleNamespace(author=SimpleNamespace(display_name='Rowan'),
                           content='<@1473712595520192552> it turned out being closer than I thought',
                           clean_content='@Aerys - Resonant Span it turned out being closer than I thought')
     channel = FakeChannel([raw])
@@ -416,7 +416,7 @@ def test_the_live_reader_shows_a_mention_as_a_name_never_her_raw_tag():
         block = read_in_thread(reader)
     finally:
         client.loop.call_soon_threadsafe(client.loop.stop)
-    assert block == 'Korvius: @Aerys - Resonant Span it turned out being closer than I thought'
+    assert block == 'Rowan: @Aerys - Resonant Span it turned out being closer than I thought'
     assert '<@' not in block
 
 

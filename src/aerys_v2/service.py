@@ -1190,7 +1190,7 @@ def ask(
       disclosing presence is. The memory boundary makes a stranger's identity COLD
       (no memories) but does NOTHING to the tools — so this gate is the one thing
       between a guild member and the owner's house. The owner is always in the set;
-      more can be added by config (e.g. Megan) with no code change
+      more can be added by config (e.g. his wife) with no code change
       (factory.action_allowlist_for). None = unenforced (dev boxes).
     - guest_action_graph: the reduced action graph (media tools only) used for
       non-allowlisted callers, from factory.guest_action_graph_for. None = they get

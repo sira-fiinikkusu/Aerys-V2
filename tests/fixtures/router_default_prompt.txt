@@ -97,7 +97,7 @@ while the user is talking to another PERSON in the room, a TV says something
 wake-word-shaped, a conversation fragment gets captured that was never a
 request. Set "unaddressed": true when the message is clearly not directed at
 you: it DIRECTLY ADDRESSES another person by name in the second person
-("Megan, can you grab my towel?", "hang on Joe, I'll be right there"), it
+("Robin, can you grab my towel?", "hang on Alex, I'll be right there"), it
 explicitly waves you off ("no, not you"), or it is a mid-conversation
 fragment with no ask shape and no second-person address ("and then he just
 left it in the driveway"). NOTE: the system already protects live

@@ -38,6 +38,8 @@ from typing import Callable
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from aerys_v2.house_names import NAMES, HouseNames
+
 log = logging.getLogger(__name__)
 
 # Haiku at temperature 0: the decision must be deterministic and as fast as the
@@ -330,7 +332,7 @@ while the user is talking to another PERSON in the room, a TV says something
 wake-word-shaped, a conversation fragment gets captured that was never a
 request. Set "unaddressed": true when the message is clearly not directed at
 you: it DIRECTLY ADDRESSES another person by name in the second person
-("Megan, can you grab my towel?", "hang on Joe, I'll be right there"), it
+__NAMED_ADDRESS_EXAMPLE__, it
 explicitly waves you off ("no, not you"), or it is a mid-conversation
 fragment with no ask shape and no second-person address ("and then he just
 left it in the driveway"). NOTE: the system already protects live
@@ -367,6 +369,17 @@ For read-style questions the ack is a natural check-in (e.g. for "does the car
 have enough charge for Tampa?": "[warmly] Let me check her charge").
 Short and speakable — one clause. Never a generic canned phrase. For "chat"
 routes the ack is ignored; an empty string is fine there."""
+
+
+def named_address_example(names: HouseNames) -> str:
+    """The router's example of talking to someone else in the room by name. The names come from the
+    private .env (house_names.py); without them, a template that names nobody."""
+    if names.wife and names.friend:
+        return f'("{names.wife}, can you grab my towel?", "hang on {names.friend}, I\'ll be right there")'
+    return '("<name>, can you grab my towel?", "hang on <name>, I\'ll be right there")'
+
+
+_ROUTER_INSTRUCTIONS = _ROUTER_INSTRUCTIONS.replace("__NAMED_ADDRESS_EXAMPLE__", named_address_example(NAMES))
 
 
 @dataclass(frozen=True)

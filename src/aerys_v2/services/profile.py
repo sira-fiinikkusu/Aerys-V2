@@ -76,7 +76,7 @@ WHERE cc.speaker_id = %(pid)s::uuid
   -- so "Dad is visiting, arrived last night" (approved 2026-04-10) was still
   -- being injected into every turn five months later as a standing fact. NULL
   -- stays permanent — most identity claims should be, and age alone is not the
-  -- discriminator ("married Megan in April" must never expire).
+  -- discriminator ("married his wife in April" must never expire).
   AND (cc.ttl_ts IS NULL OR cc.ttl_ts > NOW())
   AND cc.sensitivity IN ('P2', 'P3')
   AND (cc.visibility = 'all'

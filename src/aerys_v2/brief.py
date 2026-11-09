@@ -4,7 +4,7 @@ he's up (board #176, Stage 2).
 The owner, 2026-11-08: Kael's HA brief stays on his phone and watch ("since hers is over
 voice and yours is on my phone/watch it is extremely helpful because im groggy af till i
 have coffee in me"), and "her voice morning brief hits in the office when she first detects
-me in there after waking ... this way im more awake and it doesnt impact megan".
+me in there after waking ... this way im more awake and it doesnt impact [his wife]".
 
 Once a day, from START until CUTOFF (Eastern), when all of these hold:
   1. the house has settled him in the brief's room, and motion there backs his phone up

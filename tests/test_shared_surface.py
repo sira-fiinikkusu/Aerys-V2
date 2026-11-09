@@ -1,7 +1,7 @@
 """Owner ask 8/16 — household-surface awareness on Sticky voice turns.
 
 The Bearer authenticates the DEVICE as owner infrastructure; the SPEAKER may
-be Megan or a guest. Turns from designated shared devices carry a prompt
+be Robin or a guest. Turns from designated shared devices carry a prompt
 block telling her to stay identity-humble and keep his private specifics off
 the shared speaker. These tests pin the gate (device-id membership) and both
 absences (other devices; feature off).
@@ -66,22 +66,22 @@ def test_note_helper_is_pure_and_gated():
 
 def test_labels_name_the_surface_bare_ids_stay_generic():
     """Fleet ask 8/16: she should know WHICH Sticky is speaking."""
-    labeled = {STICKY2: "Sticky Two (Megan's unit)"}
+    labeled = {STICKY2: "Sticky Two (Robin's unit)"}
     note = _shared_surface_note({"device_id": STICKY2}, labeled)
-    assert "Sticky Two (Megan's unit), a shared Sticky display" in note
+    assert "Sticky Two (Robin's unit), a shared Sticky display" in note
     bare = _shared_surface_note({"device_id": STICKY}, {STICKY: ""})
     assert "via a HOUSEHOLD surface — a shared Sticky display" in bare
 
 
 def test_parse_shared_surfaces_mixed_forms():
     parsed = _parse_shared_surfaces(
-        f"{STICKY}, {STICKY2}=Sticky Two (Megan's unit) ,"
+        f"{STICKY}, {STICKY2}=Sticky Two (Robin's unit) ,"
     )
-    assert parsed == {STICKY: "", STICKY2: "Sticky Two (Megan's unit)"}
+    assert parsed == {STICKY: "", STICKY2: "Sticky Two (Robin's unit)"}
     assert _parse_shared_surfaces("") == {}
 
 
 def test_labeled_turn_carries_the_name_through_the_graph():
-    system = run_turn({STICKY2: "Sticky Two (Megan's unit)"}, STICKY2)
-    assert "Sticky Two (Megan's unit)" in system
+    system = run_turn({STICKY2: "Sticky Two (Robin's unit)"}, STICKY2)
+    assert "Sticky Two (Robin's unit)" in system
     assert "HOUSEHOLD surface" in system

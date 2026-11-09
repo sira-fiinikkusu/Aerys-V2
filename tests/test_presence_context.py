@@ -39,7 +39,7 @@ def test_the_block_reports_occupancy_and_refuses_to_name_a_person():
     assert "Rooms showing occupancy right now: office, living room." in text
     assert "He is speaking from the office." in text
     # the limit is stated IN the block: several rooms read occupied at once, and an
-    # occupancy sensor cannot tell Chris from Megan from a pet.
+    # occupancy sensor cannot tell Chris from Robin from a pet.
     assert "do not say WHO" in text and "never assert where someone is" in text
     assert "Chris is in" not in text
 

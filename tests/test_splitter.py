@@ -323,7 +323,7 @@ def test_voice_header_regex_unanchored_quirk():
 
 
 def test_voice_links_unwrapped_to_text():
-    assert voice("see [Chip](https://example.com/a?b=c) now") == "see Chip now"
+    assert voice("see [Docs](https://example.com/a?b=c) now") == "see Docs now"
 
 
 def test_voice_inline_code_unwrapped():
