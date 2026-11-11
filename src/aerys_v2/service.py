@@ -1894,6 +1894,8 @@ def _full_action_seed(graph, prior: list, text: str, identity: dict, *, current_
             additional_kwargs=dict(getattr(current, "additional_kwargs", {}) or {}),
         )
     kept = gate_for_room([*before, current], identity)
+    if not kept:                     # the gate always keeps the request; if it ever didn't, the request alone
+        return [current]
     return [_mark_earlier_belief(m) if getattr(m, "type", "") == "ai" else m for m in kept[:-1]] + [kept[-1]]
 
 

@@ -631,3 +631,11 @@ def test_settings_default_to_full_and_reach_the_chat_graph(monkeypatch):
     assert (graph.action_context, graph.action_context_messages, graph.voice_action_context_messages) == ("full", 40, 12)
     monkeypatch.setenv("ACTION_CONTEXT", "requests")
     assert action_context_kwargs(Settings(_env_file=None))["action_context"] == "requests"
+
+
+def test_full_seed_never_crashes_when_the_gate_returns_nothing(monkeypatch):
+    # Gemini review 11/10: an empty gate result would IndexError; the request alone goes instead.
+    import aerys_v2.service as service
+    monkeypatch.setattr(service, "gate_for_room", lambda messages, identity: [])
+    seeded = _action_history_seed(FullGraph([_pub("a"), AIMessage(content="b")]), PRIVATE, "now", specialist=True)
+    assert [m.content for m in seeded] == ["now"]
