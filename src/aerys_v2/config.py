@@ -694,7 +694,9 @@ class Settings(BaseSettings):
     # None = read_web_page disarmed (tool and overlay both absent).
     firecrawl_api_key: SecretStr | None = None
 
-    # Owner Gmail: compose credentials are used only to create unsigned drafts.
+    # Owner Gmail: independent on-request reads and unsigned create-only drafts.
+    # Shared readonly+compose credentials; neither switch schedules inbox watching.
+    gmail_read: bool = False
     gmail_drafts: bool = False
     gmail_drafts_client_id: str | None = None
     gmail_drafts_client_secret: SecretStr | None = None

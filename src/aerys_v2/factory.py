@@ -2543,11 +2543,9 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             tools.append(build_kael_checkins_tool(PostgresCheckinStore(settings.database_url)))
 
     if not guest:
-        from aerys_v2.tools.gmail_drafts import gmail_drafts_for
+        from aerys_v2.tools.gmail_drafts import gmail_tools_for
 
-        gmail_draft = gmail_drafts_for(settings)
-        if gmail_draft is not None:
-            tools.append(gmail_draft)
+        tools.extend(gmail_tools_for(settings))
 
     if not guest and settings.email_app_password is not None and settings.email_address:
         # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:

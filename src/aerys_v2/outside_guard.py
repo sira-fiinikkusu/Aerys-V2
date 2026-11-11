@@ -12,7 +12,7 @@ import json
 from langchain_core.messages import ToolMessage
 
 READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_document',
-                     'youtube_summary', 'search_email', 'read_email',
+                     'youtube_summary', 'search_email', 'read_email', 'search_his_email', 'read_his_email',
                      'check_async_task', 'list_async_tasks'})
 # draft_in_his_gmail is deliberately absent: a draft reaches no one; the owner
 # reviews and sends it himself. It is also absent from action_executor's allowed set.

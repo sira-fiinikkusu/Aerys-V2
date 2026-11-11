@@ -16,7 +16,7 @@ def test_consent_url():
     parsed = urlsplit(url)
     assert parsed.scheme == 'https' and parsed.netloc == 'accounts.google.com'
     query = parse_qs(parsed.query)
-    assert query['scope'] == ['https://www.googleapis.com/auth/gmail.compose']
+    assert set(query['scope'][0].split()) == {'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose'}
     assert query['access_type'] == ['offline'] and query['prompt'] == ['consent']
     assert query['redirect_uri'] == ['http://127.0.0.1:12345/']
     assert query['state'] == ['state'] and query['response_type'] == ['code']
@@ -29,7 +29,7 @@ def test_exchange():
     def open_fake(request, timeout):
         calls.append(request)
         assert timeout == 20
-        return io.BytesIO(json.dumps({'refresh_token': 'placeholder-refresh'}).encode())
+        return io.BytesIO(json.dumps({'refresh_token': 'placeholder-refresh', 'scope': signin.SCOPE}).encode())
     assert signin.exchange_code('placeholder-client', 'placeholder-secret', 'code',
                                 'http://127.0.0.1:12345/', 'verifier', open_url=open_fake) == 'placeholder-refresh'
     request, = calls
@@ -128,6 +128,18 @@ def test_help(capsys):
     with pytest.raises(SystemExit) as exc:
         signin.main(['--help'])
     assert exc.value.code == 0
-    text = capsys.readouterr().out
+    text = ' '.join(capsys.readouterr().out.split())
     assert 'scope can create drafts and send' in text
     assert 'only creates drafts' in text
+
+@pytest.mark.parametrize('scope', [None, '', 'https://www.googleapis.com/auth/gmail.compose', 'https://www.googleapis.com/auth/gmail.readonly', 'https://mail.google.com/', 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose extra'])
+def test_exact_scope_set(scope):
+    with pytest.raises(ValueError):
+        signin.exchange_code('client', 'secret', 'code', 'redirect', 'verifier',
+            open_url=lambda *a, **kw: io.BytesIO(json.dumps({'refresh_token': 'placeholder', 'scope': scope}).encode()))
+
+
+def test_scope_order():
+    assert signin.exchange_code('client', 'secret', 'code', 'redirect', 'verifier',
+        open_url=lambda *a, **kw: io.BytesIO(json.dumps({'refresh_token': 'placeholder',
+            'scope': ' '.join(reversed(signin.SCOPE.split()))}).encode())) == 'placeholder'

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-time desktop OAuth consent for owner Gmail draft creation; stdlib only."""
+"""One-time desktop OAuth consent for owner-requested Gmail reads and draft creation; stdlib only."""
 import argparse
 import base64
 import getpass
@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-SCOPE = 'https://www.googleapis.com/auth/gmail.compose'
+SCOPE = 'https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.compose'
 TOKEN_URL = 'https://oauth2.googleapis.com/token'
 
 
@@ -41,7 +41,7 @@ def exchange_code(client_id, client_secret, code, redirect_uri, verifier, *, ope
         payload = json.load(response)
     if not isinstance(payload, dict):
         raise ValueError('Invalid token response')
-    if 'scope' in payload and payload['scope'] != SCOPE:
+    if not isinstance(payload.get('scope'), str) or set(payload['scope'].split()) != set(SCOPE.split()):
         raise ValueError('Unexpected granted scope')
     token = payload.get('refresh_token')
     if not isinstance(token, str) or not token.strip():
@@ -83,11 +83,11 @@ def env_lines(client_id, client_secret, refresh_token):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=(
-        'Run once on a machine with a browser to authorize Gmail compose access. '
+        'Run once on a machine with a browser to authorize Gmail readonly and compose access. '
         'The scope can create drafts and send, but the brain code only creates drafts. '
         'Uses a Desktop app OAuth client and a random 127.0.0.1 loopback port. '
         'Prints only three credential env lines to stdout for manual pasting into the brain .env; '
-        'writes no files. Separately set GMAIL_DRAFTS=1 and GMAIL_DRAFTS_FROM to your address.'))
+        'writes no files. Set GMAIL_READ=1 and/or GMAIL_DRAFTS=1; set GMAIL_DRAFTS_FROM to your address.'))
     parser.add_argument('--client-json', metavar='PATH', help='Google Desktop app client JSON; otherwise prompt')
     args = parser.parse_args(argv)
     try:
