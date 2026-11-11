@@ -155,7 +155,10 @@ def _human_turn(
     (content_privacy.redact_sealed_history). Every writer passes the room it has, the
     retag included: replacing a message by id with a copy that lacked the room would
     quietly unseal it."""
-    kwargs = {CONTENT_PRIVACY_KEY: origin_privacy}
+    from aerys_v2.services.said_when import SAID_AT_KEY, said_at_now
+
+    # T-6: when it was said, so "tomorrow" is read against that day (services/said_when.py).
+    kwargs = {CONTENT_PRIVACY_KEY: origin_privacy, SAID_AT_KEY: said_at_now()}
     if sealed_room:
         kwargs[SEALED_ROOM_KEY] = sealed_room
     return HumanMessage(content=text, id=msg_id, additional_kwargs=kwargs)

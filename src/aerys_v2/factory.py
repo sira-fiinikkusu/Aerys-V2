@@ -3206,7 +3206,10 @@ def _where_when_line(thread: object, identity: dict) -> str:
         "Treat this as your own awareness — use it naturally, and never cite URLs, "
         "links, or metadata to the user to explain how you know the time or where "
         "you are. That is only about this awareness: when someone asks you for a "
-        "link to something, give it."
+        "link to something, give it. Earlier lines marked [said ...] were said then, and "
+        "your reply right after one was said then too: read today, tonight, tomorrow and "
+        "yesterday in them against that day, never against today. A line marked as having "
+        "no recorded date: don't assume when it was; ask if it matters."
     )
 
 

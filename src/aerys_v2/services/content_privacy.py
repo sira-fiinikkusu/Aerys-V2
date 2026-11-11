@@ -224,9 +224,12 @@ def gate_for_room(messages: list, identity: dict | None) -> list:
     other room. Every path that shows thread history to a model goes through here, so
     the two gates cannot drift apart.
     """
+    from aerys_v2.services.said_when import with_said_dates
+
     identity = identity or {}
     if identity.get("privacy_context") == PRIVATE:
-        return messages
-    return redact_sealed_history(
+        return with_said_dates(messages)
+    # T-6: earlier days' lines carry when they were said (said_when.py), on every path.
+    return with_said_dates(redact_sealed_history(
         redact_private_history(messages), str(identity.get("sealed_room") or "")
-    )
+    ))

@@ -355,10 +355,12 @@ def kael_note_for(
         # proactive=False: the caller brings it to the owner itself (a ticket answer's
         # relay, tickets.py), so this note must not earn a second, HOLD-able turn.
         msg_id = f"kael-note-{uuid.uuid4().hex[:12]}"
+        from aerys_v2.services.said_when import SAID_AT_KEY, said_at_now
+
         msg = HumanMessage(
             content=f"{NOTE_PREFIX} {text}",
             id=msg_id,
-            additional_kwargs={CONTENT_PRIVACY_KEY: "private"},
+            additional_kwargs={CONTENT_PRIVACY_KEY: "private", SAID_AT_KEY: said_at_now()},
         )
         graph.update_state(
             {"configurable": {"thread_id": thread_id}}, {"messages": [msg]}
