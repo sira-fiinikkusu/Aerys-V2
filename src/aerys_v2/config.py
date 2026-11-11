@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     # (chat includes the current human in this tail). The checkpointer keeps
     # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.
     history_window_messages: int = 200
+    # ACTION_CONTEXT (#182, Chris 11/10: "if her hands dont know the full conversation she will build
+    # garbage"): what her hands see when she acts. full = the room-gated conversation, her replies
+    # included (the last ACTION_CONTEXT_MESSAGES; voice, metered and latency-bound, the last
+    # VOICE_ACTION_CONTEXT_MESSAGES). requests = the 9/04 seed (his last three requests, folded): the undo.
+    action_context: Literal["full", "requests"] = "full"
+    action_context_messages: int = 40
+    voice_action_context_messages: int = 12
     # PROMPT_CONTEXT_TRAILING: where the per-turn context (clock, memories, room,
     # portable, family) sits. False = inside the system prompt ahead of the
     # history, exactly as before 2026-09-19. True = a trailing block on the

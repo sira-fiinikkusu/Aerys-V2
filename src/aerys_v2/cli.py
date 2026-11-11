@@ -6,6 +6,13 @@ from aerys_v2.privacy_shadow import privacy_shadow_for
 from aerys_v2.speaker_redirect import speaker_redirect_for
 from aerys_v2.reflex import live_router_for, reflex_for
 
+
+def _action_context(settings) -> dict:
+    """#182's knobs for build_graph: what her hands see of the thread. Imported here because
+    factory is heavy and this module keeps it out of import time."""
+    from aerys_v2.factory import action_context_kwargs
+    return action_context_kwargs(settings)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
@@ -99,6 +106,7 @@ def main() -> None:
             graph = build_graph(
                 build_model(settings), soul=load_soul(settings.soul_file_path), checkpointer=cp,
                 history_window_messages=settings.history_window_messages,
+                **_action_context(settings),
                 context_trailing=settings.prompt_context_trailing,
             )
             reply = ask(
@@ -133,6 +141,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=load_soul(settings.soul_file_path),
             history_window_messages=settings.history_window_messages,
+            **_action_context(settings),
                 context_trailing=settings.prompt_context_trailing,
         )
         results, summary = run_eval(LocalGraphTarget(graph), cases, Judge.from_settings(settings))
@@ -250,6 +259,7 @@ def main() -> None:
                 soul=soul,
                 checkpointer=cp,
                 history_window_messages=settings.history_window_messages,
+                **_action_context(settings),
                 context_trailing=settings.prompt_context_trailing,
                 # long-term memory context: ON only when MEMORIES_DATABASE_URL is
                 # set (read-only prod aerys DB); None keeps the graph memory-free
@@ -492,6 +502,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
+            **_action_context(settings),
                 context_trailing=settings.prompt_context_trailing,
             # long-term memory context: same wiring as --serve so Discord text
             # chats recall memory too. None when MEMORIES_DATABASE_URL is unset
@@ -659,6 +670,7 @@ def main() -> None:
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
+            **_action_context(settings),
                 context_trailing=settings.prompt_context_trailing,
             # long-term memory context: same wiring as --serve/--discord so
             # Telegram text chats recall memory too. None when

@@ -1752,7 +1752,7 @@ def _trim_human_turn(m: HumanMessage) -> HumanMessage:
 
 def _action_history_seed(
     graph: object, configurable: dict, text: str, *, escalated: bool = False,
-    specialist: bool = False,
+    specialist: bool = False, voice: bool = False,
 ) -> list:
     """Seed the checkpointer-less action graph with the thread's PRIOR turns.
 
@@ -1785,14 +1785,23 @@ def _action_history_seed(
             exc_info=True,
         )
         prior = []
+    reading = ""
     if escalated and prior and getattr(prior[-1], "type", "") == "ai":
         # Escalated text turn: the chat invoke already checkpointed BOTH this
         # turn's human message and the marker handoff line. Drop the trailing
         # handoff line (the action model must reason from the request, not from
         # a note about handing off) — the human turn is then already the tail,
-        # so appending another copy would duplicate it.
+        # so appending another copy would duplicate it. Its words (marker off) are
+        # chat's reading of the request, made with the whole conversation in view:
+        # the full seed carries them (#182: "please if you dont mind" meant her offer).
+        if HANDOFF_MARKER in _reply_text(prior[-1]):
+            reading = _strip_handoff(_reply_text(prior[-1]))
         prior = prior[:-1]
     prior = window_messages(prior, getattr(graph, "history_window_messages", 200))
+    current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
+    if specialist and str(getattr(graph, "action_context", "requests") or "").strip().lower() == "full":
+        return _full_action_seed(graph, prior, text, identity, current_checkpointed=current_checkpointed,
+                                 reading=reading, voice=voice)
     # ── SPECIALIST SEED (2026-09-04): prior HUMAN turns only ──────────────────
     # The 7/05 continuity fix seeded the WHOLE prior exchange. Traced 9/04: her own
     # earlier line "I can't set a specific brightness" rode into the next command
@@ -1840,6 +1849,52 @@ def _action_history_seed(
         content=folded, id=getattr(current, "id", None),
         additional_kwargs=dict(getattr(current, "additional_kwargs", {}) or {}),
     )]
+
+
+#: #182 (Chris 11/10): "i need actions to have context about a conversation its how you and i work. if her
+#: hands dont know the full conversation she will build garbage." With ACTION_CONTEXT=full the specialist
+#: sees the room-gated conversation, her replies included. September stays fixed where it lived: an earlier
+#: line of hers saying she can't do something ("I can't set a specific brightness" made her skip the tool on
+#: 9/04) carries this note right where it sits, and the charter says the tools decide.
+EARLIER_BELIEF_NOTE = ("[An earlier belief of yours, not a fact: your tools decide what you can do now. "
+                       "Try them before repeating it.]")
+_EARLIER_CANT = re.compile(
+    r"\bI(?:[\'’]m\s+(?:not\s+able|unable)|(?:\s+really)?\s+(?:can(?:not|[\'’]t|\s+not)|"
+    r"could(?:n[\'’]t|\s+not)|am\s+(?:not\s+able|unable)|(?:do\s+not|don[\'’]t)\s+have\s+"
+    r"(?:a\s+way|any\s+way|access|the\s+ability)|have\s+no\s+way))\b",
+    re.IGNORECASE,
+)
+
+
+def _mark_earlier_belief(m):
+    """Her earlier reply, with EARLIER_BELIEF_NOTE added when it claims she can't do something."""
+    text = _reply_text(m)
+    if not text or not _EARLIER_CANT.search(text):
+        return m
+    return AIMessage(content=f"{text}\n{EARLIER_BELIEF_NOTE}", id=getattr(m, "id", None),
+                     additional_kwargs=dict(getattr(m, "additional_kwargs", {}) or {}))
+
+
+def _full_action_seed(graph, prior: list, text: str, identity: dict, *, current_checkpointed: bool,
+                      reading: str, voice: bool) -> list:
+    """The specialist's view under ACTION_CONTEXT=full: the conversation's last messages (voice gets its
+    shorter window: it's metered and latency-bound), room-gated like chat, the request last."""
+    attr = "voice_action_context_messages" if voice else "action_context_messages"
+    window = int(getattr(graph, attr, 40) or 0)
+    if current_checkpointed:
+        current, before = prior[-1], list(prior[:-1])
+    else:
+        current, before = HumanMessage(content=text), list(prior)
+    before = [m for m in before if getattr(m, "type", "") in ("human", "ai")]
+    before = before[-window:] if window > 0 else []
+    if reading:
+        current = HumanMessage(
+            content=f"{_message_text(current)}\n\n[Reading the whole conversation, you took this as: {reading}]",
+            id=getattr(current, "id", None),
+            additional_kwargs=dict(getattr(current, "additional_kwargs", {}) or {}),
+        )
+    kept = gate_for_room([*before, current], identity)
+    return [_mark_earlier_belief(m) if getattr(m, "type", "") == "ai" else m for m in kept[:-1]] + [kept[-1]]
 
 
 def _message_text(m: HumanMessage) -> str:
@@ -2216,7 +2271,7 @@ def _voice_parallel_start(
         # a late AI result can still land after a newer turn's pair — the full
         # placeholder-replace fix is deliberately out of tonight's scope.)
         seeded_messages = _action_history_seed(
-            graph, real_configurable, text, specialist=True
+            graph, real_configurable, text, specialist=True, voice=True
         )
         graph.update_state(
             {"configurable": real_configurable},

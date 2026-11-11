@@ -64,7 +64,8 @@ def test_discord_runner_wires_context_fn(monkeypatch):
 
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
                          room_context_fn, portable_context_fn, history_window_messages,
-                         context_trailing):
+                         context_trailing, action_context, action_context_messages,
+                         voice_action_context_messages):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
             context_fn=context_fn, tier_models=tier_models,
@@ -72,6 +73,9 @@ def test_discord_runner_wires_context_fn(monkeypatch):
             portable_context_fn=portable_context_fn,
             history_window_messages=history_window_messages,
             context_trailing=context_trailing,
+            action_context=action_context,  # #182: what her hands see of the thread
+            action_context_messages=action_context_messages,
+            voice_action_context_messages=voice_action_context_messages,
         )
         return "GRAPH"
 
@@ -117,4 +121,8 @@ def test_discord_runner_wires_context_fn(monkeypatch):
         "portable_context_fn": "PORTFN",
         "history_window_messages": 17,
         "context_trailing": False,
+        # #182: her hands see the conversation by default (ACTION_CONTEXT=full, 40 / voice 12).
+        "action_context": "full",
+        "action_context_messages": 40,
+        "voice_action_context_messages": 12,
     }

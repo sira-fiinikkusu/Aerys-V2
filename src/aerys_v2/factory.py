@@ -1695,9 +1695,10 @@ SPECIALIST_CHARTER = (
     "a tool result. Never say you cannot do something unless a tool refused it on "
     "this turn; relay refusals exactly (what, why). If the request needs no tool — "
     "it is a question you must ask back, or it is outside your tools — call "
-    "no_action with the sentence you will say; never fake a result. Prior "
-    "requests, if shown, exist only to resolve references like 'them' or 'that "
-    "one'. Reply length follows the job: a device confirmation or a reading is one "
+    "no_action with the sentence you will say; never fake a result. The "
+    "conversation before the request is context, not more things to do: do only "
+    "the request at the end. What you said earlier about what you can or can't "
+    "do is not a fact; the tools decide, so try the tool. Reply length follows the job: a device confirmation or a reading is one "
     "or two plain sentences; a summary, a search answer, or a document read takes "
     "the length it needs. Write the reply as Aerys would say it: first person, "
     "she/her, warm and direct, no preamble, no apology, no mention of internal "
@@ -3115,6 +3116,9 @@ def build_graph(
     family_notes_fn=None,
     history_window_messages: int = 200,
     context_trailing: bool = False,
+    action_context: str = "requests",
+    action_context_messages: int = 40,
+    voice_action_context_messages: int = 12,
 ) -> object:
     """START → chat → END, checkpointed.
 
@@ -3378,4 +3382,19 @@ def build_graph(
     # This is graph configuration, never checkpointed conversation state.
     compiled.presence_fn = presence_fn
     compiled.history_window_messages = history_window_messages
+    # #182: what her hands see of this thread (service._action_history_seed). full = the conversation;
+    # requests = the 9/04 seed, the undo.
+    compiled.action_context = action_context
+    compiled.action_context_messages = action_context_messages
+    compiled.voice_action_context_messages = voice_action_context_messages
     return compiled
+
+
+def action_context_kwargs(settings) -> dict:
+    """build_chat_graph's #182 knobs from settings (ACTION_CONTEXT, ACTION_CONTEXT_MESSAGES,
+    VOICE_ACTION_CONTEXT_MESSAGES)."""
+    return {
+        "action_context": str(getattr(settings, "action_context", "full") or "full"),
+        "action_context_messages": int(getattr(settings, "action_context_messages", 40)),
+        "voice_action_context_messages": int(getattr(settings, "voice_action_context_messages", 12)),
+    }
