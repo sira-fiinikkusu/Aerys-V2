@@ -41,6 +41,8 @@ from aerys_v2.reach import ReachEvent
 log = logging.getLogger(__name__)
 
 STATUSES = ("success", "error", "cancelled", "interrupted", "timeout")
+#: Surfaces a notice can be texted back to (the desk's text_to).
+TEXT_SURFACES = ("discord", "telegram")
 SOURCE, TOPIC = "home-job", "jobs"
 TICK_S = 30
 DETAIL_TRIES = 3            # passes that try to read the job's details before going without them
@@ -221,8 +223,10 @@ class HomeNotices:
     the desk. Every leg is injected (tests; production wires them in home_notices_for)."""
 
     def __init__(self, desk, store, *, fetch: Callable[[Notice], Job] | None = None,
-                 compose: Callable[[Job], str] | None = None, clock: Callable[[], datetime] | None = None):
+                 compose: Callable[[Job], str] | None = None, clock: Callable[[], datetime] | None = None,
+                 asked_on: Callable[[Notice], str | None] | None = None):
         self.desk, self.store, self.fetch, self.compose = desk, store, fetch, compose
+        self.asked_on = asked_on
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.wake = threading.Event()
 
@@ -247,6 +251,20 @@ class HomeNotices:
         if not text or _HOLD.match(text):
             text = f"Done at home: {task}." if task else "A job at home is done."
         return text
+
+    def _text_to(self, notice: Notice) -> str | None:
+        """Where the job was asked, when that was Discord or Telegram: its notice goes back there as
+        text (the owner's D20 rule). A voice ask, an unknown one, or a lookup that fails: None, and
+        the desk's follow-me delivery as before."""
+        if self.asked_on is None:
+            return None
+        try:
+            surface = self.asked_on(notice)
+        except Exception:
+            log.warning("home notice %s: couldn't read where the job was asked; follow-me delivery", notice.id,
+                        exc_info=True)
+            return None
+        return surface if surface in TEXT_SURFACES else None
 
     def tick(self) -> dict:
         out = {"handed": 0, "waiting": 0, "skipped": 0}
@@ -285,10 +303,11 @@ class HomeNotices:
                 out["waiting"] += 1
                 continue
             detail = clip(job.result, RESULT_CHARS) if notice.status == "success" else clip(job.error, ERROR_CHARS)
+            text_to = self._text_to(notice)
             try:
                 outcome = self.desk.reach_out(ReachEvent(
                     source=SOURCE, topic=TOPIC, headline=self._headline(notice, job), detail=detail, owed=True,
-                    dedupe_key=key))
+                    dedupe_key=key, text_only=text_to is not None, text_to=text_to))
             except Exception:
                 log.warning("home notice %s: the desk didn't take it; retried next pass", notice.id, exc_info=True)
                 out["waiting"] += 1
@@ -385,10 +404,18 @@ def composer_for(settings, *, model=None) -> Callable[[Job], str]:
     return compose
 
 
+def asked_on_for(settings) -> Callable[[Notice], str | None]:
+    """Where his job was asked (home_jobs.py keeps it on the job's record in v2_home_tasks)."""
+    from aerys_v2.home_jobs import PostgresHomeTaskLedger
+
+    ledger = PostgresHomeTaskLedger(settings.database_url)
+    return lambda notice: ledger.asked_on(notice.thread_id)
+
+
 def home_notices_for(settings, desk) -> HomeNotices | None:
     """None unless armed: home_notices on, a webhook token, a desk and a database."""
     if (not getattr(settings, "home_notices", False) or getattr(settings, "home_webhook_token", None) is None
             or desk is None or not getattr(settings, "database_url", None)):
         return None
     return HomeNotices(desk, PostgresNoticeStore(settings.database_url), fetch=fetcher_for(settings),
-                       compose=composer_for(settings))
+                       compose=composer_for(settings), asked_on=asked_on_for(settings))
