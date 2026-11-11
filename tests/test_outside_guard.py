@@ -387,3 +387,60 @@ def test_an_approved_contact_save_uses_the_address_he_approved():
                                                'identity': {'user_id': owner, 'platform': 'discord'}})
     ok, said = execute(row)
     assert ok and saved == [('p-joe', 'joe@example.com')]
+
+
+def test_an_email_after_outside_text_waits_for_his_tap_then_goes_exactly_once():
+    """The follow-through (11/11): an email after outside text used to be refused outright; now his button
+    shows the exact mail, and his tap is the confirmation the watcher sends with."""
+    sent = []
+
+    @tool('send_email')
+    def send_email(to: str, subject: str, body: str, confirmed: bool = False) -> str:
+        """Test send."""
+        sent.append((to, subject, body, confirmed))
+        return 'Sent: to ' + to if confirmed is True else 'NOT SENT: unconfirmed'
+
+    b = Box(executors={OUTSIDE_ACTION: action_executor([send_email])})
+    mail = {'to': 'sam@example.com', 'subject': 'Saturday', 'body': 'See you at six.', 'confirmed': False}
+    req = request([ToolMessage(content='an email from someone', name='read_email', tool_call_id='r')],
+                  name='send_email', args=mail)
+    result = outside_guard(req, lambda r: pytest.fail('sent without his tap'), gate=b.gate)
+    assert 'Waiting' in result.content and not sent
+    row = next(iter(b.approval_store.rows.values()))
+    assert 'To: sam@example.com\nSubject: Saturday\n\nSee you at six.' in row.detail
+    assert 'an email from someone' not in row.detail
+    b.watcher.tick()
+    assert not sent
+    b.tap()
+    b.watcher.tick()
+    b.watcher.tick()
+    assert sent == [('sam@example.com', 'Saturday', 'See you at six.', True)]
+
+
+def test_an_email_after_outside_text_needs_its_words_and_a_button():
+    req = request([ToolMessage(content='x', name='read_email', tool_call_id='r')], name='send_email',
+                  args={'to': 'sam@example.com', 'subject': 's', 'body': ' '})
+    b = Box(executors={OUTSIDE_ACTION: action_executor([])})
+    assert outside_guard(req, lambda r: pytest.fail('sent'), gate=b.gate).content.startswith('Not sent')
+    assert not b.approval_store.rows
+    assert outside_guard(req, lambda r: pytest.fail('sent'), gate=None).content.startswith('Not sent')
+
+
+def test_his_button_shows_the_email_exactly_as_it_will_be_sent():
+    """Codex review 11/11: send_email collapses the subject and trims the body, so the button shows that form."""
+    sent = []
+
+    @tool('send_email')
+    def send_email(to: str, subject: str, body: str, confirmed: bool = False) -> str:
+        """Test send."""
+        sent.append((subject, body))
+        return 'Sent: ok'
+
+    b = Box(executors={OUTSIDE_ACTION: action_executor([send_email])})
+    req = request([ToolMessage(content='x', name='read_email', tool_call_id='r')], name='send_email',
+                  args={'to': ' sam@example.com ', 'subject': 'A   long\tday', 'body': '\n  Hi Sam.\n\n'})
+    outside_guard(req, lambda r: pytest.fail('sent'), gate=b.gate)
+    row = next(iter(b.approval_store.rows.values()))
+    assert 'To: sam@example.com\nSubject: A long day\n\nHi Sam.' in row.detail
+    b.tap(); b.watcher.tick(); b.watcher.tick()
+    assert sent == [('A long day', 'Hi Sam.')]

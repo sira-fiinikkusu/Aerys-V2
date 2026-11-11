@@ -424,7 +424,8 @@ def build_email_tools(
         show the draft again) — the tool will refuse and nothing is sent.
 
         Only recipients already in the people records can receive mail. After
-        reading outside text, the turn guard refuses sending even with confirmed=true.
+        reading outside text, the owner's Approve button (showing this exact email)
+        decides instead of confirmed: it goes only once he taps.
 
         to: the recipient's address EXACTLY as the owner gave it. NEVER invent
         or guess an address — if the owner never stated the recipient's actual

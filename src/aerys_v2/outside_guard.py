@@ -88,8 +88,28 @@ def _decide(request, gate):
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
         return None
     if name == 'send_email':
-        return _refusal(request, 'Not sent: after reading outside text, email needs the owner’s '
-                        'Approve button. Email approval execution is not available yet.')
+        # D28 (11/11, the follow-through): after outside text an email waits for his tap. The button
+        # shows the exact mail; his tap is the confirmation, and the watcher sends exactly that, once
+        # (action_executor). Her `confirmed` flag never rides along: the tap decides.
+        if gate is None:
+            return _refusal(request, 'Not sent: after reading outside text, email needs the owner’s '
+                            'Approve button, which is unavailable. Nothing was sent.')
+        # Shown exactly as send_email will send it (it collapses the subject and trims the body;
+        # Codex review 11/11): what he approves is what goes.
+        mail = {'to': str(args.get('to') or '').strip(), 'subject': ' '.join(str(args.get('subject') or '').split()),
+                'body': str(args.get('body') or '').strip()}
+        if not mail['to'] or not mail['body']:
+            return _refusal(request, 'Not sent: I need who it is to and what it says before asking the owner.')
+        identity, thread = conf.get('identity') or {}, conf.get('thread_id', '')
+        from aerys_v2.hands_gate import _key
+        payload = {'tool': name, 'tool_args': mail, 'identity': identity,
+                   'what': f'your email to {mail["to"]} after reading outside text'}
+        verdict = gate._ask(OUTSIDE_ACTION, 'outside:' + _key(thread, payload), thread, payload,
+                            kind='email', summary=f'Send email to {mail["to"]}',
+                            detail=(f'{notice(sources)}\n\nTo: {mail["to"]}\nSubject: {mail["subject"]}'
+                                    f'\n\n{mail["body"]}'),
+                            what=payload['what'])
+        return None if verdict.go else _refusal(request, verdict.text)
     if gate is None:
         return _refusal(request, 'Not done: after reading outside text this needs the owner’s '
                         'Approve button, which is unavailable. Nothing happened.')
@@ -140,7 +160,7 @@ def outside_middleware(gate=None):
 def action_executor(tools):
     """The watcher invokes only the exact registered tool and args shown on his button."""
     allowed = {t.name: t for t in tools if t.name in REACH_OUT - {
-        'send_message', 'send_email', 'start_async_task', 'update_async_task'} or t.name == 'kael_tickets'}
+        'send_message', 'start_async_task', 'update_async_task'} or t.name == 'kael_tickets'}
 
     def execute(row):
         tool = allowed.get(row.args.get('tool'))
@@ -155,8 +175,13 @@ def action_executor(tools):
         approved_words = (str(row.args['tool_args'].get('email') or '')
                           if tool.name == 'save_contact_email' else '')
         token = CURRENT_TURN_TEXT.set(approved_words)
+        tool_args = dict(row.args['tool_args'])
+        if tool.name == 'send_email':
+            # His tap on the button that showed this exact mail is the confirmation.
+            tool_args = {k: str(tool_args.get(k) or '') for k in ('to', 'subject', 'body')}
+            tool_args['confirmed'] = True
         try:
-            result = str(tool.invoke(row.args['tool_args'], config=config))
+            result = str(tool.invoke(tool_args, config=config))
         finally:
             CURRENT_TURN_TEXT.reset(token)
         prefixes = {
@@ -167,6 +192,7 @@ def action_executor(tools):
             'message_kael': ('Delivered', 'NOT DELIVERED YET:'),
             'kael_tickets': ('Added to ', 'Canceled '),
             'save_contact_email': ('Saved:',),
+            'send_email': ('Sent:',),
         }
         return result.startswith(prefixes[tool.name]), result
 
