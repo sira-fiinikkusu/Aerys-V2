@@ -430,3 +430,83 @@ def test_a_send_whose_record_write_failed_is_still_known_to_this_process():
     said = sent.invoke({}, config={"configurable": {"identity": DISCORD}})
     assert "esphome-voice-satellite-fixed-ip.md" in said and not said.startswith("No recorded")
     assert rig.call(DISCORD).startswith("ALREADY SENT")
+
+
+# --- Codex recheck of 4df4db4: the fixes' own edges ------------------------------------------
+
+from aerys_v2.tools.send_file import SendInProgress
+
+
+class FakeConn:
+    def __init__(self, fail_on=None):
+        self.fail_on, self.closed, self.autocommit, self.calls = fail_on, False, False, []
+
+    def execute(self, sql, args=()):
+        self.calls.append(sql)
+        if self.fail_on and self.fail_on in sql:
+            raise RuntimeError(f"{self.fail_on} failed")
+        return self
+
+    def close(self):
+        self.closed = True
+
+
+class LockPg(PostgresFileSends):
+    """Locks go to a fake connection; the record itself lives in this process only."""
+
+    def __init__(self, conn):
+        super().__init__("postgresql://unused")
+        self.conn = conn
+
+    def _connect(self, options=""):
+        if "lock_timeout" in options:
+            return self.conn
+        raise RuntimeError("no database for the record")
+
+    def _rows(self, sql, args):
+        raise RuntimeError("database read failed")
+
+
+def test_an_unreadable_database_still_sees_what_this_process_sent():
+    rig = RecordedRig(ledger=LockPg(FakeConn()))
+    assert rig.call(DISCORD).startswith("SENT")
+    assert rig.call(DISCORD).startswith("ALREADY SENT") and len(rig.sent) == 1
+
+
+def test_a_send_in_flight_elsewhere_is_never_doubled():
+    class Busy(FileSends):
+        def claim(self, person_id, path):
+            raise SendInProgress(path)
+    rig = RecordedRig(ledger=Busy())
+    said = rig.call(DISCORD)
+    assert said.startswith("NOT SENT") and "being sent to him right now" in said and rig.got == [] and rig.sent == []
+
+
+def test_a_failed_unlock_keeps_the_sent_result_and_closes_the_session():
+    conn = FakeConn(fail_on="pg_advisory_unlock")
+    rig = RecordedRig(ledger=LockPg(conn))
+    assert rig.call(DISCORD).startswith("SENT") and conn.closed
+
+
+def test_a_failed_lock_closes_its_connection_and_still_sends():
+    conn = FakeConn(fail_on="pg_advisory_lock")
+    rig = RecordedRig(ledger=LockPg(conn))
+    assert rig.call(DISCORD).startswith("SENT") and conn.closed
+
+
+def test_sends_are_kept_by_age_not_by_count():
+    ledger = FileSends()
+    for i in range(300):
+        ledger.record(OWNER, FileSend(T0 + timedelta(seconds=i), f"f{i}.md", f"f{i}.md", 1, "discord"))
+    assert ledger.last(OWNER, "f0.md", T0 - timedelta(hours=1)) is not None
+    ledger.record(OWNER, FileSend(T0 + timedelta(days=8), "late.md", "late.md", 1, "discord"))
+    assert ledger.last(OWNER, "f0.md", T0 - timedelta(hours=1)) is None      # past a week: let go
+
+
+def test_the_read_tool_shows_what_it_remembers_when_the_record_is_unreadable():
+    ledger = LockPg(FakeConn())
+    rig = RecordedRig(ledger=ledger)
+    rig.call(DISCORD)
+    sent = build_files_sent_tool(ledger=ledger, owner_person_id=OWNER, now=rig.clock)
+    said = sent.invoke({}, config={"configurable": {"identity": DISCORD}})
+    assert "esphome-voice-satellite-fixed-ip.md" in said and "There may be others" in said

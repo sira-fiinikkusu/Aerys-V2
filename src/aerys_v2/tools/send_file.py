@@ -81,8 +81,12 @@ class FileSends:
     claim(person, path) serializes check, delivery and record for one file, so two overlapping
     calls can't both find no send and both deliver (Codex review, #187)."""
 
+    #: Sends kept in this process: as long as the read tool can look back (a week).
+    KEEP = timedelta(days=7)
+
     def __init__(self):
         self.rows: list[tuple[str, FileSend]] = []
+        self._rows_lock = threading.Lock()       # every change to rows, and every snapshot of it
         self._locks: dict[tuple[str, str], threading.Lock] = {}
         self._guard = threading.Lock()
 
@@ -95,16 +99,38 @@ class FileSends:
         with self._local_lock(person_id, path):
             yield
 
+    def _keep(self, person_id: str, send: FileSend) -> None:
+        with self._rows_lock:
+            self.rows.append((str(person_id), send))
+            cutoff = send.sent_at - self.KEEP
+            self.rows = [(p, s) for p, s in self.rows if s.sent_at >= cutoff]   # by age, never by count
+
+    def _snapshot(self) -> list[tuple[str, FileSend]]:
+        with self._rows_lock:
+            return list(self.rows)
+
     def record(self, person_id: str, send: FileSend, thread_id: str = "") -> None:
-        self.rows.append((str(person_id), send))
+        self._keep(person_id, send)
 
     def last(self, person_id: str, path: str, since: datetime) -> FileSend | None:
-        hits = [s for p, s in self.rows if p == str(person_id) and s.path == path and s.sent_at >= since]
+        hits = [s for p, s in self._snapshot() if p == str(person_id) and s.path == path and s.sent_at >= since]
         return max(hits, key=lambda s: s.sent_at) if hits else None
 
     def recent(self, person_id: str, since: datetime) -> list[FileSend]:
-        return sorted((s for p, s in self.rows if p == str(person_id) and s.sent_at >= since),
+        return sorted((s for p, s in self._snapshot() if p == str(person_id) and s.sent_at >= since),
                       key=lambda s: s.sent_at, reverse=True)
+
+
+class SendInProgress(Exception):
+    """Another worker is sending this file right now (its claim outlasted the wait)."""
+
+
+class RecordUnreadable(Exception):
+    """The database record couldn't be read; .local holds what this process remembers."""
+
+    def __init__(self, local: list[FileSend]):
+        super().__init__("the record of sends couldn't be read")
+        self.local = local
 
 
 class PostgresFileSends(FileSends):
@@ -129,13 +155,25 @@ class PostgresFileSends(FileSends):
 
     @contextmanager
     def claim(self, person_id, path):
+        """The process lock, then the cross-worker advisory lock. A database we can't reach falls back
+        to the process lock (fail-open: he asked for the file). A lock we CAN reach but another worker
+        holds past the wait raises SendInProgress: never deliver beside a send in flight."""
+        import psycopg
+
         with self._local_lock(person_id, path):
             key = f"file_send:{person_id}:{path}"
+            conn = None
             try:
                 conn = self._connect(f"-c statement_timeout=0 -c lock_timeout={self.LOCK_WAIT_MS}")
                 conn.autocommit = True
                 conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 26))", (key,))
-            except Exception as e:      # a lock we can't take never blocks a send he asked for
+            except psycopg.errors.LockNotAvailable:
+                self._close(conn)
+                raise SendInProgress(path)
+            except BaseException as e:
+                self._close(conn)
+                if not isinstance(e, Exception):
+                    raise                      # an interrupt is never swallowed
                 log.warning("send_file: no cross-worker lock (%s); this process's lock only", type(e).__name__)
                 conn = None
             try:
@@ -144,12 +182,21 @@ class PostgresFileSends(FileSends):
                 if conn is not None:
                     try:
                         conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 26))", (key,))
+                    except Exception as e:      # the send's outcome stands; closing the session frees it
+                        log.warning("send_file: advisory unlock failed (%s)", type(e).__name__)
                     finally:
-                        conn.close()
+                        self._close(conn)
+
+    @staticmethod
+    def _close(conn) -> None:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:                  # noqa: BLE001 — cleanup only
+                pass
 
     def record(self, person_id, send, thread_id=""):
-        self.rows.append((str(person_id), send))
-        del self.rows[:-200]
+        self._keep(person_id, send)            # first: a failed write never erases the evidence
         with self._connect() as c:
             c.execute("INSERT INTO v2_file_sends (sent_at, person_id, path, name, bytes, surface, thread_id) "
                       "VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -165,16 +212,27 @@ class PostgresFileSends(FileSends):
                       key=lambda s: s.sent_at, reverse=True)
 
     def last(self, person_id, path, since):
-        rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
-                          "AND path = %s AND sent_at >= %s ORDER BY sent_at DESC LIMIT 1",
-                          (str(person_id), path, since))
-        merged = self._merged(rows, [s for s in [super().last(person_id, path, since)] if s is not None])
+        local = [s for s in [super().last(person_id, path, since)] if s is not None]
+        try:
+            rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
+                              "AND path = %s AND sent_at >= %s ORDER BY sent_at DESC LIMIT 1",
+                              (str(person_id), path, since))
+        except Exception as e:                 # what this process remembers still counts
+            if local:
+                log.warning("send_file: record unreadable (%s); using this process's sends", type(e).__name__)
+                return local[0]
+            raise
+        merged = self._merged(rows, local)
         return merged[0] if merged else None
 
     def recent(self, person_id, since):
-        rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
-                          "AND sent_at >= %s ORDER BY sent_at DESC LIMIT 50", (str(person_id), since))
-        return self._merged(rows, super().recent(person_id, since))
+        local = super().recent(person_id, since)
+        try:
+            rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
+                              "AND sent_at >= %s ORDER BY sent_at DESC LIMIT 50", (str(person_id), since))
+        except Exception as e:
+            raise RecordUnreadable(local) from e
+        return self._merged(rows, local)
 
 
 def _when(at: datetime, now: datetime) -> str:
@@ -229,8 +287,12 @@ def build_send_file_tool(*, home_url: str, home_token: str, owner_person_id: str
         if ledger is None:
             return _send(rel, identity, config, note, again)
         # One file at a time: the check, the delivery and the record happen under one claim.
-        with ledger.claim(owner_person_id, rel):
-            return _send(rel, identity, config, note, again)
+        try:
+            with ledger.claim(owner_person_id, rel):
+                return _send(rel, identity, config, note, again)
+        except SendInProgress:
+            return ("NOT SENT: this same file is being sent to him right now by another part of me. Give it a "
+                    "minute, then check files_sent_to_chris before sending it again.")
 
     def _send(rel: str, identity: dict, config, note: str, again: bool) -> str:
         if ledger is not None and not again:
@@ -300,8 +362,16 @@ def build_files_sent_tool(*, ledger: FileSends, owner_person_id: str,
         if str(identity.get("user_id") or "") != str(owner_person_id):
             return "The record of files sent to Chris is only for Chris."
         span = max(1, min(int(hours or 48), 168))
+        partial = ""
         try:
             sends = ledger.recent(owner_person_id, clock() - timedelta(hours=span))
+        except RecordUnreadable as e:
+            log.warning("files_sent: couldn't read the record (%s)", type(e.__cause__).__name__)
+            if not e.local:
+                return "I couldn't read the record of files I sent just now; I don't know, so I won't guess."
+            sends = e.local
+            partial = ("\n(The full record couldn't be read just now; these are only the sends this part of me "
+                       "remembers. There may be others.)")
         except Exception as e:
             log.warning("files_sent: couldn't read the record (%s)", type(e).__name__)
             return "I couldn't read the record of files I sent just now; I don't know, so I won't guess."
@@ -310,7 +380,7 @@ def build_files_sent_tool(*, ledger: FileSends, owner_person_id: str,
                     "didn't go: if he says he has one, believe him; don't send it again unless he asks.")
         lines = [f"- {_when(s.sent_at, clock())}: {s.name} ({s.bytes} bytes), {s.path}, to {_where(s.surface)}"
                  for s in sends]
-        return f"Files sent to Chris in the last {span} hours, newest first:\n" + "\n".join(lines)
+        return f"Files sent to Chris in the last {span} hours, newest first:\n" + "\n".join(lines) + partial
 
     return files_sent_to_chris
 
