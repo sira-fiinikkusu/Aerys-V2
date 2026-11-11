@@ -467,3 +467,69 @@ def test_when_where_it_was_asked_cant_be_read_it_still_goes_follow_me():
     home.notices.receive(note())
     assert home.notices.tick()["handed"] == 1
     assert home.world.spoken == [(home.words, "dev-office")]
+
+
+# --- a household member's jobs (D19 rule 4: told to her, not him) ------------------------------------
+
+def test_a_household_members_finished_job_waits_and_is_never_told_to_him():
+    home = Home()
+    home.notices.not_his = lambda notice: notice.thread_id == "her-thread"
+    home.notices.receive(note(run="run-her", thread="her-thread"))
+    home.notices.receive(note(run="run-his", thread="his-thread"))
+    out = home.notices.tick()
+    assert out["handed"] == 1 and out["waiting"] == 1
+    assert len(home.world.spoken) == 1 and home.fetched == ["run-his"]
+    home.notices.tick()                                   # still owed: never dropped, never his
+    assert len(home.world.spoken) == 1 and [n.run_id for n in home.notices.store.open()] == ["run-her"]
+
+
+def test_when_whose_job_it_is_cant_be_read_it_waits():
+    home = Home()
+
+    def broken(notice):
+        raise ConnectionError("database away")
+
+    home.notices.not_his = broken
+    home.notices.receive(note())
+    assert home.notices.tick() == {"handed": 0, "waiting": 1, "skipped": 0}
+    home.notices.not_his = lambda notice: False
+    assert home.notices.tick()["handed"] == 1
+
+
+def test_without_household_members_his_notices_skip_the_lookup():
+    from aerys_v2.config import Settings
+    from aerys_v2.home_notices import not_his_for
+
+    base = dict(_env_file=None, anthropic_api_key="placeholder", database_url="postgresql://x/y",
+                owner_person_id="6e6bcbed-0000-4000-8000-000000000001")
+    assert not_his_for(Settings(**base)) is None
+    member = "22222222-2222-2222-2222-222222222222"
+    assert callable(not_his_for(Settings(**base, home_job_members=f"{member}=home-member")))
+
+
+def test_only_a_job_on_record_as_his_goes_to_him(monkeypatch):
+    import aerys_v2.home_jobs as home_jobs
+    from aerys_v2.config import Settings
+    from aerys_v2.home_notices import not_his_for
+
+    owner, member = "6e6bcbed-0000-4000-8000-000000000001", "22222222-2222-2222-2222-222222222222"
+    records = {}
+
+    class Ledger:
+        def __init__(self, url):
+            pass
+
+        def owner_of(self, thread_id):
+            return records.get(thread_id)
+
+    monkeypatch.setattr(home_jobs, "PostgresHomeTaskLedger", Ledger)
+    settings = Settings(_env_file=None, anthropic_api_key="placeholder", database_url="postgresql://x/y",
+                        owner_person_id=owner, home_job_members=f"{member}=home-member")
+    home = Home()
+    home.notices.not_his = not_his_for(settings)
+    home.notices.receive(note(run="run-early", thread="not-written-yet"))
+    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == []     # no record: it waits
+    records["not-written-yet"] = member
+    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == []     # hers: still owed
+    records["not-written-yet"] = owner
+    assert home.notices.tick()["handed"] == 1 and len(home.world.spoken) == 1  # his: told

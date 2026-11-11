@@ -215,6 +215,14 @@ class MemoryHomeTaskLedger:
                     return task.get(ASKED_ON)
         return None
 
+    def owner_of(self, thread_id: str) -> str | None:
+        """Whose job is running on her home thread `thread_id` (him, or a household member), or None."""
+        with self._lock:
+            for tid, (who, task) in self.rows.items():
+                if thread_id in (tid, task.get("thread_id")):
+                    return who
+        return None
+
 
 class PostgresHomeTaskLedger:
     """v2_home_tasks (db/migrations/024): one row per job, the official task record as JSON.
@@ -264,6 +272,12 @@ class PostgresHomeTaskLedger:
             row = conn.execute("SELECT task->>%s FROM v2_home_tasks WHERE task_id = %s OR task->>'thread_id' = %s "
                                "ORDER BY updated_at DESC LIMIT 1", (ASKED_ON, thread_id, thread_id)).fetchone()
         return row[0] if row else None
+
+    def owner_of(self, thread_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT owner FROM v2_home_tasks WHERE task_id = %s OR task->>'thread_id' = %s "
+                               "ORDER BY updated_at DESC LIMIT 1", (thread_id, thread_id)).fetchone()
+        return str(row[0]) if row else None
 
     def save(self, owner: str, tasks: dict) -> None:
         if tasks:
@@ -353,47 +367,66 @@ def home_subagent_middleware(url: str, token: str):
     }])
 
 
-def home_ledger_middleware(ledger, owner_person_id: str):
+def home_ledger_middleware(ledger, owner_person_id: str, members=None):
     """Hands his jobs to the official home tools (through their runtime state) and writes back
     every update they return, all under his lock: one load, call, save at a time, so nothing older
     is ever written over something newer. What's on record wins over what the turn last saw. If
     his jobs can't be read, nothing runs (fail closed); if a job went but couldn't be written down,
-    she's told so. Only for him: for anyone else his ledger isn't even read (the D10 gate, next in
-    line, refuses them)."""
+    she's told so. Only for him and household members (D19): a member's turns get her own jobs
+    only, under her own lock; for anyone else no ledger is even read (the D10 gate, next in line,
+    refuses them)."""
     from langchain.agents.middleware import AgentMiddleware
     from langchain_core.messages import ToolMessage
     from langgraph.types import Command
 
-    def mine(request) -> bool:
+    members = dict(members or {})
+
+    def holder(request) -> str | None:
+        """Whose jobs this call is about (D19 slice 3, per-person lists): a household member's own for
+        her turns, his for his; None for anyone else."""
         if (request.tool_call or {}).get("name") not in HOME_TOOLS:
-            return False
+            return None
         config = getattr(request.runtime, "config", None) or {}
         thread_id = (config.get("configurable") or {}).get("thread_id")
-        return asker(identity_from_config(config), thread_id, owner_person_id) != OTHER
+        identity = identity_from_config(config)
+        if asker(identity, thread_id, owner_person_id, members) == OTHER:
+            return None
+        person = str((identity or {}).get("user_id") or "")
+        return person if person in members else owner_person_id
 
     def refused(request):
         call = request.tool_call or {}
         return ToolMessage(content=CANT_READ, tool_call_id=call.get("id") or "", name=call.get("name"))
 
-    def with_jobs(request, tasks: dict):
+    def with_jobs(request, tasks: dict, person: str):
         state = request.runtime.state if isinstance(request.runtime.state, dict) else {}
-        merged = {**state, "async_tasks": {**(state.get("async_tasks") or {}), **tasks}}
+        if person == owner_person_id:
+            jobs = {**(state.get("async_tasks") or {}), **tasks}
+        else:
+            # Hers only, each marked hers (the gate's check): never what a shared thread holds of his.
+            jobs = {tid: {**task, "owner": person} for tid, task in tasks.items() if isinstance(task, dict)}
+        merged = {**state, "async_tasks": jobs}
         return request.override(state=merged, runtime=dataclasses.replace(request.runtime, state=merged))
 
-    def kept(session, result, before: dict, asked: str | None):
+    def kept(session, result, before: dict, asked: str | None, person: str):
         update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
         tasks = (update or {}).get("async_tasks")
         if not tasks:
             return result
+        if person != owner_person_id:
+            # A member's jobs live in her ledger only, never in a thread's state, which a room's
+            # voice turns share with him.
+            update = {k: v for k, v in update.items() if k != "async_tasks"}
+            result = dataclasses.replace(result, update=update)
         try:
-            session.save(owner_person_id, keep_asked_on(tasks, before, asked))
+            session.save(person, keep_asked_on(tasks, before, asked))
             return result
         except Exception:
             # The job itself went (or changed); only her record of it didn't: say so.
             log.warning("home jobs: couldn't record %d job update(s)", len(tasks), exc_info=True)
         messages = [m.model_copy(update={"content": f"{m.content}{NOT_RECORDED}"}) if isinstance(m, ToolMessage) else m
                     for m in update.get("messages") or []]
-        return Command(update={**update, "messages": messages})
+        return dataclasses.replace(result, update={**update, "messages": messages})
 
     def asked(request) -> str | None:
         if (request.tool_call or {}).get("name") not in (START, UPDATE):
@@ -401,27 +434,29 @@ def home_ledger_middleware(ledger, owner_person_id: str):
         config = getattr(request.runtime, "config", None) or {}
         return asked_from(identity_from_config(config), (config.get("configurable") or {}).get("thread_id"))
 
-    def guarded(request, handler):
+    def guarded(request, handler, person: str):
         with contextlib.ExitStack() as stack:
             try:
-                session = stack.enter_context(ledger.locked(owner_person_id))
-                tasks = session.load(owner_person_id)
+                session = stack.enter_context(ledger.locked(person))
+                tasks = session.load(person)
             except Exception:
-                log.warning("home jobs: couldn't read his jobs; nothing runs", exc_info=True)
+                log.warning("home jobs: couldn't read the jobs; nothing runs", exc_info=True)
                 return refused(request)
-            return kept(session, handler(with_jobs(request, tasks)), tasks, asked(request))
+            return kept(session, handler(with_jobs(request, tasks, person)), tasks, asked(request), person)
 
     class HomeTaskLedger(AgentMiddleware):
         def wrap_tool_call(self, request, handler):
-            return guarded(request, handler) if mine(request) else handler(request)
+            person = holder(request)
+            return handler(request) if person is None else guarded(request, handler, person)
 
         async def awrap_tool_call(self, request, handler):
-            if not mine(request):
+            person = holder(request)
+            if person is None:
                 return await handler(request)
             loop = asyncio.get_running_loop()
             # The lock and the ledger are blocking; the official tool's async path runs inside.
             return await asyncio.to_thread(
-                guarded, request, lambda req: asyncio.run_coroutine_threadsafe(handler(req), loop).result())
+                guarded, request, lambda req: asyncio.run_coroutine_threadsafe(handler(req), loop).result(), person)
 
     return HomeTaskLedger()
 
@@ -507,7 +542,7 @@ def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
         gate.read_only_agents = frozenset(a for a in gate.read_only_agents if a != HOME_AGENT)
     # Order matters: his jobs are loaded first, so the gate can name the job a change is for;
     # then the gate decides; then the official tools run.
-    middleware = [home_ledger_middleware(ledger, owner_person_id), home_job_middleware(gate), subagents]
+    middleware = [home_ledger_middleware(ledger, owner_person_id, gate.members), home_job_middleware(gate), subagents]
     if files is not None:
         middleware.append(files)
     return HomeJobs(middleware=middleware, overlay=HOME_JOBS_OVERLAY, gate=gate, watcher=HandsWatcher(gate))

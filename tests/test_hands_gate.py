@@ -923,7 +923,6 @@ def test_member_grant_is_not_house_control_and_unknown_tools_are_refused():
     assert home_job_member_map(settings) == {MEMBER_ID: "home-member"}
     assert settings.house_control_person_ids == ""
     b = member_box()
-    assert not b.gate.home_job(MEMBER_TEXT, "person:member", "list_async_tasks", {}).go
     assert not b.gate.home_job(MEMBER_TEXT, "person:member", "other_tool", {},
                               {"async_tasks": {None: {"owner": MEMBER_ID}}}).go
 
@@ -969,3 +968,16 @@ def test_member_typed_twin_retires_pending_voice_start():
     assert b.gate.home_job(MEMBER_TEXT, "person:member", "start_async_task", MEMBER_START).go
     assert next(iter(b.approval_store.rows.values())).status == "withdrawn"
     assert b.watcher.tick()["done"] == 0
+
+
+def test_member_lists_only_when_every_job_in_sight_is_hers():
+    b = member_box()
+    assert b.gate.home_job(MEMBER_TEXT, "person:member", "list_async_tasks", {}).go          # none yet
+    assert b.gate.home_job(MEMBER_TEXT, "person:member", "list_async_tasks", {},
+                           {"async_tasks": {"mine": {"owner": MEMBER_ID}}}).go
+    for leaked in ({"owner": OWNER}, {}, "not a record"):
+        assert not b.gate.home_job(MEMBER_TEXT, "person:member", "list_async_tasks", {},
+                                   {"async_tasks": {"mine": {"owner": MEMBER_ID}, "his": leaked}}).go
+    assert b.gate.home_job(MEMBER_TEXT, "person:member", "check_async_task", {"task_id": "mine"},
+                           {"async_tasks": {"mine": {"owner": MEMBER_ID}}}).go
+    assert not b.store.rows and not b.approval_store.rows                                    # reads ask no one

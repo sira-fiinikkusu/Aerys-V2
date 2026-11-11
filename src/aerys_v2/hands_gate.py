@@ -332,15 +332,20 @@ class HandsGate:
             if name == START:
                 if args.get("subagent_type") != self.members[person]:
                     return Verdict(False, "Not started: use your own home project.")
+            elif name == "list_async_tasks":
+                # Her own list (slice 3): the ledger hands her turns her jobs only; anything else in
+                # sight means it didn't, so nothing is listed.
+                if any(not isinstance(t, dict) or t.get("owner") != person for t in _tasks(state).values()):
+                    return Verdict(False, "Not done: only your own identified home jobs are accessible.")
             else:
                 task = _tasks(state).get(args.get("task_id"))
-                if name == "list_async_tasks" or not isinstance(task, dict) or task.get("owner") != person:
+                if not isinstance(task, dict) or task.get("owner") != person:
                     return Verdict(False, "Not done: only your own identified home jobs are accessible.")
+            if name in READS:
+                return GO
             args["_job_owner"] = person
             if (who == MEMBER and (not tainted or name == CANCEL)) or (who == MEMBER_VOICE and name == CANCEL):
                 return self._direct(name, args)
-            if name in READS:
-                return GO
             recipients = [person]
         else:
             recipients = []

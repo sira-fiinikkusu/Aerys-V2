@@ -735,3 +735,156 @@ def test_approved_member_executor_uses_member_ledger_and_strips_private_args():
     assert calls == [("Build a page", "home-member", {})]
     assert set(ledger.load(OWNER)) == {"owner-task"}
     assert set(ledger.load(member)) == {"member-task"}
+
+
+# --- per-person job lists (D19 slice 3) ----------------------------------------------------------------
+
+MEMBER = "22222222-2222-2222-2222-222222222222"
+MEMBER_TEXT = {"user_id": MEMBER, "platform": "discord", "channel_kind": "dm"}
+SHARED_THREAD = "voice:room"
+
+
+def _rec(tid, run="r-1", status="running"):
+    stamp = "2026-11-09T15:00:00Z"
+    return {"task_id": tid, "agent_name": "home", "thread_id": tid, "run_id": run, "status": status,
+            "created_at": stamp, "last_checked_at": stamp, "last_updated_at": stamp}
+
+
+def _ledger_request(identity, name="list_async_tasks", args=None, thread=SHARED_THREAD, state=None):
+    from langchain.tools import ToolRuntime
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    state = state if state is not None else {"messages": []}
+    rt = ToolRuntime(state=state, context=None, stream_writer=lambda *_: None, store=None, tool_call_id="c1",
+                     config={"configurable": {"thread_id": thread, "identity": identity}})
+    return ToolCallRequest(tool_call={"id": "c1", "name": name, "args": args or {}}, tool=None, state=state, runtime=rt)
+
+
+def test_her_turn_sees_her_jobs_only_and_they_never_land_in_a_shared_threads_state():
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"his": _rec("his")})
+    ledger.save(MEMBER, {"hers": _rec("hers")})
+    room = {"messages": [], "async_tasks": {"his-in-room": _rec("his-in-room")}}   # a room his voice uses too
+    mw = home_ledger_middleware(ledger, OWNER, {MEMBER: "home-member"})
+    seen = {}
+
+    def handler(req):
+        seen.update(req.runtime.state["async_tasks"])
+        return Command(update={"messages": [ToolMessage("1 tracked task(s)", tool_call_id="c1")],
+                               "async_tasks": {"hers": {**seen["hers"], "status": "success", "run_id": "r-2"}}})
+
+    result = mw.wrap_tool_call(_ledger_request(MEMBER_TEXT, state=room), handler)
+    assert set(seen) == {"hers"} and seen["hers"]["owner"] == MEMBER       # hers, marked hers
+    assert "async_tasks" not in result.update and result.update["messages"]  # the thread never holds hers
+    assert ledger.load(MEMBER)["hers"]["run_id"] == "r-2"
+    assert set(ledger.load(OWNER)) == {"his"} and ledger.load(OWNER)["his"]["run_id"] == "r-1"
+
+
+def test_his_turns_are_unchanged_when_she_is_a_member():
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"his": _rec("his")})
+    ledger.save(MEMBER, {"hers": _rec("hers")})
+    room = {"messages": [], "async_tasks": {"from-the-room": _rec("from-the-room")}}
+    seen = {}
+
+    def handler(req):
+        seen.update(req.runtime.state["async_tasks"])
+        return Command(update={"messages": [ToolMessage("ok", tool_call_id="c1")],
+                               "async_tasks": {"his": {**seen["his"], "run_id": "r-2"}}})
+
+    for members in (None, {MEMBER: "home-member"}):
+        seen.clear()
+        result = home_ledger_middleware(ledger, OWNER, members).wrap_tool_call(
+            _ledger_request(TEXT, thread=DM_THREAD, state=room), handler)
+        assert set(seen) == {"his", "from-the-room"} and "owner" not in seen["his"]
+        assert result.update["async_tasks"]["his"]["run_id"] == "r-2"
+    assert set(ledger.load(MEMBER)) == {"hers"} and ledger.load(MEMBER)["hers"]["run_id"] == "r-1"
+
+
+def test_her_async_turn_uses_her_ledger_and_a_guest_still_gets_none():
+    import asyncio
+
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"his": _rec("his")})
+    ledger.save(MEMBER, {"hers": _rec("hers")})
+    mw = home_ledger_middleware(ledger, OWNER, {MEMBER: "home-member"})
+
+    async def handler(req):
+        assert set(req.runtime.state["async_tasks"]) == {"hers"}
+        return Command(update={"messages": [ToolMessage("stopped", tool_call_id="c1")],
+                               "async_tasks": {"hers": {**_rec("hers"), "status": "cancelled"}}})
+
+    req = _ledger_request(MEMBER_TEXT, "cancel_async_task", {"task_id": "hers"}, thread=f"person:{MEMBER}")
+    result = asyncio.run(mw.awrap_tool_call(req, handler))
+    assert "async_tasks" not in result.update and ledger.load(MEMBER)["hers"]["status"] == "cancelled"
+
+    async def guest(req):
+        assert "async_tasks" not in req.runtime.state
+        return "refused by the gate"
+
+    assert asyncio.run(mw.awrap_tool_call(_ledger_request(GUEST), guest)) == "refused by the gate"
+
+
+def test_her_typed_start_is_recorded_in_her_list_through_the_real_gate():
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+    from aerys_v2.hands_gate import home_job_middleware
+
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    gate = HandsGate(Approvals(MemoryApprovalStore(), clock=lambda: NOW), MemoryGatedActionStore(),
+                     owner_person_id=OWNER, members={MEMBER: "home-member"}, clock=lambda: NOW)
+    outer, inner = home_ledger_middleware(ledger, OWNER, gate.members), home_job_middleware(gate)
+
+    def tool(req):
+        return Command(update={"messages": [ToolMessage("started", tool_call_id="c1")],
+                               "async_tasks": {"new": _rec("new")}})
+
+    start = {"description": "Make a calendar", "subagent_type": "home-member"}
+    req = _ledger_request(MEMBER_TEXT, "start_async_task", start, thread=f"person:{MEMBER}")
+    result = outer.wrap_tool_call(req, lambda r: inner.wrap_tool_call(r, tool))
+    assert set(ledger.load(MEMBER)) == {"new"} and ledger.load(OWNER) == {}
+    assert "async_tasks" not in result.update
+    listed = {}
+
+    def lister(req):
+        listed.update(req.runtime.state["async_tasks"])
+        return "1 tracked task(s)"
+
+    assert outer.wrap_tool_call(_ledger_request(MEMBER_TEXT, thread=f"person:{MEMBER}"),
+                                lambda r: inner.wrap_tool_call(r, lister)) == "1 tracked task(s)"
+    assert set(listed) == {"new"}
+
+
+def test_her_turns_keep_a_commands_routing_even_when_her_record_fails():
+    from langgraph.types import Command
+
+    from aerys_v2.home_jobs import home_ledger_middleware
+
+    class Failing(MemoryHomeTaskLedger):
+        def save(self, owner, tasks):
+            raise ConnectionError("database away")
+
+    for ledger in (MemoryHomeTaskLedger(clock=lambda: NOW), Failing(clock=lambda: NOW)):
+        MemoryHomeTaskLedger.save(ledger, MEMBER, {"hers": _rec("hers")})
+        mw = home_ledger_middleware(ledger, OWNER, {MEMBER: "home-member"})
+
+        def handler(req):
+            return Command(graph=Command.PARENT, goto="next", resume="value",
+                           update={"messages": [ToolMessage("ok", tool_call_id="c1")], "async_tasks": {"hers": _rec("hers")}})
+
+        result = mw.wrap_tool_call(_ledger_request(MEMBER_TEXT, thread=f"person:{MEMBER}"), handler)
+        assert (result.graph, result.goto, result.resume) == (Command.PARENT, "next", "value")
+        assert "async_tasks" not in result.update and result.update["messages"]

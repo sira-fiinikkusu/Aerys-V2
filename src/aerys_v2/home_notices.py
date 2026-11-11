@@ -224,9 +224,14 @@ class HomeNotices:
 
     def __init__(self, desk, store, *, fetch: Callable[[Notice], Job] | None = None,
                  compose: Callable[[Job], str] | None = None, clock: Callable[[], datetime] | None = None,
-                 asked_on: Callable[[Notice], str | None] | None = None):
+                 asked_on: Callable[[Notice], str | None] | None = None,
+                 not_his: Callable[[Notice], bool] | None = None):
         self.desk, self.store, self.fetch, self.compose = desk, store, fetch, compose
         self.asked_on = asked_on
+        # D19 rule 4: a household member's finished job is told to her, not him. Until her own
+        # notices exist, hers stay owed here (never handed to his desk, never dropped).
+        self.not_his = not_his
+        self._held: set = set()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.wake = threading.Event()
 
@@ -274,6 +279,20 @@ class HomeNotices:
                 self.store.handled(notice.id, now, "superseded: the newer request's notice says how it went")
                 out["skipped"] += 1
                 continue
+            if self.not_his is not None:
+                try:
+                    hers = self.not_his(notice)
+                except Exception:
+                    log.warning("home notice %s: couldn't read whose job it is; it waits", notice.id, exc_info=True)
+                    out["waiting"] += 1
+                    continue
+                if hers:
+                    if notice.id not in self._held:
+                        self._held.add(notice.id)
+                        log.info("home notice %s: not on record as his job (a household member's, or not "
+                             "written down yet); it waits", notice.id)
+                    out["waiting"] += 1
+                    continue
             job = Job()
             if self.fetch is not None:
                 try:
@@ -412,10 +431,29 @@ def asked_on_for(settings) -> Callable[[Notice], str | None]:
     return lambda notice: ledger.asked_on(notice.thread_id)
 
 
+def not_his_for(settings) -> Callable[[Notice], bool] | None:
+    """Whether a notice's job isn't positively his (D19): a household member's, or one whose record
+    isn't there (yet). Those wait; only a job on record as his goes to his desk. None when there
+    are no members, so his notices go exactly as before."""
+    from aerys_v2.config import home_job_member_map
+    from aerys_v2.home_jobs import PostgresHomeTaskLedger
+
+    if not home_job_member_map(settings) or settings.owner_person_id is None:
+        return None
+    ledger = PostgresHomeTaskLedger(settings.database_url)
+    owner = str(settings.owner_person_id)
+
+    def not_his(notice) -> bool:
+        return ledger.owner_of(notice.thread_id) != owner
+
+    return not_his
+
+
 def home_notices_for(settings, desk) -> HomeNotices | None:
     """None unless armed: home_notices on, a webhook token, a desk and a database."""
     if (not getattr(settings, "home_notices", False) or getattr(settings, "home_webhook_token", None) is None
             or desk is None or not getattr(settings, "database_url", None)):
         return None
     return HomeNotices(desk, PostgresNoticeStore(settings.database_url), fetch=fetcher_for(settings),
-                       compose=composer_for(settings), asked_on=asked_on_for(settings))
+                       compose=composer_for(settings), asked_on=asked_on_for(settings),
+                       not_his=not_his_for(settings))
