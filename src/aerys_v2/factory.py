@@ -11,6 +11,7 @@ import logging
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from aerys_v2.action_context import memoized
 from aerys_v2.anthropic_model import build_metered_model
 from aerys_v2.config import Settings
 from aerys_v2.house_names import NAMES, wife_or
@@ -32,7 +34,7 @@ from aerys_v2.history import prompt_with_context, window_messages
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
 from aerys_v2.state import ChatState, identity_from_config, is_lens_surface, is_voice_turn
 from aerys_v2.turns import channel_enum
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 log = logging.getLogger(__name__)
 
@@ -271,6 +273,35 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
             log.warning("people-memory context failed for person %s", person_id, exc_info=True)
             return ""
 
+    def people_with_memo(memo):
+        from aerys_v2.services.people_memory import PEOPLE_SQL, assemble_people_block, person_section
+
+        def read(person_id, window_text, privacy_context):
+            # Open at most one connection on a pass with misses, none on all hits.
+            with ExitStack() as stack:
+                conn = None
+
+                def connection():
+                    nonlocal conn
+                    if conn is None:
+                        conn = stack.enter_context(psycopg.connect(settings.memories_database_url))
+                        conn.read_only = True
+                    return conn
+
+                def roster():
+                    return connection().execute(PEOPLE_SQL).fetchall()
+
+                def section(speaker, name, privacy):
+                    return person_section(connection(), speaker, name, privacy)
+
+                return assemble_people_block(
+                    person_id, window_text, privacy_context,
+                    memoized(roster, memo, namespace=(people, "roster")),
+                    memoized(section, memo, namespace=(people, "section")),
+                )
+        return read
+
+    people.with_memo = people_with_memo
     context_fn.people = people
     return context_fn
 
@@ -286,11 +317,14 @@ def people_window(messages, query_text: str, *, last: int = 6) -> str:
     return "\n".join(texts)
 
 
-def people_knowledge(context_fn, identity: dict, messages, query_text: str) -> str:
+def people_knowledge(context_fn, identity: dict, messages, query_text: str, *, memo=None) -> str:
     """The '[People in this conversation]' block, or '' (no seam, nobody named, or a failure)."""
     people = getattr(context_fn, "people", None)
     if people is None:
         return ""
+    if memo is not None:
+        factory = getattr(people, "with_memo", None)
+        people = factory(memo) if factory is not None else memoized(people, memo)
     try:
         block = people(str(identity.get("user_id", "")), people_window(messages, query_text),
                        identity.get("privacy_context", "public"))
@@ -1959,7 +1993,7 @@ def _action_prompt_builder(
     code, so the request bytes can't drift between them. Returns
     fn(messages, config) -> (prompt, specialist, fast)."""
 
-    def build(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
+    def assemble(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
         # Same identity rule as the chat node: from per-call config, never state.
         identity = identity_from_config(config)
         # SPECIALIST MODE (2026-09-04) rides `configurable` like spoken_ack: set by
@@ -1968,6 +2002,7 @@ def _action_prompt_builder(
         # runs this graph, conversation included): the soul, free model, exactly
         # as before. One compiled graph, two shapes, chosen per call.
         configurable = config.get("configurable") or {}
+        memo = configurable.get("action_context_memo")
         specialist = bool(configurable.get("specialist"))
         fast = configurable.get("tier") == "fast"  # the router's grade rides in
         persona = charter if specialist else soul
@@ -2019,7 +2054,7 @@ def _action_prompt_builder(
                 content = latest.content
                 query_text = content if isinstance(content, str) else str(content)
             try:
-                block = context_fn(
+                block = memoized(context_fn, memo)(
                     str(identity.get("user_id", "")),
                     query_text,
                     identity.get("privacy_context", "public"),
@@ -2029,7 +2064,7 @@ def _action_prompt_builder(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
-            knowledge += people_knowledge(context_fn, identity, messages, query_text)
+            knowledge += people_knowledge(context_fn, identity, messages, query_text, memo=memo)
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
@@ -2041,25 +2076,32 @@ def _action_prompt_builder(
         family = ""
         if family_notes_fn is not None:
             try:
-                family = family_notes_fn(identity) or ""
+                family = memoized(family_notes_fn, memo)(identity) or ""
             except Exception:
                 log.warning("action family_notes_fn raised; continuing without", exc_info=True)
         shared = _shared_surface_note(identity, shared_surface_ids or {})
         # The room, on her HANDS as well as her voice: a job asked in a shared
         # channel needs the channel as much as a conversation does.
-        room = room_block(identity, room_context_fn,
+        room = room_block(identity, memoized(room_context_fn, memo),
                           ((config or {}).get("configurable") or {}).get("room_sink"))
         # Her other bodies, on her hands too: a job asked here may continue one begun
         # on the stick, and "do the thing I asked you about last night" has to resolve.
-        portable = portable_block(identity, portable_context_fn)
+        portable = portable_block(identity, memoized(portable_context_fn, memo))
         # Ambient house presence (her gap #101, passive half). The helper owns the
         # owner-and-private fence — presence disclosure is a gated surface.
-        presence = presence_block(identity, presence_fn)
+        presence = presence_block(identity, memoized(
+            presence_fn, memo,
+            # A valid snapshot can have no occupied rooms but still locate the caller.
+            # Failed HA reads have neither rooms nor these fields; retry those.
+            cache_if=lambda value: bool(value or getattr(value, "whereabouts", None)
+                                       or getattr(value, "city", None)
+                                       or getattr(value, "local_zone", None)),
+        ))
         # What this satellite has heard lately — owner's voice turns only; the helper
         # owns that fence (Chris asked for it and asked that guests not get it).
-        voice_room = voice_room_block(identity, voice_room_fn)
-        # act runs once per model pass; context is computed once per node call,
-        # then attached to a fresh copy, never accumulated in the tool-loop state.
+        voice_room = voice_room_block(identity, memoized(voice_room_fn, memo))
+        # Helpers run every pass; only exact raw reads share the per-invoke memo.
+        # Context attaches to a fresh copy, never accumulating in tool-loop state.
         # The spoken-ack overlay quotes THIS turn's generated ack, so it is
         # per-turn text and rides with the dynamic block; the other ack_block
         # variants (banter / typed / lens styling) are per-surface and stay in
@@ -2083,8 +2125,22 @@ def _action_prompt_builder(
         # a tool ("search where to buy this") was invisible here. Same inlining as chat.
         from aerys_v2.images import inline_current_images
 
-        prompt = inline_current_images(prompt)
+        if memo is None:
+            prompt = inline_current_images(prompt)
+        else:
+            from aerys_v2.images import fetch_image
+
+            prompt = inline_current_images(prompt, fetch=memoized(fetch_image, memo))
         return prompt, specialist, fast
+
+    def build(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
+        started = perf_counter()
+        try:
+            return assemble(messages, config)
+        finally:
+            log.debug("action prompt built in %.2f ms (memo=%s)",
+                      (perf_counter() - started) * 1000,
+                      "action_context_memo" in (config.get("configurable") or {}))
 
     return build
 

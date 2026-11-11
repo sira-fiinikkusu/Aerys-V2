@@ -970,6 +970,8 @@ def action_honesty_gate(
 def _invoke_action_graph(action_graph: object, messages: list, config: dict) -> dict:
     # Bring the tool-node receipt back across LangGraph's copied context, even
     # if the local model fails too. The caller resets the flag once per turn.
+    config = {**config, "configurable": {**config.get("configurable", {}),
+                                       "action_context_memo": {}}}
     with track_local_tool_fallback():
         return action_graph.invoke({"messages": messages}, config)
 
