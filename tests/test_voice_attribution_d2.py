@@ -37,7 +37,7 @@ def test_untagged_and_unsure_voice_turns_are_his_by_default_only():
     assert all(s["user_id"] == OWNER for s in seen), "chat still answers him (9/22 rule)"
 
 
-def test_a_clear_match_megan_and_guests_are_not_marked():
+def test_a_clear_match_robin_and_guests_are_not_marked():
     c, seen = _app()
     _voice(c, {"id": "chris", "confidence": 0.7})          # a named match to his print
     _voice(c, {"id": "robin", "confidence": 0.7})          # her own person, not his

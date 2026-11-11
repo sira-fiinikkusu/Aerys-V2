@@ -137,9 +137,9 @@ def test_groups_by_person_before_extraction():
     assert len(llm.calls) == 2
     transcripts = [user for _, user in llm.calls]
     chris_t = next(t for t in transcripts if "Dodge Ram" in t)
-    megan_t = next(t for t in transcripts if "SNES" in t)
+    robin_t = next(t for t in transcripts if "SNES" in t)
     assert "SNES" not in chris_t and "Rotonda West" in chris_t  # no cross-person bleed
-    assert "Dodge Ram" not in megan_t
+    assert "Dodge Ram" not in robin_t
     assert all(system == EXTRACTION_SYSTEM_PROMPT for system, _ in llm.calls)
 
 
