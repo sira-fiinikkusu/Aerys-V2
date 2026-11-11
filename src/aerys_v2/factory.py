@@ -2474,6 +2474,19 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             tools.append(build_contact_tool(contacts, owner_person_id=owner,
                                             owner_names=lambda: contacts.names_of(owner)))
 
+    if not guest:
+        from aerys_v2.tools.send_message import build_send_message_tool
+        if getattr(settings, "messages_as_herself", False):
+            from aerys_v2.hands_gate import hands_gate_for
+            message_gate = hands_gate_for(settings)
+            sender = getattr(message_gate, "message_sender", None)
+            if sender is not None:
+                tools.append(build_send_message_tool(sender))
+            else:
+                log.info("send_message not armed: gate or required messaging configuration unavailable")
+        else:
+            log.info("send_message not armed: MESSAGES_AS_HERSELF is off")
+
     if not guest and settings.database_url:
         # REACH PREFS (board #176, Stage 2; the owner's D4/D7, 2026-11-08): he steers how
         # often she reaches out on her own, and about what, in his own words; the reach-out

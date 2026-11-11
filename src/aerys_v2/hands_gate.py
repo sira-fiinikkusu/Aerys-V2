@@ -455,7 +455,7 @@ class HandsGate:
 
     # D12 ---------------------------------------------------------------------------------
 
-    def message(self, thread_id, platform: str, to: str, text: str, identity=None, *, tainted=()) -> Verdict:
+    def message(self, thread_id, platform: str, to: str, text: str, identity=None, *, tainted=(), resolved=None) -> Verdict:
         """Before she messages anyone: GO for him and for anyone he's already confirmed at this
         exact address; otherwise his button (one match) or a question for him (none, or several)."""
         platform = str(platform or "").strip().lower()
@@ -465,7 +465,7 @@ class HandsGate:
         if self.people is None:
             return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.")
         try:
-            found = self.people(platform, to)
+            found = self.people(platform, to) if resolved is None else resolved
         except Exception:
             log.warning("hands gate: the people lookup failed; nothing sent", exc_info=True)
             return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.")
@@ -485,7 +485,7 @@ class HandsGate:
                                   "Chris which one he means.")
         (p,) = destinations.values()
         pid = str(p["person_id"])
-        if pid == str(self.owner):
+        if pid == str(self.owner) and not tainted:
             return GO
         address = str(p.get("address") or "").strip()
         if not address:
@@ -795,7 +795,12 @@ def people_lookup_for(settings) -> Callable[[str, str], list[dict]] | None:
             found = rows(conn, sql + "(pi.platform_user_id = %s OR lower(btrim(pi.username)) = lower(%s))",
                          (platform, to, to))
             if not found:
-                found = rows(conn, sql + "lower(btrim(p.display_name)) = lower(%s)", (platform, to))
+                found = rows(conn,
+                             "SELECT p.id, p.display_name, pi.platform_user_id, nullif(btrim(pi.username), '') "
+                             "FROM persons p LEFT JOIN platform_identities pi "
+                             "ON pi.person_id = p.id AND pi.platform = %s "
+                             "WHERE p.deleted_at IS NULL AND lower(btrim(p.display_name)) = lower(%s)",
+                             (platform, to))
             return found
 
     return lookup
@@ -816,8 +821,16 @@ def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], tup
     from aerys_v2.config import home_job_member_map
 
     read_only = [a for a in str(getattr(settings, "home_read_only_agents", "") or "").split(",") if a.strip()]
-    return HandsGate(approvals, PostgresGatedActionStore(settings.database_url),
+    gate = HandsGate(approvals, PostgresGatedActionStore(settings.database_url),
                      owner_person_id=str(settings.owner_person_id), people=people_lookup_for(settings),
                      executors=executors, read_only_agents=read_only,
                      members=home_job_member_map(settings),
                      discord_id=lambda person: person_id_for(settings, person))
+
+    if getattr(settings, "messages_as_herself", False):
+        from aerys_v2.tools.send_message import message_sender_for
+        sender = message_sender_for(settings, gate)
+        if sender is not None:
+            gate.message_sender = sender
+            gate.executors[MESSAGE] = sender.execute
+    return gate

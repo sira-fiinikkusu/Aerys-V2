@@ -523,6 +523,8 @@ class Settings(BaseSettings):
     # home_read_only_agents (list one only once the home body enforces read-only for it); any
     # other voice-started job, and her first message to anyone new, waits for his Approve. Off
     # unless hands_gates is true and approvals is armed.
+    messages_as_herself: bool = False  # D12/D27: explicit opt-in only
+    message_people: str = ""  # comma-separated person UUIDs; deployment env only
     hands_gates: bool = False
     home_read_only_agents: str = ""
     # Separate home-job grant: person UUID=home project, comma separated.

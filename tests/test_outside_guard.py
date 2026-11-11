@@ -117,13 +117,13 @@ def test_origin_and_room_provenance():
         assert sink['outside'] is expected
 
 
-def test_approved_contact_still_waits_but_owner_go_stays():
+def test_approved_contact_and_owner_wait_after_outside_text():
     b = Box()
     b.gate.message(OWNER_THREAD, 'discord', 'sam_42', 'first')
     b.tap(); b.watcher.tick()
     v = b.gate.message(OWNER_THREAD, 'discord', 'sam_42', 'next', tainted=('read_email',))
     assert not v.go and 'Waiting' in v.text
-    assert b.gate.message(OWNER_THREAD, 'discord', 'chris_h', 'owner', tainted=True).go
+    assert not b.gate.message(OWNER_THREAD, 'discord', 'chris_h', 'owner', tainted=True).go
 
 
 @pytest.mark.parametrize('same_pass', [False, True])

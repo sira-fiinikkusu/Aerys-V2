@@ -14,7 +14,7 @@ from langchain_core.messages import ToolMessage
 READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_document',
                      'youtube_summary', 'search_email', 'read_email',
                      'check_async_task', 'list_async_tasks'})
-REACH_OUT = frozenset({'send_email', 'start_async_task', 'update_async_task', 'message_kael',
+REACH_OUT = frozenset({'send_message', 'send_email', 'start_async_task', 'update_async_task', 'message_kael',
                       'sticky_note', 'log_gap', 'control_alarm', 'remember', 'save_contact_email'})
 #: D29 #1 (2026-11-11): her own home jobs' results are trusted for her notes and for asking Kael;
 #: sending to people and starting or changing jobs after them still waits for his tap.
@@ -77,6 +77,10 @@ def _decide(request, gate):
         holder['untrusted_read'] = True
     reaches = name in REACH_OUT or (name == 'kael_tickets' and
                                    args.get('action', '').strip().lower() in ('update', 'cancel'))
+    # The message tool reads this same snapshot through ToolRuntime and calls D12 itself.
+    # Its button shows the resolved identity and signed words, not an outside_action wrapper.
+    if name == 'send_message':
+        return None
     if not sources or not reaches:
         return None
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
@@ -134,7 +138,7 @@ def outside_middleware(gate=None):
 def action_executor(tools):
     """The watcher invokes only the exact registered tool and args shown on his button."""
     allowed = {t.name: t for t in tools if t.name in REACH_OUT - {
-        'send_email', 'start_async_task', 'update_async_task'} or t.name == 'kael_tickets'}
+        'send_message', 'send_email', 'start_async_task', 'update_async_task'} or t.name == 'kael_tickets'}
 
     def execute(row):
         tool = allowed.get(row.args.get('tool'))
