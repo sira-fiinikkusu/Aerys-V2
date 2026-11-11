@@ -423,7 +423,10 @@ def storm_reach_for(desk, *, fallback: Callable[[str, str, str], None] | None = 
             # that can't be told (the ledger is unreachable), a WARNING goes direct anyway (a
             # second copy beats a lost warning); anything else doesn't (the phone leg has it).
             try:
-                taken = desk.store.recently_sent(notice.key, datetime.now(timezone.utc) - DEDUPE_WINDOW)
+                # The desk's own clock, as every desk decision: the wall clock here made this a time bomb in
+                # the suite (11/10: a day after its fixed test date, the desk's row read as "not taken").
+                now = desk.clock() if callable(getattr(desk, "clock", None)) else datetime.now(timezone.utc)
+                taken = desk.store.recently_sent(notice.key, now - DEDUPE_WINDOW)
             except Exception:
                 taken = URGENCY.get(notice.kind) != "safety"
             if taken:
