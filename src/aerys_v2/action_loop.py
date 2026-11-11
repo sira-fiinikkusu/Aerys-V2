@@ -26,11 +26,9 @@ tool call with a synthetic "could not be executed" ToolMessage. The model is sho
 history without those (as before), and turns.extract_tool_calls never counts one as a tool
 that ran, so the honesty gate still sees zero tools (Codex review, 11/08).
 
-What does NOT move in this slice, on purpose: the honesty gate (service.py bounces a
-zero-tool claim around the graph, as before), the direct device command seed
-(service._direct_device_seed reads home_control_tool off the graph), and the per-turn
-context, which is still computed on every model pass like the old act node. Each of
-those moves later as its own measured step.
+The honesty gate is an outer wrap hook, armed only by the service's gated action
+path. Its one retry rebuilds the prompt without adding graph nodes. Direct device
+seeding remains in the service.
 
 A legacy model object (a ToolModelPair, or any object with .invoke) is still accepted
 and called directly from the hook, the way the stick's loop calls its model: that keeps
@@ -144,6 +142,33 @@ def _agent_models(settings, tools: list, *, backend: str, timeout_s: float = 60.
                            lifeboat=lifeboat, lifeboat_tools=house)
 
 
+def _honesty_middleware():
+    """Bounce once inside the model node, without spending another graph step."""
+    from langchain.agents.middleware import AgentMiddleware, ModelResponse
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.config import get_config
+
+    from aerys_v2.turns import ACTION_NO_TOOL_CORRECTION, extract_tool_calls
+
+    class ActionHonesty(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            first = handler(request)
+            last = next((m for m in reversed(first.result) if isinstance(m, AIMessage)), None)
+            if (not get_config().get("configurable", {}).get("honesty_gate")
+                    or last is None or last.tool_calls
+                    or extract_tool_calls(request.messages)
+                    or any(isinstance(m, HumanMessage) and m.content == ACTION_NO_TOOL_CORRECTION
+                           for m in request.messages)):
+                return first
+            log.info("action-honesty gate: zero tool calls — bouncing once with a correction")
+            fix = HumanMessage(content=ACTION_NO_TOOL_CORRECTION)
+            again = handler(request.override(messages=[*request.messages, *first.result, fix]))
+            return ModelResponse(result=[*first.result, fix, *again.result],
+                                 structured_response=again.structured_response)
+
+    return ActionHonesty()
+
+
 def _act_middleware(build_prompt, models):
     """One wrap_model_call hook: the act node's prompt, the per-call model, the
     lifeboat, the panel tap. A wrap hook adds no graph node (see the module doc)."""
@@ -241,8 +266,9 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
         default,
         tools=list(tools),
         # extra_middleware: official middleware mounted after hers, e.g. her home body's long
-        # jobs (home_jobs.py, s3-02). Hers stays outermost: it builds the prompt and picks the model.
-        middleware=[_act_middleware(build_prompt, models), *kw.get("extra_middleware", ())],
+        # jobs (home_jobs.py, s3-02). The honesty retry must rebuild the prompt.
+        middleware=[_honesty_middleware(), _act_middleware(build_prompt, models),
+                    *kw.get("extra_middleware", ())],
         checkpointer=kw.get("checkpointer"),
     )
     compiled.presence_fn = presence_fn

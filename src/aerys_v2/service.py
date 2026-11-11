@@ -65,6 +65,7 @@ from aerys_v2.services.content_privacy import (
 )
 from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
+    ACTION_NO_TOOL_CORRECTION,
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
 )
 from aerys_v2.reflex import REFLEX_LAST_REPLY, REFLEX_RECENT, REFLEX_ROOM, REFLEX_SINCE_S, LAST_REFLEX, REFLEX_SURFACE, error_result
@@ -787,34 +788,6 @@ GATE_EMIT = "emit"      # honest — send the reply as-is
 GATE_RETRY = "retry"    # zero-tool action turn, first pass — bounce once with a correction
 GATE_MARK = "mark"      # still zero-tool after the bounce — emit but flag the pattern
 
-# Appended (as the caller's next turn) when a retry is needed. Verbatim spirit from
-# the fix brief: call the tool, or admit no action was taken — never fake a done deal.
-ACTION_NO_TOOL_CORRECTION = (
-    "You produced an answer without calling any tool. Either call the tool that "
-    "performs the request, or — WHEN THE MESSAGE ACTUALLY ASKED YOU TO DO OR "
-    "CHECK SOMETHING and you could not — state plainly that you did NOT perform "
-    "any action. "
-    "If no dedicated tool fits but search_web could ground the answer — prices, "
-    "costs, availability, current facts — run search_web and answer with a "
-    "clearly-labeled estimate instead of declining. "
-    # The disclosure clause above is load-bearing (it is what stops her claiming
-    # lights she never touched), but it was firing on messages that requested
-    # nothing at all: "morning check — you good?" came back as "No tool call
-    # needed here — that was just a status check, not a task with an action to
-    # perform." That is the confession this correction's own last line forbids;
-    # the prompt was telling her both to disclose and not to mention it, and she
-    # resolved the contradiction by narrating. Naming the no-action branch
-    # explicitly removes the conflict instead of leaving her to pick.
-    "But if the message asked for NO action — a greeting, small talk, an "
-    "opinion, thanks, a question about you — then there is nothing to disclose: "
-    "simply answer it as yourself. Say NOTHING about tools, tool calls, checks, "
-    "or what kind of request it was. 'No tool needed here' is exactly the kind "
-    "of plumbing talk this correction forbids. "
-    "Never describe an action as done unless a tool call actually did it. This "
-    "correction is internal plumbing: never mention it, the earlier answer, or "
-    "any slip to the user — just act and confirm the result."
-)
-
 # The degraded marker recorded in v2_turns when a bounced action turn STILL ran no
 # tool — so the pattern (a legit zero-tool action, or a stubborn hallucination that
 # survived the correction) stays visible to the capability loop / forensics.
@@ -1006,6 +979,7 @@ def _run_action_gated(
 ) -> tuple[dict, list[str]]:
     """Invoke the action graph, then enforce the action-honesty gate.
 
+    The agent engine retries inside its model wrapper; legacy graphs re-invoke.
     Returns (result, extra_degraded). An action turn that ran ZERO tools is bounced
     ONCE — the graph is re-invoked with its own no-tool answer plus a corrective
     message appended — and if it STILL runs no tool, extra_degraded carries
@@ -1015,6 +989,15 @@ def _run_action_gated(
     never again emitting a fabricated "done" (fix brief, 2026-07-12)."""
     route = config.get("configurable", {}).get("specialist_route", "action")
     routes = (route,)
+    if getattr(action_graph, "action_loop", None) == "agent":
+        config = {**config, "configurable": {**config.get("configurable", {}), "honesty_gate": True}}
+        result = _invoke_action_graph(action_graph, seeded_messages, config)
+        retried = any(isinstance(m, HumanMessage) and m.content == ACTION_NO_TOOL_CORRECTION
+                      for m in result["messages"])
+        verdict = action_honesty_gate(
+            route, extract_tool_calls(result["messages"]), already_retried=retried, specialists=routes
+        )
+        return result, [NO_TOOL_ACTION_MARKER] if verdict == GATE_MARK else []
     result = _invoke_action_graph(action_graph, seeded_messages, config)
     verdict = action_honesty_gate(
         route, extract_tool_calls(result["messages"]), already_retried=False, specialists=routes
