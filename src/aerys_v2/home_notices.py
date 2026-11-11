@@ -35,6 +35,7 @@ import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from aerys_v2.reach import ReachEvent
 
@@ -51,6 +52,7 @@ METADATA_BYTES = 4096
 TASK_CHARS = 300
 RESULT_CHARS = 1500
 ERROR_CHARS = 300
+EASTERN = ZoneInfo("America/New_York")
 _HOLD = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
 #: "Ever", for the desk's ledger: a job's notice is told once, however late a retry comes.
 EPOCH = datetime(2000, 1, 1, tzinfo=timezone.utc)
@@ -69,6 +71,14 @@ HOME_JOB_PROMPT = (
     "The full report goes to him as text, so don't recite it. No lists, no markdown, no emoji. "
     "Reply with ONLY the message."
 )
+
+#: A household member's finished job (D19 rule 4): told to her, as text in her own DM, never at his
+#: desk or in his rooms. Fixed words around her job's own report; a job that didn't finish says PLAIN's.
+MEMBER_DONE = "Your job at home is done{about}."
+MEMBER_REPORT_CHARS = 1500
+#: Her DM failing again and again (blocked, no Discord id): after this many tries it's marked, never
+#: sent forever.
+MEMBER_TRIES = 6
 
 #: What a job that didn't succeed says: fixed sentences, never her words, never "done".
 PLAIN = {
@@ -225,13 +235,21 @@ class HomeNotices:
     def __init__(self, desk, store, *, fetch: Callable[[Notice], Job] | None = None,
                  compose: Callable[[Job], str] | None = None, clock: Callable[[], datetime] | None = None,
                  asked_on: Callable[[Notice], str | None] | None = None,
-                 not_his: Callable[[Notice], bool] | None = None):
+                 whose: Callable[[Notice], str | None] | None = None, owner: str | None = None,
+                 tell_member: Callable[[str, str, bool], None] | None = None,
+                 quiet: Callable[[datetime], bool] | None = None):
         self.desk, self.store, self.fetch, self.compose = desk, store, fetch, compose
         self.asked_on = asked_on
-        # D19 rule 4: a household member's finished job is told to her, not him. Until her own
-        # notices exist, hers stay owed here (never handed to his desk, never dropped).
-        self.not_his = not_his
+        # D19 rule 4: whose job a notice is about. Unset (no household members): every notice is his,
+        # as before. His goes to his desk; a household member's is told to her (tell_member); one whose
+        # record isn't there yet, or hers when she can't be told, stays owed. Hers never reach his desk.
+        self.whose, self.owner, self.tell_member = whose, owner, tell_member
+        self.quiet = quiet or quiet_hours
         self._held: set = set()
+        # Her DM's own tries, apart from the details' (a slow home server never eats them, nor they its),
+        # and the notices she's already been told whose "handled" mark hasn't landed yet: told once.
+        self._dm_fails: dict = {}
+        self._told: set = set()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.wake = threading.Event()
 
@@ -279,20 +297,23 @@ class HomeNotices:
                 self.store.handled(notice.id, now, "superseded: the newer request's notice says how it went")
                 out["skipped"] += 1
                 continue
-            if self.not_his is not None:
+            member = None
+            if self.whose is not None:
                 try:
-                    hers = self.not_his(notice)
+                    who = self.whose(notice)
                 except Exception:
                     log.warning("home notice %s: couldn't read whose job it is; it waits", notice.id, exc_info=True)
                     out["waiting"] += 1
                     continue
-                if hers:
-                    if notice.id not in self._held:
-                        self._held.add(notice.id)
-                        log.info("home notice %s: not on record as his job (a household member's, or not "
-                             "written down yet); it waits", notice.id)
-                    out["waiting"] += 1
-                    continue
+                if not (who and who == self.owner):         # his desk only on a positive match
+                    if not who or self.tell_member is None:
+                        if notice.id not in self._held:
+                            self._held.add(notice.id)
+                            log.info("home notice %s: not on record as his job, and no one to tell yet; "
+                                     "it waits", notice.id)
+                        out["waiting"] += 1
+                        continue
+                    member = who
             job = Job()
             if self.fetch is not None:
                 try:
@@ -305,8 +326,11 @@ class HomeNotices:
                                     notice.id, type(e).__name__)
                         out["waiting"] += 1
                         continue
-                    log.warning("home notice %s: no details after %d tries; telling him without them",
+                    log.warning("home notice %s: no details after %d tries; telling it without them",
                                 notice.id, DETAIL_TRIES)
+            if member is not None:
+                out[self._tell_member(notice, member, job, now)] += 1
+                continue
             key = f"home-job:{notice.run_id}:{notice.status}"
             try:
                 # The desk's own dedupe looks back a day; a notice whose "handled" mark failed
@@ -335,6 +359,38 @@ class HomeNotices:
             log.info("home notice %s (run %s %s): %s", notice.id, notice.run_id, notice.status, outcome)
             out["handed"] += 1
         return out
+
+    def _tell_member(self, notice: Notice, member: str, job: Job, now: datetime) -> str:
+        """Her finished job, told to her (D19 rule 4): "handed", "waiting" (tried again next pass) or
+        "skipped" (she couldn't be reached after MEMBER_TRIES; marked, not resent forever)."""
+        task = clip(job.task, TASK_CHARS)
+        about = f": {task}" if task else ""
+        if notice.status == "success":
+            text, more = MEMBER_DONE.format(about=about), clip(job.result, MEMBER_REPORT_CHARS)
+        else:
+            text, more = PLAIN[notice.status].format(about=about), clip(job.error, ERROR_CHARS)
+        if more:
+            text = f"{text}\n\n{more}"
+        if notice.id not in self._told:
+            try:
+                self.tell_member(member, text, self.quiet(now))
+            except Exception as e:
+                fails = self._dm_fails[notice.id] = self._dm_fails.get(notice.id, 0) + 1
+                if fails < MEMBER_TRIES:
+                    log.warning("home notice %s: couldn't tell the household member (%s); trying again",
+                                notice.id, type(e).__name__)
+                    return "waiting"
+                log.warning("home notice %s: couldn't tell the household member after %d tries; marked",
+                            notice.id, MEMBER_TRIES)
+                self.store.handled(notice.id, now, "couldn't reach the household member")
+                self._dm_fails.pop(notice.id, None)
+                return "skipped"
+            self._told.add(notice.id)
+        self.store.handled(notice.id, now, "told the household member")
+        self._told.discard(notice.id)
+        self._dm_fails.pop(notice.id, None)
+        log.info("home notice %s (run %s %s): told the household member", notice.id, notice.run_id, notice.status)
+        return "handed"
 
     def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
         log.info("home notices armed | every %d s", TICK_S)
@@ -431,22 +487,47 @@ def asked_on_for(settings) -> Callable[[Notice], str | None]:
     return lambda notice: ledger.asked_on(notice.thread_id)
 
 
-def not_his_for(settings) -> Callable[[Notice], bool] | None:
-    """Whether a notice's job isn't positively his (D19): a household member's, or one whose record
-    isn't there (yet). Those wait; only a job on record as his goes to his desk. None when there
-    are no members, so his notices go exactly as before."""
+def quiet_hours(when: datetime) -> bool:
+    """Night in the house (9 PM to 9 AM Eastern): a member's notice still arrives, without a buzz."""
+    hour = when.astimezone(EASTERN).hour
+    return hour >= 21 or hour < 9
+
+
+def whose_for(settings) -> Callable[[Notice], str | None] | None:
+    """Whose job a notice is about (D19), from its record in v2_home_tasks: his id, a household
+    member's, or None when it isn't written down (yet). None only when there are no members, so his
+    notices go exactly as before; with members and no owner configured, nothing reaches a desk."""
     from aerys_v2.config import home_job_member_map
     from aerys_v2.home_jobs import PostgresHomeTaskLedger
 
-    if not home_job_member_map(settings) or settings.owner_person_id is None:
+    if not home_job_member_map(settings):
         return None
     ledger = PostgresHomeTaskLedger(settings.database_url)
-    owner = str(settings.owner_person_id)
+    return lambda notice: ledger.owner_of(notice.thread_id)
 
-    def not_his(notice) -> bool:
-        return ledger.owner_of(notice.thread_id) != owner
 
-    return not_his
+def tell_member_for(settings, *, send=None, discord_id=None) -> Callable[[str, str, bool], None] | None:
+    """Tells a household member about her own job: a DM from her bot's own Discord account to hers
+    (D19 rule 4). None without the bot. Never him: his notices go through his desk."""
+    token = getattr(settings, "discord_bot_token", None)
+    if token is None:
+        return None
+    from aerys_v2.approvals import person_id_for
+    from aerys_v2.kael_line import _discord_dm_send
+
+    send = send or _discord_dm_send
+    find = discord_id or (lambda person: person_id_for(settings, person))
+    owner = str(getattr(settings, "owner_person_id", "") or "")
+
+    def tell(person: str, text: str, silent: bool) -> None:
+        if not person or str(person) == owner:
+            raise ValueError("not a household member")
+        address = find(person)
+        if address is None:
+            raise LookupError("no Discord account on record for that household member")
+        send(token.get_secret_value(), str(address), text, silent=silent)
+
+    return tell
 
 
 def home_notices_for(settings, desk) -> HomeNotices | None:
@@ -456,4 +537,5 @@ def home_notices_for(settings, desk) -> HomeNotices | None:
         return None
     return HomeNotices(desk, PostgresNoticeStore(settings.database_url), fetch=fetcher_for(settings),
                        compose=composer_for(settings), asked_on=asked_on_for(settings),
-                       not_his=not_his_for(settings))
+                       whose=whose_for(settings), owner=str(getattr(settings, "owner_person_id", None) or ""),
+                       tell_member=tell_member_for(settings))

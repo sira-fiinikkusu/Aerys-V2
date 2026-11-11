@@ -471,65 +471,172 @@ def test_when_where_it_was_asked_cant_be_read_it_still_goes_follow_me():
 
 # --- a household member's jobs (D19 rule 4: told to her, not him) ------------------------------------
 
-def test_a_household_members_finished_job_waits_and_is_never_told_to_him():
-    home = Home()
-    home.notices.not_his = lambda notice: notice.thread_id == "her-thread"
+OWNER_ID, MEMBER_ID = "6e6bcbed-0000-4000-8000-000000000001", "22222222-2222-2222-2222-222222222222"
+
+
+def household(records, *, told=None, fails=0, now=DAY):
+    """Home() with household members: `records` maps a job's thread to whose it is."""
+    home = Home(now)
+    told = [] if told is None else told
+
+    def tell(person, text, silent):
+        if household.failures:
+            household.failures -= 1
+            raise ConnectionError("discord away")
+        told.append((person, text, silent))
+
+    household.failures = fails
+    home.notices.whose = lambda notice: records.get(notice.thread_id)
+    home.notices.owner = OWNER_ID
+    home.notices.tell_member = tell
+    return home, told
+
+
+def test_her_finished_job_is_told_to_her_and_never_to_him():
+    home, told = household({"her-thread": MEMBER_ID, "his-thread": OWNER_ID})
+    home.job = Job(task="Make a calendar", result="Made it: three weeks, meals on Sundays.")
     home.notices.receive(note(run="run-her", thread="her-thread"))
     home.notices.receive(note(run="run-his", thread="his-thread"))
-    out = home.notices.tick()
-    assert out["handed"] == 1 and out["waiting"] == 1
-    assert len(home.world.spoken) == 1 and home.fetched == ["run-his"]
-    home.notices.tick()                                   # still owed: never dropped, never his
-    assert len(home.world.spoken) == 1 and [n.run_id for n in home.notices.store.open()] == ["run-her"]
+    assert home.notices.tick()["handed"] == 2
+    ((person, text, silent),) = told
+    assert person == MEMBER_ID and not silent
+    assert text.startswith("Your job at home is done: Make a calendar.") and "meals on Sundays" in text
+    assert len(home.world.spoken) == 1 and len(home.desk.store.rows) == 1      # only his reached his desk
+    assert home.notices.store.open() == []
+
+
+def test_her_job_that_didnt_finish_says_so_plainly_and_quietly_at_night():
+    home, told = household({"her-thread": MEMBER_ID}, now=NIGHT)
+    home.job = Job(task="Make a calendar", error="the calendar site refused")
+    home.notices.receive(note(status="error", thread="her-thread"))
+    home.notices.tick()
+    ((_, text, silent),) = told
+    assert text.startswith("That job at home didn't finish: Make a calendar.") and "refused" in text
+    assert silent and "done" not in text.split("\n")[0].lower()
+    assert home.composed == []                                                # never his composer
+
+
+def test_a_job_not_written_down_yet_waits_and_goes_to_whoever_it_turns_out_to_be():
+    records = {}
+    home, told = household(records)
+    home.notices.receive(note(run="run-early", thread="not-written-yet"))
+    assert home.notices.tick()["waiting"] == 1 and not told and home.world.spoken == []
+    records["not-written-yet"] = MEMBER_ID
+    assert home.notices.tick()["handed"] == 1 and len(told) == 1 and home.world.spoken == []
 
 
 def test_when_whose_job_it_is_cant_be_read_it_waits():
-    home = Home()
+    home, told = household({})
 
     def broken(notice):
         raise ConnectionError("database away")
 
-    home.notices.not_his = broken
+    home.notices.whose = broken
     home.notices.receive(note())
     assert home.notices.tick() == {"handed": 0, "waiting": 1, "skipped": 0}
-    home.notices.not_his = lambda notice: False
-    assert home.notices.tick()["handed"] == 1
+    home.notices.whose = lambda notice: OWNER_ID
+    assert home.notices.tick()["handed"] == 1 and not told
 
 
-def test_without_household_members_his_notices_skip_the_lookup():
+def test_with_no_way_to_tell_her_her_notice_stays_owed():
+    home, _ = household({"her-thread": MEMBER_ID})
+    home.notices.tell_member = None
+    home.notices.receive(note(thread="her-thread"))
+    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == []
+    assert len(home.notices.store.open()) == 1
+
+
+def test_her_dm_failing_is_retried_then_marked_never_sent_forever():
+    from aerys_v2.home_notices import MEMBER_TRIES
+
+    home, told = household({"her-thread": MEMBER_ID}, fails=1)
+    home.notices.receive(note(thread="her-thread"))
+    assert home.notices.tick()["waiting"] == 1
+    assert home.notices.tick()["handed"] == 1 and len(told) == 1
+
+    home, told = household({"her-thread": MEMBER_ID}, fails=99)
+    home.notices.receive(note(thread="her-thread"))
+    outs = [home.notices.tick() for _ in range(MEMBER_TRIES)]
+    assert outs[-1]["skipped"] == 1 and not told and home.notices.store.open() == []
+    assert home.world.spoken == []                                             # never fell back to him
+
+
+def test_telling_a_member_goes_to_her_own_discord_and_never_to_him():
     from aerys_v2.config import Settings
-    from aerys_v2.home_notices import not_his_for
+    from aerys_v2.home_notices import tell_member_for, whose_for
 
     base = dict(_env_file=None, anthropic_api_key="placeholder", database_url="postgresql://x/y",
-                owner_person_id="6e6bcbed-0000-4000-8000-000000000001")
-    assert not_his_for(Settings(**base)) is None
-    member = "22222222-2222-2222-2222-222222222222"
-    assert callable(not_his_for(Settings(**base, home_job_members=f"{member}=home-member")))
+                owner_person_id=OWNER_ID)
+    assert whose_for(Settings(**base)) is None                                # no members: as before
+    assert callable(whose_for(Settings(**base, home_job_members=f"{MEMBER_ID}=home-member")))
+    assert tell_member_for(Settings(**base)) is None                          # no bot, no DMs
+    sent = []
+    tell = tell_member_for(Settings(**base, discord_bot_token="placeholder-bot"),
+                           send=lambda token, to, text, silent: sent.append((to, text, silent)),
+                           discord_id=lambda person: {MEMBER_ID: 222}.get(person))
+    tell(MEMBER_ID, "Your job at home is done.", True)
+    assert sent == [("222", "Your job at home is done.", True)]
+    for person in (OWNER_ID, "", "33333333-3333-3333-3333-333333333333"):
+        with pytest.raises((ValueError, LookupError)):
+            tell(person, "x", False)
+    assert len(sent) == 1
 
 
-def test_only_a_job_on_record_as_his_goes_to_him(monkeypatch):
-    import aerys_v2.home_jobs as home_jobs
+
+def test_his_desk_needs_a_positive_match_on_his_id():
+    home, told = household({"her-thread": MEMBER_ID})
+    home.notices.owner = None                                  # an owner that isn't configured
+    home.notices.whose = lambda notice: None
+    home.notices.receive(note(run="run-a", thread="unknown"))
+    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == [] and home.composed == []
+    home.notices.owner = ""
+    home.notices.whose = lambda notice: {"her-thread": MEMBER_ID}.get(notice.thread_id)
+    home.notices.receive(note(run="run-b", thread="her-thread"))
+    home.notices.tick()
+    assert [p for p, _, _ in told] == [MEMBER_ID] and home.world.spoken == []          # hers to her, the unknown waits
     from aerys_v2.config import Settings
-    from aerys_v2.home_notices import not_his_for
+    from aerys_v2.home_notices import whose_for
+    no_owner = Settings(_env_file=None, anthropic_api_key="placeholder", database_url="postgresql://x/y",
+                        home_job_members=f"{MEMBER_ID}=home-member")
+    assert callable(whose_for(no_owner))                        # members and no owner: still checked
 
-    owner, member = "6e6bcbed-0000-4000-8000-000000000001", "22222222-2222-2222-2222-222222222222"
-    records = {}
 
-    class Ledger:
-        def __init__(self, url):
+def test_slow_details_and_a_failing_dm_keep_their_own_tries():
+    from aerys_v2.home_notices import DETAIL_TRIES, MEMBER_TRIES
+
+    home, told = household({"her-thread": MEMBER_ID}, fails=99)
+    home.fetch_fails = DETAIL_TRIES - 1                         # the details come on the last try
+    home.notices.receive(note(thread="her-thread"))
+    outs = [home.notices.tick() for _ in range(DETAIL_TRIES - 1 + MEMBER_TRIES)]
+    assert household.failures == 99 - MEMBER_TRIES              # every DM try was made
+    assert outs[-1]["skipped"] == 1 and home.notices.store.open() == []
+
+    home, told = household({"her-thread": MEMBER_ID}, fails=2)
+    home.notices.receive(note(thread="her-thread"))
+    home.notices.tick(), home.notices.tick()                   # two DM failures
+    home.fetch_fails = 1                                        # then the details are slow once
+    assert home.notices.tick()["waiting"] == 1 and not told     # it waits for them, not sent bare
+    assert home.notices.tick()["handed"] == 1
+    ((_, text, _),) = told
+    assert "Three flights today" in text or "Built it" in text
+
+
+def test_a_told_notice_whose_mark_fails_is_never_told_twice():
+    home, told = household({"her-thread": MEMBER_ID})
+    real = home.notices.store.handled
+    marks = {"fail": 2}
+
+    def flaky(notice_id, now, outcome):
+        if marks["fail"]:
+            marks["fail"] -= 1
+            raise ConnectionError("database away")
+        return real(notice_id, now, outcome)
+
+    home.notices.store.handled = flaky
+    home.notices.receive(note(thread="her-thread"))
+    for _ in range(3):
+        try:
+            home.notices.tick()
+        except ConnectionError:
             pass
-
-        def owner_of(self, thread_id):
-            return records.get(thread_id)
-
-    monkeypatch.setattr(home_jobs, "PostgresHomeTaskLedger", Ledger)
-    settings = Settings(_env_file=None, anthropic_api_key="placeholder", database_url="postgresql://x/y",
-                        owner_person_id=owner, home_job_members=f"{member}=home-member")
-    home = Home()
-    home.notices.not_his = not_his_for(settings)
-    home.notices.receive(note(run="run-early", thread="not-written-yet"))
-    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == []     # no record: it waits
-    records["not-written-yet"] = member
-    assert home.notices.tick()["waiting"] == 1 and home.world.spoken == []     # hers: still owed
-    records["not-written-yet"] = owner
-    assert home.notices.tick()["handed"] == 1 and len(home.world.spoken) == 1  # his: told
+    assert len(told) == 1 and home.notices.store.open() == []
