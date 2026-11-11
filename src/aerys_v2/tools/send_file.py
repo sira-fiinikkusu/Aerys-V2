@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import logging
 import posixpath
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -47,12 +49,15 @@ Deliver = Callable[[str, str, bytes, str], None]
 
 
 def _relative(path) -> str:
-    """The path as her home server takes it: relative to her workspace."""
+    """The path as her home server takes it: relative to her workspace, and canonical, so
+    'report.md', './report.md' and 'notes/../report.md' are one file to the record too (Codex
+    review, #187). A path that climbs out of the workspace comes back starting with '..'."""
     p = str(path or "").strip()
     for prefix in (HOME_WORKSPACE + "/", "~/work/"):
         if p.startswith(prefix):
             p = p[len(prefix):]
-    return p.lstrip("/")
+    p = p.lstrip("/")
+    return "" if not p else ("" if (n := posixpath.normpath(p)) == "." else n)
 
 
 def _name(header, rel: str) -> str:
@@ -71,10 +76,24 @@ class FileSend:
 
 
 class FileSends:
-    """The record of files she handed him (v2_file_sends, migration 026). In memory for tests."""
+    """The record of files she handed him (v2_file_sends, migration 026). In memory for tests.
+
+    claim(person, path) serializes check, delivery and record for one file, so two overlapping
+    calls can't both find no send and both deliver (Codex review, #187)."""
 
     def __init__(self):
         self.rows: list[tuple[str, FileSend]] = []
+        self._locks: dict[tuple[str, str], threading.Lock] = {}
+        self._guard = threading.Lock()
+
+    def _local_lock(self, person_id: str, path: str) -> threading.Lock:
+        with self._guard:
+            return self._locks.setdefault((str(person_id), path), threading.Lock())
+
+    @contextmanager
+    def claim(self, person_id: str, path: str):
+        with self._local_lock(person_id, path):
+            yield
 
     def record(self, person_id: str, send: FileSend, thread_id: str = "") -> None:
         self.rows.append((str(person_id), send))
@@ -89,17 +108,48 @@ class FileSends:
 
 
 class PostgresFileSends(FileSends):
-    """v2_file_sends in the brain's own database: a short connection per call, like the other ledgers."""
+    """v2_file_sends in the brain's own database: a short connection per call, like the other ledgers.
+
+    Every send is also kept in this process (self.rows) before the database write, so a write that
+    fails doesn't make the record deny a send that happened; reads merge the two. claim() holds a
+    Postgres advisory lock across workers (Discord, Telegram and voice run in separate containers),
+    falling back to this process's lock when the database can't be reached."""
+
+    #: A lock is held across one delivery (a Discord or Telegram upload, at most about a minute).
+    LOCK_WAIT_MS = 90_000
 
     def __init__(self, database_url: str):
+        super().__init__()
         self.database_url = database_url
 
-    def _connect(self):
+    def _connect(self, options="-c statement_timeout=5000"):
         import psycopg
 
-        return psycopg.connect(self.database_url, connect_timeout=5, options="-c statement_timeout=5000")
+        return psycopg.connect(self.database_url, connect_timeout=5, options=options)
+
+    @contextmanager
+    def claim(self, person_id, path):
+        with self._local_lock(person_id, path):
+            key = f"file_send:{person_id}:{path}"
+            try:
+                conn = self._connect(f"-c statement_timeout=0 -c lock_timeout={self.LOCK_WAIT_MS}")
+                conn.autocommit = True
+                conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 26))", (key,))
+            except Exception as e:      # a lock we can't take never blocks a send he asked for
+                log.warning("send_file: no cross-worker lock (%s); this process's lock only", type(e).__name__)
+                conn = None
+            try:
+                yield
+            finally:
+                if conn is not None:
+                    try:
+                        conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 26))", (key,))
+                    finally:
+                        conn.close()
 
     def record(self, person_id, send, thread_id=""):
+        self.rows.append((str(person_id), send))
+        del self.rows[:-200]
         with self._connect() as c:
             c.execute("INSERT INTO v2_file_sends (sent_at, person_id, path, name, bytes, surface, thread_id) "
                       "VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -109,15 +159,22 @@ class PostgresFileSends(FileSends):
         with self._connect() as c:
             return [FileSend(*row) for row in c.execute(sql, args).fetchall()]
 
+    def _merged(self, db: list[FileSend], local: list[FileSend]) -> list[FileSend]:
+        seen = {(s.path, s.sent_at) for s in db}
+        return sorted(db + [s for s in local if (s.path, s.sent_at) not in seen],
+                      key=lambda s: s.sent_at, reverse=True)
+
     def last(self, person_id, path, since):
         rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
                           "AND path = %s AND sent_at >= %s ORDER BY sent_at DESC LIMIT 1",
                           (str(person_id), path, since))
-        return rows[0] if rows else None
+        merged = self._merged(rows, [s for s in [super().last(person_id, path, since)] if s is not None])
+        return merged[0] if merged else None
 
     def recent(self, person_id, since):
-        return self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
+        rows = self._rows("SELECT sent_at, path, name, bytes, surface FROM v2_file_sends WHERE person_id = %s "
                           "AND sent_at >= %s ORDER BY sent_at DESC LIMIT 50", (str(person_id), since))
+        return self._merged(rows, super().recent(person_id, since))
 
 
 def _when(at: datetime, now: datetime) -> str:
@@ -167,6 +224,15 @@ def build_send_file_tool(*, home_url: str, home_token: str, owner_person_id: str
         rel = _relative(path)
         if not rel:
             return "NOT SENT: say which file: its path in your home workspace."
+        if rel == ".." or rel.startswith("../"):
+            return "NOT SENT: that path leaves my home workspace; only files inside it can be sent."
+        if ledger is None:
+            return _send(rel, identity, config, note, again)
+        # One file at a time: the check, the delivery and the record happen under one claim.
+        with ledger.claim(owner_person_id, rel):
+            return _send(rel, identity, config, note, again)
+
+    def _send(rel: str, identity: dict, config, note: str, again: bool) -> str:
         if ledger is not None and not again:
             try:
                 prev = ledger.last(owner_person_id, rel, clock() - timedelta(hours=RESEND_HOURS))
@@ -222,9 +288,11 @@ def build_files_sent_tool(*, ledger: FileSends, owner_person_id: str,
     def files_sent_to_chris(config: RunnableConfig, hours: int = 48) -> str:
         """The files you've sent Chris, newest first: when, what, and where it went.
 
-        CALL THIS when he asks what you sent him, whether a file reached him, or when. It is the
-        record: every file send_file_to_chris delivered is in it. Answer from it; don't send a
-        file again because he asked about it.
+        CALL THIS when he asks what you sent him, whether a file reached him, or when. Files
+        send_file_to_chris delivered are recorded here (the record began Nov 10, 2026). Answer
+        from it; don't send a file again because he asked about it. A file missing from the
+        record is NOT proof it didn't go: never tell him it wasn't sent, and never send it again,
+        because of a missing line.
 
         hours: how far back to look (default 48, at most a week).
         """
@@ -238,7 +306,8 @@ def build_files_sent_tool(*, ledger: FileSends, owner_person_id: str,
             log.warning("files_sent: couldn't read the record (%s)", type(e).__name__)
             return "I couldn't read the record of files I sent just now; I don't know, so I won't guess."
         if not sends:
-            return f"No files sent to Chris in the last {span} hours."
+            return (f"No recorded sends to Chris in the last {span} hours. The record isn't proof a file "
+                    "didn't go: if he says he has one, believe him; don't send it again unless he asks.")
         lines = [f"- {_when(s.sent_at, clock())}: {s.name} ({s.bytes} bytes), {s.path}, to {_where(s.surface)}"
                  for s in sends]
         return f"Files sent to Chris in the last {span} hours, newest first:\n" + "\n".join(lines)

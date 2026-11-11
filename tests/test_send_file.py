@@ -332,7 +332,9 @@ def test_the_record_answers_what_she_sent():
 
 def test_an_empty_record_says_so_and_guesses_nothing():
     sent = build_files_sent_tool(ledger=FileSends(), owner_person_id=OWNER, now=Clock())
-    assert sent.invoke({"hours": 24}, config={"configurable": {"identity": DISCORD}}).startswith("No files sent")
+    said = sent.invoke({"hours": 24}, config={"configurable": {"identity": DISCORD}})
+    # Codex review: a missing line is never stated as "nothing was sent" (the 11/10 premise).
+    assert said.startswith("No recorded sends") and "isn't proof" in said and "don't send it again" in said
 
 
 def test_the_record_is_only_his():
@@ -360,3 +362,71 @@ def test_both_tools_are_offered_to_him_and_neither_to_anyone_else():
 def test_her_rules_say_a_question_about_what_she_did_is_not_a_redo():
     assert "never by doing it again" in SPECIALIST_CHARTER
     assert SENT_TOOL_NAME in HOME_JOBS_OVERLAY and "don't send the file again" in HOME_JOBS_OVERLAY
+
+
+# --- Codex review of 9826512: one file, one send, whatever the path spelling or the timing -------
+
+import threading
+
+from aerys_v2.tools.send_file import PostgresFileSends
+
+
+@pytest.mark.parametrize("spelling", ["./esphome-voice-satellite-fixed-ip.md",
+                                      "notes/../esphome-voice-satellite-fixed-ip.md",
+                                      "/home/hands/work/esphome-voice-satellite-fixed-ip.md"])
+def test_another_spelling_of_the_same_file_is_still_already_sent(spelling):
+    rig = RecordedRig()
+    rig.call(DISCORD)
+    assert rig.call(DISCORD, path=spelling).startswith("ALREADY SENT") and len(rig.sent) == 1
+
+
+def test_a_path_out_of_her_workspace_is_refused_before_anything_is_fetched():
+    rig = RecordedRig()
+    said = rig.call(DISCORD, path="../.ssh/id_ed25519")
+    assert said.startswith("NOT SENT") and "leaves my home workspace" in said and rig.got == []
+
+
+def test_two_overlapping_sends_of_one_file_deliver_once():
+    rig = RecordedRig()
+    entered, release = threading.Event(), threading.Event()
+    first = rig.deliver
+
+    def slow(surface, name, data, note):
+        entered.set()
+        release.wait(5)
+        first(surface, name, data, note)
+    rig.deliver = slow
+    rig.tool = build_send_file_tool(home_url=HOME_URL, home_token="home-api-token", owner_person_id=OWNER,
+                                    deliver=lambda *a: rig.deliver(*a), get=rig.get, ledger=rig.ledger, now=rig.clock)
+    results = []
+    a = threading.Thread(target=lambda: results.append(rig.call(DISCORD)))
+    a.start()
+    assert entered.wait(5)
+    b = threading.Thread(target=lambda: results.append(rig.call(DISCORD)))
+    b.start()
+    release.set()
+    a.join(5); b.join(5)
+    assert sorted(r.split(":")[0] for r in results) == ["ALREADY SENT", "SENT"] and len(rig.sent) == 1
+
+
+class FlakyPg(PostgresFileSends):
+    """The database answers reads (with nothing) but every write fails."""
+
+    def __init__(self):
+        super().__init__("postgresql://unused")
+
+    def _connect(self, options=""):
+        raise RuntimeError("database write failed")
+
+    def _rows(self, sql, args):
+        return []
+
+
+def test_a_send_whose_record_write_failed_is_still_known_to_this_process():
+    ledger = FlakyPg()
+    rig = RecordedRig(ledger=ledger)
+    assert rig.call(DISCORD).startswith("SENT")              # the claim fell back to the process lock
+    sent = build_files_sent_tool(ledger=ledger, owner_person_id=OWNER, now=rig.clock)
+    said = sent.invoke({}, config={"configurable": {"identity": DISCORD}})
+    assert "esphome-voice-satellite-fixed-ip.md" in said and not said.startswith("No recorded")
+    assert rig.call(DISCORD).startswith("ALREADY SENT")
