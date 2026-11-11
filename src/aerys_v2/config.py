@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     # pipeline, future satellites) present this as a Bearer token. LAN-only surface.
     api_token: SecretStr | None = None
     api_port: int = 8300
+    # BENCH_MODE (board #176 s1-03, the voice bench): a COPY of the --serve door that
+    # answers HTTP and nothing else. No watcher starts (brief, desk, storm, tickets, home
+    # jobs...), nothing is spoken or pushed to a panel, and voice turns ride the
+    # 'bench:voice' thread instead of the owner's. The live door never sets it.
+    bench_mode: bool = False
 
     @field_validator("api_token", mode="after")
     @classmethod

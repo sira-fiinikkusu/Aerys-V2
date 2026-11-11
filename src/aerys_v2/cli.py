@@ -235,7 +235,8 @@ def main() -> None:
             record_turn = turn_recorder_for(settings)
             # Panel-face seam: her desk avatar mirrors the turn's phase. None
             # unless PANEL_STATE_URL is set — fire-and-forget, fail-open.
-            face_push = face_pusher_for(settings)
+            # BENCH_MODE (config.bench_mode): a bench copy never drives her face.
+            face_push = None if settings.bench_mode else face_pusher_for(settings)
             # /gaps READ seam for the HTTP door (self-iteration Phase A) — same
             # arming as record_turn; None DB-less. Fail-open, read-only.
             gaps_fn = gaps_reader_for(settings)
@@ -292,15 +293,17 @@ def main() -> None:
             # (HA_SATELLITE_MAP, falling back to ha_announce_entity). Wired only
             # when speak_fn is armed — the two halves always travel together.
             satellite_map = satellite_map_from(settings.ha_satellite_map)
-            speak_fn = speak_fn_for(settings)
+            # BENCH_MODE: a bench copy says nothing aloud and pushes nothing to a display;
+            # its follow-ups stay history-only on the bench thread.
+            speak_fn = None if settings.bench_mode else speak_fn_for(settings)
             # Per-device follow-up routing: mapped satellite -> announce, headless
             # phone -> aerys_followup event (the Myo app speaks it). Owns delivery
             # over speak_fn/satellite_for when armed (ha_token set).
-            followup_router = followup_router_for(settings)
+            followup_router = None if settings.bench_mode else followup_router_for(settings)
             # Gap #48: full-text ink push around upstream ESPHome's 500-byte
             # voice-event cap (function-level import — only --serve voices).
             from aerys_v2.factory import display_push_for
-            display_push = display_push_for(settings)
+            display_push = None if settings.bench_mode else display_push_for(settings)
             satellite_for = (
                 (lambda device_id: resolve_announce_entity(
                     device_id, satellite_map, settings.ha_announce_entity))
@@ -362,7 +365,7 @@ def main() -> None:
                 # memory door 1 — the only door approved to build solo).
                 a2a_memory_fn=a2a_memory_writer_for(settings),
                 # Office satellite speaks through Leviathan (owner ask 2026-09-26).
-                speaker_redirect=speaker_redirect_for(settings),
+                speaker_redirect=None if settings.bench_mode else speaker_redirect_for(settings),
                 settings=settings,  # speaker ID: voice_speaker_persons / unknown policy
             )
             # ASK_ONCE=<path to an /ask JSON body>: serve that one request through this
@@ -376,6 +379,14 @@ def main() -> None:
                 from aerys_v2.transports.http_api import serve_once
 
                 sys.exit(serve_once(app, ask_once, settings.api_token.get_secret_value()))
+            # BENCH_MODE: the door answers and nothing else runs. The live door owns every
+            # watcher below; a second copy of any of them would double her briefs, desk
+            # pings, storm alerts, ticket relays and home-job starts.
+            if settings.bench_mode:
+                log.warning("BENCH MODE | HTTP only on :%s: no watchers, nothing spoken, voice on %s",
+                            settings.api_port, "bench:voice")
+                uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
+                sys.exit(0)
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;
             # None unless panel + HA + occupancy entity are all configured.

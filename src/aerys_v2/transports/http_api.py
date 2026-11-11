@@ -20,6 +20,10 @@ from aerys_v2.state import Identity, VOICE_OWNER_ASSUMED_KEY
 
 log = logging.getLogger(__name__)
 
+#: Where a BENCH_MODE copy's voice turns go (config.bench_mode): never the owner's thread.
+#: The 'bench' prefix is also a lab channel, so its turns raise no gap reports.
+BENCH_VOICE_THREAD = "bench:voice"
+
 
 #: The identity an unrecognized voice lands on. Named once so the door and the
 #: engage gate cannot drift on what "a stranger spoke" means.
@@ -178,6 +182,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         his continuous 'person:{owner_id}' thread — the SAME thread as his DM/guild/
         Telegram text, so voice joins cross-surface continuity. Without an owner (dev/CI)
         there is no owner thread to join, so fall back to the legacy shared voice thread."""
+        if settings is not None and getattr(settings, "bench_mode", False):
+            return BENCH_VOICE_THREAD   # a bench copy never writes into his conversation
         return person_thread_key(http_user_id) if owner_person_id else "voice:beta"
 
     def require_token(request: Request) -> None:
