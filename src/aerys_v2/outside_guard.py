@@ -14,6 +14,8 @@ from langchain_core.messages import ToolMessage
 READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_document',
                      'youtube_summary', 'search_email', 'read_email',
                      'check_async_task', 'list_async_tasks'})
+# draft_in_his_gmail is deliberately absent: a draft reaches no one; the owner
+# reviews and sends it himself. It is also absent from action_executor's allowed set.
 REACH_OUT = frozenset({'send_message', 'send_email', 'start_async_task', 'update_async_task', 'message_kael',
                       'sticky_note', 'log_gap', 'control_alarm', 'remember', 'save_contact_email'})
 #: D29 #1 (2026-11-11): her own home jobs' results are trusted for her notes and for asking Kael;

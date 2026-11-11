@@ -694,6 +694,13 @@ class Settings(BaseSettings):
     # None = read_web_page disarmed (tool and overlay both absent).
     firecrawl_api_key: SecretStr | None = None
 
+    # Owner Gmail: compose credentials are used only to create unsigned drafts.
+    gmail_drafts: bool = False
+    gmail_drafts_client_id: str | None = None
+    gmail_drafts_client_secret: SecretStr | None = None
+    gmail_drafts_refresh_token: SecretStr | None = None
+    gmail_drafts_from: str | None = None
+
     # ---- EMAIL (her own mailbox — scope decided 2026-07-11) -------------------
     # Aerys's OWN Gmail account over IMAP/SMTP with an app password — the
     # rebuild of n8n's email trio (Email Sub-Agent kbKrKBVUgwU6n9gg, Gmail
