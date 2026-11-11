@@ -2469,8 +2469,10 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
         if settings.memories_database_url and settings.owner_person_id is not None:
             from aerys_v2.tools.contacts import PostgresContacts, build_contact_tool
 
-            tools.append(build_contact_tool(PostgresContacts(settings.memories_database_url),
-                                            owner_person_id=str(settings.owner_person_id)))
+            contacts = PostgresContacts(settings.memories_database_url)
+            owner = str(settings.owner_person_id)
+            tools.append(build_contact_tool(contacts, owner_person_id=owner,
+                                            owner_names=lambda: contacts.names_of(owner)))
 
     if not guest and settings.database_url:
         # REACH PREFS (board #176, Stage 2; the owner's D4/D7, 2026-11-08): he steers how

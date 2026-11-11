@@ -68,6 +68,15 @@ class PostgresContacts:
                 "SELECT id, display_name, coalesce(btrim(email), '') FROM persons "
                 "WHERE deleted_at IS NULL AND lower(btrim(display_name)) = lower(btrim(%s))", (name,)).fetchall()]
 
+    def names_of(self, person_id: str) -> set[str]:
+        """A person's own display name (the owner's: 'Chris's email is …' means him, never a namesake)."""
+        try:
+            with self._connect() as c:
+                row = c.execute("SELECT display_name FROM persons WHERE id = %s::uuid", (person_id,)).fetchone()
+            return {row[0]} if row and row[0] else set()
+        except Exception:
+            return set()
+
     def _holder(self, email: str) -> str:
         with self._connect() as c:
             row = c.execute("SELECT display_name FROM persons WHERE email = %s", (email,)).fetchone()

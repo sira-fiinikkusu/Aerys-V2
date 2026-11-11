@@ -110,3 +110,10 @@ def test_an_address_already_on_someone_else_says_whose():
             raise AddressTaken("Luke")
     said = call(tool(Taken([("p-joe", "Joe", "")]), "Joe's email is shared@example.com"), "Joe", "shared@example.com")
     assert said.startswith("Not saved") and "already on Luke's record" in said
+
+
+def test_his_own_name_is_him_even_with_a_namesake():
+    book = Book([("other-chris", "Chris", "")])
+    said = call(tool(book, "Chris's email is chris@example.com"), "Chris", "chris@example.com")
+    assert said.startswith("Saved:") and book.people[OWNER][1] == "chris@example.com"
+    assert book.people["other-chris"][1] == ""
