@@ -2464,6 +2464,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             from aerys_v2.tools.remember import build_remember_tool
 
             tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings)))
+        # CONTACTS (D29, 2026-11-11): his words attach an email address to a person's record, which is
+        # what the email tool's known-recipient check reads. Owner-only; the guard holds it after outside text.
+        if settings.memories_database_url and settings.owner_person_id is not None:
+            from aerys_v2.tools.contacts import PostgresContacts, build_contact_tool
+
+            tools.append(build_contact_tool(PostgresContacts(settings.memories_database_url),
+                                            owner_person_id=str(settings.owner_person_id)))
 
     if not guest and settings.database_url:
         # REACH PREFS (board #176, Stage 2; the owner's D4/D7, 2026-11-08): he steers how

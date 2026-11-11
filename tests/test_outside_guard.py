@@ -337,3 +337,53 @@ def test_a_household_members_own_request_is_not_outside_text():
     assert origin_sources(clear, "person:m", owner, (), members) == []
     assert "outside speaker" in origin_sources(unsure, "person:m", owner, (), members)
     assert "outside speaker" in origin_sources(typed, "person:m", owner, (), None)   # no grant: outside
+
+
+@pytest.mark.parametrize('name', ['remember', 'message_kael'])
+def test_her_own_home_job_results_are_trusted_for_notes_and_kael(name):
+    # D29 #1 (2026-11-11): after checking her own home job she may keep a note or ask Kael directly.
+    req = request([ToolMessage(content='job says: done', name='check_async_task', tool_call_id='c')], name=name,
+                  args={'value': 'x'})
+    ran = []
+    outside_guard(req, lambda r: ran.append(r) or 'ok', gate=None)
+    assert ran
+
+
+@pytest.mark.parametrize('extra', ['read_web_page', 'search_email'])
+def test_a_web_or_email_read_beside_the_job_result_still_waits(extra):
+    req = request([ToolMessage(content='job', name='check_async_task', tool_call_id='c'),
+                   ToolMessage(content='page', name=extra, tool_call_id='w')], name='remember', args={'value': 'x'})
+    result = outside_guard(req, lambda r: pytest.fail('direct execution'), gate=None)
+    assert 'Not done' in result.content
+
+
+@pytest.mark.parametrize('name', ['start_async_task', 'sticky_note', 'send_email', 'save_contact_email'])
+def test_after_her_own_job_results_other_reachouts_still_wait(name):
+    req = request([ToolMessage(content='job', name='list_async_tasks', tool_call_id='l')], name=name,
+                  args={'description': 'x', 'subagent_type': 'home'} if name == 'start_async_task' else {'value': 'x'})
+    result = outside_guard(req, lambda r: pytest.fail('direct execution'), gate=None)
+    assert result.content.startswith(('Not done', 'Not sent'))
+
+
+def test_an_approved_contact_save_uses_the_address_he_approved():
+    from aerys_v2.tools.contacts import build_contact_tool
+    from aerys_v2.tools.remember import CURRENT_TURN_TEXT
+
+    saved = []
+
+    class Book:
+        def find(self, name):
+            return [('p-joe', 'Joe', '')]
+
+        def set_email(self, pid, email):
+            saved.append((pid, email))
+            return True
+
+    owner = '11111111-1111-1111-1111-111111111111'
+    t = build_contact_tool(Book(), owner_person_id=owner, turn_text=CURRENT_TURN_TEXT.get)
+    execute = action_executor([t])
+    row = SimpleNamespace(thread_id='t', args={'tool': 'save_contact_email',
+                                               'tool_args': {'name': 'Joe', 'email': 'joe@example.com'},
+                                               'identity': {'user_id': owner, 'platform': 'discord'}})
+    ok, said = execute(row)
+    assert ok and saved == [('p-joe', 'joe@example.com')]

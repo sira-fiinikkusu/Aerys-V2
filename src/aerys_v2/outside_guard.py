@@ -15,7 +15,11 @@ READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_docum
                      'youtube_summary', 'search_email', 'read_email',
                      'check_async_task', 'list_async_tasks'})
 REACH_OUT = frozenset({'send_email', 'start_async_task', 'update_async_task', 'message_kael',
-                      'sticky_note', 'log_gap', 'control_alarm', 'remember'})
+                      'sticky_note', 'log_gap', 'control_alarm', 'remember', 'save_contact_email'})
+#: D29 #1 (2026-11-11): her own home jobs' results are trusted for her notes and for asking Kael;
+#: sending to people and starting or changing jobs after them still waits for his tap.
+HOME_JOB_READERS = frozenset({'check_async_task', 'list_async_tasks'})
+TRUSTED_AFTER_HOME_JOBS = frozenset({'remember', 'message_kael'})
 OUTSIDE_ACTION = 'outside_action'
 REFUSAL = 'Not done: I could not check the outside-text guard, so nothing happened.'
 
@@ -74,6 +78,8 @@ def _decide(request, gate):
     reaches = name in REACH_OUT or (name == 'kael_tickets' and
                                    args.get('action', '').strip().lower() in ('update', 'cancel'))
     if not sources or not reaches:
+        return None
+    if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
         return None
     if name == 'send_email':
         return _refusal(request, 'Not sent: after reading outside text, email needs the owner’s '
@@ -138,7 +144,11 @@ def action_executor(tools):
                                    'identity': row.args.get('identity') or {}}}
         # Approval authorizes the write; it does not promote outside words to owner facts.
         from aerys_v2.tools.remember import CURRENT_TURN_TEXT
-        token = CURRENT_TURN_TEXT.set('')
+        # His tap on the button that showed this exact address is his word for it (contacts); for
+        # everything else the approved write carries no owner words (remember stays her own inference).
+        approved_words = (str(row.args['tool_args'].get('email') or '')
+                          if tool.name == 'save_contact_email' else '')
+        token = CURRENT_TURN_TEXT.set(approved_words)
         try:
             result = str(tool.invoke(row.args['tool_args'], config=config))
         finally:
@@ -150,6 +160,7 @@ def action_executor(tools):
             'control_alarm': ('Alarm ',),
             'message_kael': ('Delivered', 'NOT DELIVERED YET:'),
             'kael_tickets': ('Added to ', 'Canceled '),
+            'save_contact_email': ('Saved:',),
         }
         return result.startswith(prefixes[tool.name]), result
 
