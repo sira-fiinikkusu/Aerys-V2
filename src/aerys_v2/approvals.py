@@ -355,6 +355,14 @@ class Approvals:
             return "expired"
         return row.status
 
+    def decided_by(self, approval_id: int) -> str | None:
+        """The recorded winning account; unreadable or unapproved decisions fail closed."""
+        try:
+            row = self.store.get(approval_id)
+            return str(row.decided_by) if row and row.status == "approved" and row.decided_by else None
+        except Exception:
+            return None
+
     def approved(self, approval_id: int) -> bool:
         return self.status(approval_id) == "approved"
 

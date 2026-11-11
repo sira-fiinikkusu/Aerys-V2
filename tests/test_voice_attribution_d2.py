@@ -84,3 +84,23 @@ def test_remember_wont_keep_a_fact_from_an_unsure_voice():
     sure = {"configurable": {"identity": {"user_id": OWNER, "voice": True}}}
     assert tool.invoke({"fact": "Chris is allergic to shellfish"}, config=sure).startswith("Kept")
     assert len(wrote) == 1
+
+
+def test_member_below_floor_keeps_identity_but_gate_requires_both_buttons():
+    from aerys_v2.config import Settings
+    from aerys_v2.hands_gate import asker, VOICE_UNSURE, MEMBER_VOICE
+    from aerys_v2.transports.http_api import AskRequest
+
+    member = "22222222-2222-2222-2222-222222222222"
+    seen = []
+    settings = Settings(_env_file=None, anthropic_api_key="placeholder", owner_person_id=OWNER,
+                        voice_speaker_persons=f"robin={member}", voice_speaker_min_confidence=0.75,
+                        home_job_members=f"{member}=home-member")
+    app = build_app(lambda text, identity, thread_id: seen.append((identity, thread_id)) or "ok",
+                    None, owner_person_id=OWNER, settings=settings)
+    endpoint = next(r.endpoint for r in app.routes if r.path == "/ask")
+    for confidence, expected in ((0.6, VOICE_UNSURE), (0.8, MEMBER_VOICE)):
+        endpoint(AskRequest(text="hello", voice=True, speaker={"id": "robin", "confidence": confidence}))
+        identity, thread = seen[-1]
+        assert identity["user_id"] == member
+        assert asker(identity, thread, OWNER, {member: "home-member"}) == expected

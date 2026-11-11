@@ -710,3 +710,28 @@ def test_what_is_on_record_wins_over_what_the_turn_last_saw():
     home_ledger_middleware(ledger, OWNER).wrap_tool_call(
         req, lambda r: seen.append(r.runtime.state["async_tasks"]["t-1"]["run_id"]) or "ok")
     assert seen == ["r-2"]
+
+
+def test_approved_member_executor_uses_member_ledger_and_strips_private_args():
+    from langgraph.types import Command
+    from aerys_v2.home_jobs import home_job_executor
+    from aerys_v2.hands_gate import GatedAction
+
+    member = "22222222-2222-2222-2222-222222222222"
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"owner-task": {"task_id": "owner-task", "status": "running"}})
+    calls = []
+
+    def start(*, description, subagent_type, runtime):
+        calls.append((description, subagent_type, runtime.state["async_tasks"]))
+        return Command(update={"async_tasks": {"member-task": {"task_id": "member-task", "status": "running"}}})
+
+    executor = home_job_executor(SimpleNamespace(tools=[SimpleNamespace(name="start_async_task", func=start)]),
+                                 ledger, OWNER)
+    row = GatedAction(1, 1, HOME_JOB, "test", 1, "person:member",
+                      {"tool": "start_async_task", "description": "Build a page", "subagent_type": "home-member",
+                       "_job_owner": member, "_start_candidates": {"2": {"person": member}}})
+    assert executor(row)[0] is True
+    assert calls == [("Build a page", "home-member", {})]
+    assert set(ledger.load(OWNER)) == {"owner-task"}
+    assert set(ledger.load(member)) == {"member-task"}

@@ -128,9 +128,11 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
     # dependency (this is the general HTTP door), while reusing the ONE canonical
     # person-thread key builder the text gateways use — no drift on the format.
     from aerys_v2.transports.discord_gateway import person_thread_key
-    from aerys_v2.config import speaker_person_map
+    from aerys_v2.config import speaker_person_map, home_job_member_map
 
     speaker_persons = speaker_person_map(settings) if settings is not None else {}
+
+    members = home_job_member_map(settings) if settings is not None else {}
 
     def resolve_speaker(speaker_id: str, confidence: float) -> tuple[str, str] | None:
         """(user_id, display_name) for a tagged voice turn, or None = leave it the owner's.
@@ -145,6 +147,9 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         name = (speaker_id or "unknown").strip().lower()
         said_unknown = name == "unknown"   # what the RECOGNIZER said, before our floor
         if confidence < settings.voice_speaker_min_confidence:
+            person = speaker_persons.get(name)
+            if person in members:
+                return person, f"{name.capitalize()} (Voice)"
             name = "unknown"
         if said_unknown and confidence >= settings.voice_guest_demote_below:
             # Not a match, but not a stranger either — too close to call. The owner
@@ -330,6 +335,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                 demoted = who is not None and who[0] == GUEST_VOICE_ID
                 identity["speaker"] = {"id": body.speaker.id, "confidence": body.speaker.confidence,
                                        "demoted": demoted}
+                if who is not None and who[0] in members and body.speaker.confidence < settings.voice_speaker_min_confidence:
+                    identity["speaker"]["unsure"] = True
                 if who is not None:
                     identity["user_id"], identity["display_name"] = who
                     thread_id = person_thread_key(who[0])

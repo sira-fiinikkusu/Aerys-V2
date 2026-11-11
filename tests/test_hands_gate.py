@@ -858,3 +858,114 @@ def test_requests_that_differ_only_in_case_are_different_work():
     assert b.store.claim(next(iter(b.store.rows.values())).id)        # the watcher has it, mid-run
     assert b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task",
                            {"description": "Create /tmp/report.txt", "subagent_type": "home"}).go
+
+
+MEMBER_ID = "22222222-2222-2222-2222-222222222222"
+MEMBER_TEXT = {"user_id": MEMBER_ID, "platform": "discord"}
+MEMBER_STRONG = {**MEMBER_TEXT, "voice": True, "speaker": {"id": "robin", "demoted": False}}
+MEMBER_START = {"description": "Make a calendar", "subagent_type": "home-member"}
+
+
+def member_box():
+    b = Box()
+    b.gate.members = {MEMBER_ID: "home-member"}
+    b.gate.discord_id = lambda person: {OWNER: 1, MEMBER_ID: 2}.get(person)
+    return b
+
+
+def test_member_text_and_voice_have_separate_start_rules():
+    b = member_box()
+    assert b.gate.home_job(MEMBER_TEXT, "person:member", "start_async_task", MEMBER_START).go
+    assert not b.gate.home_job(MEMBER_TEXT, "person:member", "start_async_task", START_WRITE).go
+    assert not b.gate.home_job(MEMBER_STRONG, "person:member", "start_async_task", MEMBER_START).go
+    assert next(iter(b.approval_store.rows.values())).approvers == ["2"]
+
+
+def test_unsure_start_is_owned_by_first_approver():
+    from aerys_v2.approvals import handle_click
+    for winner, person, project in ((1, OWNER, "home"), (2, MEMBER_ID, "home-member")):
+        b = member_box()
+        assert not b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE).go
+        a = next(iter(b.approval_store.rows.values()))
+        assert a.approvers == ["1", "2"]
+        assert handle_click(b.approval_store, a.id, True, winner, 1, NOW)[1]
+        assert handle_click(b.approval_store, a.id, True, 3 - winner, 1, NOW)[1] is None
+        b.watcher.tick()
+        assert len(b.done) == 1
+        assert b.done[0][1]["_job_owner"] == person
+        assert b.done[0][1]["subagent_type"] == project
+
+
+def test_member_cannot_change_owner_tasks_and_clear_voice_cancels_own():
+    b = member_box()
+    state = {"async_tasks": {"owner-task": {"agent_name": "home", "owner": OWNER},
+                             "mine": {"agent_name": "home-member", "owner": MEMBER_ID}}}
+    for identity in (MEMBER_TEXT, MEMBER_STRONG):
+        for tool in ("update_async_task", "cancel_async_task", "check_async_task"):
+            assert not b.gate.home_job(identity, "person:member", tool, {"task_id": "owner-task"}, state).go
+    assert b.gate.home_job(MEMBER_STRONG, "person:member", "cancel_async_task", {"task_id": "mine"}, state).go
+    assert not b.gate.home_job(MEMBER_STRONG, "person:member", "cancel_async_task", {"task_id": "missing"}, state).go
+
+
+def test_unsure_owner_change_and_cancel_remain_owner_only():
+    from aerys_v2.approvals import handle_click
+    for tool in ("update_async_task", "cancel_async_task"):
+        b = member_box()
+        b.gate.home_job(UNSURE, OWNER_THREAD, tool, {"task_id": "owner-task"})
+        a = next(iter(b.approval_store.rows.values()))
+        assert a.approvers is None
+        assert handle_click(b.approval_store, a.id, True, 2, 1, NOW)[1] is None
+
+
+def test_member_grant_is_not_house_control_and_unknown_tools_are_refused():
+    from aerys_v2.config import Settings, home_job_member_map
+    settings = Settings(_env_file=None, anthropic_api_key="placeholder", home_job_members=f"{MEMBER_ID}=home-member")
+    assert home_job_member_map(settings) == {MEMBER_ID: "home-member"}
+    assert settings.house_control_person_ids == ""
+    b = member_box()
+    assert not b.gate.home_job(MEMBER_TEXT, "person:member", "list_async_tasks", {}).go
+    assert not b.gate.home_job(MEMBER_TEXT, "person:member", "other_tool", {},
+                              {"async_tasks": {None: {"owner": MEMBER_ID}}}).go
+
+
+def test_under_floor_member_start_asks_everyone_but_changes_only_own_jobs():
+    b = member_box()
+    unsure = {**MEMBER_STRONG, "speaker": {"id": "robin", "unsure": True}}
+    assert not b.gate.home_job(unsure, "person:member", "start_async_task", MEMBER_START).go
+    assert next(iter(b.approval_store.rows.values())).approvers == ["1", "2"]
+    assert not b.gate.home_job(unsure, "person:member", "cancel_async_task",
+                              {"task_id": "other"}, {"async_tasks": {"other": {"owner": OWNER}}}).go
+
+
+def test_missing_recipient_or_decider_never_dispatches():
+    b = member_box()
+    b.gate.discord_id = lambda person: None
+    assert not b.gate.home_job(MEMBER_STRONG, "person:member", "start_async_task", MEMBER_START).go
+    assert not b.store.rows
+    b = member_box()
+    b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", START_WRITE)
+    approval = next(iter(b.approval_store.rows.values()))
+    approval.status = "approved"
+    approval.decided_by = "999"
+    assert b.watcher.tick()["failed"] == 1
+    assert not b.done
+
+
+def test_owner_winning_a_named_unsure_member_start_uses_owner_project():
+    from aerys_v2.approvals import handle_click
+    b = member_box()
+    identity = {**MEMBER_STRONG, "speaker": {"id": "robin", "unsure": True}}
+    b.gate.home_job(identity, "person:member", "start_async_task", MEMBER_START)
+    approval = next(iter(b.approval_store.rows.values()))
+    handle_click(b.approval_store, approval.id, True, 1, 1, NOW)
+    assert b.watcher.tick()["done"] == 1
+    assert b.done[0][1]["_job_owner"] == OWNER
+    assert b.done[0][1]["subagent_type"] == "home"
+
+
+def test_member_typed_twin_retires_pending_voice_start():
+    b = member_box()
+    b.gate.home_job(MEMBER_STRONG, "person:member", "start_async_task", MEMBER_START)
+    assert b.gate.home_job(MEMBER_TEXT, "person:member", "start_async_task", MEMBER_START).go
+    assert next(iter(b.approval_store.rows.values())).status == "withdrawn"
+    assert b.watcher.tick()["done"] == 0

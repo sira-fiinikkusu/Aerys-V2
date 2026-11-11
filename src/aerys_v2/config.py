@@ -525,6 +525,8 @@ class Settings(BaseSettings):
     # unless hands_gates is true and approvals is armed.
     hands_gates: bool = False
     home_read_only_agents: str = ""
+    # Separate home-job grant: person UUID=home project, comma separated.
+    home_job_members: str = ""
     # HER LONG JOBS AT HOME (home_jobs.py; board #176, s3-02): her new loop (action_loop=agent)
     # starts jobs on her home body through LangChain's AsyncSubAgentMiddleware, at home_url with
     # home_api_token, behind the D10 gate above. Off unless home_jobs is true AND the gate is armed.
@@ -920,3 +922,21 @@ def person_mapping(value: str) -> dict[str, str]:
             raise ValueError("invalid person mapping")
         result[person] = target
     return result
+
+
+def home_job_member_map(settings) -> dict[str, str]:
+    """Explicit home-job grants; independent of house-control permissions."""
+    from uuid import UUID
+
+    members = {}
+    for entry in str(getattr(settings, "home_job_members", "") or "").split(","):
+        if not entry.strip():
+            continue
+        person, sep, project = entry.partition("=")
+        if not sep or not project.strip():
+            raise ValueError("HOME_JOB_MEMBERS requires person UUID=project")
+        person = str(UUID(person.strip()))
+        if person == str(getattr(settings, "owner_person_id", "")) or project.strip() == "home":
+            raise ValueError("HOME_JOB_MEMBERS must use a separate member and project")
+        members[person] = project.strip()
+    return members

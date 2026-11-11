@@ -437,6 +437,8 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
 
     def run(row) -> tuple[bool, str]:
         args = dict(row.args or {})
+        job_owner = str(args.get("_job_owner") or owner_person_id)
+        args = {k: v for k, v in args.items() if not k.startswith("_")}
         name = args.get("tool")
         if name == START:
             call = {"description": str(args.get("description") or ""), "subagent_type": str(args.get("subagent_type") or "")}
@@ -447,9 +449,9 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
             call = {"task_id": str(args.get("task_id") or "")}
         else:
             return False, "not a home job"
-        with ledger.locked(owner_person_id) as session:
+        with ledger.locked(job_owner) as session:
             try:
-                state = {"messages": [], "async_tasks": session.load(owner_person_id)}
+                state = {"messages": [], "async_tasks": session.load(job_owner)}
             except Exception:
                 log.warning("home jobs: couldn't read his jobs; the approved %s didn't run", name, exc_info=True)
                 return False, ("I couldn't read his home jobs, so nothing was stopped" if name == CANCEL
@@ -463,7 +465,7 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
                 return False, _plain_failure(result)
             recorded = ""
             try:
-                session.save(owner_person_id, keep_asked_on(tasks, state["async_tasks"]))
+                session.save(job_owner, keep_asked_on(tasks, state["async_tasks"]))
             except Exception:
                 log.warning("home jobs: an approved job went, but recording it failed", exc_info=True)
                 recorded = NOT_RECORDED

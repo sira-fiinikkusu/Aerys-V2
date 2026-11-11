@@ -46,7 +46,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for
+from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for, person_id_for
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_lens_surface, is_voice_turn
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 # OTHER: everyone and everything else.
 OWNER_TEXT, OWNER_VOICE, VOICE_UNSURE, OWNER_ASK, OTHER = (
     "owner_text", "owner_voice", "voice_unsure", "owner_ask", "other")
+MEMBER, MEMBER_VOICE = "member", "member_voice"
 #: Whoever this is, it's him raising it himself: never held by an earlier no (D17 Q5).
 HIMSELF = (OWNER_TEXT, OWNER_VOICE)
 TEXT_PLATFORMS = ("discord", "telegram")
@@ -106,10 +107,18 @@ class GatedAction:
     outcome: str | None = None
 
 
-def asker(identity, thread_id, owner_person_id) -> str:
+def asker(identity, thread_id, owner_person_id, members=None) -> str:
     """Who is asking, from what the doors already decided (never re-judged here)."""
     ident = identity if isinstance(identity, dict) else {}
-    if not owner_person_id or str(ident.get("user_id") or "") != str(owner_person_id):
+    person = str(ident.get("user_id") or "")
+    if person in (members or {}):
+        if is_voice_turn(ident, thread_id):
+            speaker = ident.get("speaker") or {}
+            strong = (speaker.get("id") not in (None, "", "unknown")
+                      and not speaker.get("demoted") and not speaker.get("unsure"))
+            return MEMBER_VOICE if strong else VOICE_UNSURE
+        return MEMBER if str(ident.get("platform") or "").lower() == "discord" else OTHER
+    if not owner_person_id or person != str(owner_person_id):
         return OTHER
     if is_voice_turn(ident, thread_id):
         spk = ident.get("speaker")
@@ -159,7 +168,7 @@ def _norm(value, loose=False):
 def _request(args, loose=False) -> dict:
     """What was asked, without the gate's own wording ('what'), normalized: two asks for the same
     thing match, from any thread, however they're punctuated (and, `loose`, however they're cased)."""
-    return {k: _norm(v, loose) for k, v in dict(args or {}).items() if k != "what"}
+    return {k: _norm(v, loose) for k, v in dict(args or {}).items() if k not in ("what", "_start_candidates")}
 
 
 def _tasks(state) -> dict:
@@ -298,8 +307,10 @@ class HandsGate:
     def __init__(self, approvals, store, *, owner_person_id, people=None,
                  executors: dict[str, Callable[[GatedAction], tuple[bool, str]]] | None = None,
                  read_only_agents=(), clock: Callable[[], datetime] | None = None,
-                 ask_for: timedelta = DEFAULT_FOR):
+                 ask_for: timedelta = DEFAULT_FOR, members=None, discord_id=None):
         self.approvals, self.store, self.owner = approvals, store, owner_person_id
+        self.members = dict(members or {})
+        self.discord_id = discord_id or (lambda person: None)
         self.people = people
         self.executors = dict(executors or {})
         self.read_only_agents = frozenset(a.strip() for a in read_only_agents if str(a).strip())
@@ -309,9 +320,42 @@ class HandsGate:
     # D10 ---------------------------------------------------------------------------------
 
     def home_job(self, identity, thread_id, name: str, args: dict, state=None) -> Verdict:
-        who = asker(identity, thread_id, self.owner)
+        who = asker(identity, thread_id, self.owner, self.members)
         if who == OTHER or name not in HOME_TOOLS:
             return Verdict(False, REFUSED_HOME)
+        person = str((identity or {}).get("user_id") or "")
+        member = person in self.members
+        args = {k: v for k, v in args.items() if not k.startswith("_")}
+        approvers = None
+        if member:
+            if name == START:
+                if args.get("subagent_type") != self.members[person]:
+                    return Verdict(False, "Not started: use your own home project.")
+            else:
+                task = _tasks(state).get(args.get("task_id"))
+                if name == "list_async_tasks" or not isinstance(task, dict) or task.get("owner") != person:
+                    return Verdict(False, "Not done: only your own identified home jobs are accessible.")
+            args["_job_owner"] = person
+            if who == MEMBER or (who == MEMBER_VOICE and name == CANCEL):
+                return self._direct(name, args)
+            if name in READS:
+                return GO
+            recipients = [person]
+        else:
+            recipients = []
+        if who == VOICE_UNSURE and name == START and self.members:
+            recipients = [self.owner, *self.members]
+        if recipients:
+            candidates = {}
+            for recipient in recipients:
+                address = self.discord_id(recipient)
+                if address is None or str(address) in candidates:
+                    return Verdict(False, "Not done: approval recipients are unavailable or ambiguous.")
+                candidates[str(address)] = {"person": recipient,
+                    "project": self.members.get(recipient, "home")}
+            approvers = list(candidates)
+            if name == START:
+                args["_start_candidates"] = candidates
         if name in READS:
             return GO
         if who == OWNER_TEXT:
@@ -339,11 +383,19 @@ class HandsGate:
             words = f"Stop task {task or 'unknown'}."
             summary = f"Stop a running home job ({agent or 'unknown job'}), {how}"
             what = f"stopping the home job, {how}"
+        if member:
+            heard = "Asked by a member voice; approval is required"
         detail = f"{heard}. Home agent: {agent or 'unknown'}.\n\n{words}"
+        if approvers is not None and name == START:
+            detail += "\nApproving starts this job in your own home project."
         base_key = f"home:{_key(str(thread_id or ''), name, args)}"
-        return self._ask(HOME_JOB, base_key, str(thread_id or ""), {"tool": name, **args, "what": what},
+        verdict = self._ask(HOME_JOB, base_key, str(thread_id or ""), {"tool": name, **args, "what": what},
                          kind="home job", summary=summary, detail=detail, what=what,
-                         himself=who in HIMSELF)
+                         himself=who in HIMSELF, approvers=approvers)
+        if approvers is not None and verdict.text.startswith(("Waiting for", "Still waiting")):
+            return Verdict(False, "Waiting for approval on Discord. Nothing has been done; "
+                           "the first approval decides whose home project runs the job.")
+        return verdict
 
     def _direct(self, name: str, args: dict) -> Verdict:
         """He asked directly for something that may already be queued for his tap (Codex, 11/09: an
@@ -481,7 +533,7 @@ class HandsGate:
             return decided.astimezone(EASTERN).strftime("%-I:%M %p")
         return None
 
-    def _ask(self, action, base_key, thread_id, args, *, kind, summary, detail, what, himself=False) -> Verdict:
+    def _ask(self, action, base_key, thread_id, args, *, kind, summary, detail, what, himself=False, approvers=None) -> Verdict:
         if action not in self.executors:
             return Verdict(False, CANT_ASK_HOME if action == HOME_JOB else CANT_ASK_MESSAGE)
         if len(detail) > DETAIL_CHARS:
@@ -529,7 +581,8 @@ class HandsGate:
             # The button is keyed by exactly what it shows: two turns asking different things at
             # once get two buttons, and only the one whose row is recorded stays.
             approval_id = self.approvals.request(kind, summary, detail, expires_in=self.ask_for,
-                                                 key=f"{base_key}:{attempt}:{_key(args)}")
+                                                 key=f"{base_key}:{attempt}:{_key(args)}",
+                                                 **({"approvers": approvers} if approvers is not None else {}))
             try:
                 row = self.store.add(approval_id, action, base_key, attempt, thread_id, args, self.clock())
             except Exception:
@@ -597,6 +650,13 @@ class HandsWatcher:
                 if not g.store.claim(row.id):
                     continue                                # another watcher has it
                 try:
+                    candidates = row.args.get("_start_candidates")
+                    if row.action == HOME_JOB and row.args.get("tool") == START and candidates:
+                        winner = candidates.get(g.approvals.decided_by(row.approval_id))
+                        if winner is None:
+                            raise ValueError("approval has no authorized winner")
+                        row.args = {**row.args, "_job_owner": winner["person"],
+                                    "subagent_type": winner["project"]}
                     result = run(row)
                     ok, said = result if isinstance(result, tuple) and len(result) == 2 else (False, "no clear result")
                     outcome = " ".join(str(said or "").split())[:OUTCOME_CHARS]
@@ -725,7 +785,11 @@ def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], tup
     if approvals is None:
         log.warning("hands gates: the approval button isn't armed (APPROVALS + an HA notify service); not armed")
         return None
+    from aerys_v2.config import home_job_member_map
+
     read_only = [a for a in str(getattr(settings, "home_read_only_agents", "") or "").split(",") if a.strip()]
     return HandsGate(approvals, PostgresGatedActionStore(settings.database_url),
                      owner_person_id=str(settings.owner_person_id), people=people_lookup_for(settings),
-                     executors=executors, read_only_agents=read_only)
+                     executors=executors, read_only_agents=read_only,
+                     members=home_job_member_map(settings),
+                     discord_id=lambda person: person_id_for(settings, person))
