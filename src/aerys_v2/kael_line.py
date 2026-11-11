@@ -98,11 +98,15 @@ DEVICE_RECENT_S = 900
 
 
 def _owner_platform_id(settings, platform: str) -> str | None:
+    return _person_platform_id(settings, platform, settings.owner_person_id)
+
+
+def _person_platform_id(settings, platform: str, person_id) -> str | None:
     """The owner's platform user id, resolved from prod platform_identities.
     memories_database_url, NOT database_url — identity is prod data (the
     8/15 wrong-database lesson, learned once)."""
     db = getattr(settings, "memories_database_url", None)
-    if not db or settings.owner_person_id is None:
+    if not db or person_id is None:
         return None
     import psycopg
 
@@ -110,7 +114,7 @@ def _owner_platform_id(settings, platform: str) -> str | None:
         with psycopg.connect(db, connect_timeout=5) as conn:
             conn.read_only = True
             row = conn.execute(
-                _OWNER_PLATFORM_SQL, (settings.owner_person_id, platform)
+                _OWNER_PLATFORM_SQL, (person_id, platform)
             ).fetchone()
         return str(row[0]) if row else None
     except Exception:

@@ -517,6 +517,7 @@ class Settings(BaseSettings):
     # identity (the id stays in the environment). Off unless approvals is true.
     approvals: bool = False
     approvals_owner_discord_id: str = ""
+    approvals_person_discord_ids: str = ""
     # WHAT WAITS FOR HIS TAP (hands_gate.py; D10 11/08, D12 11/09), on that button: from voice,
     # a home job starts directly only on a strong match AND an agent listed in
     # home_read_only_agents (list one only once the home body enforces read-only for it); any
@@ -903,3 +904,19 @@ def run_boot_assertions(settings: Settings, env_file: Path | None = None) -> Non
                 "match a person and grants no access.",
                 pid,
             )
+
+
+def person_mapping(value: str) -> dict[str, str]:
+    """Parse an env-only person UUID=value grant; reject ambiguous or malformed entries."""
+    from uuid import UUID
+
+    result = {}
+    for entry in str(value or "").split(","):
+        if not entry.strip():
+            continue
+        person, sep, target = entry.strip().partition("=")
+        person, target = person.strip(), target.strip()
+        if not sep or not target or str(UUID(person)) != person or person in result:
+            raise ValueError("invalid person mapping")
+        result[person] = target
+    return result

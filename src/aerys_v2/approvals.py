@@ -28,7 +28,7 @@ import logging
 import re
 import time as _time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -62,6 +62,8 @@ class Approval:
     channel_id: str | None = None
     shown: str | None = None
     pinged_at: datetime | None = None
+    approvers: list[str] | None = None
+    recipient: str | None = None
 
 
 def custom_id(approval_id: int, verdict: str) -> str:
@@ -77,12 +79,13 @@ class MemoryApprovalStore:
     def __init__(self):
         self.rows: dict[int, Approval] = {}
         self._next = 1
+        self.posts = {}
 
-    def request(self, kind, summary, detail, now, expires_at, key):
+    def request(self, kind, summary, detail, now, expires_at, key, approvers=None):
         for r in self.rows.values():
             if r.request_key == key:
                 return r, False
-        a = Approval(self._next, kind, summary, detail, now, expires_at, request_key=key)
+        a = Approval(self._next, kind, summary, detail, now, expires_at, request_key=key, approvers=approvers)
         self.rows[a.id] = a
         self._next += 1
         return a, True
@@ -98,7 +101,7 @@ class MemoryApprovalStore:
                        and r.requested_at <= before and r.expires_at > now), key=lambda r: r.id)
 
     def unposted(self, now):
-        return sorted((r for r in self.rows.values() if r.status == "pending" and r.message_id is None
+        return sorted((r for r in self.rows.values() if r.status == "pending" and r.approvers is None and r.message_id is None
                        and r.expires_at > now), key=lambda r: r.id)
 
     def claim(self, approval_id, token):
@@ -150,12 +153,45 @@ class MemoryApprovalStore:
     def set_shown(self, approval_id, status):
         self.rows[approval_id].shown = status
 
+    def post_rows(self, now, since):
+        out = []
+        for a in self.rows.values():
+            for recipient in a.approvers or []:
+                post = self.posts.get((a.id, recipient), {})
+                if (a.status == "pending" and a.expires_at > now and not post.get("message_id")) or (
+                    a.status != "pending" and a.decided_at >= since and post.get("channel_id")
+                    and post.get("shown") != a.status):
+                    out.append(replace(a, recipient=recipient, message_id=post.get("message_id"),
+                                       channel_id=post.get("channel_id")))
+        return out
+
+    def claim_post(self, aid, recipient, token):
+        key = (aid, recipient)
+        if key in self.posts:
+            return False
+        self.posts[key] = {"message_id": token}
+        return True
+
+    def posted_post(self, aid, recipient, token, channel, message):
+        p = self.posts.get((aid, recipient), {})
+        if p.get("message_id") != token:
+            return False
+        p.update(channel_id=str(channel), message_id=str(message))
+        return True
+
+    def release_post(self, aid, recipient, token):
+        if self.posts.get((aid, recipient), {}).get("message_id") == token:
+            del self.posts[aid, recipient]
+
+    def shown_post(self, aid, recipient, status):
+        self.posts[aid, recipient]["shown"] = status
+
 
 class PostgresApprovalStore:
     """v2_approvals (db/migrations/022). Fresh short connections per call."""
 
     COLUMNS = ("id, kind, summary, detail, requested_at, expires_at, status, decided_at, decided_by, "
-               "request_key, message_id, channel_id, shown, pinged_at")
+               "request_key, message_id, channel_id, shown, pinged_at, approvers")
 
     def __init__(self, database_url: str):
         self.database_url = database_url
@@ -177,12 +213,12 @@ class PostgresApprovalStore:
         with self._connect() as conn:
             return [self._row(r) for r in conn.execute(sql, args).fetchall()]
 
-    def request(self, kind, summary, detail, now, expires_at, key):
+    def request(self, kind, summary, detail, now, expires_at, key, approvers=None):
         with self._connect() as conn:
             row = conn.execute(
-                "INSERT INTO v2_approvals (kind, summary, detail, requested_at, expires_at, request_key) "
-                f"VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (request_key) DO NOTHING RETURNING {self.COLUMNS}",
-                (kind, summary, detail, now, expires_at, key)).fetchone()
+                "INSERT INTO v2_approvals (kind, summary, detail, requested_at, expires_at, request_key, approvers) "
+                f"VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (request_key) DO NOTHING RETURNING {self.COLUMNS}",
+                (kind, summary, detail, now, expires_at, key, approvers)).fetchone()
             if row is not None:
                 return self._row(row), True
             row = conn.execute(f"SELECT {self.COLUMNS} FROM v2_approvals WHERE request_key = %s", (key,)).fetchone()
@@ -201,7 +237,7 @@ class PostgresApprovalStore:
 
     def unposted(self, now):
         return self._all(f"SELECT {self.COLUMNS} FROM v2_approvals WHERE status = 'pending' "
-                         "AND message_id IS NULL AND expires_at > %s ORDER BY id", (now,))
+                         "AND approvers IS NULL AND message_id IS NULL AND expires_at > %s ORDER BY id", (now,))
 
     def claim(self, approval_id, token):
         """Before the DM goes: one gateway, one DM, ever (a claim left by a failed record stays)."""
@@ -241,6 +277,35 @@ class PostgresApprovalStore:
     def set_shown(self, approval_id, status):
         self._one("UPDATE v2_approvals SET shown = %s WHERE id = %s RETURNING id", (status, approval_id))
 
+    def post_rows(self, now, since):
+        columns = ", ".join("a." + c.strip() for c in self.COLUMNS.split(","))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {columns}, recipient, p.channel_id, p.message_id FROM v2_approvals a "
+                "CROSS JOIN LATERAL unnest(a.approvers) AS recipient "
+                "LEFT JOIN v2_approval_posts p ON p.approval_id = a.id AND p.approver = recipient "
+                "WHERE (a.status = 'pending' AND a.expires_at > %s AND p.message_id IS NULL) "
+                "OR (a.status <> 'pending' AND a.decided_at >= %s AND p.channel_id IS NOT NULL "
+                "AND p.shown IS DISTINCT FROM a.status) ORDER BY a.id, recipient", (now, since)).fetchall()
+        return [replace(self._row(r[:-3]), recipient=r[-3], channel_id=r[-2], message_id=r[-1]) for r in rows]
+
+    def claim_post(self, aid, recipient, token):
+        return self._one("INSERT INTO v2_approval_posts (approval_id, approver, message_id) VALUES (%s, %s, %s) "
+                         "ON CONFLICT DO NOTHING RETURNING approval_id", (aid, recipient, token)) is not None
+
+    def posted_post(self, aid, recipient, token, channel, message):
+        return self._one("UPDATE v2_approval_posts SET channel_id = %s, message_id = %s "
+                         "WHERE approval_id = %s AND approver = %s AND message_id = %s RETURNING approval_id",
+                         (str(channel), str(message), aid, recipient, token)) is not None
+
+    def release_post(self, aid, recipient, token):
+        self._one("DELETE FROM v2_approval_posts WHERE approval_id = %s AND approver = %s "
+                  "AND message_id = %s RETURNING approval_id", (aid, recipient, token))
+
+    def shown_post(self, aid, recipient, status):
+        self._one("UPDATE v2_approval_posts SET shown = %s WHERE approval_id = %s AND approver = %s "
+                  "RETURNING approval_id", (status, aid, recipient))
+
 
 # --- the asking side (any process that writes rows) ---------------------------------------
 
@@ -255,7 +320,7 @@ class Approvals:
         self.sleep = sleep
 
     def request(self, kind: str, summary: str, detail: str = "", expires_in: timedelta = DEFAULT_FOR,
-                key: str | None = None) -> int:
+                key: str | None = None, approvers: list[str] | None = None) -> int:
         """Ask him. The same key twice is one request. Raises if the request can't be written: a
         caller that can't ask can't go ahead. The HA ping is tried now and retried by the gateway."""
         kind = " ".join(str(kind or "").split())[:60]
@@ -264,9 +329,13 @@ class Approvals:
             raise ValueError("an approval needs a kind and a summary")
         if expires_in <= timedelta(0) or expires_in > LONGEST_FOR:
             raise ValueError("an approval lasts more than nothing and at most a week")
+        if approvers is not None:
+            approvers = sorted(set(str(x) for x in approvers))
+            if not approvers or any(not x.isdigit() for x in approvers):
+                raise ValueError("approvers must be nonempty Discord ids")
         now = self.clock()
         row, created = self.store.request(kind, summary, str(detail or "")[:DETAIL_CHARS], now, now + expires_in,
-                                          key or f"{kind}:{uuid.uuid4().hex}")
+                                          key or f"{kind}:{uuid.uuid4().hex}", approvers=approvers)
         if created:
             ping(self.store, self.notify, row, now)
         log.info("approval %s (%s): %s", row.id, kind, "requested" if created else "already asked")
@@ -400,9 +469,11 @@ def handle_click(store, approval_id: int, approve: bool, clicker_id: int, owner_
                  now: datetime) -> tuple[str, Approval | None]:
     """The tap, decided. Returns (what to tell the clicker, the decided row or None). Only the
     owner decides; only a pending, unexpired request is decided; and only once."""
-    if owner_id is None or int(clicker_id) != int(owner_id):
-        return "Not yours to answer.", None
     try:
+        current = store.get(approval_id)
+        allowed = current.approvers if current and current.approvers is not None else [str(owner_id)]
+        if str(clicker_id) not in allowed:
+            return "Not yours to answer.", None
         row = store.decide(approval_id, approve, clicker_id, now)
     except Exception:
         log.warning("approval %s: couldn't record the answer", approval_id, exc_info=True)
@@ -428,7 +499,8 @@ async def on_tap(interaction, approval_id: int, approve: bool, *, store, owner_i
         return
     try:
         await interaction.edit_original_response(content=outcome_text(row), view=None)
-        await asyncio.to_thread(store.set_shown, row.id, row.status)
+        if row.approvers is None:
+            await asyncio.to_thread(store.set_shown, row.id, row.status)
     except Exception as e:
         log.warning("approval %s: decided, but the message edit failed (%s); the poller retries",
                     row.id, type(e).__name__)
@@ -447,6 +519,8 @@ async def poll_once(store, *, send: Callable, edit: Callable, notify=None, now: 
 
     out = {"posted": 0, "expired": 0, "shown": 0, "pinged": 0}
     for aid, (token, channel_id, message_id) in list((unrecorded or {}).items()):
+        if isinstance(aid, tuple):
+            continue
         try:
             await asyncio.to_thread(store.posted, aid, token, channel_id, message_id)
         except Exception:
@@ -484,6 +558,9 @@ async def poll_once(store, *, send: Callable, edit: Callable, notify=None, now: 
             if unrecorded is not None:
                 unrecorded[a.id] = (token, channel_id, message_id)
         out["posted"] += 1
+    extra = await _poll_posts(store, send=send, edit=edit, now=now, unrecorded=unrecorded)
+    for key, value in extra.items():
+        out[key] += value
     return out
 
 
@@ -531,7 +608,8 @@ def attach_approvals(client, *, store, owner_id: Callable[[], int | None], notif
         return client.get_user(int(oid)) or await client.fetch_user(int(oid))
 
     async def send(a: Approval) -> tuple[str, str]:  # pragma: no cover - live only
-        message = await (await owner_user()).send(message_text(a), view=buttons(a))
+        user = (client.get_user(int(a.recipient)) or await client.fetch_user(int(a.recipient))) if a.recipient else await owner_user()
+        message = await user.send(message_text(a), view=buttons(a))
         return str(message.channel.id), str(message.id)
 
     async def edit(a: Approval, text: str) -> None:  # pragma: no cover - live only (edit_dm is tested)
@@ -559,3 +637,61 @@ def attach_approvals(client, *, store, owner_id: Callable[[], int | None], notif
 
     client.setup_hook = setup_hook  # type: ignore[method-assign]
     return ApprovalButton
+
+
+async def _poll_posts(store, *, send, edit, now, unrecorded=None):
+    """Per-recipient claims and outcome retries for explicit approver lists."""
+    import asyncio
+
+    out = {"posted": 0, "shown": 0}
+    for key, values in list((unrecorded or {}).items()):
+        if not isinstance(key, tuple):
+            continue
+        try:
+            await asyncio.to_thread(store.posted_post, *key, *values)
+        except Exception:
+            continue
+        unrecorded.pop(key)
+    for a in await asyncio.to_thread(store.post_rows, now, now - SHOW_FOR):
+        if a.status != "pending":
+            try:
+                await edit(a, outcome_text(a))
+                await asyncio.to_thread(store.shown_post, a.id, a.recipient, a.status)
+                out["shown"] += 1
+            except Exception:
+                log.warning("approval %s: outcome edit will retry", a.id)
+            continue
+        token = f"{CLAIM}{uuid.uuid4().hex}"
+        if not await asyncio.to_thread(store.claim_post, a.id, a.recipient, token):
+            continue
+        try:
+            channel, message = await send(a)
+        except Exception:
+            await asyncio.to_thread(store.release_post, a.id, a.recipient, token)
+            continue
+        try:
+            await asyncio.to_thread(store.posted_post, a.id, a.recipient, token, channel, message)
+        except Exception:
+            if unrecorded is not None:
+                unrecorded[a.id, a.recipient] = (token, channel, message)
+        out["posted"] += 1
+    return out
+
+
+def person_id_for(settings, person_id, *, lookup=None) -> int | None:
+    """Resolve a person's Discord id from env overrides or linked identities."""
+    from aerys_v2.config import person_mapping
+    from aerys_v2.kael_line import _person_platform_id
+
+    if str(person_id) == str(getattr(settings, "owner_person_id", "")):
+        return owner_id_for(settings)()
+    fixed = person_mapping(getattr(settings, "approvals_person_discord_ids", ""))
+    try:
+        raw = fixed.get(str(person_id))
+        if raw is None:
+            raw = (lookup or _person_platform_id)(settings, "discord", person_id)
+        raw = str(raw or "").strip()
+        return int(raw) if raw.isdigit() else None
+    except Exception:
+        log.warning("approvals: person lookup failed")
+        return None

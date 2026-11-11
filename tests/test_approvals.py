@@ -454,3 +454,26 @@ def test_an_outcome_edit_goes_to_the_dm_it_was_posted_in():
     row.channel_id, row.message_id = "222", "333"
     asyncio.run(edit_dm(Client(), row, "**Approved** (job)"))
     assert calls == [("channel", 222), ("message", 222, 333), ("edit", 333, "**Approved** (job)", None)]
+
+
+def test_multiple_approvers_first_tap_wins_and_all_posts_update():
+    d = Desk()
+    aid = d.approvals.request("job", "Shared request", approvers=[str(OWNER), str(SOMEONE)])
+    sent, edited = [], []
+
+    async def send(a):
+        sent.append(a.recipient)
+        return a.recipient, str(len(sent))
+
+    async def edit(a, text):
+        edited.append((a.channel_id, text))
+
+    asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW))
+    assert set(sent) == {str(OWNER), str(SOMEONE)}
+    assert handle_click(d.store, aid, True, 999, OWNER, NOW)[1] is None
+    assert handle_click(d.store, aid, True, SOMEONE, OWNER, NOW)[1].decided_by == str(SOMEONE)
+    assert handle_click(d.store, aid, False, OWNER, OWNER, NOW)[1] is None
+    asyncio.run(poll_once(d.store, send=send, edit=edit, now=NOW))
+    assert {channel for channel, _ in edited} == set(sent)
+    assert all("Approved" in text for _, text in edited)
+    assert d.store.get(aid).status == "approved"
