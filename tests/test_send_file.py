@@ -226,3 +226,137 @@ def test_a_surface_she_cant_reach_raises_so_the_tool_says_not_sent():
 
 def test_no_bot_at_all_means_no_delivery():
     assert deliver_for(_settings(discord_bot_token=None, telegram_bot_token=None)) is None
+
+
+# --- the record of sends, and no re-send he didn't ask for (#187, 11/10) ----------------------
+# 23:13: asked "what file did you send me tonight?", her hands looked in the home-job records,
+# didn't find the 22:14 send (a direct send, never a job), decided it hadn't happened, and sent the
+# file again. These pin: every send is recorded, the record answers "what did you send", and the
+# same file again within hours needs him to ask for it again.
+
+from datetime import datetime, timedelta, timezone
+
+from aerys_v2.factory import SPECIALIST_CHARTER
+from aerys_v2.tools.send_file import (
+    RESEND_HOURS,
+    SENT_TOOL_NAME,
+    FileSend,
+    FileSends,
+    build_files_sent_tool,
+)
+
+T0 = datetime(2026, 11, 11, 3, 14, tzinfo=timezone.utc)    # 10:14 PM Eastern, 11/10
+
+
+class Clock:
+    def __init__(self, at=T0):
+        self.at = at
+
+    def __call__(self):
+        return self.at
+
+
+class RecordedRig(Rig):
+    def __init__(self, ledger=None, clock=None, **kw):
+        super().__init__(**kw)
+        self.ledger, self.clock = ledger if ledger is not None else FileSends(), clock or Clock()
+        self.tool = build_send_file_tool(home_url=HOME_URL, home_token="home-api-token", owner_person_id=OWNER,
+                                         deliver=self.deliver, get=self.get, ledger=self.ledger, now=self.clock)
+
+    def call(self, identity, path="esphome-voice-satellite-fixed-ip.md", note="", again=False):
+        return self.tool.invoke({"path": path, "note": note, "again": again},
+                                config={"configurable": {"identity": identity, "thread_id": f"person:{OWNER}"}})
+
+
+def test_a_send_is_recorded_once_he_has_it():
+    rig = RecordedRig()
+    assert rig.call(DISCORD).startswith("SENT")
+    ((person, send),) = rig.ledger.rows
+    assert person == OWNER and send.path == "esphome-voice-satellite-fixed-ip.md"
+    assert (send.name, send.bytes, send.surface) == ("esphome-voice-satellite-fixed-ip.md", len(HOWTO), "discord")
+
+
+def test_a_send_that_didnt_happen_is_never_recorded():
+    rig = RecordedRig(deliver_fails=RuntimeError("Discord answered HTTP 500"))
+    assert rig.call(DISCORD).startswith("NOT SENT") and rig.ledger.rows == []
+
+
+def test_the_same_file_again_is_refused_and_says_when_it_went():
+    clock = Clock()
+    rig = RecordedRig(clock=clock)
+    assert rig.call(DISCORD).startswith("SENT")
+    clock.at = T0 + timedelta(minutes=59)                    # 11:13 PM: the voice question
+    said = rig.call(DISCORD)
+    assert said.startswith("ALREADY SENT") and "10:14 PM today" in said and "his Discord DM" in said
+    assert len(rig.sent) == 1 and len(rig.got) == 1          # nothing fetched, nothing sent the second time
+
+
+def test_he_can_ask_for_it_again():
+    rig = RecordedRig()
+    rig.call(DISCORD)
+    assert rig.call(DISCORD, again=True).startswith("SENT")
+    assert len(rig.sent) == 2 and len(rig.ledger.rows) == 2
+
+
+def test_after_the_window_it_sends_without_asking_again():
+    clock = Clock()
+    rig = RecordedRig(clock=clock)
+    rig.call(DISCORD)
+    clock.at = T0 + timedelta(hours=RESEND_HOURS, minutes=1)
+    assert rig.call(DISCORD).startswith("SENT") and len(rig.sent) == 2
+
+
+def test_a_different_file_is_its_own_send():
+    rig = RecordedRig()
+    rig.call(DISCORD)
+    assert rig.call(DISCORD, path="/home/hands/work/notes/other.md").startswith("SENT")
+
+
+def test_a_record_it_cant_read_never_blocks_a_send_he_asked_for():
+    class Broken(FileSends):
+        def last(self, *a):
+            raise RuntimeError("database down")
+    rig = RecordedRig(ledger=Broken())
+    assert rig.call(DISCORD).startswith("SENT")
+
+
+def test_the_record_answers_what_she_sent():
+    clock = Clock()
+    rig = RecordedRig(clock=clock)
+    rig.call(DISCORD)
+    clock.at = T0 + timedelta(minutes=59)
+    sent = build_files_sent_tool(ledger=rig.ledger, owner_person_id=OWNER, now=clock)
+    said = sent.invoke({}, config={"configurable": {"identity": DISCORD}})
+    assert "10:14 PM today" in said and "esphome-voice-satellite-fixed-ip.md" in said and "Discord DM" in said
+
+
+def test_an_empty_record_says_so_and_guesses_nothing():
+    sent = build_files_sent_tool(ledger=FileSends(), owner_person_id=OWNER, now=Clock())
+    assert sent.invoke({"hours": 24}, config={"configurable": {"identity": DISCORD}}).startswith("No files sent")
+
+
+def test_the_record_is_only_his():
+    sent = build_files_sent_tool(ledger=FileSends(), owner_person_id=OWNER, now=Clock())
+    assert "only for Chris" in sent.invoke({}, config={"configurable": {"identity": GUEST}})
+
+
+def test_both_tools_are_offered_to_him_and_neither_to_anyone_else():
+    ledger = FileSends()
+    sent = build_files_sent_tool(ledger=ledger, owner_person_id=OWNER, now=Clock())
+
+    def offered(identity):
+        log = []
+        model = Rec(script=[AIMessage(content="ok")], log=log)
+        graph = build_agent_action_graph(AgentToolModels(model, (model, True)), "SOUL", [],
+                                         extra_middleware=[send_file_middleware(Rig().tool, OWNER, sent_tool=sent)])
+        graph.invoke({"messages": [HumanMessage(content="what did you send me?")]},
+                     {"configurable": {"thread_id": "t", "identity": identity}, "recursion_limit": 6})
+        return set(log[0]["tools"])
+
+    assert {TOOL_NAME, SENT_TOOL_NAME} <= offered(DISCORD)
+    assert not ({TOOL_NAME, SENT_TOOL_NAME} & offered(GUEST))
+
+
+def test_her_rules_say_a_question_about_what_she_did_is_not_a_redo():
+    assert "never by doing it again" in SPECIALIST_CHARTER
+    assert SENT_TOOL_NAME in HOME_JOBS_OVERLAY and "don't send the file again" in HOME_JOBS_OVERLAY

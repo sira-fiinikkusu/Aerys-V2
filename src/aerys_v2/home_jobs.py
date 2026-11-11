@@ -100,7 +100,9 @@ HOME_JOBS_OVERLAY = (
     "update_async_task: the job adjusts in flight. check_async_task and list_async_tasks say how his "
     "jobs are going when he asks; cancel_async_task stops one. If a tool says it's waiting for "
     "Chris's tap, tell him it's waiting on his button and never say it started. To hand him a file "
-    "your home job made, send_file_to_chris with its path: it lands in his DM."
+    "your home job made, send_file_to_chris with its path: it lands in his DM. When he asks what you "
+    "sent him, files_sent_to_chris is the record (direct sends aren't jobs, so the job list won't "
+    "show them); answer from it and don't send the file again unless he asks you to."
 )
 
 
@@ -530,13 +532,16 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
         return None
     url = str(settings.home_url).strip().rstrip("/")
     files = None
-    from aerys_v2.tools.send_file import build_send_file_tool, deliver_for, send_file_middleware
+    from aerys_v2.tools.send_file import (PostgresFileSends, build_files_sent_tool, build_send_file_tool,
+                                          deliver_for, send_file_middleware)
 
     deliver = deliver_for(settings)
     if deliver is not None:     # #183: he gets the files her home jobs make, in his DM
+        owner = str(settings.owner_person_id)
+        sends = PostgresFileSends(settings.database_url)    # #187: the record, and the resend guard
         files = send_file_middleware(build_send_file_tool(home_url=url, home_token=token.get_secret_value(),
-                                                          owner_person_id=str(settings.owner_person_id),
-                                                          deliver=deliver), str(settings.owner_person_id))
+                                                          owner_person_id=owner, deliver=deliver, ledger=sends),
+                                     owner, sent_tool=build_files_sent_tool(ledger=sends, owner_person_id=owner))
     jobs = build_home_jobs(url=url, token=token.get_secret_value(),
                            ledger=PostgresHomeTaskLedger(settings.database_url),
                            owner_person_id=str(settings.owner_person_id),
