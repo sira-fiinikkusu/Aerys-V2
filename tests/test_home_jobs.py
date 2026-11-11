@@ -428,6 +428,45 @@ def test_the_done_notice_for_a_job_she_started_lands_at_the_desk_carrying_where_
     assert kept.metadata == {"subagent_name": HOME_AGENT, "parent_thread_id": DM_THREAD}
 
 
+
+TELEGRAM = {"user_id": OWNER, "display_name": "Chris", "platform": "telegram", "channel_kind": "dm"}
+
+
+def test_a_job_remembers_which_of_his_surfaces_asked_for_it(home):
+    # #183 (11/10): the done-notice goes back where he asked (D20), so the job keeps where that was.
+    # The official tools rebuild their task records on every call; what they don't carry is kept.
+    b = Box()
+    b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
+    ((task_id, task),) = b.ledger.load(OWNER).items()
+    assert task["asked_on"] == "discord"
+    b.turn([call("check_async_task", {"task_id": task_id}), AIMessage(content="Running.")], STRONG,
+           thread=VOICE_THREAD, text="how's it going?")
+    assert b.ledger.load(OWNER)[task_id]["asked_on"] == "discord"          # a check doesn't move it
+    b.turn([call("update_async_task", {"task_id": task_id, "message": "make it blue"}),
+            AIMessage(content="Changed.")], TELEGRAM, text="make it blue")
+    assert b.ledger.load(OWNER)[task_id]["asked_on"] == "telegram"         # his latest ask does
+    assert b.ledger.asked_on(task["thread_id"]) == "telegram"
+    assert b.ledger.asked_on("no-such-thread") is None
+
+
+def test_a_job_he_started_in_discord_tells_him_there_when_its_done(home):
+    b = Box()
+    b.turn([call("start_async_task", START), AIMessage(content="Started.")], TEXT)
+    home.finish()
+    run = home.runs["r-1"]
+    payload = {"thread_id": run["thread_id"], "run_id": run["run_id"], "status": run["status"],
+               "metadata": home.threads[run["thread_id"]]["metadata"]}
+    told = []
+    desk = SimpleNamespace(store=SimpleNamespace(decided=lambda key, since: False),
+                           reach_out=lambda event: told.append(event) or "sent")
+    notices = HomeNotices(desk, MemoryNoticeStore(), clock=lambda: NOW,
+                          asked_on=lambda notice: b.ledger.asked_on(notice.thread_id))
+    notices.receive(payload)
+    notices.tick()
+    (event,) = told
+    assert event.text_only is True and event.text_to == "discord"
+
+
 # --- arming: nothing unless everything is there ------------------------------------------------
 
 

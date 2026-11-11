@@ -51,6 +51,7 @@ from aerys_v2.hands_gate import (
     HOME_TOOLS,
     OTHER,
     START,
+    TEXT_PLATFORMS,
     UPDATE,
     HandsGate,
     HandsWatcher,
@@ -58,7 +59,7 @@ from aerys_v2.hands_gate import (
     hands_gate_for,
     home_job_middleware,
 )
-from aerys_v2.state import identity_from_config
+from aerys_v2.state import identity_from_config, is_voice_turn
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ MAX_TASKS = 25
 _UNFINISHED = ("pending", "running", "waiting")
 #: How long a home tool waits for another call on his jobs to finish (they're quick HTTP calls).
 LOCK_WAIT_S = 30
+#: Where he last asked about a job (discord | telegram | voice), kept on its record: its done-notice goes
+#: back there as text when that was Discord or Telegram (the owner's D20 rule, for jobs since #183 11/10).
+ASKED_ON = "asked_on"
 
 CANT_READ = ("Not done: I couldn't get to his home jobs just now (they couldn't be read, or another "
              "request on them was still going), so nothing happened. Try again in a moment.")
@@ -200,6 +204,14 @@ class MemoryHomeTaskLedger:
                 if who == owner and isinstance(task, dict):
                     self.rows[tid] = (owner, dict(task))
 
+    def asked_on(self, thread_id: str) -> str | None:
+        """Where he last asked about the job running on her home thread `thread_id`, or None."""
+        with self._lock:
+            for tid, (_, task) in self.rows.items():
+                if thread_id in (tid, task.get("thread_id")):
+                    return task.get(ASKED_ON)
+        return None
+
 
 class PostgresHomeTaskLedger:
     """v2_home_tasks (db/migrations/024): one row per job, the official task record as JSON.
@@ -244,6 +256,12 @@ class PostgresHomeTaskLedger:
         with self._connect() as conn:
             return self._load(conn, owner)
 
+    def asked_on(self, thread_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT task->>%s FROM v2_home_tasks WHERE task_id = %s OR task->>'thread_id' = %s "
+                               "ORDER BY updated_at DESC LIMIT 1", (ASKED_ON, thread_id, thread_id)).fetchone()
+        return row[0] if row else None
+
     def save(self, owner: str, tasks: dict) -> None:
         if tasks:
             with self._connect() as conn:
@@ -273,6 +291,30 @@ class _Session:
 
     def save(self, owner: str, tasks: dict) -> None:
         self.ledger._save(self.conn, owner, tasks)
+
+
+def asked_from(identity, thread_id) -> str | None:
+    """The surface a turn came on, as a job's record keeps it: discord | telegram | voice; None for his
+    other lines (G2, panel, Sticky, Kael's line), whose notices keep the desk's follow-me delivery."""
+    ident = identity if isinstance(identity, dict) else {}
+    if is_voice_turn(ident, thread_id):
+        return "voice"
+    platform = str(ident.get("platform") or "").strip().lower()
+    return platform if platform in TEXT_PLATFORMS else None
+
+
+def keep_asked_on(tasks: dict, before: dict, asked: str | None = None) -> dict:
+    """The official tools rebuild a job's record on every call, and only with their own fields: what
+    the record already said about where he asked is carried over; `asked` (his ask that moved the job:
+    a start or a change) replaces it."""
+    out = {}
+    for tid, task in (tasks or {}).items():
+        if not isinstance(task, dict):
+            out[tid] = task
+            continue
+        where = asked or task.get(ASKED_ON) or (before.get(tid) or {}).get(ASKED_ON)
+        out[tid] = {**task, ASKED_ON: where} if where else task
+    return out
 
 
 # --- the middleware ----------------------------------------------------------------------------
@@ -335,13 +377,13 @@ def home_ledger_middleware(ledger, owner_person_id: str):
         merged = {**state, "async_tasks": {**(state.get("async_tasks") or {}), **tasks}}
         return request.override(state=merged, runtime=dataclasses.replace(request.runtime, state=merged))
 
-    def kept(session, result):
+    def kept(session, result, before: dict, asked: str | None):
         update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
         tasks = (update or {}).get("async_tasks")
         if not tasks:
             return result
         try:
-            session.save(owner_person_id, tasks)
+            session.save(owner_person_id, keep_asked_on(tasks, before, asked))
             return result
         except Exception:
             # The job itself went (or changed); only her record of it didn't: say so.
@@ -349,6 +391,12 @@ def home_ledger_middleware(ledger, owner_person_id: str):
         messages = [m.model_copy(update={"content": f"{m.content}{NOT_RECORDED}"}) if isinstance(m, ToolMessage) else m
                     for m in update.get("messages") or []]
         return Command(update={**update, "messages": messages})
+
+    def asked(request) -> str | None:
+        if (request.tool_call or {}).get("name") not in (START, UPDATE):
+            return None                  # a check, a list or a stop doesn't move where he asked
+        config = getattr(request.runtime, "config", None) or {}
+        return asked_from(identity_from_config(config), (config.get("configurable") or {}).get("thread_id"))
 
     def guarded(request, handler):
         with contextlib.ExitStack() as stack:
@@ -358,7 +406,7 @@ def home_ledger_middleware(ledger, owner_person_id: str):
             except Exception:
                 log.warning("home jobs: couldn't read his jobs; nothing runs", exc_info=True)
                 return refused(request)
-            return kept(session, handler(with_jobs(request, tasks)))
+            return kept(session, handler(with_jobs(request, tasks)), tasks, asked(request))
 
     class HomeTaskLedger(AgentMiddleware):
         def wrap_tool_call(self, request, handler):
@@ -412,7 +460,7 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
                 return False, _plain_failure(result)
             recorded = ""
             try:
-                session.save(owner_person_id, tasks)
+                session.save(owner_person_id, keep_asked_on(tasks, state["async_tasks"]))
             except Exception:
                 log.warning("home jobs: an approved job went, but recording it failed", exc_info=True)
                 recorded = NOT_RECORDED

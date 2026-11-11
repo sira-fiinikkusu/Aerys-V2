@@ -415,3 +415,55 @@ def test_her_plan_bookkeeping_stays_out_of_his_copy():
     assert "plan item" not in detail
     assert detail.startswith("This machine has 5.8 GiB of RAM in total")
     assert "Swap: none set up." in detail and "I made no changes" in detail
+
+
+# --- #183 (11/10): a job asked for in Discord is answered in Discord ---------------------------
+# The owner's D20 rule for tickets ("if i ask her in discord she should respond to tickets from
+# discord") holds for her home jobs too: 11/10 a job he started from his Discord DM was spoken in
+# the office. The notice now goes back as text to the surface the job was asked on; a voice ask,
+# or one whose surface isn't known, keeps the desk's follow-me delivery.
+
+@pytest.mark.parametrize("surface", ["discord", "telegram"])
+def test_a_job_asked_for_in_text_is_answered_there_as_text(surface):
+    home = Home()
+    home.notices.asked_on = lambda notice: surface
+    home.notices.receive(note())
+    home.notices.tick()
+    assert home.world.spoken == []
+    (where, body, silent), = home.world.texts
+    assert where == surface and body.startswith(home.words) and not silent
+    reach = home.desk.store.rows[1]
+    assert reach.text_only and reach.text_to == surface
+
+
+def test_a_job_that_didnt_finish_is_texted_where_it_was_asked_too():
+    home = Home(job=Job(task="Write the how-to up as a file", error="it isn't where you asked"))
+    home.notices.asked_on = lambda notice: "discord"
+    home.notices.receive(note(status="error"))
+    home.notices.tick()
+    assert home.world.spoken == []
+    (where, body, _), = home.world.texts
+    assert where == "discord" and body.startswith("That job at home didn't finish")
+
+
+@pytest.mark.parametrize("asked", ["voice", None, "somewhere-new"])
+def test_a_voice_or_unknown_ask_keeps_follow_me(asked):
+    home = Home()
+    home.notices.asked_on = lambda notice: asked
+    home.notices.receive(note())
+    home.notices.tick()
+    assert home.world.spoken == [(home.words, "dev-office")]
+    reach = home.desk.store.rows[1]
+    assert not reach.text_only and reach.text_to is None
+
+
+def test_when_where_it_was_asked_cant_be_read_it_still_goes_follow_me():
+    home = Home()
+
+    def broken(notice):
+        raise ConnectionError("database away")
+
+    home.notices.asked_on = broken
+    home.notices.receive(note())
+    assert home.notices.tick()["handed"] == 1
+    assert home.world.spoken == [(home.words, "dev-office")]
