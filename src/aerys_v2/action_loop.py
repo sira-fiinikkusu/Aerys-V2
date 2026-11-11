@@ -262,12 +262,20 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
         # Never invoked: the hook calls the legacy model itself. A fake that answers
         # with an error string would be a lie, so it has nothing to say.
         default = FakeListChatModel(responses=[])
+    from aerys_v2.outside_guard import outside_middleware, prepare_origin
+    original_prompt = build_prompt
+
+    def build_prompt(history, config):
+        prepare_origin(config, kw.get("guard_owner"), kw.get("shared_surface_ids"),
+                       getattr(kw.get("outside_gate"), "members", None))
+        return original_prompt(history, config)
+
     compiled = create_agent(
         default,
         tools=list(tools),
         # extra_middleware: official middleware mounted after hers, e.g. her home body's long
         # jobs (home_jobs.py, s3-02). The honesty retry must rebuild the prompt.
-        middleware=[_honesty_middleware(), _act_middleware(build_prompt, models),
+        middleware=[outside_middleware(kw.get("outside_gate")), _honesty_middleware(), _act_middleware(build_prompt, models),
                     *kw.get("extra_middleware", ())],
         checkpointer=kw.get("checkpointer"),
     )

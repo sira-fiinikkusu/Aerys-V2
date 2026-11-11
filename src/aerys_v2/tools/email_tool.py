@@ -195,6 +195,7 @@ def build_email_tools(
     imap_factory: ImapFactory,
     smtp_factory: SmtpFactory,
     self_address: str,
+    people=None,
 ) -> list:
     """Close over the mailbox seams and return the four email tools.
 
@@ -422,6 +423,9 @@ def build_email_tools(
         the owner has not read. If in any doubt, call with confirmed=false (or
         show the draft again) — the tool will refuse and nothing is sent.
 
+        Only recipients already in the people records can receive mail. After
+        reading outside text, the turn guard refuses sending even with confirmed=true.
+
         to: the recipient's address EXACTLY as the owner gave it. NEVER invent
         or guess an address — if the owner never stated the recipient's actual
         email address, do not call this tool; ask them for the address.
@@ -443,6 +447,16 @@ def build_email_tools(
         addrs, problem = _validate_recipients(to)
         if problem:
             return f"NOT SENT: {problem}"
+        try:
+            for address in addrs:
+                found = people("email", address) if people is not None else []
+                matches = {(str(p.get("person_id") or ""), str(p.get("address") or "").strip().lower())
+                           for p in found}
+                if (len(matches) != 1 or not next(iter(matches))[0]
+                        or next(iter(matches))[1] != address.lower()):
+                    return "NOT SENT: that email address is not one known, unambiguous recipient. Ask the owner."
+        except Exception:
+            return "NOT SENT: I couldn't check the recipient, so nothing was sent."
         text = (body or "").strip()
         if not text:
             return "NOT SENT: the body is empty — draft the message first."

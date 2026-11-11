@@ -200,6 +200,7 @@ def test_cached_reads_keep_privacy_fences_and_side_effects(monkeypatch):
     for _ in range(2):
         sink.clear()
         factory.room_block(identity, room, sink)
-        assert sink == {"room": "room text"}
+        assert sink["room"] == "room text"
+        assert sink["outside"] is True       # #189: room text with no author provenance fails closed
     identity["privacy_context"] = "private"
     assert factory.room_block(identity, room, {}) == ""

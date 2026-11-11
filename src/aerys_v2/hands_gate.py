@@ -124,7 +124,8 @@ def asker(identity, thread_id, owner_person_id, members=None) -> str:
         spk = ident.get("speaker")
         sid = str(spk.get("id") or "").strip().lower() if isinstance(spk, dict) else ""
         strong = (bool(sid) and sid != "unknown" and not spk.get("demoted")
-                  and not ident.get(VOICE_OWNER_ASSUMED_KEY))
+                  and not ident.get(VOICE_OWNER_ASSUMED_KEY) and not spk.get("unsure")
+                  and spk.get("band") != "unsure")
         return OWNER_VOICE if strong else VOICE_UNSURE
     if str(ident.get("platform") or "").strip().lower() in TEXT_PLATFORMS:
         return OWNER_TEXT
@@ -319,7 +320,7 @@ class HandsGate:
 
     # D10 ---------------------------------------------------------------------------------
 
-    def home_job(self, identity, thread_id, name: str, args: dict, state=None) -> Verdict:
+    def home_job(self, identity, thread_id, name: str, args: dict, state=None, *, tainted=()) -> Verdict:
         who = asker(identity, thread_id, self.owner, self.members)
         if who == OTHER or name not in HOME_TOOLS:
             return Verdict(False, REFUSED_HOME)
@@ -336,7 +337,7 @@ class HandsGate:
                 if name == "list_async_tasks" or not isinstance(task, dict) or task.get("owner") != person:
                     return Verdict(False, "Not done: only your own identified home jobs are accessible.")
             args["_job_owner"] = person
-            if who == MEMBER or (who == MEMBER_VOICE and name == CANCEL):
+            if (who == MEMBER and (not tainted or name == CANCEL)) or (who == MEMBER_VOICE and name == CANCEL):
                 return self._direct(name, args)
             if name in READS:
                 return GO
@@ -345,6 +346,8 @@ class HandsGate:
             recipients = []
         if who == VOICE_UNSURE and name == START and self.members:
             recipients = [self.owner, *self.members]
+        if tainted:
+            recipients = []  # outside text always needs the owner, never a member tap
         if recipients:
             candidates = {}
             for recipient in recipients:
@@ -358,12 +361,14 @@ class HandsGate:
                 args["_start_candidates"] = candidates
         if name in READS:
             return GO
-        if who == OWNER_TEXT:
+        if who == OWNER_TEXT and (not tainted or name == CANCEL):
             return self._direct(name, args)
         agent = self._agent(name, args, state)
-        if who == OWNER_VOICE and (name == CANCEL or agent in self.read_only_agents):
+        if who == OWNER_VOICE and (name == CANCEL or (not tainted and agent in self.read_only_agents)):
             return self._direct(name, args)
-        if who == OWNER_ASK:
+        if tainted:
+            how, heard = "asked after reading outside text", ""
+        elif who == OWNER_ASK:
             line = _line(identity, thread_id)
             how, heard = f"asked on {line}", f"Asked on {line}, which can't show it was him typing"
         else:
@@ -385,13 +390,16 @@ class HandsGate:
             what = f"stopping the home job, {how}"
         if member:
             heard = "Asked by a member voice; approval is required"
+        if tainted:
+            from aerys_v2.outside_guard import notice
+            heard = notice(tainted)
         detail = f"{heard}. Home agent: {agent or 'unknown'}.\n\n{words}"
         if approvers is not None and name == START:
             detail += "\nApproving starts this job in your own home project."
         base_key = f"home:{_key(str(thread_id or ''), name, args)}"
         verdict = self._ask(HOME_JOB, base_key, str(thread_id or ""), {"tool": name, **args, "what": what},
                          kind="home job", summary=summary, detail=detail, what=what,
-                         himself=who in HIMSELF, approvers=approvers)
+                         himself=who in HIMSELF and not tainted, approvers=approvers)
         if approvers is not None and verdict.text.startswith(("Waiting for", "Still waiting")):
             return Verdict(False, "Waiting for approval on Discord. Nothing has been done; "
                            "the first approval decides whose home project runs the job.")
@@ -437,7 +445,7 @@ class HandsGate:
 
     # D12 ---------------------------------------------------------------------------------
 
-    def message(self, thread_id, platform: str, to: str, text: str, identity=None) -> Verdict:
+    def message(self, thread_id, platform: str, to: str, text: str, identity=None, *, tainted=()) -> Verdict:
         """Before she messages anyone: GO for him and for anyone he's already confirmed at this
         exact address; otherwise his button (one match) or a question for him (none, or several)."""
         platform = str(platform or "").strip().lower()
@@ -482,6 +490,14 @@ class HandsGate:
         except Exception:
             log.warning("hands gate: couldn't read the contact's confirmations; nothing sent", exc_info=True)
             return Verdict(False, GATE_DOWN)
+        if tainted:
+            from aerys_v2.outside_guard import notice
+            what = f"your message to {name} after reading outside text"
+            return self._ask(MESSAGE, f"outside:{base_key}:{_key(text)}", str(thread_id or ""),
+                             {"platform": platform, "address": address, "person_id": pid,
+                              "name": name, "handle": handle, "text": str(text or ""), "what": what},
+                             kind="message", summary=f"Message to {name} · {label}: {handle}",
+                             detail=f"{notice(tainted)}\n{to_line}\n\n{text}", what=what)
         if approved:
             # Confirmed. The approved first message itself is the watcher's to send, before and
             # after it goes: her asking again never sends it a second time.
@@ -553,7 +569,7 @@ class HandsGate:
                 if last.status in ("waiting", "running") and state == "approved":
                     return Verdict(False, f"Chris approved {last.args.get('what') or what}; it's being done now. "
                                           "Don't ask again.")
-                if last.status == "done" and action == HOME_JOB:
+                if last.status == "done" and action in (HOME_JOB, "outside_action"):
                     return Verdict(False, f"Chris approved that already and it was done ({last.outcome or 'started'}). "
                                           "It isn't done twice.")
             # The same request from another thread (D17 Q5's "same request"): one live button for it,
@@ -609,7 +625,9 @@ def _note_for(row: GatedAction, status: str, outcome: str = "") -> str:
     if status == "done":
         if row.action == MESSAGE:
             return (f"Chris tapped Approve, and {what} was sent. Later messages to "
-                    f"{row.args.get('name') or 'them'} at that address go without asking.")
+                    f"{row.args.get('name') or 'them'} at that address go without asking unless the turn reads outside text.")
+        if row.action == "outside_action":
+            return f"The owner tapped Approve for {what}. {outcome}".strip()
         return f"Chris tapped Approve, and {what} has started. {outcome}".strip()
     if status == "failed":
         return (f"Chris approved {what}, but it didn't go through ({outcome}). It may not have happened; "

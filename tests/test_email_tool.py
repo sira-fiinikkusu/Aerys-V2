@@ -124,11 +124,15 @@ class CountingFactory:
         return self.obj
 
 
+def known_people(platform, address):
+    return [{"person_id": "known-person", "address": address}] if address == "real.person@company.io" else []
+
+
 def make_tools(imap=None, smtp=None):
     imap_f = CountingFactory(imap or FakeIMAP())
     smtp_f = CountingFactory(smtp or FakeSMTP())
     search, read, draft, send = build_email_tools(
-        imap_factory=imap_f, smtp_factory=smtp_f, self_address=SELF
+        imap_factory=imap_f, smtp_factory=smtp_f, self_address=SELF, people=known_people
     )
     return search, read, draft, send, imap_f, smtp_f
 
@@ -191,7 +195,7 @@ def test_search_dead_mailbox_is_honest_string_not_exception(monkeypatch):
     monkeypatch.setattr("aerys_v2.tools.email_tool.TRANSIENT_RETRY_BACKOFF_S", 0)
     imap_f = CountingFactory(raise_on_call=True)
     search, *_ = build_email_tools(
-        imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF
+        imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF, people=known_people
     )
     out = search.invoke({"query": "q"})
     assert out.startswith("email search failed:") and "unreachable" in out
@@ -220,7 +224,7 @@ def test_search_retries_once_through_a_transient_connect_failure(monkeypatch):
     monkeypatch.setattr("aerys_v2.tools.email_tool.TRANSIENT_RETRY_BACKOFF_S", 0)
     imap_f = FlakyOnceFactory(FakeIMAP(uids=b"3"))
     search, *_ = build_email_tools(
-        imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF
+        imap_factory=imap_f, smtp_factory=CountingFactory(FakeSMTP()), self_address=SELF, people=known_people
     )
     out = search.invoke({"query": "delta"})
     assert not out.startswith("email search failed")
@@ -246,7 +250,7 @@ def test_read_retries_once_when_the_session_dies_mid_op(monkeypatch):
     _, read, *_rest = build_email_tools(
         imap_factory=CountingFactory(imap),
         smtp_factory=CountingFactory(FakeSMTP()),
-        self_address=SELF,
+        self_address=SELF, people=known_people,
     )
     out = read.invoke({"uid": "7"})
     assert not out.startswith("email read failed")
@@ -260,7 +264,7 @@ def test_search_success_and_no_match_never_retry():
         search, *_ = build_email_tools(
             imap_factory=imap_f,
             smtp_factory=CountingFactory(FakeSMTP()),
-            self_address=SELF,
+            self_address=SELF, people=known_people,
         )
         search.invoke({"query": "q"})
         assert imap_f.calls == 1  # both are answers, not failures
@@ -415,7 +419,7 @@ def test_send_dead_smtp_factory_is_honest_string():
     search_t, read_t, draft_t, send = build_email_tools(
         imap_factory=CountingFactory(FakeIMAP()),
         smtp_factory=CountingFactory(raise_on_call=True),
-        self_address=SELF,
+        self_address=SELF, people=known_people,
     )
     out = send.invoke({
         "to": "real.person@company.io", "subject": "s", "body": "b", "confirmed": True,
@@ -442,7 +446,7 @@ def test_tool_names_match_prompt_references():
     tools = build_email_tools(
         imap_factory=CountingFactory(FakeIMAP()),
         smtp_factory=CountingFactory(FakeSMTP()),
-        self_address=SELF,
+        self_address=SELF, people=known_people,
     )
     assert [t.name for t in tools] == [
         "search_email", "read_email", "draft_email", "send_email",
@@ -512,3 +516,12 @@ def test_search_strips_crlf_from_query_before_imap():
         for part in call:
             if isinstance(part, str):
                 assert "\r" not in part and "\n" not in part
+
+
+def test_unknown_recipient_and_unreadable_people_never_open_smtp():
+    for lookup in (None, lambda *a: [], lambda *a: [{"person_id": "p", "address": "different@company.io"}]):
+        smtp = CountingFactory(FakeSMTP())
+        *_, send = build_email_tools(imap_factory=CountingFactory(FakeIMAP()), smtp_factory=smtp,
+                                    self_address=SELF, people=lookup)
+        out = send.invoke({'to': 'unknown@company.io', 'subject': 's', 'body': 'b', 'confirmed': True})
+        assert out.startswith('NOT SENT:') and smtp.calls == 0

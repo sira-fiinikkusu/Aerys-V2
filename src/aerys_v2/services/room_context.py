@@ -97,6 +97,14 @@ _SELF_CAP = 2000
 _SELF = 'Aerys (you)'
 
 
+class RoomText(str):
+    """Prompt text plus authenticated author provenance (never inferred from labels)."""
+    def __new__(cls, text, *, people=None, outside=None):
+        obj = super().__new__(cls, text)
+        obj.people, obj.outside = people, outside
+        return obj
+
+
 def format_room_messages(rows) -> str:
     """(speaker, text) pairs, chronological, -> the same block shape as turns.
 
@@ -129,4 +137,4 @@ def format_room_context(rows: list) -> str:
         reply = _clip(emitted_reply)
         if reply:
             lines.append(f"Aerys: {reply}")
-    return "\n".join(lines)
+    return RoomText("\n".join(lines), people={str(r[1] or "") for r in rows if _clip(r[2])})

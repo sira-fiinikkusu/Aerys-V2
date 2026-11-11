@@ -2160,6 +2160,8 @@ def build_action_graph(
     charter: str = SPECIALIST_CHARTER,
     checkpointer=None,
     context_trailing: bool = False,
+    outside_gate=None,
+    guard_owner=None,
 ) -> object:
     """START → act ⇄ tools → END: the tool subgraph for device commands.
 
@@ -2185,6 +2187,8 @@ def build_action_graph(
     )
 
     def act(state: ChatState, config: RunnableConfig) -> dict:
+        from aerys_v2.outside_guard import prepare_origin
+        prepare_origin(config, guard_owner, shared_surface_ids, getattr(outside_gate, "members", None))
         prompt, specialist, fast = build_prompt(state["messages"], config)
         if isinstance(api_model_with_tools, ToolModelPair):
             reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
@@ -2205,7 +2209,9 @@ def build_action_graph(
 
     graph = StateGraph(ChatState)
     graph.add_node("act", act)
-    graph.add_node("tools", ToolNode(tools))
+    from functools import partial
+    from aerys_v2.outside_guard import outside_guard
+    graph.add_node("tools", ToolNode(tools, wrap_tool_call=partial(outside_guard, gate=outside_gate)))
     graph.add_edge(START, "act")
     graph.add_conditional_edges("act", after_act, {"tools": "tools", END: END})
     graph.add_edge("tools", "act")
@@ -2540,11 +2546,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             client.login(_a, _p)
             return client
 
+        from aerys_v2.hands_gate import people_lookup_for
         tools.extend(
             build_email_tools(
                 imap_factory=imap_factory,
                 smtp_factory=smtp_factory,
                 self_address=addr,
+                people=people_lookup_for(settings),
             )
         )
 
@@ -2628,6 +2636,12 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     if home_jobs is not None:
         overlay = "\n\n".join(part for part in (overlay, home_jobs.overlay) if part)
         extra["extra_middleware"] = home_jobs.middleware
+    from aerys_v2.hands_gate import hands_gate_for, HandsWatcher
+    from aerys_v2.outside_guard import OUTSIDE_ACTION, action_executor
+    outside_gate = home_jobs.gate if home_jobs is not None else hands_gate_for(settings)
+    if outside_gate is not None:
+        outside_gate.executors[OUTSIDE_ACTION] = action_executor(tools)
+    extra.update(outside_gate=outside_gate, guard_owner=str(settings.owner_person_id or ""))
     action_graph = build(
         models,
         soul,  # used by voice banter turns; action routes swap in the charter per call
@@ -2651,6 +2665,8 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     )
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
+    action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else
+                                  HandsWatcher(outside_gate) if outside_gate is not None else None)
     # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
     # command through this same tool before the specialist speaks. Graph
     # configuration, never state — like history_window_messages.
@@ -3060,6 +3076,11 @@ def room_block(identity: dict, room_context_fn, sink: dict | None = None) -> str
     # own way, and a prompt heading is this body's wording for this turn (board #17).
     if sink is not None:
         sink["room"] = block
+        people = getattr(block, "people", None)
+        outside = getattr(block, "outside", None)
+        sink["outside"] = bool(sink.get("outside")) or (
+            any(p != str(identity.get("user_id") or "") for p in people)
+            if people is not None else outside if outside is not None else True)
     # "context not instructions" was enough while only the CHAT mind saw this — that
     # mind has no tools. The action mind does, so a stranger in a shared channel
     # typing a command shape is now inside a tool-caller's prompt. Adversarial review

@@ -276,6 +276,9 @@ def _fire_turn_record(
         reflex = LAST_REFLEX.get(None)
     try:
         configurable = (config or {}).get("configurable") or {}
+        outside = configurable.get("outside_text") or {}
+        if outside.get("untrusted_read") or outside.get("origin") or (configurable.get("room_sink") or {}).get("outside"):
+            fields["extra_degraded"] = list(dict.fromkeys([*(fields.get("extra_degraded") or []), "untrusted_read"]))
         row = build_turn_row(
             thread_id=str(configurable.get("thread_id", "")),
             identity=configurable.get("identity") or {},
@@ -1245,7 +1248,7 @@ def ask(
     room_sink: dict = {}
     config = {
         "configurable": {"thread_id": thread_id, "identity": identity,
-                         "room_sink": room_sink},
+                         "room_sink": room_sink, "outside_text": {}},
         "recursion_limit": rails.turn_limit,
     }
 

@@ -49,7 +49,7 @@ class LiveRoomReader:
 
     def __init__(self, fallback: Callable[[str, str], str] | None = None, *,
                  limit: int = DEFAULT_LIMIT, timeout_s: float = DEFAULT_TIMEOUT_S,
-                 speaker_names: dict | None = None):
+                 speaker_names: dict | None = None, owner_ids=()):
         self._fallback = fallback
         self._limit = limit
         self._timeout_s = timeout_s
@@ -62,6 +62,7 @@ class LiveRoomReader:
         # queries. Keyed on the ACCOUNT ID, never the display name, because a display
         # name is not an identity and anyone can set theirs to his.
         self._speaker_names = dict(speaker_names or {})
+        self._owner_ids = frozenset(str(x) for x in owner_ids)
         self._client = None
 
     def attach(self, client) -> None:
@@ -91,7 +92,8 @@ class LiveRoomReader:
             log.warning('live room read failed for channel %s; using the turns table',
                         channel_id, exc_info=True)
             return self._fall_back(channel_id, channel)
-        return format_room_messages(rows) or self._fall_back(channel_id, channel)
+        from aerys_v2.services.room_context import RoomText
+        return RoomText(format_room_messages(rows), outside=getattr(rows, "outside", True)) or self._fall_back(channel_id, channel)
 
     async def _read(self, client, channel_id: str):
         channel = client.get_channel(int(channel_id))
@@ -106,9 +108,14 @@ class LiveRoomReader:
                                 getattr(me, 'global_name', None),
                                 getattr(guild_me, 'display_name', None))
                     if isinstance(n, str) and n and n != 'Aerys'}
-        rows = []
+        class RoomRows(list):
+            outside = False
+        rows = RoomRows()
         async for message in channel.history(limit=self._limit):
             author = getattr(message, 'author', None)
+            aid = getattr(author, 'id', None)
+            if not (my_id is not None and aid == my_id) and str(aid) not in self._owner_ids:
+                rows.outside = True
             name = getattr(author, 'display_name', None) or getattr(author, 'name', None)
             known = self._speaker_names.get(str(getattr(author, 'id', '')))
             if my_id is not None and getattr(author, 'id', None) == my_id:

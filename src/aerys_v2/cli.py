@@ -428,10 +428,10 @@ def main() -> None:
             start_home_notices(home_notices)
             # Her long jobs at home (s3-02): a job he approved by button is started by this one
             # watcher (the other transports only ask), and she's told in her thread how it went.
-            home_jobs = getattr(action_graph, "home_jobs", None)
-            if home_jobs is not None:
-                home_jobs.watcher.note = kael_note_fn
-                home_jobs.watcher.start()
+            hands_watcher = getattr(action_graph, "hands_watcher", None)
+            if hands_watcher is not None:
+                hands_watcher.note = kael_note_fn
+                hands_watcher.start()
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)
 
@@ -458,6 +458,7 @@ def main() -> None:
             deep_gate_for,
             load_soul,
             room_names_for,
+            owner_room_names_for,
             portable_context_fn_for,
             room_context_fn_for,
             tier_models_for,
@@ -493,7 +494,8 @@ def main() -> None:
         # His own un-addressed messages must read as HIM, not as his Discord handle:
         # the live read is the one path that skips identity resolution (2026-09-14).
         room_context = LiveRoomReader(fallback=room_context_fn_for(settings),
-                                      speaker_names=room_names_for(settings))
+                                      speaker_names=room_names_for(settings),
+                                      owner_ids=owner_room_names_for(settings))
         # Board #12: her portable turns, read back into the house body, so
         # "1 identity, 1 memory" holds in BOTH directions.
         portable_context = portable_context_fn_for(settings)
