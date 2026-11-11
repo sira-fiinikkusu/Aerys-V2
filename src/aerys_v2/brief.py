@@ -36,7 +36,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable
 
 from aerys_v2.followups import CHECK_IN_TOPICS
-from aerys_v2.reach import EASTERN, Reach, ReachEvent
+from aerys_v2.reach import EASTERN, Reach, ReachEvent, muted_topics
 
 log = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ class MorningBrief:
             return "done"
         if carried == "pending":
             return "carried by the welcome-home hello"
-        if TOPIC in {str(m).strip().lower() for m in store.prefs(self.desk.budget_default).muted}:
+        if TOPIC in muted_topics(store.prefs(self.desk.budget_default), now):
             return "muted"
         try:
             deferring = self.defer is not None and self.defer(now)
@@ -317,7 +317,7 @@ class EveningHeadsUp:
         if store.recently_sent(key, _at(day, 0)) or store.decided(key, _at(day, 0)):
             self.done = day
             return "done"
-        if EVENING_TOPIC in {str(m).strip().lower() for m in store.prefs(self.desk.budget_default).muted}:
+        if EVENING_TOPIC in muted_topics(store.prefs(self.desk.budget_default), now):
             return "muted"
         try:
             reading = self.read()

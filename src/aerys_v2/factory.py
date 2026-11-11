@@ -2068,7 +2068,7 @@ def _action_prompt_builder(
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
-        where_when = _where_when_line(thread, identity)
+        where_when = _where_when_line(thread, identity) + _reach_feedback_line(messages)
         # Family splice on the ACTION mind too (owner nit, 2026-08-05): voice and
         # glasses turns ALWAYS run this graph, and those are exactly the surfaces
         # where the owner most tells her to reach Kael — chat-only would put the
@@ -3189,6 +3189,22 @@ def _shared_surface_note(identity: dict, shared: dict) -> str:
     )
 
 
+def _reach_feedback_line(messages: list) -> str:
+    """Only the immediate reply to a recorded reach-out can carry this hint."""
+    if len(messages) < 2 or not isinstance(messages[-1], HumanMessage):
+        return ""
+    previous = messages[-2]
+    if not isinstance(previous, AIMessage):
+        return ""
+    topic = previous.additional_kwargs.get("reach_topic")
+    if not isinstance(topic, str) or not topic.strip():
+        return ""
+    return (f"\nHis message may be feedback on your reach-out about {topic}: if so, use reach_prefs "
+            "(quiet for 'not now'; mute for 'not useful' or 'stop these'; never more or checkins_more "
+            "because of a reply, even thanks), quoting his words in his_words; tell him plainly what "
+            "changed and how to undo it (unmute the topic).")
+
+
 def _where_when_line(thread: object, identity: dict) -> str:
     """The per-turn "right now it is X, you're talking in Y" line, shared by BOTH
     the chat and action nodes so a time/where question answers identically no matter
@@ -3423,7 +3439,7 @@ def build_graph(
         # same seam the voice branch uses above) plus the room label the resolver
         # carried on identity. The public-room phrasing also nudges her privacy
         # posture behaviorally ("others may be reading").
-        where_when = _where_when_line(thread, identity)
+        where_when = _where_when_line(thread, identity) + _reach_feedback_line(messages)
         # Channel-recent ROOM context (multi-person half): only on a PUBLIC turn, and
         # only when the resolver carried a channel_id. The person-keyed thread holds
         # just HIS messages, so without this she'd be blind to the rest of the room —

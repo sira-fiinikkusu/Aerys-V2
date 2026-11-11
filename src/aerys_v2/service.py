@@ -1811,6 +1811,16 @@ def _action_history_seed(
         # DM/voice context passes the full history through; any other room drops
         # private-tagged priors and priors sealed to some other room.
         return gate_for_room(seeded, identity)
+    # Preserve just the immediately replied-to reach-out for feedback steering,
+    # even when the specialist otherwise folds only prior human requests.
+    before_current = prior[:-1] if current_checkpointed else prior
+    reach_reply = []
+    if before_current and isinstance(before_current[-1], AIMessage):
+        candidate = before_current[-1]
+        if candidate.additional_kwargs.get("reach_topic"):
+            visible = gate_for_room([candidate, HumanMessage(content=text)], identity)
+            if candidate in visible[:-1]:
+                reach_reply = [candidate]
     humans = [m for m in prior if getattr(m, "type", "") == "human"]
     if current_checkpointed:
         current = prior[-1]          # already checkpointed by the chat invoke
@@ -1828,7 +1838,7 @@ def _action_history_seed(
     # one. One message, the priors quoted as already-handled context, the
     # request last: nothing in the prompt looks like an unanswered instruction.
     if not priors:
-        return [current]
+        return [*reach_reply, current]
     note = "\n".join(f"- {_message_text(m)}" for m in priors)
     folded = (
         "Earlier requests in this conversation — ALREADY HANDLED, shown only so "
@@ -1836,7 +1846,7 @@ def _action_history_seed(
         "them out again unless the request below explicitly asks to repeat one:"
         f"\n{note}\n\nThe request to carry out now:\n{_message_text(current)}"
     )
-    return [HumanMessage(
+    return [*reach_reply, HumanMessage(
         content=folded, id=getattr(current, "id", None),
         additional_kwargs=dict(getattr(current, "additional_kwargs", {}) or {}),
     )]

@@ -294,7 +294,7 @@ class WelcomeHome:
         if arrived - left < self.away_for:
             self._finish(key)
             return "a short trip"
-        if TOPIC in muted_topics(store.prefs(self.desk.budget_default)):
+        if TOPIC in muted_topics(store.prefs(self.desk.budget_default), now):
             self._drop(key, now, f"you muted {TOPIC}")
             self._finish(key)
             return "muted"
@@ -330,7 +330,7 @@ class WelcomeHome:
         store = self.desk.store
         if store.recently_sent(key, start) or store.carried(key, start) is not None:
             return False
-        return "brief" not in muted_topics(store.prefs(self.desk.budget_default))
+        return "brief" not in muted_topics(store.prefs(self.desk.budget_default), now)
 
     def _claim(self, a: Appointment, now: datetime, kept: str) -> int | None:
         """Hold an appointment's check-in for this hello, so it's asked once. Its follow-up row
@@ -392,7 +392,7 @@ class WelcomeHome:
         kept = f"{KEPT} ({key})"
         mine = []
         prefs = self.desk.store.prefs(self.desk.budget_default)
-        may_ask = "appointments" not in muted_topics(prefs)
+        may_ask = "appointments" not in muted_topics(prefs, now)
         if self.followups is not None:
             try:
                 mine = [f for f in self.followups.kept_for(kept) if f.reason == kept]
@@ -428,7 +428,7 @@ class WelcomeHome:
         if f.expires_at is not None and now >= f.expires_at:
             fs.mark(f.id, now, status="skipped", reason=f"{why}; too late for a check-in")
             return
-        if "appointments" in muted_topics(prefs):
+        if "appointments" in muted_topics(prefs, now):
             fs.mark(f.id, now, status="skipped", reason=f"{why}; appointments muted")
             return
         held = 1 if f.status == "skipped" and f.reason.startswith(KEPT) else 0    # it counts itself

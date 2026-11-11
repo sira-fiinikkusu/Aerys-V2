@@ -21,7 +21,7 @@ from datetime import timedelta
 from dataclasses import replace
 
 from aerys_v2.reach import (BUDGET_MAX, BUDGET_MIN, CHECKINS_MAX, CHECKINS_MIN, COMPANY_DEFAULT, COMPANY_MAX,
-                            NAP_DEFAULT, NAP_MAX)
+                            NAP_DEFAULT, NAP_MAX, EASTERN, active_mute_entries, mute_entry)
 
 log = logging.getLogger(__name__)
 
@@ -54,11 +54,17 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
         company, so nothing you'd say aloud is said while they're here (it goes as text); when he
         says they've left: company_gone.
 
-        action: "less", "more", "mute", "unmute", "show", "nap", "awake", "checkins_more",
+        A reply to your reach-out is feedback on THAT topic: "ugh, not now" means
+        quiet for a while; "not useful" or "stop sending these" means mute that kind.
+        Quote his words in his_words, tell him what changed and how to undo it (unmute).
+        Learning from a reply only makes you quieter: never more or checkins_more because
+        of a reply, even "thanks, love these". Explicit requests for more still use more.
+
+        action: "quiet", "less", "more", "mute", "unmute", "show", "nap", "awake", "checkins_more",
           "checkins_less", "company" or "company_gone".
-        hours: for company, if he said how long (default 6, at most 24).
+        hours: for quiet (default 3, at most 24); for company, if he said how long (default 6, at most 24).
         minutes: for nap, if he said how long (default 60, at most 180).
-        topic: for mute and unmute: kael (news from Kael), weather, calendar, email,
+        topic: for quiet, mute and unmute: kael (news from Kael), weather, calendar, email,
           follow-ups (all your unasked check-ins), appointments, to-dos, brief (your spoken
           morning brief in his office), evening (your heads-up about tomorrow), or welcome
           (your hello when he gets home: "don't greet me when I get home"). Storm
@@ -71,8 +77,14 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
         words = " ".join((his_words or "").split())[:300]
         try:
             prefs = store.prefs(default_budget)
+            prefs = replace(prefs, muted=active_mute_entries(prefs, now()))
             if act == "show":
-                muted = ", ".join(prefs.muted) if prefs.muted else "nothing"
+                labels = []
+                for entry in prefs.muted:
+                    key, end = mute_entry(entry)
+                    labels.append(f"{key} until {end.astimezone(EASTERN):%Y-%m-%d %H:%M %Z}"
+                                  if end is not None else key)
+                muted = ", ".join(labels) or "nothing"
                 nap = (f" A nap hold runs until {prefs.hold_until:%H:%M} UTC or until he talks to you."
                        if prefs.hold_until is not None and prefs.hold_until > now() else "")
                 company = (" People are over: nothing said aloud until they leave."
@@ -100,16 +112,26 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
                     return "There was no nap hold; nothing changed."
                 store.set_prefs(replace(prefs, hold_since=None, hold_until=None), now(), "awake", words)
                 return "The nap hold is off; you can speak to him again."
-            if act in ("mute", "unmute"):
+            if act in ("quiet", "mute", "unmute"):
                 key = (topic or "").strip().lower()
                 if key not in TOPICS:
                     return f"NOT DONE: topic must be one of {', '.join(TOPICS)}."
-                muted = [m for m in prefs.muted if m != key]
+                muted = [m for m in prefs.muted if mute_entry(m)[0] != key]
+                if act == "quiet":
+                    start = now()
+                    end = start + timedelta(hours=min(int(hours), 24) if hours and int(hours) > 0 else 3)
+                    existing = [mute_entry(m)[1] for m in prefs.muted if mute_entry(m)[0] == key]
+                    if existing and (None in existing or max(existing) >= end):
+                        return f"{key} is already muted at least that long; nothing changed."
+                    muted.append(f"{key}@{end.astimezone(timezone.utc).isoformat()}")
+                    store.set_prefs(replace(prefs, muted=muted), start, f"quiet {key} until {end.isoformat()}", words)
+                    return (f"Changed: quiet on {key} until {end.astimezone(EASTERN):%Y-%m-%d %H:%M %Z}. "
+                            f"Undo with unmute {key}.")
                 if act == "mute":
                     if key in prefs.muted:
                         return f"{key} is already muted; nothing changed."
                     muted.append(key)
-                elif key not in prefs.muted:
+                elif len(muted) == len(prefs.muted):
                     return f"{key} wasn't muted; nothing changed."
                 store.set_prefs(replace(prefs, muted=muted), now(), f"{act} {key}", words)
                 return (f"Changed: you won't bring up {key} on your own now." if act == "mute"
@@ -133,7 +155,7 @@ def build_reach_prefs_tool(store, *, default_budget: int = 3, clock=None):
                     return "There was no company setting on; nothing changed."
                 store.set_prefs(replace(prefs, company_until=None), now(), "company gone", words)
                 return "Company's gone: you can speak to him again."
-            return ('NOT DONE: action must be "less", "more", "mute", "unmute", "show", "nap", "awake", '
+            return ('NOT DONE: action must be "quiet", "less", "more", "mute", "unmute", "show", "nap", "awake", '
                     '"checkins_more", "checkins_less", "company" or "company_gone".')
         except Exception:
             log.warning("reach_prefs %s failed", act, exc_info=True)

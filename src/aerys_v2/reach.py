@@ -177,9 +177,38 @@ class Decision:
     breaks_through: bool = False      # safety: may speak at night or over a meeting (D4)
 
 
-def muted_topics(prefs: "Prefs") -> set:
-    """What he's muted, with each umbrella topic opened up (MUTE_COVERS)."""
-    muted = {str(m).strip().lower() for m in prefs.muted}
+_bad_mute_entries: set[str] = set()
+
+
+def mute_entry(entry: str) -> tuple[str, datetime | None] | None:
+    """Decode a plain mute or an aware timed quiet; bad records are inert."""
+    raw = str(entry).strip()
+    if "@" not in raw:
+        return (raw.lower(), None) if raw else None
+    topic, end = raw.split("@", 1)
+    try:
+        until = datetime.fromisoformat(end)
+        if not topic.strip() or until.tzinfo is None:
+            raise ValueError("quiet requires a topic and timezone")
+        return topic.strip().lower(), until.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        if raw not in _bad_mute_entries:
+            _bad_mute_entries.add(raw)
+            log.warning("Ignoring malformed timed reach mute")
+        return None
+
+
+def active_mute_entries(prefs: "Prefs", now: datetime) -> list:
+    """Keep active records for storage, without expanding umbrella topics."""
+    return [entry for entry in prefs.muted
+            if (parsed := mute_entry(entry)) is not None
+            and (parsed[1] is None or now < parsed[1])]
+
+
+def muted_topics(prefs: "Prefs", now: datetime | None = None) -> set:
+    """Active mutes, with each umbrella topic opened up (MUTE_COVERS)."""
+    now = now if now is not None else datetime.now(timezone.utc)
+    muted = {mute_entry(entry)[0] for entry in active_mute_entries(prefs, now)}
     for umbrella, covers in MUTE_COVERS.items():
         if umbrella in muted:
             muted.update(covers)
@@ -237,7 +266,7 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
         if quiet and not safety_voice_at_night:
             return Decision("send", "safety at night: as text that buzzes", voice="reroute", breaks_through=True)
         return Decision("send", "safety", breaks_through=True)
-    if not event.owed and event.topic.strip().lower() in muted_topics(prefs):
+    if not event.owed and event.topic.strip().lower() in muted_topics(prefs, now):
         return Decision("drop", f"you muted {event.topic}")
     if quiet and not event.brief:      # a brief exists only once he's up and in its room
         if event.owed or event.urgency == "timely":
@@ -385,6 +414,7 @@ class MemoryReachStore:
         return replace(self._prefs, muted=list(self._prefs.muted))
 
     def set_prefs(self, prefs, now, change, words):
+        prefs = replace(prefs, muted=active_mute_entries(prefs, now))
         self._prefs = replace(prefs, muted=list(prefs.muted))
         self.changes.append((now, change, words))
 
@@ -547,6 +577,7 @@ class PostgresReachStore:
                      company_until=row[5])
 
     def set_prefs(self, prefs, now, change, words):
+        prefs = replace(prefs, muted=active_mute_entries(prefs, now))
         with self._connect() as conn:   # one transaction: the prefs and their record together
             conn.execute(
                 "INSERT INTO v2_reach_prefs (id, budget, muted, hold_since, hold_until, checkins, company_until, "
@@ -776,7 +807,7 @@ class ReachDesk:
         the brief never goes, they go on their own at `until`."""
         with self.lock:
             now = self.clock()
-            muted = muted_topics(self.store.prefs(self.budget_default))
+            muted = muted_topics(self.store.prefs(self.budget_default), now)
             out = []
             for r in self.store.foldable(since, until):
                 if self._delivered(r.id) or r.topic.strip().lower() in muted or r.topic in skip_topics:

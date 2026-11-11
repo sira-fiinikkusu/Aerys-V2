@@ -616,13 +616,14 @@ TICKET_RELAY_PROMPT = (
 )
 
 
-def _said_to_owner(graph, settings, text: str) -> None:
+def _said_to_owner(graph, settings, text: str, row=None) -> None:
     """She said it, so the owner's thread must remember she said it (the continuity rule
     the proactive turn and the voice paths follow). Fail-open: the message is already out."""
     try:
         graph.update_state(
             {"configurable": {"thread_id": f"person:{settings.owner_person_id}"}},
-            {"messages": [AIMessage(content=text)]},
+            {"messages": [AIMessage(content=text, additional_kwargs=(
+                {"reach_topic": row.topic, "reach_source": row.source} if row is not None else {}))]},
         )
     except Exception:
         log.warning("owner thread append failed (message already delivered)", exc_info=True)
@@ -979,7 +980,7 @@ def reach_desk_for(settings, graph):
         morning_hour=morning_h,
         meeting_hold=meeting_hold_fn_for(settings),
         replied_since=replied_since,
-        said=lambda row, body: _said_to_owner(graph, settings, body),
+        said=lambda row, body: _said_to_owner(graph, settings, body, row),
         follow_through_after=timedelta(minutes=int(getattr(settings, "reach_follow_through_min", 5))),
         safety_voice_at_night=bool(getattr(settings, "reach_safety_voice_at_night", False)),
     )

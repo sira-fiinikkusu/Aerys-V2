@@ -365,12 +365,12 @@ class FollowUps:
         self.last_appts: datetime | None = None
         self.last_mine: datetime | None = None
 
-    def _muted(self) -> tuple[set, int]:
+    def _muted(self, now: datetime) -> tuple[set, int]:
         prefs = self.desk.store.prefs(self.desk.budget_default)
-        return muted_topics(prefs), prefs.checkins      # "follow-ups" covers appointments and to-dos
+        return muted_topics(prefs, now), prefs.checkins      # "follow-ups" covers appointments and to-dos
 
     def _room_for_one_more(self, now: datetime) -> bool:
-        _, cap = self._muted()
+        _, cap = self._muted(now)
         return self.store.raised_since(_day_start(now)) < cap
 
     @staticmethod
@@ -433,7 +433,7 @@ class FollowUps:
                 if f.expires_at is not None and now >= f.expires_at:
                     self.store.mark(f.id, now, status="skipped", reason="expired before it could go")
                     continue
-                muted, _ = self._muted()
+                muted, _ = self._muted(now)
                 if TOPIC[f.kind] in muted:
                     self.store.mark(f.id, now, status="skipped", reason="muted")
                     continue
@@ -471,7 +471,7 @@ class FollowUps:
     def _appointments(self, now: datetime, out: dict) -> None:
         if self.appointments is None:
             return
-        muted, _ = self._muted()
+        muted, _ = self._muted(now)
         if "appointments" in muted:                       # also when he muted all follow-ups
             return
         for a in self.appointments(now):
