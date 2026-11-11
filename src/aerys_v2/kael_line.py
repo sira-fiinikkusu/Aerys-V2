@@ -712,9 +712,13 @@ def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str)
     if len(spoken) <= SPOKEN_MAX:
         # Said plainly: only markup came off (nothing is lost), so no duplicate text copy.
         return ReachEvent(source=source, topic="kael", headline=spoken, owed=True, dedupe_key=dedupe_key)
+    from aerys_v2.reach import pointer_line
+
     where = _text_surface_name(desk)
-    line = (f"Your ask to Kael is still open; the details are on {where}." if source == "ticket_notice"
-            else f"Kael got back to you on that; the full answer is on {where}.")
+    # T-7: said aloud, never echoed in the text it points to (reach.text_copy); she speaks for herself:
+    # Kael got back to HER (the owner, 11/11: "she should say 'Kael got back to me on that'").
+    line = (pointer_line("Your ask to Kael is still open", "the details are", where) if source == "ticket_notice"
+            else pointer_line("Kael got back to me on that", "the full answer is", where))
     return ReachEvent(source=source, topic="kael", headline=line, detail=text, owed=True, dedupe_key=dedupe_key)
 
 
@@ -756,7 +760,7 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> C
             log.warning("ticket %s relay: her words failed; passing Kael's on plainly", name,
                         exc_info=True)
         if not text or _HOLD_RE.match(text):
-            text = f"Kael got back to you ({name}): {ticket.answer}"
+            text = f"Kael got back to me ({name}): {ticket.answer}"
         if desk is not None:
             answered = getattr(ticket, "answered_at", None)
             return desk.reach_out(_owed_ticket_event(

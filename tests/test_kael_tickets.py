@@ -500,7 +500,7 @@ def test_when_her_words_fail_kaels_answer_still_goes_plainly(reply):
     relay = ticket_relay_for(FakeGraph(), owner_settings(), model=SpeakModel(reply),
                              reach=lambda t: sent.append(t) or True)
     assert relay(answered()) is True
-    assert sent == ["Kael got back to you (T-3): yes, green"]
+    assert sent == ["Kael got back to me (T-3): yes, green"]
 
 
 def test_a_relay_that_cannot_reach_him_reports_false_and_leaves_the_thread_alone():

@@ -247,3 +247,26 @@ def test_plain_for_voice_reads_code_spans_and_fences_exactly():
     assert plain_for_voice("Use `a``b`.") == "Use a``b."
     assert plain_for_voice("```text\n**literal**\n```") == "**literal**"
     assert plain_for_voice("``` python\n**literal**\n```") == "**literal**"      # Codex recheck 3
+
+
+def test_t7_the_pointer_is_said_aloud_and_never_echoed_in_the_text():
+    """T-7 (the owner, 11/11): the line pointing at Discord is for the speaker only; the Discord text carries
+    the answer itself. And she speaks for herself: Kael got back to HER."""
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    relay = ticket_relay_for(None, owner_settings(), model=Says(LONG), desk=desk)
+    assert relay(answered("voice")) is True
+    said = world.spoken[0][0]
+    assert said == "Kael got back to me on that; the full answer is on Discord."
+    (surface, text, _), = world.texts
+    assert surface == "discord" and "full answer is on Discord" not in text and "45 minutes" in text
+
+
+def test_text_copy_drops_only_a_pointer_headline():
+    from aerys_v2.reach import pointer_line, text_copy
+
+    p = pointer_line("Kael got back to me on that", "the full answer is", "Telegram")
+    assert text_copy(p, "the answer") == "the answer"
+    assert text_copy(p, "") == p                                  # nothing to point at: the line stays
+    assert text_copy("Rain at 4.", "Radar: a band from the west.") == "Rain at 4.\n\nRadar: a band from the west."
+    assert text_copy("The full answer is on Discord. Really.", "x").startswith("The full answer")

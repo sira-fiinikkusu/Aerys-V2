@@ -49,6 +49,8 @@ What she says is the private part: never logged (logs carry ids, sources and sta
 
 from __future__ import annotations
 
+import re
+
 import logging
 import threading
 from dataclasses import dataclass, field, replace
@@ -97,6 +99,25 @@ class ReachEvent:
     folds: tuple = ()                 # ids of held items it carries (marked 'folded' when it goes)
     text_only: bool = False           # never spoken, wherever he is (email)
     text_to: str | None = None        # a text_only message's surface (discord | telegram); None = the desk's default
+
+
+#: T-7 (the owner, 11/11): "she can say 'Kael got back to you on that; the full answer is on Discord.' outloud
+#: but that line shouldnt be echoed in discord". A spoken line that only points at the text is said aloud and
+#: left out of the text it points to. kael_line builds them with pointer_line(); text_copy() knows them.
+_POINTER_TAIL = re.compile(r"; the (?:full answer is|details are) on (?:Discord|Telegram)\.$")
+
+
+def pointer_line(lead: str, what: str, where: str) -> str:
+    """A spoken line that only points at the text copy: "<lead>; <what> on <where>."."""
+    return f"{lead}; {what} on {where}."
+
+
+def text_copy(headline: str, detail: str) -> str:
+    """What goes as text for a reach-out: the headline and the detail, except a pointer headline, which the
+    text it points to never repeats."""
+    if detail and _POINTER_TAIL.search(headline or ""):
+        return detail
+    return (headline or "") + (f"\n\n{detail}" if detail else "")
 
 
 @dataclass
@@ -591,7 +612,7 @@ class Deliverer:
             where = Where(self.text_surface)
         if row.room and not (where.kind == "room" and where.label == row.room):
             return Delivery("away")        # pinned to a room he isn't in: it waits for him there
-        body = row.headline + (f"\n\n{row.detail}" if row.detail else "")
+        body = text_copy(row.headline, row.detail)
         # A notification on his phone, watch and glasses, AS WELL AS the text (the owner, 11/08: "and
         # not instead of, she can discord me too"): in company (never aloud) and when he's away ("if im
         # not home she can use that channel too"). Not for a quiet one: a notification buzzes.
@@ -911,8 +932,7 @@ class ReachDesk:
                         continue
                     # Not answered: a copy. Answered but the detail never went (its text failed
                     # after the speech): the detail alone, he heard the headline.
-                    copy = (row.detail if heard else
-                            f"{MISSED_PREFIX} {row.headline}" + (f"\n\n{row.detail}" if row.detail else ""))
+                    copy = (row.detail if heard else f"{MISSED_PREFIX} {text_copy(row.headline, row.detail)}")
                     quiet_copy = self.quiet(now) and row.urgency != "safety"   # a warning still buzzes
                     try:
                         self.deliverer.text(self.deliverer.text_surface, copy, quiet_copy)
