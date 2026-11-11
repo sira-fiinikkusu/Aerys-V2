@@ -981,3 +981,11 @@ def test_member_lists_only_when_every_job_in_sight_is_hers():
     assert b.gate.home_job(MEMBER_TEXT, "person:member", "check_async_task", {"task_id": "mine"},
                            {"async_tasks": {"mine": {"owner": MEMBER_ID}}}).go
     assert not b.store.rows and not b.approval_store.rows                                    # reads ask no one
+
+
+def test_his_starts_stay_out_of_her_project_but_an_unsure_voice_goes_to_whoever_taps():
+    b = member_box()
+    assert not b.gate.home_job(TEXT, OWNER_THREAD, "start_async_task", MEMBER_START).go
+    assert not b.store.rows and not b.approval_store.rows
+    assert not b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", MEMBER_START).go   # waits for a tap
+    assert next(iter(b.approval_store.rows.values())).approvers == ["1", "2"]

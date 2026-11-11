@@ -189,7 +189,7 @@ def echo(text: str) -> str:
 class Box:
     """Her home jobs wired as production wires them, over in-memory stores."""
 
-    def __init__(self):
+    def __init__(self, members=None):
         self.approval_store = MemoryApprovalStore()
         self.pinged = []
         self.approvals = Approvals(self.approval_store, notify=lambda t, m: self.pinged.append((t, m)),
@@ -199,10 +199,10 @@ class Box:
 
         def gate_factory(executors):
             return HandsGate(self.approvals, self.actions, owner_person_id=OWNER, people=None,
-                             executors=executors, read_only_agents=(), clock=lambda: NOW)
+                             executors=executors, read_only_agents=(), clock=lambda: NOW, members=members)
 
         self.jobs = build_home_jobs(url=HOME_URL, token=TOKEN, ledger=self.ledger, owner_person_id=OWNER,
-                                    gate_factory=gate_factory)
+                                    gate_factory=gate_factory, projects=sorted(set((members or {}).values())))
         self.notes = []
         self.jobs.watcher.note = lambda thread, text: self.notes.append((thread, text))
 
@@ -888,3 +888,45 @@ def test_her_turns_keep_a_commands_routing_even_when_her_record_fails():
         result = mw.wrap_tool_call(_ledger_request(MEMBER_TEXT, thread=f"person:{MEMBER}"), handler)
         assert (result.graph, result.goto, result.resume) == (Command.PARENT, "next", "value")
         assert "async_tasks" not in result.update and result.update["messages"]
+
+
+
+# --- her own project on the brain (D19 slice 4) ----------------------------------------------------------
+
+def test_each_household_project_is_its_own_home_subagent():
+    from aerys_v2.home_jobs import MEMBER_DESCRIPTION, home_subagent_middleware
+
+    mw = home_subagent_middleware(HOME_URL, TOKEN, ["home-member", "home-member", "home", " ", "hands"])
+    (start,) = [t for t in mw.tools if t.name == "start_async_task"]
+    assert "home-member" in start.description and HOME_AGENT in start.description
+    assert MEMBER_DESCRIPTION.format(project="home-member") in start.description
+    alone = home_subagent_middleware(HOME_URL, TOKEN)
+    (plain,) = [t for t in alone.tools if t.name == "start_async_task"]
+    assert "home-member" not in plain.description
+
+
+def test_her_typed_job_runs_as_her_project_and_is_hers_alone(home):
+    b = Box(members={MEMBER: "home-member"})
+    his = {"description": "Build the fridge planner page", "subagent_type": HOME_AGENT}
+    b.turn([call("start_async_task", his), AIMessage(content="Started.")], TEXT)
+    mine = {"description": "Make a calendar", "subagent_type": "home-member"}
+    out, _ = b.turn([call("start_async_task", mine), AIMessage(content="Started.")], MEMBER_TEXT,
+                    thread=f"person:{MEMBER}")
+    assert any("Launched async subagent" in t for t in tool_texts(out))
+    runs = home.created("run")
+    assert [r[2]["assistant_id"] for r in runs] == [HOME_GRAPH_ID, "home-member"]   # her folder at home
+    (her_task,) = b.ledger.load(MEMBER)
+    assert her_task not in b.ledger.load(OWNER) and not (out.get("async_tasks") or {})
+    out, _ = b.turn([call("list_async_tasks", {}), AIMessage(content="One job.")], MEMBER_TEXT,
+                    thread=f"person:{MEMBER}", text="what's running?")
+    (listed,) = tool_texts(out)
+    assert her_task in listed and "1 tracked task" in listed
+
+
+def test_his_jobs_never_go_into_her_project(home):
+    b = Box(members={MEMBER: "home-member"})
+    out, _ = b.turn([call("start_async_task", {"description": "Tidy her calendar", "subagent_type": "home-member"}),
+                     AIMessage(content="Not started.")], TEXT)
+    (said,) = tool_texts(out)
+    assert said.startswith("Not started: that's a household member's own project")
+    assert not home.created("run") and b.ledger.load(OWNER) == {}

@@ -90,6 +90,12 @@ HOME_DESCRIPTION = (
     "organizing files. A job gets 45 minutes and 150 steps; Chris hears when it's done. Deleting, "
     "money, messaging people and reaching outside the machine still stop for him there."
 )
+#: A household member's own project (D19 slice 4): the same home machine, her own folder there.
+MEMBER_DESCRIPTION = (
+    "A household member's own project on your home machine ({project}): you there, the same as "
+    "home, but in her own folder, for long work SHE asked for herself. Only for her requests; "
+    "Chris's jobs always go to home, and nothing here touches his work."
+)
 
 HOME_JOBS_OVERLAY = (
     "LONG JOBS AT HOME: for work that takes more than a few minutes (building, deep research, "
@@ -337,8 +343,10 @@ def keep_asked_on(tasks: dict, before: dict, asked: str | None = None) -> dict:
 # --- the middleware ----------------------------------------------------------------------------
 
 
-def home_subagent_middleware(url: str, token: str):
-    """The official AsyncSubAgentMiddleware with her one home subagent, minus its hook nodes."""
+def home_subagent_middleware(url: str, token: str, projects=()):
+    """The official AsyncSubAgentMiddleware with her home subagent, minus its hook nodes. Each
+    household member's project (D19) is a subagent of its own, on the same home machine: its name
+    is the assistant her home server runs it as, and so the folder it works in there."""
     from deepagents.middleware.async_subagents import AsyncSubAgentMiddleware
     from langchain.agents.middleware import AgentMiddleware
 
@@ -356,7 +364,7 @@ def home_subagent_middleware(url: str, token: str):
         awrap_model_call = AgentMiddleware.awrap_model_call
 
     _quiet_official_logs()
-    return HomeSubAgents(async_subagents=[{
+    home = {
         "name": HOME_AGENT,
         "description": HOME_DESCRIPTION,
         "graph_id": HOME_GRAPH_ID,
@@ -364,7 +372,10 @@ def home_subagent_middleware(url: str, token: str):
         "headers": {"Authorization": f"Bearer {token}"},
         "notify_parent": False,              # "I'm done" is the done-notice's job (Stage 3)
         "update_strategy": "interrupt",      # D11: a change adjusts the running job in flight
-    }])
+    }
+    members = [{**home, "name": p, "description": MEMBER_DESCRIPTION.format(project=p), "graph_id": p}
+               for p in sorted({str(p).strip() for p in projects if str(p).strip()} - {HOME_AGENT, HOME_GRAPH_ID})]
+    return HomeSubAgents(async_subagents=[home, *members])
 
 
 def home_ledger_middleware(ledger, owner_person_id: str, members=None):
@@ -529,9 +540,10 @@ class HomeJobs:
 
 
 def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
-                    gate_factory: Callable[[dict], HandsGate | None], files=None) -> HomeJobs | None:
-    """files: send_file_middleware (tools/send_file.py), mounted last when there's a bot to send with."""
-    subagents = home_subagent_middleware(url, token)
+                    gate_factory: Callable[[dict], HandsGate | None], files=None, projects=()) -> HomeJobs | None:
+    """files: send_file_middleware (tools/send_file.py), mounted last when there's a bot to send with.
+    projects: household members' own projects (D19), each its own home subagent."""
+    subagents = home_subagent_middleware(url, token, projects)
     gate = gate_factory({HOME_JOB: home_job_executor(subagents, ledger, owner_person_id)})
     if gate is None:
         return None
@@ -568,6 +580,9 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
         log.warning("home jobs: not armed: %s", "; ".join(reasons))
         return None
     url = str(settings.home_url).strip().rstrip("/")
+    from aerys_v2.config import home_job_member_map
+
+    projects = sorted(set(home_job_member_map(settings).values()))
     files = None
     from aerys_v2.tools.send_file import (PostgresFileSends, build_files_sent_tool, build_send_file_tool,
                                           deliver_for, send_file_middleware)
@@ -583,9 +598,11 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
                            ledger=PostgresHomeTaskLedger(settings.database_url),
                            owner_person_id=str(settings.owner_person_id),
                            gate_factory=lambda executors: hands_gate_for(settings, executors=executors),
-                           files=files)
+                           files=files, projects=projects)
     if jobs is None:
         log.warning("home jobs: not armed: the D10 gate isn't (HANDS_GATES and the approval button are needed)")
         return None
     log.info("home jobs armed | %s, D10 gate on%s", HOME_AGENT, ", files to him" if files is not None else "")
+    if projects:
+        log.info("home jobs: %d household project(s) armed", len(projects))
     return jobs

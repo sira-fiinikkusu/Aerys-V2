@@ -349,6 +349,11 @@ class HandsGate:
             recipients = [person]
         else:
             recipients = []
+            if name == START and who != VOICE_UNSURE and args.get("subagent_type") in set(self.members.values()):
+                # A household member's project is hers (D19 slice 4); an unsure voice's project is
+                # whoever taps first, set by the watcher.
+                return Verdict(False, "Not started: that's a household member's own project. "
+                                      "Chris's jobs go to home.")
         if who == VOICE_UNSURE and name == START and self.members:
             recipients = [self.owner, *self.members]
         if tainted:
