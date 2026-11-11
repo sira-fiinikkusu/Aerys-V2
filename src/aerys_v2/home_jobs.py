@@ -99,7 +99,8 @@ HOME_JOBS_OVERLAY = (
     "don't promise to report back yourself. If he changes his mind mid-job, send the change with "
     "update_async_task: the job adjusts in flight. check_async_task and list_async_tasks say how his "
     "jobs are going when he asks; cancel_async_task stops one. If a tool says it's waiting for "
-    "Chris's tap, tell him it's waiting on his button and never say it started."
+    "Chris's tap, tell him it's waiting on his button and never say it started. To hand him a file "
+    "your home job made, send_file_to_chris with its path: it lands in his DM."
 )
 
 
@@ -489,7 +490,8 @@ class HomeJobs:
 
 
 def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
-                    gate_factory: Callable[[dict], HandsGate | None]) -> HomeJobs | None:
+                    gate_factory: Callable[[dict], HandsGate | None], files=None) -> HomeJobs | None:
+    """files: send_file_middleware (tools/send_file.py), mounted last when there's a bot to send with."""
     subagents = home_subagent_middleware(url, token)
     gate = gate_factory({HOME_JOB: home_job_executor(subagents, ledger, owner_person_id)})
     if gate is None:
@@ -501,8 +503,10 @@ def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
         gate.read_only_agents = frozenset(a for a in gate.read_only_agents if a != HOME_AGENT)
     # Order matters: his jobs are loaded first, so the gate can name the job a change is for;
     # then the gate decides; then the official tools run.
-    return HomeJobs(middleware=[home_ledger_middleware(ledger, owner_person_id), home_job_middleware(gate), subagents],
-                    overlay=HOME_JOBS_OVERLAY, gate=gate, watcher=HandsWatcher(gate))
+    middleware = [home_ledger_middleware(ledger, owner_person_id), home_job_middleware(gate), subagents]
+    if files is not None:
+        middleware.append(files)
+    return HomeJobs(middleware=middleware, overlay=HOME_JOBS_OVERLAY, gate=gate, watcher=HandsWatcher(gate))
 
 
 def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
@@ -524,12 +528,22 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
     if reasons:
         log.warning("home jobs: not armed: %s", "; ".join(reasons))
         return None
-    jobs = build_home_jobs(url=str(settings.home_url).strip().rstrip("/"), token=token.get_secret_value(),
+    url = str(settings.home_url).strip().rstrip("/")
+    files = None
+    from aerys_v2.tools.send_file import build_send_file_tool, deliver_for, send_file_middleware
+
+    deliver = deliver_for(settings)
+    if deliver is not None:     # #183: he gets the files her home jobs make, in his DM
+        files = send_file_middleware(build_send_file_tool(home_url=url, home_token=token.get_secret_value(),
+                                                          owner_person_id=str(settings.owner_person_id),
+                                                          deliver=deliver), str(settings.owner_person_id))
+    jobs = build_home_jobs(url=url, token=token.get_secret_value(),
                            ledger=PostgresHomeTaskLedger(settings.database_url),
                            owner_person_id=str(settings.owner_person_id),
-                           gate_factory=lambda executors: hands_gate_for(settings, executors=executors))
+                           gate_factory=lambda executors: hands_gate_for(settings, executors=executors),
+                           files=files)
     if jobs is None:
         log.warning("home jobs: not armed: the D10 gate isn't (HANDS_GATES and the approval button are needed)")
         return None
-    log.info("home jobs armed | %s, D10 gate on", HOME_AGENT)
+    log.info("home jobs armed | %s, D10 gate on%s", HOME_AGENT, ", files to him" if files is not None else "")
     return jobs

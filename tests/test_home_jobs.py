@@ -495,6 +495,15 @@ def test_not_armed_unless_everything_it_needs_is_there():
     assert len(names) == 3 and names[1] == "HomeJobGate"
 
 
+def test_with_a_bot_to_send_with_his_files_ride_along_last():
+    # #183: send_file_to_chris mounts with her home jobs when a Discord or Telegram bot can deliver.
+    from pydantic import SecretStr
+    armed = home_jobs_for(_settings(discord_bot_token=SecretStr("discord-bot-token")), environ={})
+    names = [type(m).__name__ for m in armed.middleware]
+    assert len(names) == 4 and names[-1] == "SendFile"
+    assert [t.name for t in armed.middleware[-1].tools] == ["send_file_to_chris"]
+
+
 # --- wiring: the action stack mounts it only when armed ----------------------------------------
 
 
