@@ -156,7 +156,7 @@ def outside_guard(request, handler, *, gate=None):
             if holder is not None:
                 holder['untrusted_read'] = True
                 # Telemetry only (the refusal above is unchanged): the turn record says the guard
-                # itself failed, so it mines as a gap even though untrusted_read alone doesn't.
+                # itself failed, its own gap, apart from untrusted_read (which every outside read carries).
                 holder['guard_error'] = True
         except Exception:
             pass

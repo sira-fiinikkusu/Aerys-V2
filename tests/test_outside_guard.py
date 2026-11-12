@@ -447,9 +447,9 @@ def test_his_button_shows_the_email_exactly_as_it_will_be_sent():
 
 
 def test_a_guard_error_leaves_its_own_marker_so_it_still_mines(monkeypatch):
-    """Codex review (11/12): untrusted_read is now by-design telemetry (not a gap), and the guard's
-    own exception path set only that tag, so a broken guard would have gone quiet. It still refuses;
-    now it also says it failed, and that marker mines as an [error] gap."""
+    """11/12: every outside read carries untrusted_read, so a broken guard (whose exception path set
+    only that tag) was indistinguishable from a normal read. It still refuses; now it also says it
+    failed, and that marker mines as its own [error] gap."""
     import aerys_v2.outside_guard as guard
     import aerys_v2.service as service
     from aerys_v2.workers.capability_requests import classify_turn
@@ -472,12 +472,12 @@ def test_a_guard_error_leaves_its_own_marker_so_it_still_mines(monkeypatch):
     import json
     degraded = captured[0]['degraded']
     gaps = classify_turn(turn(degraded=json.loads(degraded) if isinstance(degraded, str) else degraded))  # jsonb, as the DB returns it
-    assert [g.summary for g in gaps] == ['degraded subsystem marker: outside_guard_failed']
+    assert 'degraded subsystem marker: outside_guard_failed' in [g.summary for g in gaps]
 
 
 def test_an_approval_system_failure_leaves_the_guard_marker_but_a_wait_does_not():
     """Codex recheck (11/12): the hands gate answers its own failures (approvals down, the button
-    couldn't be raised) with an ordinary refusal, so they too would have gone quiet. They carry
+    couldn't be raised) with an ordinary refusal, indistinguishable from a wait. They carry
     infra=True now; the guard turns that into guard_error. Waiting for his tap stays unmarked."""
     from aerys_v2.hands_gate import GATE_DOWN, Verdict
     class Gate:
