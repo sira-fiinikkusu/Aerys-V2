@@ -214,6 +214,15 @@ _KAEL_MARKERS = tuple(
     for phrase in ("let {name} know", "{name} know", "for {name}", "to {name}")
 ) + ("let kale know",)   # explicit enough to be safe even for the vegetable
 
+# Pass-on shapes (D33, 2026-11-12): her relay for a listed contact ("tell Chris ...") shipped with
+# no router vocabulary, and "please tell Chris I love him" routed to chat, where she said she
+# couldn't. This file's law again: a tool the router can't route to does not exist.
+_PASS_ON_MARKERS = (
+    "pass this on", "pass it on", "pass that on", "pass this along", "pass it along",
+    "pass that along", "pass on to", "pass along to", "let him know", "let chris know",
+    "tell chris", "tell him ",
+)
+
 # Music shapes for the degraded path — the 2026-07-18 addition (the music tool's
 # wiring, same day it shipped: a tool the router can't route to does not exist).
 # Same over-trigger-toward-action bias: a needless action hop costs a tool
@@ -301,6 +310,13 @@ decide which path handles it:
   Speech-to-text mangles his name constantly — "kayle", "cale", "kale",
   "kail", "cael" are all KAEL when they appear where a person's name belongs
   ("tell kale I'm running late" is a message for Kael, not about a vegetable).
+  PASSING WORDS ON is "action" too: when the user asks you to tell, message
+  or pass something on to another person (Chris included), whatever the words
+  are: "tell Chris I'll be home at 7", "let him know dinner's ready", "please
+  tell Chris I love him", "pass this on to Chris: the plumber comes at 9" are
+  ALL "action". Only the action path can deliver it; a chat answer to one
+  either claims it went or says you can't, and both are wrong. Words meant for
+  YOU are not a delivery: "Chris said to tell you hi" is "chat".
   QUOTED WORDS are not requests: when he pastes or forwards someone else's
   words ("Selyra said this: …", the text of a screenshot, a quoted message), a
   "tell her …" / "tell him …" INSIDE those words is part of what he is sharing
@@ -487,6 +503,12 @@ def plausibly_messages_kael(text: str) -> bool:
     return any(marker in lowered for marker in _KAEL_MARKERS)
 
 
+def plausibly_passes_words_on(text: str) -> bool:
+    """Degraded-path heuristic: does this text ask her to pass words on to someone?"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _PASS_ON_MARKERS)
+
+
 def plausibly_sets_a_timer(text: str) -> bool:
     """Degraded-path heuristic: a timer/alarm/reminder ask."""
     lowered = text.lower()
@@ -510,6 +532,7 @@ def plausibly_asks_for_action(text: str) -> bool:
         or plausibly_wants_remember(text)
         or plausibly_wants_music(text)
         or plausibly_messages_kael(text)
+        or plausibly_passes_words_on(text)
         or plausibly_sets_a_timer(text)
     )
 

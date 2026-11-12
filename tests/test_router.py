@@ -298,3 +298,36 @@ def test_the_router_budget_leaves_room_for_haiku_55_to_think_first(monkeypatch):
     router_for(Settings(_env_file=None, anthropic_api_key="sk-test"), "soul")
     assert seen["max_tokens"] >= 1024
     assert seen["timeout"] == 10.0, "the voice race budget is unchanged"
+
+
+import pytest  # noqa: E402  (only the D33 tests below are parametrized)
+
+
+# D33 (2026-11-12): "please tell Chris I love him" from a listed contact routed to chat, and the
+# toolless chat side told her it couldn't pass messages on. A tool the router can't route to
+# does not exist: the prompt names the shape, and the degraded path routes it to action too.
+@pytest.mark.parametrize("text", [
+    "Please tell Chris I love him",
+    "let him know dinner's ready",
+    "Could you pass this on to Chris: the plumber comes at 9",
+    "can you let Chris know the dog got out",
+    "tell him I said goodnight",
+])
+def test_passing_words_on_routes_to_action_when_the_router_is_down(text):
+    from aerys_v2.router import fallback_decision, plausibly_passes_words_on
+    assert plausibly_passes_words_on(text)
+    assert fallback_decision(text).route == "action"
+
+
+def test_a_question_about_him_is_not_a_pass_on():
+    from aerys_v2.router import plausibly_passes_words_on
+    assert not plausibly_passes_words_on("what did Chris have for lunch?")
+
+
+def test_the_router_prompt_and_the_chat_side_both_know_passing_words_on():
+    import inspect
+    from aerys_v2 import factory, router
+    assert 'PASSING WORDS ON is "action"' in router._ROUTER_INSTRUCTIONS
+    assert "tell Chris I love him" in " ".join(router._ROUTER_INSTRUCTIONS.split())
+    source = inspect.getsource(factory)
+    assert "no sending or passing on messages" in source and "a message to send or to" in source

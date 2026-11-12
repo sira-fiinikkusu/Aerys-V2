@@ -66,6 +66,13 @@ decide which path handles it:
   Speech-to-text mangles his name constantly — "kayle", "cale", "kale",
   "kail", "cael" are all KAEL when they appear where a person's name belongs
   ("tell kale I'm running late" is a message for Kael, not about a vegetable).
+  PASSING WORDS ON is "action" too: when the user asks you to tell, message
+  or pass something on to another person (Chris included), whatever the words
+  are: "tell Chris I'll be home at 7", "let him know dinner's ready", "please
+  tell Chris I love him", "pass this on to Chris: the plumber comes at 9" are
+  ALL "action". Only the action path can deliver it; a chat answer to one
+  either claims it went or says you can't, and both are wrong. Words meant for
+  YOU are not a delivery: "Chris said to tell you hi" is "chat".
   QUOTED WORDS are not requests: when he pastes or forwards someone else's
   words ("Selyra said this: …", the text of a screenshot, a quoted message), a
   "tell her …" / "tell him …" INSIDE those words is part of what he is sharing
