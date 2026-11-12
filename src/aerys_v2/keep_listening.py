@@ -17,27 +17,29 @@ class ToggleReader:
         self._enabled = False
 
     def enabled(self) -> bool:
+        # The HA read happens OUTSIDE the lock (Gemini review 11/11): a slow HA never makes one voice
+        # turn wait on another's read; at worst two turns read it at the same time.
         with self._lock:
             if time.monotonic() < self._expires:
                 return self._enabled
-            enabled = False
-            try:
-                settings = self._settings
-                if settings is not None and settings.ha_token is not None:
-                    response = httpx.get(
-                        settings.ha_base_url.rstrip("/")
-                        + "/api/states/input_boolean.aerys_keep_listening",
-                        headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
-                        timeout=2.0,
-                    )
-                    response.raise_for_status()
-                    enabled = response.json().get("state") == "on"
-            except Exception:
-                # Missing toggle, timeout, malformed response, or HA unavailable = OFF.
-                pass
+        enabled = False
+        try:
+            settings = self._settings
+            if settings is not None and settings.ha_token is not None:
+                response = httpx.get(
+                    settings.ha_base_url.rstrip("/") + "/api/states/input_boolean.aerys_keep_listening",
+                    headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
+                    timeout=2.0,
+                )
+                response.raise_for_status()
+                enabled = response.json().get("state") == "on"
+        except Exception:
+            # Missing toggle, timeout, malformed response, or HA unavailable = OFF.
+            pass
+        with self._lock:
             self._enabled = enabled
             self._expires = time.monotonic() + 5.0
-            return enabled
+        return enabled
 
 
 opened_mic: dict[str, float] = {}
