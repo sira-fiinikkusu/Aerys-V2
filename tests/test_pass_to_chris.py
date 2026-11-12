@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from datetime import timedelta
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from aerys_v2.tools.pass_to_chris import Relay, build_pass_to_chris_tool
+from aerys_v2.tools.pass_to_chris import Relay, ReachQueue, build_pass_to_chris_tool
 from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk
 from test_reach_desk import DAY
 
@@ -15,17 +15,20 @@ def setup():
     deliverer = SimpleNamespace(deliver=lambda row, d: (sent.append(row) or SimpleNamespace(
         status='sent', surface='discord', spoken=False, texted=True)))
     desk = ReachDesk(store, deliverer, clock=lambda: DAY, budget_default=8)
-    return Relay('owner', {'contact', 'second'}, desk), sent, desk
+    return Relay('owner', {'contact', 'second'}, ReachQueue(store, clock=lambda: desk.clock()),
+                 {'owner': 'Chris', 'contact': 'Sam', 'second': 'Second'}.get), sent, desk
 
 
 def test_quote_and_cap_and_next_day():
     relay, sent, desk = setup()
     assert relay.send('Say "hello"', CONTACT, 'person:contact') == 'Passed on to Chris.'
+    desk.tick()
     assert sent[0].headline == 'Sam says: "Say \\"hello\\""'
     assert (sent[0].source, sent[0].topic, sent[0].owed) == ('relay', 'messages', False)
     for _ in range(2):
         assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
     assert 'daily limit' in relay.send('fourth', CONTACT, '')
+    desk.tick()
     assert len(sent) == 3
     assert relay.send('other', dict(CONTACT, user_id='second'), '') == 'Passed on to Chris.'
     desk.clock = lambda: DAY + timedelta(days=1)
@@ -45,12 +48,14 @@ def test_mute_failure_and_long_quote():
     relay, sent, desk = setup()
     from aerys_v2.tools.reach_prefs import build_reach_prefs_tool
     assert build_reach_prefs_tool(desk.store).invoke({'action': 'mute', 'topic': 'messages'}).startswith('Changed')
-    assert relay.send('hello', CONTACT, '').startswith('Not passed on')
-    assert not sent
+    assert relay.send('hello', CONTACT, '') == 'Not passed on: the reach-out desk declined it.'
+    desk.tick()
+    assert not sent and not [r for r in desk.store.rows.values() if r.source == 'relay']
     desk.store._prefs = Prefs(budget=8)
     assert relay.send('x' * 800, CONTACT, '') == 'Passed on to Chris.'
+    desk.tick()
     assert len(sent[0].headline) <= 400 and sent[0].headline.endswith('"')
-    desk.reach_out = lambda e: (_ for _ in ()).throw(OSError())
+    relay.desk.enqueue = lambda e: (_ for _ in ()).throw(OSError())
     assert relay.send('hello', CONTACT, '').startswith('Not passed on')
 
 
@@ -65,6 +70,7 @@ def test_engine_relay():
     graph = build_action_graph(model, 'test', [tool])
     result = graph.invoke({'messages': [HumanMessage(content='Tell Chris: See you soon')]},
                           {'configurable': {'identity': CONTACT, 'thread_id': 'person:contact'}})
+    desk.tick()
     assert sent[0].headline == 'Sam says: "See you soon"'
     assert any(isinstance(m, ToolMessage) and m.content == 'Passed on to Chris.' for m in result['messages'])
 
@@ -139,6 +145,7 @@ def test_parallel_cap():
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(lambda _: relay.send('hi', CONTACT, ''), range(10)))
     assert results.count('Passed on to Chris.') == 3
+    desk.tick()
     assert len(sent) == 3
 
 
@@ -158,12 +165,12 @@ def test_postgres_reservation_commits_before_desk(monkeypatch, count):
             return SimpleNamespace(fetchone=lambda: (count,))
     store = PostgresReachStore('unused')
     monkeypatch.setattr(store, '_connect', Conn)
-    desk.store = store
+    relay.desk.store = store
     def reach(event):
         assert events[-1] == 'commit'
         events.append('desk')
         return 'queued'
-    desk.reach_out = reach
+    relay.desk.enqueue = reach
     result = relay.send('hello', CONTACT, '')
     if count == 3:
         assert result.startswith('Not passed on') and events == ['begin', 'SELECT', 'SELECT', 'commit']
@@ -184,8 +191,8 @@ def test_reservation_commit_failure_never_reaches_desk(monkeypatch):
             return SimpleNamespace(fetchone=lambda: (0,))
     store = PostgresReachStore('unused')
     monkeypatch.setattr(store, '_connect', Conn)
-    desk.store = store
+    relay.desk.store = store
     calls = []
-    desk.reach_out = lambda e: calls.append(e)
+    relay.desk.enqueue = lambda e: calls.append(e)
     assert relay.send('hello', CONTACT, '').startswith('Not passed on')
     assert not calls

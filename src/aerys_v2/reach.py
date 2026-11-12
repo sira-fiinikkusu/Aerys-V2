@@ -384,7 +384,7 @@ class MemoryReachStore:
         return self.add(event, now, status=status, reason=reason, not_before=not_before)
 
     def foldable(self, since, until):
-        return sorted((r for r in self.rows.values() if r.status == "queued" and not r.owed and not r.brief
+        return sorted((r for r in self.rows.values() if r.status == "queued" and r.source != "relay" and not r.owed and not r.brief
                        and r.urgency == "routine" and r.created_at and r.created_at >= since
                        and (r.not_before is None or r.not_before <= until)), key=lambda r: r.id)
 
@@ -416,7 +416,7 @@ class MemoryReachStore:
         self.mark(reach_id, now, **fields)
         for fid in folds:                    # only what's still waiting: never re-mark what went
             r = self.rows.get(fid)
-            if r is not None and r.status == "queued":
+            if r is not None and r.status == "queued" and r.source != "relay":
                 r.status, r.reason, r.delivered_at = "folded", f"in the brief (#{reach_id})", now
 
     def prefs(self, default_budget):
@@ -534,7 +534,7 @@ class PostgresReachStore:
     def foldable(self, since, until):
         with self._connect() as conn:
             rows = conn.execute(
-                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND NOT owed AND NOT brief "
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND source <> 'relay' AND NOT owed AND NOT brief "
                 "AND urgency = 'routine' AND created_at >= %s AND (not_before IS NULL OR not_before <= %s) "
                 "ORDER BY id", (since, until)).fetchall()
         return [self._row(r) for r in rows]
@@ -590,7 +590,7 @@ class PostgresReachStore:
                              (*fields.values(), now, reach_id))
             if folds:
                 conn.execute("UPDATE v2_reachouts SET status = 'folded', reason = %s, delivered_at = %s, "
-                             "updated_at = %s WHERE id = ANY(%s) AND status = 'queued'",
+                             "updated_at = %s WHERE id = ANY(%s) AND status = 'queued' AND source <> 'relay'",
                              (f"in the brief (#{reach_id})", now, now, list(folds)))
 
     def prefs(self, default_budget):

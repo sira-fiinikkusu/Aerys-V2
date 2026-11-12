@@ -523,8 +523,8 @@ def main() -> None:
         face_push = face_pusher_for(settings)
         # Discord contacts use this local guest graph, not the HTTP action graph.
         # The shared reach ledger is drained by the existing --serve desk watcher.
-        from aerys_v2.kael_line import reach_desk_for
-        relay_desk = reach_desk_for(settings, graph) if settings.messages_as_herself else None
+        from aerys_v2.tools.pass_to_chris import relay_queue_for
+        relay_desk = relay_queue_for(settings)
         router = action_graph = guest_action_graph = None
         stack = action_stack_for(
             settings, soul, room_context_fn=room_context,

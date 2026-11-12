@@ -45,8 +45,11 @@ def test_discord_runner_wires_context_fn(monkeypatch, relay_on):
 
     monkeypatch.setenv("MESSAGES_AS_HERSELF", str(relay_on).lower())
     import aerys_v2.kael_line as line
+    import aerys_v2.tools.pass_to_chris as relay
     desk_calls, guest_calls = [], []
-    monkeypatch.setattr(line, "reach_desk_for", lambda s, g: (desk_calls.append(g) or "DESK"))
+    monkeypatch.setattr(line, "reach_desk_for", lambda *a: pytest.fail("soak must not build a delivery desk"))
+    monkeypatch.setattr(relay, "relay_queue_for", lambda s: (desk_calls.append(s.messages_as_herself)
+                        or ("QUEUE" if s.messages_as_herself else None)))
     monkeypatch.setattr(factory, "guest_action_graph_for",
                         lambda s, soul, **kw: (guest_calls.append(kw) or "GUEST"))
     monkeypatch.setattr(cli, "_arm_live_reflex", lambda s, r, router, graph: (router, r))
@@ -113,8 +116,8 @@ def test_discord_runner_wires_context_fn(monkeypatch, relay_on):
         cli.main()
     assert exc.value.code == 0
 
-    assert desk_calls == (["GRAPH"] if relay_on else [])
-    assert guest_calls[0]["reach_desk"] == ("DESK" if relay_on else None)
+    assert desk_calls == [relay_on]
+    assert guest_calls[0]["reach_desk"] == ("QUEUE" if relay_on else None)
     assert len(made) == 1
     assert made[0].run_token == "dev-bot-token"
     # The regression guard: context_fn is threaded from context_fn_for(settings)
