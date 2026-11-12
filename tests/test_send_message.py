@@ -170,10 +170,10 @@ def test_factory_tool_and_executor_wired_and_guest_absent(monkeypatch):
     gate = module.hands_gate_for(s)
     assert MESSAGE in gate.executors
     assert gate.message_sender is not None
-    assert 'send_message' in [t.name for t in action_tools_for(s)]
-    assert 'send_message' not in [t.name for t in action_tools_for(s, guest=True)]
+    assert {'send_message', 'messages_sent'} <= {t.name for t in action_tools_for(s)}
+    assert not {'send_message', 'messages_sent'} & {t.name for t in action_tools_for(s, guest=True)}
     s.hands_gates = False
-    assert 'send_message' not in [t.name for t in action_tools_for(s)]
+    assert not {'send_message', 'messages_sent'} & {t.name for t in action_tools_for(s)}
 
 
 def test_reservation_failure_prevents_network_and_finish_failure_never_claims_sent():

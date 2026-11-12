@@ -6,6 +6,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
@@ -27,6 +28,10 @@ class MessageSends:
     def __init__(self):
         self.rows = []
         self.lock = threading.Lock()
+
+    def recent(self, limit):
+        with self.lock:
+            return [dict(r) for r in sorted(self.rows, key=lambda r: r['time'], reverse=True)[:limit]]
 
     def reserve(self, person, platform, digest):
         with self.lock:
@@ -56,6 +61,14 @@ class PostgresMessageSends:
         import psycopg
         return psycopg.connect(self.database_url, connect_timeout=5, options='-c statement_timeout=5000')
 
+    def recent(self, limit):
+        with self._connect() as c:
+            rows = c.execute("SELECT person_id, platform, words_hash, attempted_at, status "
+                             "FROM v2_message_sends ORDER BY attempted_at DESC, id DESC LIMIT %s",
+                             (limit,)).fetchall()
+        return [dict(person=str(p), platform=platform, hash=digest, time=when, status=status)
+                for p, platform, digest, when, status in rows]
+
     def reserve(self, person, platform, digest):
         with self._connect() as c:
             c.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s, 29))',
@@ -77,8 +90,58 @@ class PostgresMessageSends:
 
 
 class MessageSender:
-    def __init__(self, gate, people, ledger, deliver):
+    def __init__(self, gate, people, ledger, deliver, names=None):
         self.gate, self.people, self.ledger, self.deliver = gate, set(people), ledger, deliver
+        self.names = names or (lambda ids: {})
+
+    def messages_sent(self, limit, identity, thread):
+        if str(identity.get('user_id') or '') != str(self.gate.owner) or str(thread).startswith('kael:'):
+            return 'Refused: only the owner can read my send record.'
+        try:
+            limit = max(1, min(10, int(limit)))
+            gates = self.gate.store.recent_messages(limit)
+            deliveries = self.ledger.recent(limit)
+            rows = [dict(r, verdict={'ok': 'sent', 'failed': "didn't go through",
+                                    'pending': 'outcome unknown'}[r['status']]) for r in deliveries]
+            used = set()
+            for g in gates:
+                status = g.status
+                if status in ('waiting', 'dropped'):
+                    status = self.gate.approvals.status(g.approval_id)
+                    if status == 'unknown':
+                        raise RuntimeError('approval unavailable')
+                person, platform = str(g.args.get('person_id') or ''), g.args.get('platform')
+                digest = hashlib.sha256(str(g.args.get('text') or '').encode('utf-8')).hexdigest()
+                # No shared attempt id in legacy records: coalesce only approved/executed
+                # requests with the same person/platform/hash, never an older delivery.
+                matches = [i for i, r in enumerate(deliveries) if i not in used
+                           and (r['person'], r['platform'], r['hash']) == (person, platform, digest)
+                           and r['time'] >= g.created_at
+                           and (status != 'failed' or r['status'] != 'ok')
+                           and (status != 'done' or r['status'] == 'ok')]
+                if status in ('done', 'running', 'failed', 'approved') and matches:
+                    used.add(min(matches, key=lambda i: deliveries[i]['time']))
+                    continue
+                verdict = {'pending': "waiting on Chris's tap", 'declined': 'Chris declined it',
+                           'expired': 'the button expired', 'failed': "didn't go through"}.get(
+                               status, 'outcome unknown')
+                rows.append(dict(person=person, platform=platform, time=g.created_at, verdict=verdict))
+            rows = sorted(rows, key=lambda r: r['time'], reverse=True)[:limit]
+            try:
+                names = self.names({r['person'] for r in rows})
+            except Exception:
+                names = {}
+            lines = []
+            for r in rows:
+                name = ' '.join(str(names.get(r['person']) or 'someone').split())
+                platform = 'Discord' if r['platform'] == 'discord' else 'unknown platform'
+                et = r['time'].astimezone(ZoneInfo('America/New_York'))
+                when = f"{et:%a} {et.strftime('%I').lstrip('0') or '12'}:{et:%M %p}"   # portable: no %-I
+                lines.append(f"{name} · {platform} · {when} · {r['verdict']}")
+            return '\n'.join(lines) or 'No message attempts in my send record.'
+        except Exception:
+            return "I couldn't read my send record just now"
+
 
     def _deliver(self, person, platform, address, text):
         if platform != 'discord' or not address or not text.endswith('\n-Aerys') or len(text) > 1990:
@@ -160,6 +223,36 @@ def build_send_message_tool(sender):
     return send_message
 
 
+def build_messages_sent_tool(sender):
+    @tool
+    def messages_sent(runtime: ToolRuntime, limit: int = 5) -> str:
+        """CALL THIS when he asks whether a message went through, or what she has sent.
+
+        Answer from this record, never from memory or a note. Owner only. Most recent
+        attempts first (up to 10), Eastern time. Sent means Discord accepted it;
+        outcome unknown means it may have gone, never call it sent.
+        """
+        try:
+            conf = runtime.config.get('configurable') or {}
+            return sender.messages_sent(limit, conf.get('identity') or {}, conf.get('thread_id', ''))
+        except Exception:
+            return "I couldn't read my send record just now"
+    return messages_sent
+
+
+def message_names_for(database_url):
+    def names(ids):
+        if not database_url or not ids:
+            return {}
+        import psycopg
+        with psycopg.connect(database_url, connect_timeout=5,
+                             options='-c statement_timeout=5000 -c default_transaction_read_only=on') as c:
+            rows = c.execute("SELECT id, display_name FROM persons "
+                             "WHERE deleted_at IS NULL AND id::text = ANY(%s)", (list(ids),)).fetchall()
+        return {str(pid): name for pid, name in rows}
+    return names
+
+
 def message_sender_for(settings, gate):
     reasons = []
     if not getattr(settings, 'messages_as_herself', False):
@@ -179,6 +272,7 @@ def message_sender_for(settings, gate):
     from aerys_v2.kael_line import _discord_dm_send
     token = settings.discord_bot_token.get_secret_value()
     sender = MessageSender(gate, people, PostgresMessageSends(settings.database_url),
-                           lambda address, text: _discord_dm_send(token, address, text))
+                           lambda address, text: _discord_dm_send(token, address, text),
+                           names=message_names_for(getattr(settings, 'memories_database_url', None)))
     log.info('send_message armed')
     return sender

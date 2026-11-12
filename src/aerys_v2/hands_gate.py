@@ -187,6 +187,10 @@ class MemoryGatedActionStore:
         self.rows: dict[int, GatedAction] = {}
         self._next = 1
 
+    def recent_messages(self, limit):
+        return sorted((r for r in self.rows.values() if r.action == MESSAGE),
+                      key=lambda r: (r.created_at, r.id), reverse=True)[:limit]
+
     def attempts(self, base_key):
         return sorted((r for r in self.rows.values() if r.base_key == base_key), key=lambda r: r.attempt)
 
@@ -252,6 +256,10 @@ class PostgresGatedActionStore:
     def _all(self, sql, args):
         with self._connect() as conn:
             return [self._row(r) for r in conn.execute(sql, args).fetchall()]
+
+    def recent_messages(self, limit):
+        return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE action = %s "
+                         "ORDER BY created_at DESC, id DESC LIMIT %s", (MESSAGE, limit))
 
     def attempts(self, base_key):
         return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE base_key = %s ORDER BY attempt",

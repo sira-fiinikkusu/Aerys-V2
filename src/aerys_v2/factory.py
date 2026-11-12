@@ -2485,13 +2485,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
                                             owner_names=lambda: contacts.names_of(owner)))
 
     if not guest:
-        from aerys_v2.tools.send_message import build_send_message_tool
+        from aerys_v2.tools.send_message import build_send_message_tool, build_messages_sent_tool
         if getattr(settings, "messages_as_herself", False):
             from aerys_v2.hands_gate import hands_gate_for
             message_gate = hands_gate_for(settings)
             sender = getattr(message_gate, "message_sender", None)
             if sender is not None:
-                tools.append(build_send_message_tool(sender))
+                tools.extend([build_send_message_tool(sender), build_messages_sent_tool(sender)])
             else:
                 log.info("send_message not armed: gate or required messaging configuration unavailable")
         else:
