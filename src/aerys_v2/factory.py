@@ -444,9 +444,22 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
         if redirect is not None and redirect.handles(device_id):
             # Speakerless-by-accident satellite (office, 2026-09-26): its follow-up
             # plays on the redirect target instead of a dead speaker.
-            redirect.say(device_id, text)
-            if not open_mic:
-                return
+            if open_mic:
+                def reopen() -> None:
+                    r = httpx.post(
+                        f"{base}/api/services/assist_satellite/start_conversation",
+                        headers=headers,
+                        json={"entity_id": satellite_map[device_id],
+                              "start_message": "Mm?", "preannounce": False},
+                        timeout=15.0,
+                    )
+                    r.raise_for_status()
+                    mark_opened(device_id)
+
+                redirect.say(device_id, text, then=reopen)
+            else:
+                redirect.say(device_id, text)
+            return
         if device_id and device_id in satellite_map:
             # Questions can open the mic; all other speech keeps the announce path.
             # preannounce=False preserves the existing no-chime behavior.

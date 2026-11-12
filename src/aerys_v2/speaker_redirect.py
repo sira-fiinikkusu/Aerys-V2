@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -52,15 +53,15 @@ class SpeakerRedirect:
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._targets
 
-    def say(self, device_id: str | None, text: str) -> None:
+    def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return
         if self._async:
-            threading.Thread(target=self._say, args=(device_id, text), daemon=True).start()
+            threading.Thread(target=self._say, args=(device_id, text, then), daemon=True).start()
         else:
-            self._say(device_id, text)
+            self._say(device_id, text, then)
 
-    def _say(self, device_id: str, text: str) -> None:
+    def _say(self, device_id: str, text: str, then: Callable[[], None] | None = None) -> None:
         try:
             r = self._client.post(
                 f"{self._ha}/api/tts_get_url",
@@ -71,8 +72,11 @@ class SpeakerRedirect:
             r.raise_for_status()
             url = r.json()["url"]
             p = self._client.post(f"{self._targets[device_id]}/play", headers=self._speaker_headers,
-                                  json={"url": url}, timeout=5.0)
+                                  json={"url": url, **({"wait": True} if then is not None else {})},
+                                  timeout=130.0 if then is not None else 5.0)
             p.raise_for_status()
+            if then is not None and p.json().get("played") is True:
+                then()
         except Exception:
             log.debug("speaker redirect failed (harmless)", exc_info=True)
 

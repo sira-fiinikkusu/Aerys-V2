@@ -96,11 +96,15 @@ def test_office_redirect(rig, monkeypatch, text, enabled):
     redirect.handles.return_value = True
     monkeypatch.setattr("aerys_v2.speaker_redirect.speaker_redirect_for", lambda _: redirect)
     followup_router_for(settings)(text, "sat")
-    redirect.say.assert_called_once_with("sat", text)
-    assert bool(posts) == enabled
+    assert not posts and not kl.opened_mic
     if enabled:
+        redirect.say.assert_called_once()
+        redirect.say.call_args.kwargs["then"]()
         assert posts[0] == ("http://ha.example/api/services/assist_satellite/start_conversation",
-                            {"entity_id": "assist_satellite.example", "start_message": text, "preannounce": False})
+                            {"entity_id": "assist_satellite.example", "start_message": "Mm?", "preannounce": False})
+        assert "sat" in kl.opened_mic
+    else:
+        redirect.say.assert_called_once_with("sat", text)
 
 
 @pytest.mark.parametrize("text,voice,expected", [
@@ -222,3 +226,80 @@ def test_her_voice_switch_flips_his_toggle_and_says_which():
     assert build_keep_listening_tool(settings, post=broken).invoke({"on": True}).startswith("Couldn't change it")
     assert build_keep_listening_tool(SimpleNamespace(ha_token=None), post=broken).invoke(
         {"on": True}).startswith("Couldn't change it")
+
+
+@pytest.mark.parametrize("delivery", ["ask", "followup"])
+@pytest.mark.parametrize("text,state,played", [
+    ("Ready?", "on", True), ("Ready?", "on", False),
+    ("Ready?", "off", True), ("Ready.", "on", True),
+    ("Ready?", "on", "http_error"), ("Ready?", "on", "timeout"),
+])
+def test_redirect_playback_gates_mic(rig, monkeypatch, delivery, text, state, played):
+    import json
+    from aerys_v2.speaker_redirect import SpeakerRedirect
+
+    kl, settings, _, states, _, posts = rig
+    states[0] = state
+    plays, during = [], []
+    waiting = text.endswith("?") and state == "on"
+
+    def transport(request):
+        if request.url.path == "/api/tts_get_url":
+            return httpx.Response(200, json={"url": "http://ha.example/clip.mp3"})
+        during.append((list(posts), dict(kl.opened_mic)))
+        plays.append((json.loads(request.content), request.extensions["timeout"]["read"]))
+        if played == "timeout":
+            raise httpx.ReadTimeout("offline", request=request)
+        return httpx.Response(500 if played == "http_error" else 200, json={"played": played})
+
+    redirect = SpeakerRedirect(
+        ha_base_url="http://ha.example", ha_token="placeholder", engine="tts.example",
+        voice="example", language="en", targets={"sat": "http://speaker.example"},
+        speaker_token="placeholder", client=httpx.Client(transport=httpx.MockTransport(transport)),
+        async_send=False,
+    )
+    monkeypatch.setattr("aerys_v2.speaker_redirect.speaker_redirect_for", lambda _: redirect)
+    if delivery == "ask":
+        reply = handler(settings, Mock(return_value=text), speaker_redirect=redirect)(
+            AskRequest(text="hi", voice=True, device_id="sat"))
+        assert reply.keep_listening is False
+    else:
+        followup_router_for(settings)(text, "sat")
+    assert during == [([], {})]
+    assert plays == [({"url": "http://ha.example/clip.mp3", **({"wait": True} if waiting else {})},
+                      130.0 if waiting else 5.0)]
+    if waiting and played is True:
+        assert posts == [("http://ha.example/api/services/assist_satellite/start_conversation",
+                          {"entity_id": "assist_satellite.example", "start_message": "Mm?", "preannounce": False})]
+        assert "sat" in kl.opened_mic
+    else:
+        assert not posts and not kl.opened_mic
+
+
+def test_nonredirect_reply_keeps_ha_mic_flag(rig):
+    kl, settings, _, _, _, posts = rig
+    redirect = Mock()
+    redirect.handles.return_value = False
+    reply = handler(settings, Mock(return_value="Ready?"), speaker_redirect=redirect)(
+        AskRequest(text="hi", voice=True, device_id="sat"))
+    assert reply.keep_listening is True
+    redirect.say.assert_called_once_with("sat", "Ready?")
+    assert "sat" in kl.opened_mic and not posts
+
+
+@pytest.mark.parametrize("delivery", ["ask", "followup"])
+def test_redirect_failed_mic_open_does_not_mark_opened(rig, monkeypatch, delivery):
+    kl, settings, _, _, _, _ = rig
+    redirect = Mock()
+    redirect.handles.return_value = True
+    monkeypatch.setattr("aerys_v2.speaker_redirect.speaker_redirect_for", lambda _: redirect)
+    if delivery == "ask":
+        handler(settings, Mock(return_value="Ready?"), speaker_redirect=redirect)(
+            AskRequest(text="hi", voice=True, device_id="sat"))
+    else:
+        followup_router_for(settings)("Ready?", "sat")
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(
+        500, request=httpx.Request("POST", url)))
+    with pytest.raises(httpx.HTTPStatusError):
+        redirect.say.call_args.kwargs["then"]()
+    assert not kl.opened_mic

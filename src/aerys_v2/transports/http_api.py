@@ -362,7 +362,30 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # Speaker redirect (2026-09-26): a voice turn from a satellite whose speaker
         # is gone is also spoken on the redirect target (Leviathan's desk speakers).
         if identity.get("voice") and speaker_redirect is not None:
-            speaker_redirect.say(body.device_id, reply)
+            if keep_listening and speaker_redirect.handles(body.device_id):
+                from aerys_v2.factory import satellite_map_from
+                import httpx
+
+                # The dead speaker finishes immediately. Only the redirect's
+                # playback acknowledgement may reopen this satellite's mic.
+                keep_listening = False
+                satellite = satellite_map_from(settings.ha_satellite_map).get(body.device_id)
+                if satellite and settings.ha_token is not None:
+                    def reopen() -> None:
+                        r = httpx.post(
+                            f"{settings.ha_base_url.rstrip('/')}/api/services/assist_satellite/start_conversation",
+                            headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
+                            json={"entity_id": satellite, "start_message": "Mm?", "preannounce": False},
+                            timeout=15.0,
+                        )
+                        r.raise_for_status()
+                        mark_opened(body.device_id)
+
+                    speaker_redirect.say(body.device_id, reply, then=reopen)
+                else:
+                    speaker_redirect.say(body.device_id, reply)
+            else:
+                speaker_redirect.say(body.device_id, reply)
         # Gap #37: an exchange on Kael's line becomes a durable memory, so the
         # her on any OTHER thread can know it happened. Fires on the FINAL
         # thread_id — a voice turn was already remapped off kael:* above, so
