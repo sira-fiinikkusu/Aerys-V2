@@ -444,3 +444,32 @@ def test_his_button_shows_the_email_exactly_as_it_will_be_sent():
     assert 'To: sam@example.com\nSubject: A long day\n\nHi Sam.' in row.detail
     b.tap(); b.watcher.tick(); b.watcher.tick()
     assert sent == [('A long day', 'Hi Sam.')]
+
+
+def test_a_guard_error_leaves_its_own_marker_so_it_still_mines(monkeypatch):
+    """Codex review (11/12): untrusted_read is now by-design telemetry (not a gap), and the guard's
+    own exception path set only that tag, so a broken guard would have gone quiet. It still refuses;
+    now it also says it failed, and that marker mines as an [error] gap."""
+    import aerys_v2.outside_guard as guard
+    import aerys_v2.service as service
+    from aerys_v2.workers.capability_requests import classify_turn
+    from test_capability_requests import turn
+    monkeypatch.setattr(guard, 'sources_for', lambda r: 1 / 0)
+    req = request([])
+    assert 'Not done' in outside_guard(req, lambda r: pytest.fail('sent')).content
+    sink = req.runtime.config['configurable']['outside_text']
+    assert sink.get('guard_error') is True and sink.get('untrusted_read') is True
+    captured = []
+    class ImmediateThread:
+        def __init__(self, target, args=(), **kwargs):
+            self.target, self.args = target, args
+        def start(self):
+            self.target(*self.args)
+    monkeypatch.setattr(service.threading, 'Thread', ImmediateThread)
+    service._fire_turn_record(captured.append, {'configurable': {
+        'thread_id': 'test', 'identity': TEXT, 'outside_text': sink}}, 'hello', 1)
+    assert 'outside_guard_failed' in captured[0]['degraded']
+    import json
+    degraded = captured[0]['degraded']
+    gaps = classify_turn(turn(degraded=json.loads(degraded) if isinstance(degraded, str) else degraded))  # jsonb, as the DB returns it
+    assert [g.summary for g in gaps] == ['degraded subsystem marker: outside_guard_failed']

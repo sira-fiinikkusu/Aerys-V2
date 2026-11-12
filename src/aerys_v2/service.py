@@ -282,6 +282,8 @@ def _fire_turn_record(
         outside = configurable.get("outside_text") or {}
         if outside.get("untrusted_read") or outside.get("origin") or (configurable.get("room_sink") or {}).get("outside"):
             fields["extra_degraded"] = list(dict.fromkeys([*(fields.get("extra_degraded") or []), "untrusted_read"]))
+        if outside.get("guard_error"):   # the guard itself failed (and refused): a real gap, never by-design
+            fields["extra_degraded"] = list(dict.fromkeys([*(fields.get("extra_degraded") or []), "outside_guard_failed"]))
         row = build_turn_row(
             thread_id=str(configurable.get("thread_id", "")),
             identity=configurable.get("identity") or {},
