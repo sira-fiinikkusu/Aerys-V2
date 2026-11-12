@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_document',
                      'youtube_summary', 'search_email', 'read_email', 'search_his_email', 'read_his_email',
@@ -54,6 +54,13 @@ def sources_for(request):
     messages = request.state['messages']
     if not isinstance(messages, (list, tuple)):
         raise ValueError('unreadable messages')
+    # Keep the immediately replied-to relay tainted through every tool/model step.
+    human = next((i for i in range(len(messages) - 1, -1, -1)
+                  if isinstance(messages[i], HumanMessage)), None)
+    if human is not None and human > 0:
+        prior = messages[human - 1]
+        if isinstance(prior, AIMessage) and prior.additional_kwargs.get('reach_source') == 'relay':
+            sources.add('relay')
     sources.update(m.name for m in messages if isinstance(m, ToolMessage) and m.name in READERS)
     return tuple(sorted(sources))
 

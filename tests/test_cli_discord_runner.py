@@ -34,13 +34,22 @@ class _LiveRoom:
 
 LIVE_ROOM = _LiveRoom()
 
-def test_discord_runner_wires_context_fn(monkeypatch):
+@pytest.mark.parametrize("relay_on", [False, True])
+def test_discord_runner_wires_context_fn(monkeypatch, relay_on):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("DISCORD_BOT_TOKEN", "dev-bot-token")
     # Keep the run hermetic: no DB (cold resolver), no wrong-database boot trap.
     for stray in ("DATABASE_URL", "MEMORIES_DATABASE_URL", "TELEGRAM_BOT_TOKEN"):
         monkeypatch.delenv(stray, raising=False)
     monkeypatch.setattr(cli, "run_boot_assertions", lambda *a, **k: None)
+
+    monkeypatch.setenv("MESSAGES_AS_HERSELF", str(relay_on).lower())
+    import aerys_v2.kael_line as line
+    desk_calls, guest_calls = [], []
+    monkeypatch.setattr(line, "reach_desk_for", lambda s, g: (desk_calls.append(g) or "DESK"))
+    monkeypatch.setattr(factory, "guest_action_graph_for",
+                        lambda s, soul, **kw: (guest_calls.append(kw) or "GUEST"))
+    monkeypatch.setattr(cli, "_arm_live_reflex", lambda s, r, router, graph: (router, r))
 
     # Factory seams -> sentinels (no models, no checkpointer, no DB).
     monkeypatch.setattr(factory, "build_model", lambda s: "MODEL")
@@ -50,7 +59,7 @@ def test_discord_runner_wires_context_fn(monkeypatch):
     monkeypatch.setattr(factory, "deep_gate_for", lambda s: "DEEPGATE")
     monkeypatch.setattr(factory, "turn_recorder_for", lambda s: "RECORDER")
     monkeypatch.setattr(factory, "action_allowlist_for", lambda s: "ALLOW")
-    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul, **kw: None)  # chat-only
+    monkeypatch.setattr(factory, "action_stack_for", lambda s, soul, **kw: ("ROUTER", "ACTION"))
     # The seam under test: build_graph must receive context_fn_for(settings), the
     # SAME long-term memory wiring --serve has.
     monkeypatch.setattr(factory, "context_fn_for", lambda s: "CTXFN")
@@ -104,6 +113,8 @@ def test_discord_runner_wires_context_fn(monkeypatch):
         cli.main()
     assert exc.value.code == 0
 
+    assert desk_calls == (["GRAPH"] if relay_on else [])
+    assert guest_calls[0]["reach_desk"] == ("DESK" if relay_on else None)
     assert len(made) == 1
     assert made[0].run_token == "dev-bot-token"
     # The regression guard: context_fn is threaded from context_fn_for(settings)

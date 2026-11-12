@@ -295,6 +295,7 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
 
 
 class ReachStore(Protocol):
+    def reserve_relay(self, person: str, now: datetime) -> bool: ...
     def add(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
@@ -324,9 +325,19 @@ class MemoryReachStore:
 
     def __init__(self, rows: Iterable[Reach] = (), prefs: Prefs | None = None):
         self.rows = {r.id: r for r in rows}
+        self._relay_lock = threading.Lock()
         self._next = max(self.rows, default=0) + 1
         self._prefs = prefs
         self.changes: list = []
+
+    def reserve_relay(self, person, now):
+        key = f"relay:{now.astimezone(EASTERN).date()}:{person}"
+        with self._relay_lock:
+            if sum(r.source == "relay_limit" and r.dedupe_key == key for r in self.rows.values()) >= 3:
+                return False
+            self.add(ReachEvent(source="relay_limit", topic="messages", headline="Relay reservation",
+                                dedupe_key=key), now, status="dropped", reason="daily relay slot", not_before=None)
+            return True
 
     def add(self, event, now, *, status, reason, not_before):
         r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
@@ -453,6 +464,21 @@ class PostgresReachStore:
                  event.dedupe_key, status, not_before, event.expires_at, reason, event.room, event.brief,
                  list(event.folds), event.text_only, event.text_to)).fetchone()
         return self._row(row)
+
+    def reserve_relay(self, person, now):
+        # Committed before delivery: uncertain attempts consume a slot. The existing
+        # ledger and transaction lock enforce the cap across processes and restarts.
+        key = f"relay:{now.astimezone(EASTERN).date()}:{person}"
+        with self._connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 33))", (key,))
+            count = conn.execute("SELECT count(*) FROM v2_reachouts WHERE source = 'relay_limit' "
+                                 "AND dedupe_key = %s", (key,)).fetchone()[0]
+            if count >= 3:
+                return False
+            conn.execute("INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, "
+                         "headline, dedupe_key, status, reason) VALUES (%s, %s, 'relay_limit', 'messages', "
+                         "'routine', 'Relay reservation', %s, 'dropped', 'daily relay slot')", (now, now, key))
+        return True
 
     def add_new(self, event, now, *, status, reason, not_before):
         """add(), unless a row with this dedupe key exists in ANY state, ever: one statement,

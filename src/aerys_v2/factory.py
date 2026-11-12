@@ -2243,7 +2243,7 @@ def build_action_graph(
     return compiled
 
 
-def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
+def action_tools_for(settings: Settings, *, guest: bool = False, reach_desk=None) -> list:
     """Every tool the action subgraph gets, assembled from what Settings arms.
 
     Two independently-armed halves, same pattern as every optional transport:
@@ -2263,7 +2263,7 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
 
     Empty list = nothing armed = the caller keeps ask() chat-only.
     """
-    tools = _action_tools_armed(settings, guest=guest)
+    tools = _action_tools_armed(settings, guest=guest, reach_desk=reach_desk)
     if tools:
         # The forced first pass's honest exit (see tools/no_action.py). Appended
         # only when something real is armed, so an empty box stays chat-only.
@@ -2272,7 +2272,7 @@ def action_tools_for(settings: Settings, *, guest: bool = False) -> list:
     return tools
 
 
-def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
+def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=None) -> list:
     tools: list = []
 
     if not guest and settings.ha_token is not None:
@@ -2496,6 +2496,12 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             owner = str(settings.owner_person_id)
             tools.append(build_contact_tool(contacts, owner_person_id=owner,
                                             owner_names=lambda: contacts.names_of(owner)))
+
+    if guest:
+        from aerys_v2.tools.pass_to_chris import relay_for, build_pass_to_chris_tool
+        relay = relay_for(settings, reach_desk)
+        if relay is not None:
+            tools.append(build_pass_to_chris_tool(relay))
 
     if not guest:
         from aerys_v2.tools.send_message import build_send_message_tool, build_messages_sent_tool
@@ -2739,7 +2745,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     return router_for(settings, soul), action_graph
 
 
-def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None) -> object | None:
+def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None, *, reach_desk=None) -> object | None:
     """The REDUCED action graph handed to NON-allowlisted callers: media tools
     (analyze_image / read_document / youtube_summary) + web search — but no house
     control, no presence reads, no timers. Anyone can share an image or ask her to
@@ -2747,7 +2753,7 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
     reach (they aren't in this graph, so a confused model can't call them — defense
     in depth on top of the ask() allowlist gate). None when neither media nor search
     is armed, in which case the gate keeps non-owners fully chat-only, as before."""
-    tools = action_tools_for(settings, guest=True)
+    tools = action_tools_for(settings, guest=True, reach_desk=reach_desk)
     if not tools:
         return None
     # Structural on either engine: a separate graph built from the guest tool list.

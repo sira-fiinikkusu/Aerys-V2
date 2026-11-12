@@ -1788,7 +1788,18 @@ def _action_history_seed(
         if HANDOFF_MARKER in _reply_text(prior[-1]):
             reading = _strip_handoff(_reply_text(prior[-1]))
         prior = prior[:-1]
+    # A relay may be the first item in his thread. window_messages removes leading
+    # assistant messages; retain this immediately replied-to outside quote so the
+    # action guard cannot lose its provenance on a fresh thread or window boundary.
+    reply_index = -2 if escalated and prior and isinstance(prior[-1], HumanMessage) else -1
+    relay_reply = prior[reply_index] if len(prior) >= abs(reply_index) else None
+    if not (isinstance(relay_reply, AIMessage)
+            and relay_reply.additional_kwargs.get("reach_source") == "relay"):
+        relay_reply = None
     prior = window_messages(prior, getattr(graph, "history_window_messages", 200))
+    if relay_reply is not None and relay_reply not in prior:
+        at = len(prior) - 1 if escalated and prior and isinstance(prior[-1], HumanMessage) else len(prior)
+        prior = [*prior[:at], relay_reply, *prior[at:]]
     current_checkpointed = escalated and prior and getattr(prior[-1], "type", "") == "human"
     if specialist and str(getattr(graph, "action_context", "requests") or "").strip().lower() == "full":
         return _full_action_seed(graph, prior, text, identity, current_checkpointed=current_checkpointed,

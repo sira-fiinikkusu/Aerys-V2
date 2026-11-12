@@ -275,13 +275,17 @@ def main() -> None:
             # EMBEDDINGS_API_KEY (media) is set (the api key the router/tool
             # model needs is structurally required by Settings). None = ask()
             # runs chat-only, exactly as before tools existed.
+            from aerys_v2.kael_line import reach_desk_for
+
+            reach_desk = reach_desk_for(settings, graph)
             router = action_graph = guest_action_graph = None
             stack = action_stack_for(
                 settings, soul, room_context_fn=room_context,
                 portable_context_fn=portable_context)
             if stack is not None:
                 router, action_graph = stack
-                guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
+                guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context,
+                                                            reach_desk=reach_desk)
                 router, reflex = _arm_live_reflex(settings, reflex, router, action_graph)
                 log.info("action stack armed | ha=%s canary=[%s] media=%s",
                          settings.ha_base_url if settings.ha_token else "(off)",
@@ -314,9 +318,6 @@ def main() -> None:
             # share one note injector; the wake lets an answer reach the owner now.
             # The reach-out desk (board #176, Stage 2): everything she starts herself goes
             # through it: the Kael-note turn and the ticket answers here, its watcher below.
-            from aerys_v2.kael_line import reach_desk_for
-
-            reach_desk = reach_desk_for(settings, graph)
             kael_note_fn = kael_note_for(graph, settings, desk=reach_desk)
             # Her home body's "I'm done" (board #176, Stage 3): the /home-notice receiver
             # writes each notice down; its worker (started below) tells the owner via the desk.
@@ -520,13 +521,18 @@ def main() -> None:
         record_turn = turn_recorder_for(settings)
         # Panel-face seam: text turns move her desk face too (working/mood).
         face_push = face_pusher_for(settings)
+        # Discord contacts use this local guest graph, not the HTTP action graph.
+        # The shared reach ledger is drained by the existing --serve desk watcher.
+        from aerys_v2.kael_line import reach_desk_for
+        relay_desk = reach_desk_for(settings, graph) if settings.messages_as_herself else None
         router = action_graph = guest_action_graph = None
         stack = action_stack_for(
             settings, soul, room_context_fn=room_context,
             portable_context_fn=portable_context)
         if stack is not None:
             router, action_graph = stack
-            guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context)
+            guest_action_graph = guest_action_graph_for(settings, soul, room_context_fn=room_context,
+                                                        reach_desk=relay_desk)
             router, reflex = _arm_live_reflex(settings, reflex, router, action_graph)
 
         # Identity resolution — the AUTH BOUNDARY (transports/resolver.py). With the
