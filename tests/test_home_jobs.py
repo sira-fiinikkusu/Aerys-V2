@@ -482,7 +482,6 @@ def _settings(**over):
 
 def test_not_armed_unless_everything_it_needs_is_there():
     assert home_jobs_for(_settings(home_jobs=False), environ={}) is None
-    assert home_jobs_for(_settings(action_loop="graph"), environ={}) is None
     assert home_jobs_for(_settings(home_url=""), environ={}) is None
     assert home_jobs_for(_settings(home_api_token=None), environ={}) is None
     assert home_jobs_for(_settings(hands_gates=False), environ={}) is None     # the D10 gate is required
@@ -528,7 +527,7 @@ def test_the_action_stack_mounts_home_jobs_on_the_new_loop_only_when_armed(home,
     assert graph.home_jobs is b.jobs and seen[-1]["extra_middleware"] == b.jobs.middleware
     assert HOME_JOBS_OVERLAY in seen[-1]["overlay"]
     _, graph = action_stack_for(settings(), soul="s")        # HOME_JOBS off: nothing changes
-    assert graph.home_jobs is None and "extra_middleware" not in seen[-1]
+    assert graph.home_jobs is None and not seen[-1]["extra_middleware"]
     assert HOME_JOBS_OVERLAY not in seen[-1]["overlay"]
 
 

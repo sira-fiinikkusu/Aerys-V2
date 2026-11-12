@@ -12,7 +12,7 @@ import json
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from aerys_v2.factory import SPECIALIST_CHARTER, ToolModelPair, build_action_graph
+from aerys_v2.factory import SPECIALIST_CHARTER, build_action_graph
 from aerys_v2.service import ACTION_SEED_TRUNCATE_AT, _action_history_seed
 from aerys_v2.services.content_privacy import CONTENT_PRIVACY_KEY
 import aerys_v2.tools.home_control as hc
@@ -25,68 +25,42 @@ from aerys_v2.tools.home_control import (
 
 hc._VERIFY_DELAYS_S = (0.0, 0.0)  # the read-back grace is real time; tests don't wait
 
-# ---- ToolModelPair: conversation free, specialist forced-then-free, fast pair ----
+# ---- Agent model policy: conversation free, specialist forced then free ----
+from aerys_v2.action_loop import AgentToolModels
+
+FIRST = [HumanMessage(content="dim the sample room")]
+AFTER_TOOL = [*FIRST, AIMessage(content="", tool_calls=[{"name": "home_control", "args": {}, "id": "c1"}]),
+              ToolMessage(content="Done", tool_call_id="c1")]
 
 
-class Recorder:
-    def __init__(self, name):
-        self.name = name
-        self.calls = []
-
-    def invoke(self, messages, **kw):
-        self.calls.append(list(messages))
-        return AIMessage(content=self.name)
-
-
-def _trio():
-    conv, auto, forced = Recorder("conv"), Recorder("auto"), Recorder("forced")
-    fa, ff = Recorder("fast_auto"), Recorder("fast_forced")
-    return conv, auto, forced, fa, ff, ToolModelPair(conv, auto, forced, fa, ff)
-
-
-FIRST = [HumanMessage(content="sys"), HumanMessage(content="dim the sunroom")]
-AFTER_TOOL = [
-    *FIRST,
-    AIMessage(content="", tool_calls=[{"name": "home_control", "args": {}, "id": "c1"}]),
-    ToolMessage(content="Done: set_brightness 50% sent", tool_call_id="c1"),
-]
+def _models():
+    return AgentToolModels("conv", ("standard", True), ("fast", True))
 
 
 def test_pair_forces_the_first_pass_only():
-    conv, auto, forced, fa, ff, pair = _trio()
-    assert pair.invoke(FIRST, specialist=True).content == "forced"
-    assert pair.invoke(AFTER_TOOL, specialist=True).content == "auto"
-    assert not conv.calls and not fa.calls and not ff.calls
+    models = _models()
+    assert models.choose(FIRST, specialist=True, fast=False) == ("standard", "any")
+    assert models.choose(AFTER_TOOL, specialist=True, fast=False) == ("standard", None)
 
 
 def test_pair_fast_tier_uses_the_fast_models():
-    conv, auto, forced, fa, ff, pair = _trio()
-    assert pair.invoke(FIRST, specialist=True, fast=True).content == "fast_forced"
-    assert pair.invoke(AFTER_TOOL, specialist=True, fast=True).content == "fast_auto"
-    assert not auto.calls and not forced.calls
+    models = _models()
+    assert models.choose(FIRST, specialist=True, fast=True) == ("fast", "any")
+    assert models.choose(AFTER_TOOL, specialist=True, fast=True) == ("fast", None)
 
 
 def test_pair_conversation_is_never_forced_and_never_fast():
-    # Voice banter rides this graph as conversation: the daily driver, free.
-    conv, auto, forced, fa, ff, pair = _trio()
-    assert pair.invoke(FIRST).content == "conv"
-    assert pair.invoke(FIRST, fast=True).content == "conv"
-    assert not forced.calls and not ff.calls
+    for fast in (False, True):
+        assert _models().choose(FIRST, specialist=False, fast=fast) == ("conv", None)
 
 
 def test_pair_without_fast_models_falls_back_to_standard():
-    conv, auto, forced = Recorder("conv"), Recorder("auto"), Recorder("forced")
-    pair = ToolModelPair(conv, auto, forced)
-    assert pair.invoke(FIRST, specialist=True, fast=True).content == "forced"
+    assert AgentToolModels("conv", ("standard", True)).choose(FIRST, specialist=True, fast=True) == ("standard", "any")
 
 
 def test_pair_honesty_bounce_is_a_free_pass():
-    # The gate's bounce re-invokes with the model's own no-tool answer appended —
-    # an assistant turn is in view, so forcing must NOT apply (the loop must be
-    # able to end on a plain answer).
-    conv, auto, forced, fa, ff, pair = _trio()
-    bounced = [HumanMessage(content="x"), AIMessage(content="I can't"), HumanMessage(content="use a tool")]
-    assert pair.invoke(bounced, specialist=True).content == "auto"
+    bounced = [HumanMessage(content="x"), AIMessage(content="I cannot"), HumanMessage(content="use a tool")]
+    assert _models().choose(bounced, specialist=True, fast=False) == ("standard", None)
 
 
 # ---- the charter rides the prompt slot the soul used to -------------------------
@@ -120,23 +94,14 @@ def test_specialist_prompt_leads_with_charter_not_soul():
     assert model.prompts[1][0].content.startswith("SOUL: a Curious Sentinel")
 
 
-def test_specialist_prompt_carries_the_fast_tier_into_the_pair():
-    class TierRecorder(ToolModelPair):
-        def __init__(self):
-            self.seen = []
-        def invoke(self, messages, *, specialist=False, fast=False, **kw):
-            self.seen.append((specialist, fast))
-            return AIMessage(content="done")
-    model = TierRecorder()
-    graph = build_action_graph(model, "soul", tools=[])
-    ident = {"user_id": "p1", "display_name": "Chris"}
-    graph.invoke({"messages": [HumanMessage(content="x")]},
-                 {"configurable": {"identity": ident, "specialist": True, "tier": "fast"}})
-    graph.invoke({"messages": [HumanMessage(content="x")]},
-                 {"configurable": {"identity": ident, "specialist": True, "tier": "standard"}})
-    graph.invoke({"messages": [HumanMessage(content="x")]},
-                 {"configurable": {"identity": ident, "tier": "fast"}})
-    assert model.seen == [(True, True), (True, False), (False, True)]
+def test_specialist_prompt_carries_the_fast_tier_into_the_agent():
+    from test_action_loop_agent import Rec
+    log, script = [], [AIMessage(content="done") for _ in range(3)]
+    conv, std, fast = (Rec(label=n, script=script, log=log) for n in ("conv", "std", "fast"))
+    graph = build_action_graph(AgentToolModels(conv, (std, True), (fast, True)), "soul", tools=[])
+    for config in ({"specialist": True, "tier": "fast"}, {"specialist": True, "tier": "standard"}, {"tier": "fast"}):
+        graph.invoke({"messages": [HumanMessage(content="x")]}, {"configurable": config})
+    assert [p["model"] for p in log] == ["fast", "std", "conv"]
 
 
 # ---- the seed: prior REQUESTS only, truncated, current last ------------------------

@@ -31,10 +31,10 @@ RESULT = ToolMessage(content="Sunny, 82.", tool_call_id="t1", name="get_weather"
 DONE = AIMessage(content="Sunny and 82 today.")
 
 
-def test_a_two_pass_turn_replays_with_parity_and_fidelity():
+def test_a_two_pass_turn_replays_with_fidelity():
     report = compare(turn_from_row(row([([SYS, ASK], CALL), ([SYS, ASK, CALL, RESULT], DONE)])))
-    assert report["parity"] and report["fidelity"], report["parity_diffs"] + report["fidelity_diffs"]
-    assert [p["slot"] for p in report["old_log"]] == ["std", "std"]
+    assert report["fidelity"], report["fidelity_diffs"]
+    assert [p["slot"] for p in report["replay_log"]] == ["std", "std"]
 
 
 def test_the_honesty_gate_retry_is_replayed_from_its_recorded_input():
@@ -42,14 +42,14 @@ def test_the_honesty_gate_retry_is_replayed_from_its_recorded_input():
     correction = HumanMessage(content="(you did not call a tool)")
     report = compare(turn_from_row(row([([SYS, ASK], claim), ([SYS, ASK, claim, correction], CALL),
                                         ([SYS, ASK, claim, correction, CALL, RESULT], DONE)])))
-    assert report["parity"] and report["fidelity"]
-    assert len(report["old_log"]) == len(report["new_log"]) == 3
+    assert report["fidelity"]
+    assert len(report["replay_log"]) == 3
 
 
 def test_a_record_the_graph_could_not_have_produced_fails_fidelity():
     stray = HumanMessage(content="a line the graph never wrote")
     report = compare(turn_from_row(row([([SYS, ASK], CALL), ([SYS, ASK, CALL, RESULT, stray], DONE)])))
-    assert report["parity"] and not report["fidelity"]
+    assert not report["fidelity"]
     assert report["fidelity_diffs"] == ["pass 2: history differs from the record"]
 
 
@@ -64,8 +64,8 @@ def test_a_second_run_the_gate_would_not_have_made_fails_fidelity():
 def test_an_error_result_replays_as_an_error():
     failed = ToolMessage(content="Error: HA unreachable", tool_call_id="t1", name="get_weather", status="error")
     report = compare(turn_from_row(row([([SYS, ASK], CALL), ([SYS, ASK, CALL, failed], DONE)])))
-    assert report["parity"] and report["fidelity"]
-    tool_seen = [m for m in report["old_log"][1]["messages"] if m[0] == "tool"]
+    assert report["fidelity"]
+    tool_seen = [m for m in report["replay_log"][1]["messages"] if m[0] == "tool"]
     assert tool_seen[0][5] == "error"
 
 
@@ -76,3 +76,27 @@ def test_a_call_the_record_does_not_have_fails_fidelity():
     turn.outputs[0] = other_args           # the loop now asks for something never recorded
     report = compare(turn)
     assert not report["fidelity"]
+
+
+def test_cli_reports_only_fidelity_and_show_opts_into_content(tmp_path, capsys):
+    import json
+    from aerys_v2.replay_traces import main
+    corpus = tmp_path / "synthetic.jsonl"
+    corpus.write_text(json.dumps(row([([SYS, ASK], CALL), ([SYS, ASK, CALL, RESULT], DONE)])) + "\n")
+    assert main([str(corpus)]) == 0
+    report = capsys.readouterr().out
+    assert "1 real action turns, 2 model passes" in report
+    assert "fidelity (agent loop replays the record)" in report
+    assert "parity" not in report and ASK.content not in report and RESULT.content not in report
+    assert main([str(corpus), "--show", "1"]) == 0
+    assert ASK.content in capsys.readouterr().out
+
+
+def test_cli_load_failure_is_content_free(tmp_path, capsys):
+    import json
+    from aerys_v2.replay_traces import main
+    corpus = tmp_path / "invalid.jsonl"
+    corpus.write_text(json.dumps({"id": 2, "passes": [{"input": ["PRIVATE_SENTINEL"]}]}) + "\n")
+    assert main([str(corpus)]) == 1
+    report = capsys.readouterr().out
+    assert "load failed:" in report and "PRIVATE_SENTINEL" not in report

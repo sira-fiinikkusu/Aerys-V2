@@ -1,4 +1,6 @@
 """Inspect real SDK clients and requests; provider I/O stays offline."""
+from aerys_v2.action_loop import build_agent_tool_models
+
 
 import asyncio
 import time
@@ -16,7 +18,6 @@ from aerys_v2.config import Settings
 from aerys_v2.evals.runner import Judge
 from aerys_v2.factory import (
     LOCAL_FALLBACK_FIRED,
-    build_api_tool_model,
     build_model,
     content_privacy_fn_for,
     tier_models_for,
@@ -62,13 +63,11 @@ def test_all_metered_clients_preserve_read_budget_and_set_connection_policy(
     collect(build_model(s, timeout_s=timeout_s), timeout_s)
     for model in tier_models_for(s, timeout_s=timeout_s).values():
         collect(model, timeout_s)
-    pair = build_api_tool_model(s, [test_light], timeout_s=timeout_s)
-    for binding in (pair._conv, pair._auto, pair._forced, pair._fast_auto, pair._fast_forced):
-        if armed:
-            binding = binding.primary
-        clients.append((binding.bound, timeout_s, 2))
-    empty = build_api_tool_model(s, [], timeout_s=timeout_s)
-    clients.append(((empty.primary if armed else empty).bound, timeout_s, 2))
+    pair = build_agent_tool_models(s, [test_light], timeout_s=timeout_s)
+    for model in (pair.conversational, pair.standard[0], (pair.fast or pair.standard)[0]):
+        clients.append((model, timeout_s, 2))
+    empty = build_agent_tool_models(s, [], timeout_s=timeout_s)
+    clients.append((empty.conversational, timeout_s, 2))
 
     # Exercise the real closures to capture their actual client, not a factory stub.
     # The router is called first (10 s), then the privacy judge (15 s). Told apart by
@@ -194,13 +193,19 @@ def test_connect_timeout_reaches_real_sdk_once_and_preserves_failure_policy(monk
         if lane == "chat":
             model = build_model(s)
         elif lane == "tool":
-            model = build_api_tool_model(s, [test_light])._forced
+            model = build_agent_tool_models(s, [test_light])
         else:
             model = tier_models_for(s)[lane]
-        invoke = lambda: model.invoke([HumanMessage(content="hello")]).content
+        if lane == "tool":
+            from action_model_probe import invoke_models
+            invoke = lambda: invoke_models(model, [HumanMessage(content="hello")], [test_light], specialist=True).content
+        else:
+            invoke = lambda: model.invoke([HumanMessage(content="hello")]).content
         expected = "local reply"
     started = time.monotonic()
-    assert invoke() == expected
+    from aerys_v2.factory import track_local_tool_fallback
+    with track_local_tool_fallback():
+        assert invoke() == expected
     assert time.monotonic() - started < 2.0
     assert len(requests) == 1  # Actual SDK retries, not a mocked model invocation.
     assert requests[0].extensions["timeout"] == {

@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 from aerys_v2.anthropic_model import build_metered_model, mark_cached_prefix
 from aerys_v2.config import Settings
-from aerys_v2.factory import build_api_tool_model
+from aerys_v2.action_loop import build_agent_tool_models
 
 EPHEMERAL = {"type": "ephemeral"}
 
@@ -29,9 +29,7 @@ def settings(armed=True, **overrides):
     )
 
 
-def _payload(binding, armed):
-    if armed:
-        binding = binding.primary
+def _payload(binding):
     # bind_tools() keeps the tools in the binding's kwargs; merge them the way
     # invoke() does so the payload is the one the API would actually receive.
     return binding.bound._get_request_payload(
@@ -53,19 +51,19 @@ def _assert_system_breakpoint(payload):
 @pytest.mark.parametrize("armed", [False, True])
 @pytest.mark.parametrize("pin", ["", "pinned"])
 def test_every_tool_turn_model_sends_top_level_cache_control(armed, pin):
-    pair = build_api_tool_model(settings(armed, action_model=pin), [test_light])
-    for name in ("_conv", "_auto", "_forced", "_fast_auto", "_fast_forced"):
-        payload = _payload(getattr(pair, name), armed)
-        _assert_system_breakpoint(payload)
-        # The cache marker must not displace the things that make it a tool turn.
-        assert payload["tools"], name
-        assert payload["max_tokens"] == 1024, name
+    pair = build_agent_tool_models(settings(armed, action_model=pin), [test_light])
+    for model, may_force in ((pair.conversational, False), pair.standard, pair.fast or pair.standard):
+        for choice in ((None, "any") if may_force else (None,)):
+            payload = _payload(model.bind_tools([test_light], tool_choice=choice))
+            _assert_system_breakpoint(payload)
+            assert payload["tools"]
+            assert payload["max_tokens"] == 1024
 
 
 @pytest.mark.parametrize("armed", [False, True])
 def test_toolless_conversational_model_caches_too(armed):
-    empty = build_api_tool_model(settings(armed), [])
-    _assert_system_breakpoint(_payload(empty, armed))
+    empty = build_agent_tool_models(settings(armed), [])
+    _assert_system_breakpoint(_payload(empty.conversational.bind_tools([])))
 
 
 def test_breakpoint_falls_back_to_the_last_tool_without_system_text():

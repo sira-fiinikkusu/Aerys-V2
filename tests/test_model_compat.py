@@ -79,11 +79,11 @@ def light(operation: str) -> str:
 
 
 def test_the_api_action_path_forces_a_tool_only_where_the_model_allows_it():
-    from aerys_v2.factory import build_api_tool_model
+    from aerys_v2.action_loop import build_agent_tool_models
 
-    pair = build_api_tool_model(settings(model="claude-sonnet-5-5", tier_fast_model="claude-haiku-5-5"), [light])
-    assert "tool_choice" not in pair._forced.kwargs, "Sonnet 5.5 refuses a forced tool call"
-    assert pair._fast_forced.kwargs["tool_choice"] == {"type": "any"}, "Haiku 5.5 takes it"
+    pair = build_agent_tool_models(settings(model="claude-sonnet-5-5", tier_fast_model="claude-haiku-5-5"), [light])
+    assert pair.standard[1] is False, "Sonnet 5.5 refuses a forced tool call"
+    assert pair.fast[1] is True, "Haiku 5.5 takes it"
 
 
 def test_the_memory_labeler_sends_no_temperature_to_haiku_5_5(monkeypatch):

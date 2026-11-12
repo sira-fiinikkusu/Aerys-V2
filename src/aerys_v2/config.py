@@ -157,12 +157,8 @@ class Settings(BaseSettings):
     # on a turn the router already decided needs one); later passes are free so
     # the loop can end. Env ACTION_FORCE_TOOL=false to bench without it.
     action_force_tool: bool = True
-    # ACTION_LOOP (board #176, Stage 1): which engine runs her action turns.
-    # "graph" = the hand-rolled act <-> tools graph (factory.build_action_graph);
-    # "agent" = the same turn on LangChain's create_agent (action_loop.py), built
-    # beside it and proven by parity before the flip. Flips need recreate.sh, not
-    # docker restart (the env file is baked at container creation).
-    action_loop: Literal["graph", "agent"] = "graph"
+    # ACTION_LOOP remains accepted for live environment files; create_agent is the only engine.
+    action_loop: Literal["agent"] = "agent"
     # HISTORY_WINDOW_MESSAGES: maximum prior thread messages shown to the model
     # (chat includes the current human in this tail). The checkpointer keeps
     # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.
@@ -529,7 +525,7 @@ class Settings(BaseSettings):
     home_read_only_agents: str = ""
     # Separate home-job grant: person UUID=home project, comma separated.
     home_job_members: str = ""
-    # HER LONG JOBS AT HOME (home_jobs.py; board #176, s3-02): her new loop (action_loop=agent)
+    # HER LONG JOBS AT HOME (home_jobs.py; board #176, s3-02): her create_agent loop
     # starts jobs on her home body through LangChain's AsyncSubAgentMiddleware, at home_url with
     # home_api_token, behind the D10 gate above. Off unless home_jobs is true AND the gate is armed.
     home_jobs: bool = False

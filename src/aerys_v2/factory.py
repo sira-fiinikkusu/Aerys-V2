@@ -1413,9 +1413,8 @@ def content_privacy_fn_for(settings: Settings) -> ContentPrivacyFn | None:
 
     The keyword pass (services.content_privacy) short-circuits obvious private
     categories with zero model spend; the LLM decides the rest. The judge is a CHEAP
-    metered call (tier_fast_model — haiku), ALWAYS the API backend like
-    build_api_tool_model (the oauth/SDK backend is chat-only and this is a one-word
-    classification, not a conversation), capped at a handful of tokens. It runs on a
+    metered call (tier_fast_model — haiku), ALWAYS the API backend (this is a
+    one-word classification, not a conversation), capped at a handful of tokens. It runs on a
     daemon thread, so its latency never touches a reply; a judge failure fails CLOSED
     to 'private' inside classify_content_privacy. None when no anthropic key can arm a
     judge — the safe direction: without judgment, no DM content is ever relaxed to
@@ -1789,7 +1788,7 @@ LOCAL_ACTION_HARDENING = (
 def is_lifeboat_failure(e: BaseException) -> bool:
     """A tool-model failure the local lifeboat answers: the connection or the server
     side died. Client status errors (4xx, 429) and programming errors keep their
-    meaning and are raised. Shared by both action loops (board #176)."""
+    meaning and are raised. Used by the action middleware."""
     from aerys_v2.oauth_model import OAuthBackendError
 
     if isinstance(e, anthropic.APIStatusError):
@@ -1813,6 +1812,17 @@ def lifeboat_fired(e: BaseException) -> None:
         receipt.append(True)
 
 
+#: The tool lifeboat's tools (Chris 2026-10-26: "house controls only honestly makes sense. general
+#: web related tools would be unavailable anyways if she cant reach her API"). All 23 tool schemas
+#: were ~6k of the lifeboat's 10.5k-token prompt; these are the ones that work with the internet down.
+LIFEBOAT_TOOLS = frozenset({
+    "home_control", "search_entities", "timer", "control_alarm", "sticky_note", "manage_list", "no_action",
+})
+
+
+# The tool-model helpers below are no longer used by the rack's action engine (create_agent, built from
+# action_loop.build_agent_tool_models). They stay, unchanged, because Aerys Portable's hands and body
+# import build_api_tool_model and ToolModelPair from here (aerys_portable/hands, body/compose.py).
 class LocalToolFailoverModel:
     """A bound Anthropic primary with a connection/server-failure tool lifeboat.
 
@@ -2011,9 +2021,7 @@ def _action_prompt_builder(
     shared_surface_ids: dict | None,
     context_trailing: bool,
 ):
-    """The action mind's prompt for one model pass, shared by both loops (board #176):
-    the hand-rolled graph's act node and the create_agent loop build it with this same
-    code, so the request bytes can't drift between them. Returns
+    """The action mind's prompt for one create_agent model pass. Returns
     fn(messages, config) -> (prompt, specialist, fast)."""
 
     def assemble(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
@@ -2185,62 +2193,20 @@ def build_action_graph(
     context_trailing: bool = False,
     outside_gate=None,
     guard_owner=None,
+    *,
+    extra_middleware=(),
 ) -> object:
-    """START → act ⇄ tools → END: the tool subgraph for device commands.
+    """Build the sole action engine, retaining the public builder's call signature."""
+    from aerys_v2.action_loop import build_agent_action_graph
 
-    n8n mapping: this is the AI Agent node with an ai_tool connection — the
-    model proposes tool_calls, ToolNode (LangGraph prebuilt) executes them and
-    feeds ToolMessages back, and the loop repeats until the model answers in
-    plain text. The recursion_limit rail from ask() applies here too: each
-    act/tools hop is a super-step, so a confused model hits the wall instead of
-    incinerating budget (the dormant turn_limit in Rails, now live).
-
-    By default there is no checkpointer — an action turn is a one-shot; the durable
-    record is (a) the outbox row the tool wrote and (b) the final AIMessage
-    that service.py appends to the MAIN thread's checkpointer.
-    """
-    from langgraph.prebuilt import ToolNode
-
-    build_prompt = _action_prompt_builder(
-        soul, charter=charter, overlay=overlay, context_fn=context_fn,
+    return build_agent_action_graph(
+        api_model_with_tools, soul, tools, context_fn=context_fn, overlay=overlay,
         family_notes_fn=family_notes_fn, room_context_fn=room_context_fn,
         portable_context_fn=portable_context_fn, presence_fn=presence_fn,
         voice_room_fn=voice_room_fn, shared_surface_ids=shared_surface_ids,
-        context_trailing=context_trailing,
+        charter=charter, checkpointer=checkpointer, context_trailing=context_trailing,
+        outside_gate=outside_gate, guard_owner=guard_owner, extra_middleware=extra_middleware,
     )
-
-    def act(state: ChatState, config: RunnableConfig) -> dict:
-        from aerys_v2.outside_guard import prepare_origin
-        prepare_origin(config, guard_owner, shared_surface_ids, getattr(outside_gate, "members", None))
-        prompt, specialist, fast = build_prompt(state["messages"], config)
-        if isinstance(api_model_with_tools, ToolModelPair):
-            reply = api_model_with_tools.invoke(prompt, specialist=specialist, fast=fast)
-        else:
-            reply = api_model_with_tools.invoke(prompt)
-        return {"messages": [reply]}
-
-    def after_act(state: ChatState) -> str:
-        # tool_calls present -> execute them; plain text -> the turn is done.
-        last = state["messages"][-1]
-        calls = getattr(last, "tool_calls", None)
-        if calls:
-            # her panel status line names what she is about to do (tool names only)
-            from .panel_corner import report_activity
-
-            report_activity([c.get("name", "") for c in calls if isinstance(c, dict)])
-        return "tools" if calls else END
-
-    graph = StateGraph(ChatState)
-    graph.add_node("act", act)
-    from functools import partial
-    from aerys_v2.outside_guard import outside_guard
-    graph.add_node("tools", ToolNode(tools, wrap_tool_call=partial(outside_guard, gate=outside_gate)))
-    graph.add_edge(START, "act")
-    graph.add_conditional_edges("act", after_act, {"tools": "tools", END: END})
-    graph.add_edge("tools", "act")
-    compiled = graph.compile(checkpointer=checkpointer)
-    compiled.presence_fn = presence_fn
-    return compiled
 
 
 def action_tools_for(settings: Settings, *, guest: bool = False, reach_desk=None) -> list:
@@ -2661,13 +2627,10 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
 
 
 def _action_engine(settings: Settings, tools: list) -> tuple[object, Callable[..., object]]:
-    """(models, builder) for ACTION_LOOP (board #176): the hand-rolled graph with its
-    pre-bound models, or the create_agent loop with the same choices unbound."""
-    if getattr(settings, "action_loop", "graph") == "agent":
-        from aerys_v2.action_loop import build_agent_action_graph, build_agent_tool_models
+    """Unbound models and the create_agent builder for every action turn."""
+    from aerys_v2.action_loop import build_agent_tool_models
 
-        return build_agent_tool_models(settings, tools), build_agent_action_graph
-    return build_api_tool_model(settings, tools), build_action_graph
+    return build_agent_tool_models(settings, tools), build_action_graph
 
 
 def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None, portable_context_fn: PortableContextFn | None = None) -> tuple | None:

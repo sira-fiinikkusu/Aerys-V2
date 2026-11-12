@@ -3,11 +3,13 @@ resumes a CLI session by prefix or LangGraph thread_id and carries the previous 
 context (privacy overlay, memories) into a turn whose context changed. The wiring stays;
 every entry point refuses until upstream can run a fresh session per turn on a warm client.
 The subscription path with tools is MODEL_BACKEND=oauth + OAUTH_TOOL_BACKEND=oauth."""
+from aerys_v2.action_loop import build_agent_tool_models
+
 import pytest
 from langchain_core.tools import tool
 
 from aerys_v2.config import Settings
-from aerys_v2.factory import CLI_BLOCKED, build_api_tool_model, build_model, tier_models_for
+from aerys_v2.factory import CLI_BLOCKED, build_model, tier_models_for
 
 
 @tool
@@ -23,7 +25,7 @@ def settings(**kw):
 @pytest.mark.parametrize("build", [
     lambda s: build_model(s),
     lambda s: tier_models_for(s),
-    lambda s: build_api_tool_model(s, [light_state]),
+    lambda s: build_agent_tool_models(s, [light_state]),
 ])
 def test_cli_backend_is_blocked_at_every_entry_point(build):
     with pytest.raises(RuntimeError, match="blocked"):

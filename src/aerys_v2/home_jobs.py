@@ -567,8 +567,6 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
     environ = os.environ if environ is None else environ
     token = getattr(settings, "home_api_token", None)
     reasons = []
-    if getattr(settings, "action_loop", "graph") != "agent":
-        reasons.append("it needs her new loop (ACTION_LOOP=agent)")
     if not str(getattr(settings, "home_url", "") or "").strip() or token is None:
         reasons.append("HOME_URL and HOME_API_TOKEN are needed")
     if not getattr(settings, "database_url", None) or getattr(settings, "owner_person_id", None) is None:

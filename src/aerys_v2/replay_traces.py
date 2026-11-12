@@ -1,30 +1,9 @@
-"""Replay her real action turns through both loops (board #176, Stage 1): the flip gate.
+"""Replay recorded action history through the agent loop and check fidelity.
 
-The parity tests prove the create_agent loop on hand-built turns. This proves it on her
-REAL ones: action turns exported from Phoenix traces (every model pass inside the action
-graph: exactly what it was handed and what it answered, plus the tools' results). For
-each turn:
-
-  * the seed is the first pass's recorded input, minus the system prompt;
-  * the model is a recording that answers with the recorded outputs, in order;
-  * each tool is a stub that answers with the recorded result for that call;
-  * the turn runs through the old graph AND the new loop, same seed, same config.
-
-Two checks per turn:
-  * parity: the new loop handed the model the same thing as the old graph on every pass
-    (model slot, tools, tool_choice, messages) and ended with the same messages;
-  * fidelity: the old graph's replayed history matches what was actually recorded, so
-    the harness itself is trusted (a harness that can't reproduce the past proves
-    nothing about the future).
-
-What it covers is the ENGINE: how the loop drives the model and the tools. Both engines
-build the system prompt with the same code (factory._action_prompt_builder) and both get
-the same stand-in soul and no context functions here, so the prompt's live context is out
-of scope (the parity unit tests cover the builder, the tool schemas and the wire bytes).
-
-Offline and deterministic: no model is called, no tool runs, nothing is written. The
-corpus is her real conversations: it lives in Kael's private folder, never in this
-repo, and the report prints ids and diff kinds, never content (--show N for one turn).
+Each turn uses recorded model replies and stub tool results. Replayed model inputs
+must match the recorded history, excluding the system prompt's live context.
+Offline: no real model or tool runs. Corpora stay private; the default report
+prints only turn ids, channels, counts, and diff kinds. --show opts into content.
 
   python -m aerys_v2.replay_traces <corpus.jsonl> [--show TURN_ID]
 """
@@ -55,7 +34,7 @@ def _load(obj: dict) -> BaseMessage:
 
 
 def _norm(m: BaseMessage) -> tuple:
-    """What the model is shown of a message: comparable across engines and the record."""
+    """What the model is shown of a message: comparable with the record."""
     calls = tuple((c.get("name"), json.dumps(c.get("args"), sort_keys=True), c.get("id"))
                   for c in (getattr(m, "tool_calls", None) or []))
     content = m.content if isinstance(m.content, str) else json.dumps(m.content, sort_keys=True)
@@ -145,7 +124,7 @@ class _Stub(BaseTool):
 
     def _take(self, args: dict) -> tuple[str, str]:
         key = json.dumps(args, sort_keys=True)
-        # Calls in one pass run concurrently on BOTH engines, so their order within the
+        # Calls in one pass run concurrently in the agent loop, so their order within the
         # pass is not part of the comparison; the pass they belong to is.
         self.ledger.append((len(self.log), self.name, key))
         exact = self.results.get((self.name, key))
@@ -166,8 +145,8 @@ class _Stub(BaseTool):
         return self._take(kwargs)[0]
 
 
-def _run(turn: RecordedTurn, engine: str, all_tools: list | None = None) -> dict:
-    """One engine over one turn: {log, out, error, ledger, unexplained, leftover}.
+def _run(turn: RecordedTurn, all_tools: list | None = None) -> dict:
+    """Replay one turn: {log, out, error, ledger, unexplained, leftover}.
 
     all_tools: every tool name in the corpus. Production binds her whole tool set on
     every pass, never only the tools a turn happened to call (an empty list binds
@@ -178,8 +157,8 @@ def _run(turn: RecordedTurn, engine: str, all_tools: list | None = None) -> dict
     appended. A second run is replayed only when the record shows exactly that: the
     next recorded input is this run's messages plus one human line. Anything else is
     an unexplained run, and fails fidelity."""
-    from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
-    from aerys_v2.factory import ToolModelPair, build_action_graph
+    from aerys_v2.action_loop import AgentToolModels
+    from aerys_v2.factory import build_action_graph
 
     log: list = []
     ledger: list = []
@@ -188,12 +167,7 @@ def _run(turn: RecordedTurn, engine: str, all_tools: list | None = None) -> dict
     names = sorted(set(all_tools or ()) | set(turn.tool_names))
     tools = [_Stub(name=n, description=f"recorded {n}", results=results, ledger=ledger, log=log) for n in names]
     conv, std, fast = (_Recording(label=n, outputs=outputs, log=log) for n in ("conv", "std", "fast"))
-    if engine == "old":
-        model = ToolModelPair(conv.bind_tools(tools), std.bind_tools(tools), std.bind_tools(tools, tool_choice="any"),
-                              fast.bind_tools(tools), fast.bind_tools(tools, tool_choice="any"))
-        graph = build_action_graph(model, "SOUL", tools)
-    else:
-        graph = build_agent_action_graph(AgentToolModels(conv, (std, True), (fast, True)), "SOUL", tools)
+    graph = build_action_graph(AgentToolModels(conv, (std, True), (fast, True)), "SOUL", tools)
     run = {"log": log, "out": None, "error": None, "ledger": ledger, "unexplained": None}
     try:
         messages = list(turn.seed)
@@ -210,44 +184,31 @@ def _run(turn: RecordedTurn, engine: str, all_tools: list | None = None) -> dict
             run["unexplained"] = f"run ended after pass {len(log)}; the record continues without a gate retry"
             break
     except Exception as e:
-        run["error"] = f"{type(e).__name__}: {str(e)[:120]}"
+        run["error"] = type(e).__name__
     run["leftover"] = sum(len(q) for q in results.values()) + len(outputs)
     return run
 
 
 def compare(turn: RecordedTurn, all_tools: list | None = None) -> dict:
-    old, new = _run(turn, "old", all_tools), _run(turn, "new", all_tools)
-    old_log, new_log = old["log"], new["log"]
-    kinds = []
-    if old["error"] or new["error"]:
-        kinds.append(f"error old={old['error']} new={new['error']}")
-    if len(new_log) != len(old_log):
-        kinds.append(f"passes old={len(old_log)} new={len(new_log)}")
-    for i, (a, b) in enumerate(zip(old_log, new_log)):
-        for key in ("slot", "tools", "choice", "system", "messages"):
-            if a[key] != b[key]:
-                kinds.append(f"pass {i + 1}: {key} differs")
-    if old["out"] != new["out"]:
-        kinds.append("final messages differ")
-    if sorted(old["ledger"]) != sorted(new["ledger"]):
-        kinds.append("tool calls differ")
+    run = _run(turn, all_tools)
+    replay_log = run["log"]
     fidelity = []
-    if old["error"]:
+    if run["error"]:
         fidelity.append("the replay failed")
-    if old["unexplained"]:
-        fidelity.append(old["unexplained"])
-    if len(old_log) != len(turn.recorded_inputs):
-        fidelity.append(f"passes replayed={len(old_log)} recorded={len(turn.recorded_inputs)}")
-    for i, (a, rec) in enumerate(zip(old_log, turn.recorded_inputs)):
+    if run["unexplained"]:
+        fidelity.append(run["unexplained"])
+    if len(replay_log) != len(turn.recorded_inputs):
+        fidelity.append(f"passes replayed={len(replay_log)} recorded={len(turn.recorded_inputs)}")
+    for i, (a, rec) in enumerate(zip(replay_log, turn.recorded_inputs)):
         if a["messages"] != [_norm(m) for m in rec]:
             fidelity.append(f"pass {i + 1}: history differs from the record")
-    if any(entry[1] == "<inexact>" for entry in old["ledger"]):
+    if any(entry[1] == "<inexact>" for entry in run["ledger"]):
         fidelity.append("a tool was called with arguments the record doesn't have")
-    if old["leftover"]:
-        fidelity.append(f"{old['leftover']} recorded outputs/results never used")
+    if run["leftover"]:
+        fidelity.append(f"{run['leftover']} recorded outputs/results never used")
     return {"id": turn.id, "channel": turn.channel, "passes": len(turn.outputs),
-            "parity": not kinds, "parity_diffs": kinds, "fidelity": not fidelity, "fidelity_diffs": fidelity,
-            "old_log": old_log, "new_log": new_log}
+            "fidelity": not fidelity, "fidelity_diffs": fidelity,
+            "replay_log": replay_log}
 
 
 def main(argv: list[str]) -> int:
@@ -257,7 +218,7 @@ def main(argv: list[str]) -> int:
         print(__doc__)
         return 2
     show = int(argv[argv.index("--show") + 1]) if "--show" in argv else None
-    factory._where_when_line = lambda thread, identity: "\nIt is noon."   # both engines, same minute
+    factory._where_when_line = lambda thread, identity: "\nIt is noon."   # deterministic prompt clock
     rows = [json.loads(line) for line in open(argv[0])]
     all_tools = sorted({t["name"] for row in rows for t in row.get("tools", []) if t.get("name")})
     reports = []
@@ -265,24 +226,20 @@ def main(argv: list[str]) -> int:
         try:
             reports.append(compare(turn_from_row(row), all_tools))
         except Exception as e:
-            reports.append({"id": row.get("id"), "channel": row.get("channel"), "passes": 0, "parity": False,
-                            "parity_diffs": [f"load failed: {type(e).__name__}: {str(e)[:120]}"],
-                            "fidelity": False, "fidelity_diffs": []})
-    parity = sum(r["parity"] for r in reports)
+            reports.append({"id": row.get("id"), "channel": row.get("channel"), "passes": 0,
+                            "fidelity": False, "fidelity_diffs": [f"load failed: {type(e).__name__}"]})
     fidelity = sum(r["fidelity"] for r in reports)
     passes = sum(r["passes"] for r in reports)
     print(f"{len(reports)} real action turns, {passes} model passes")
-    print(f"parity (new loop == old graph on every pass): {parity}/{len(reports)}")
-    print(f"fidelity (old graph replays the record):      {fidelity}/{len(reports)}")
+    print(f"fidelity (agent loop replays the record):      {fidelity}/{len(reports)}")
     for r in reports:
-        if not r["parity"] or not r["fidelity"]:
+        if not r["fidelity"]:
             print(f"  turn {r['id']} ({r['channel']}, {r['passes']} passes): "
-                  f"{'; '.join(r['parity_diffs'] + r['fidelity_diffs'])}")
+                  f"{'; '.join(r['fidelity_diffs'])}")
     if show is not None:
         r = next((r for r in reports if r["id"] == show), None)
         print(json.dumps(r, indent=1, default=str)[:20000] if r else f"no turn {show}")
-    # The gate passes only when the harness is trusted (fidelity) AND the loops agree (parity).
-    return 0 if parity == fidelity == len(reports) else 1
+    return 0 if fidelity == len(reports) else 1
 
 
 if __name__ == "__main__":

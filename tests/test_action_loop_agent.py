@@ -1,11 +1,4 @@
-"""Board #176, Stage 1: her action loop on create_agent, proven against the old graph.
-
-The claim this slice rests on: same prompt, same model, same tools, same tool_choice,
-same rails. These tests run identical turns through both engines and compare what the
-model was handed, at the LangChain level (a recording fake model) and at the wire
-(the Anthropic payload, cache marks included). The whole suite also runs against the
-new loop with AERYS_TEST_ACTION_LOOP=agent (tests/conftest.py).
-"""
+"""Action-loop behavior: prompts, model choice, tools, rails, and wire payloads."""
 
 from __future__ import annotations
 
@@ -31,15 +24,11 @@ from aerys_v2.action_loop import (
     SurfaceSplitAgentModels,
     build_agent_action_graph,
 )
-from aerys_v2.factory import LOCAL_FALLBACK_FIRED, ToolModelPair
-
-# The hand-rolled graph, even when the suite runs with AERYS_TEST_ACTION_LOOP=agent.
-OLD_BUILD = getattr(factory, "_original_build_action_graph", factory.build_action_graph)
-
+from aerys_v2.factory import LOCAL_FALLBACK_FIRED
 
 @pytest.fixture(autouse=True)
 def fixed_clock(monkeypatch):
-    # The where/when line carries the minute; both engines must see the same one.
+    # The where/when line carries the minute; tests use a stable one.
     monkeypatch.setattr(factory, "_where_when_line", lambda thread, identity: "\nIt is noon.")
 
 
@@ -89,21 +78,10 @@ def a_tool_then_done():
             AIMessage(content="Done.")]
 
 
-def engines(script_fn):
-    """Both engines over the same scripted models: (old_graph, old_log, new_graph, new_log)."""
-    out = []
-    for build in ("old", "new"):
-        log, script = [], script_fn()
-        conv, std, fast = (Rec(label=n, script=script, log=log) for n in ("conv", "std", "fast"))
-        if build == "old":
-            pair = ToolModelPair(conv.bind_tools(TOOLS), std.bind_tools(TOOLS),
-                                 std.bind_tools(TOOLS, tool_choice="any"),
-                                 fast.bind_tools(TOOLS), fast.bind_tools(TOOLS, tool_choice="any"))
-            graph = OLD_BUILD(pair, "SOUL", TOOLS)
-        else:
-            graph = build_agent_action_graph(AgentToolModels(conv, (std, True), (fast, True)), "SOUL", TOOLS)
-        out += [graph, log]
-    return out
+def agent(script_fn):
+    log, script = [], script_fn()
+    conv, std, fast = (Rec(label=n, script=script, log=log) for n in ("conv", "std", "fast"))
+    return build_agent_action_graph(AgentToolModels(conv, (std, True), (fast, True)), "SOUL", TOOLS), log
 
 
 def cfg(**configurable):
@@ -124,38 +102,40 @@ SURFACES = {
 
 
 @pytest.mark.parametrize("surface", SURFACES)
-def test_both_engines_hand_the_model_the_same_thing_on_every_pass(surface):
-    old, old_log, new, new_log = engines(a_tool_then_done)
-    turn = {"messages": [HumanMessage(content="say hi")]}
-    old_out = old.invoke(turn, SURFACES[surface])
-    new_out = new.invoke(turn, SURFACES[surface])
-    assert len(old_log) == 2 and new_log == old_log
-    assert [(m.type, m.content) for m in new_out["messages"]] == [(m.type, m.content) for m in old_out["messages"]]
+def test_agent_preserves_surface_model_choice_and_tool_history(surface):
+    graph, log = agent(a_tool_then_done)
+    out = graph.invoke({"messages": [HumanMessage(content="say hi")]}, SURFACES[surface])
+    specialist = SURFACES[surface]["configurable"].get("specialist", False)
+    label = "fast" if surface == "fast tier" else "std" if specialist else "conv"
+    assert [(p["model"], p["choice"]) for p in log] == [(label, "any" if specialist else None), (label, None)]
+    assert all(p["tools"] == ("echo", "home_control") for p in log)
+    assert [(m.type, m.content) for m in out["messages"]] == [
+        ("human", "say hi"), ("ai", ""), ("tool", "echo: hi"), ("ai", "Done.")]
+    assert log[1]["messages"][-3:] == [("human", "say hi"), ("ai", ""), ("tool", "echo: hi")]
 
 
 def test_the_specialist_first_pass_is_forced_and_later_passes_are_free():
-    _, _, new, log = engines(a_tool_then_done)
+    new, log = agent(a_tool_then_done)
     new.invoke({"messages": [HumanMessage(content="say hi")]}, SURFACES["typed specialist"])
     assert [(c["model"], c["choice"]) for c in log] == [("std", "any"), ("std", None)]
     assert log[0]["tools"] == ("echo", "home_control")
 
 
 def test_the_graph_is_model_and_tools_only_so_the_rail_means_what_it_meant():
-    _, _, new, _ = engines(a_tool_then_done)
+    new, _ = agent(a_tool_then_done)
     assert set(new.nodes) - {"__start__"} == {"model", "tools"}
 
 
-def test_a_runaway_loop_hits_the_same_wall_after_the_same_number_of_calls():
+def test_a_runaway_loop_hits_the_rail_after_five_model_calls():
     def forever():
         return [AIMessage(content="", tool_calls=[{"id": f"c{i}", "name": "echo", "args": {"text": "x"}}])
                 for i in range(20)]
 
-    old, old_log, new, new_log = engines(forever)
-    for graph in (old, new):
-        with pytest.raises(Exception) as err:
-            graph.invoke({"messages": [HumanMessage(content="loop")]}, SURFACES["typed specialist"])
-        assert type(err.value).__name__ == "GraphRecursionError"
-    assert len(new_log) == len(old_log) == 5
+    graph, log = agent(forever)
+    from langgraph.errors import GraphRecursionError
+    with pytest.raises(GraphRecursionError):
+        graph.invoke({"messages": [HumanMessage(content="loop")]}, SURFACES["typed specialist"])
+    assert len(log) == 5
 
 
 def test_the_service_attributes_ride_on_the_new_graph():
@@ -166,13 +146,11 @@ def test_the_service_attributes_ride_on_the_new_graph():
                         tier_fast_model="claude-haiku-5-5", action_model="", action_force_tool=True,
                         anthropic_api_key="k", oauth_turn_timeout_s=60)
     models, build = _action_engine(s, TOOLS)
-    assert build is build_agent_action_graph and isinstance(models, AgentToolModels)
+    assert build is factory.build_action_graph and isinstance(models, AgentToolModels)
     assert models.standard[1] is False      # Sonnet 5.5 refuses a forced tool on the API
     assert models.fast[1] is True           # Haiku 5.5 accepts it
     graph = build(models, "SOUL", TOOLS, presence_fn="p")
     assert graph.presence_fn == "p" and graph.action_loop == "agent"
-    s.action_loop = "graph"
-    assert _action_engine(s, TOOLS)[1] is factory.build_action_graph   # whatever the suite runs as "graph"
 
 
 # --- voice on the API, text on the plan: chosen per call --------------------------------------
@@ -277,16 +255,14 @@ def _wire_turns(monkeypatch, build):
     return payloads
 
 
-def test_the_wire_payloads_are_identical_old_and_new(monkeypatch):
-    old = _wire_turns(monkeypatch, lambda base: OLD_BUILD(
-        ToolModelPair(base.bind_tools(TOOLS), base.bind_tools(TOOLS),
-                      base.bind_tools(TOOLS, tool_choice="any")), "SOUL", TOOLS))
-    new = _wire_turns(monkeypatch, lambda base: build_agent_action_graph(
+def test_agent_wire_payloads_preserve_tool_choice_and_cache(monkeypatch):
+    payloads = _wire_turns(monkeypatch, lambda base: build_agent_action_graph(
         AgentToolModels(base, (base, True)), "SOUL", TOOLS))
-    assert len(old) == len(new) == 2
-    assert new == old
-    assert old[0]["tool_choice"]["type"] == "any" and "tool_choice" not in old[1]
-    assert "cache_control" in str(old[0]["system"])           # the cached prefix survived the re-bind
+    assert len(payloads) == 2
+    assert payloads[0]["tool_choice"]["type"] == "any" and "tool_choice" not in payloads[1]
+    assert "cache_control" in str(payloads[0]["system"])
+    assert [t["name"] for t in payloads[0]["tools"]] == ["echo", "home_control"]
+    assert payloads[1]["messages"][-1]["content"][0]["type"] == "tool_result"
 
 
 # --- the plan model: re-binding per call keeps the warm process ------------------------------
@@ -301,10 +277,8 @@ def test_rebinding_the_plan_model_reuses_the_same_warm_client_key():
 
 # --- Codex review 11/08: create_agent's repair of a malformed tool call ---------------------
 
-def test_a_malformed_call_then_a_claim_is_still_zero_tools_on_both_engines():
-    """Old graph: a malformed call ends the turn; the gate retries with its correction and a
-    bare "Done." is caught (no tool ran). create_agent answers the malformed call with a
-    synthetic error receipt first: it must not be shown to the model or counted as a tool."""
+def test_a_malformed_call_then_a_claim_is_still_zero_tools():
+    """Synthetic repair receipts are hidden and never counted as executed tools."""
     from aerys_v2.service import ACTION_NO_TOOL_CORRECTION
     from aerys_v2.turns import extract_tool_calls
 
@@ -313,16 +287,14 @@ def test_a_malformed_call_then_a_claim_is_still_zero_tools_on_both_engines():
                                                            "id": "bad1", "error": "json"}]),
                 AIMessage(content="Done, the lamp is on.")]
 
-    old, old_log, new, new_log = engines(script)
-    results = []
-    for graph in (old, new):
-        first = graph.invoke({"messages": [HumanMessage(content="lamp on")]}, SURFACES["typed specialist"])
-        retry = [*first["messages"], HumanMessage(content=ACTION_NO_TOOL_CORRECTION)]
-        results.append(graph.invoke({"messages": retry}, SURFACES["typed specialist"]))
-    assert new_log == old_log and len(old_log) == 2
-    for out in results:
-        assert extract_tool_calls(out["messages"]) == []
-        assert out["messages"][-1].content == "Done, the lamp is on."
+    graph, log = agent(script)
+    first = graph.invoke({"messages": [HumanMessage(content="lamp on")]}, SURFACES["typed specialist"])
+    retry = [*first["messages"], HumanMessage(content=ACTION_NO_TOOL_CORRECTION)]
+    out = graph.invoke({"messages": retry}, SURFACES["typed specialist"])
+    assert len(log) == 2
+    assert all(kind != "tool" for kind, _ in log[1]["messages"])
+    assert extract_tool_calls(out["messages"]) == []
+    assert out["messages"][-1].content == "Done, the lamp is on."
 
 
 def test_a_repair_receipt_is_not_a_tool_that_ran_but_a_real_failure_still_is():
@@ -339,10 +311,10 @@ def test_a_repair_receipt_is_not_a_tool_that_ran_but_a_real_failure_still_is():
     assert [c["name"] for c in extract_tool_calls(msgs)] == ["echo"]
 
 
-def test_two_tools_in_one_pass_come_back_in_the_same_order_on_both_engines():
+def test_two_tools_in_one_pass_return_in_call_order():
     """Real traces have parallel calls (calendar_events + manage_list in one pass).
     create_agent sends each call as its own task; the next model pass must still see
-    the results in the order the old ToolNode gave them."""
+    the results in call order."""
     import time as _time
 
     @tool
@@ -358,17 +330,26 @@ def test_two_tools_in_one_pass_come_back_in_the_same_order_on_both_engines():
                                                   {"id": "b", "name": "echo", "args": {"text": "2"}}]),
                 AIMessage(content="Both done.")]
 
-    logs = []
-    for engine in ("old", "new"):
-        log, s = [], script()
-        conv, std = Rec(label="conv", script=s, log=log), Rec(label="std", script=s, log=log)
-        if engine == "old":
-            graph = OLD_BUILD(ToolModelPair(conv.bind_tools(tools), std.bind_tools(tools),
-                                            std.bind_tools(tools, tool_choice="any")), "SOUL", tools)
-        else:
-            graph = build_agent_action_graph(AgentToolModels(conv, (std, True)), "SOUL", tools)
-        out = graph.invoke({"messages": [HumanMessage(content="do both")]}, SURFACES["typed specialist"])
-        logs.append((log, [(m.type, m.content) for m in out["messages"]]))
-    (old_log, old_msgs), (new_log, new_msgs) = logs
-    assert new_log == old_log and new_msgs == old_msgs
-    assert [c for t, c in old_msgs if t == "tool"] == ["slow: 1", "echo: 2"]
+    log, replies = [], script()
+    conv, std = (Rec(label=n, script=replies, log=log) for n in ("conv", "std"))
+    graph = build_agent_action_graph(AgentToolModels(conv, (std, True)), "SOUL", tools)
+    out = graph.invoke({"messages": [HumanMessage(content="do both")]}, SURFACES["typed specialist"])
+    assert [m.content for m in out["messages"] if m.type == "tool"] == ["slow: 1", "echo: 2"]
+    assert [content for kind, content in log[1]["messages"] if kind == "tool"] == ["slow: 1", "echo: 2"]
+
+
+def test_action_loop_defaults_to_agent_and_accepts_live_environment(monkeypatch):
+    from aerys_v2.config import Settings
+    monkeypatch.delenv("ACTION_LOOP", raising=False)
+    assert Settings(_env_file=None, anthropic_api_key="test").action_loop == "agent"
+    monkeypatch.setenv("ACTION_LOOP", "agent")
+    assert Settings(_env_file=None, anthropic_api_key="test").action_loop == "agent"
+
+
+@pytest.mark.parametrize("value", ["graph", "other", ""])
+def test_action_loop_rejects_retired_or_unknown_engines(monkeypatch, value):
+    from aerys_v2.config import Settings
+    from pydantic import ValidationError
+    monkeypatch.setenv("ACTION_LOOP", value)
+    with pytest.raises(ValidationError, match="action_loop"):
+        Settings(_env_file=None, anthropic_api_key="test")

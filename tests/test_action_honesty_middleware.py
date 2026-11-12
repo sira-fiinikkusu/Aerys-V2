@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
 from aerys_v2.service import ACTION_NO_TOOL_CORRECTION, NO_TOOL_ACTION_MARKER, ask
-from test_action_loop_agent import Rec, TOOLS, a_tool_then_done, cfg, engines
+from test_action_loop_agent import Rec, TOOLS, a_tool_then_done, cfg, agent
 from test_honesty_fixes import Recorder, action_router, fake_model
 from aerys_v2.factory import build_graph
 
@@ -60,10 +60,9 @@ def test_armed_nodes_and_runaway_limit():
     def forever():
         return [AIMessage(content="", tool_calls=[
             {"id": f"c{i}", "name": "echo", "args": {"text": "x"}}]) for i in range(20)]
-    old, old_log, new, new_log = engines(forever)
-    assert set(new.nodes) - {"__start__"} == {"model", "tools"}
-    for graph in (old, new):
-        with pytest.raises(Exception) as err:
-            graph.invoke({"messages": [HumanMessage(content="loop")]}, cfg(honesty_gate=True))
-        assert type(err.value).__name__ == "GraphRecursionError"
-    assert len(old_log) == len(new_log) == 5
+    graph, log = agent(forever)
+    assert set(graph.nodes) - {"__start__"} == {"model", "tools"}
+    from langgraph.errors import GraphRecursionError
+    with pytest.raises(GraphRecursionError):
+        graph.invoke({"messages": [HumanMessage(content="loop")]}, cfg(honesty_gate=True))
+    assert len(log) == 5

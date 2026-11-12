@@ -14,7 +14,6 @@ from aerys_v2.factory import (
     LIFEBOAT_SYSTEM,
     LOCAL_ACTION_HARDENING,
     LocalFailoverModel,
-    LocalToolFailoverModel,
     lifeboat_prompt,
 )
 
@@ -115,11 +114,10 @@ def test_the_chat_lifeboat_receives_the_slim_prompt():
 
 
 def test_the_tool_lifeboat_receives_the_slim_prompt_with_hardening():
-    primary, lifeboat = Mock(), Mock()
-    primary.invoke.side_effect = connection_error()
-    model = LocalToolFailoverModel(primary, lifeboat)
-    model.invoke([big_system(), HumanMessage(content="office lights off")])
-    sent = lifeboat.invoke.call_args.args[0]
-    assert sent[0].content == LIFEBOAT_SYSTEM + LOCAL_ACTION_HARDENING
-    assert sent[-1].content == "office lights off"
-    assert chars(sent) <= LIFEBOAT_MAX_CHARS + len(LOCAL_ACTION_HARDENING)
+    from action_model_probe import failing_models, invoke_models
+    model, log = failing_models(connection_error())
+    invoke_models(model, [big_system(), HumanMessage(content="office lights off")], [])
+    sent = log[-1]["messages"]
+    assert sent[0] == ("system", LIFEBOAT_SYSTEM + LOCAL_ACTION_HARDENING)
+    assert sent[-1] == ("human", "office lights off")
+    assert sum(len(content) for _, content in sent) <= LIFEBOAT_MAX_CHARS + len(LOCAL_ACTION_HARDENING)

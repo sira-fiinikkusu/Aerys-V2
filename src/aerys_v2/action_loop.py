@@ -1,38 +1,10 @@
-"""Her action loop on LangChain's create_agent (board #176, Stage 1; the owner's D1 = b).
+"""The sole action engine, built on LangChain's create_agent.
 
-The hand-rolled action graph (factory.build_action_graph: act <-> ToolNode) moves onto
-create_agent, LangChain's official loop, so official middleware can mount on it: first
-of all AsyncSubAgentMiddleware, which hands long work to her home body (#174). The owner,
-2026-11-07: "if both works i would lean to the 'official' option".
-
-Built BESIDE the old loop, behind ACTION_LOOP=agent (default "graph"), and proven by
-parity before it is flipped. This first slice swaps the engine only:
-
-  * the prompt is built by the SAME code as the old act node
-    (factory._action_prompt_builder), so the request bytes can't drift;
-  * the model is chosen per call the official way: an unbound chat model and its
-    tool_choice go to the handler with request.override(), and create_agent binds the
-    tools. The choice mirrors factory._build_tool_model exactly (conversation vs the
-    specialist, the fast tier, the forced first pass, voice on the API while text
-    rides the plan);
-  * the local lifeboat keeps its exact semantics (connection and 5xx failures only,
-    the house tools only, the hardened prompt) as a retry through the same handler;
-  * the panel's activity line is tapped from the same hook;
-  * there are NO hook nodes: the compiled graph is model + tools, so the recursion
-    rail (Rails.turn_limit as recursion_limit) means exactly what it meant before.
-
-One difference create_agent brings is neutralised here: its model node answers a malformed
-tool call with a synthetic "could not be executed" ToolMessage. The model is shown the
-history without those (as before), and turns.extract_tool_calls never counts one as a tool
-that ran, so the honesty gate still sees zero tools (Codex review, 11/08).
-
-The honesty gate is an outer wrap hook, armed only by the service's gated action
-path. Its one retry rebuilds the prompt without adding graph nodes. Direct device
-seeding remains in the service.
-
-A legacy model object (a ToolModelPair, or any object with .invoke) is still accepted
-and called directly from the hook, the way the stick's loop calls its model: that keeps
-every existing action-graph test runnable against this loop unchanged.
+Middleware builds the action prompt, selects unbound models and tool choice per
+pass, retries eligible outages on the local house-tool lifeboat, and reports
+panel activity. The honesty retry stays inside the model node, preserving the
+recursion rail. Synthetic malformed-call receipts never count as executed tools.
+Plain .invoke models remain supported for offline callers and tests.
 """
 
 from __future__ import annotations
@@ -51,8 +23,8 @@ class AgentToolModels:
 
     conversational: voice banter and other non-specialist turns (free to answer
     without a tool). standard / fast: (model, may_force) for specialist turns; may_force
-    = the first pass is forced to call a tool (tool_choice="any"), as in
-    factory._build_tool_model. fast None = the standard pair serves the fast tier too
+    = the first pass is forced to call a tool (tool_choice="any").
+    fast None = the standard pair serves the fast tier too
     (a pinned action_model). lifeboat / lifeboat_tools: the local tool model and the
     house tools it gets, or None when no lifeboat is armed.
     """
@@ -64,18 +36,16 @@ class AgentToolModels:
     lifeboat_tools: list = field(default_factory=list)
 
     def choose(self, prompt: list, *, specialist: bool, fast: bool) -> tuple[object, str | None]:
-        from aerys_v2.factory import ToolModelPair
-
         if not specialist:
             return self.conversational, None
         model, may_force = (self.fast or self.standard) if fast else self.standard
-        return model, ("any" if may_force and ToolModelPair.is_first_pass(prompt) else None)
+        first_pass = not any(getattr(m, "type", "") in ("ai", "tool") for m in prompt)
+        return model, ("any" if may_force and first_pass else None)
 
 
 @dataclass
 class SurfaceSplitAgentModels:
-    """Text rides the plan, voice stays metered (factory.SurfaceSplitToolModel's rule,
-    read from the same REFLEX_SURFACE that ask() sets before routing)."""
+    """Text rides the plan, voice stays metered, selected by REFLEX_SURFACE."""
 
     text: AgentToolModels
     voice: AgentToolModels
@@ -86,23 +56,21 @@ class SurfaceSplitAgentModels:
         return self.voice if REFLEX_SURFACE.get() == "voice" else self.text
 
 
-def build_agent_tool_models(settings, tools: list):
-    """factory.build_api_tool_model's choices, unbound: the same backends, models,
-    forcing rule and lifeboat, handed to the loop instead of pre-bound."""
+def build_agent_tool_models(settings, tools: list, *, timeout_s: float = 60.0):
+    """Build unbound action models, forcing policy, and optional local lifeboat."""
     from aerys_v2.factory import CLI_BLOCKED
 
     if settings.model_backend == "cli":
         raise RuntimeError(CLI_BLOCKED)
     if settings.model_backend == "oauth" and settings.oauth_tool_backend == "oauth":
-        text = _agent_models(settings, tools, backend="oauth")
+        text = _agent_models(settings, tools, timeout_s=timeout_s, backend="oauth")
         if settings.oauth_voice_backend == "oauth":
             return text
-        return SurfaceSplitAgentModels(text, _agent_models(settings, tools, backend="api"))
-    return _agent_models(settings, tools, backend="api")
+        return SurfaceSplitAgentModels(text, _agent_models(settings, tools, timeout_s=timeout_s, backend="api"))
+    return _agent_models(settings, tools, timeout_s=timeout_s, backend="api")
 
 
 def _agent_models(settings, tools: list, *, backend: str, timeout_s: float = 60.0) -> AgentToolModels:
-    # Kept in step with factory._build_tool_model: the parity tests compare the two.
     from aerys_v2.anthropic_model import build_metered_model, supports_forced_tool_choice
     from aerys_v2.factory import LIFEBOAT_TOOLS
 
@@ -170,7 +138,7 @@ def _honesty_middleware():
 
 
 def _act_middleware(build_prompt, models):
-    """One wrap_model_call hook: the act node's prompt, the per-call model, the
+    """One wrap_model_call hook: the action prompt, the per-call model, the
     lifeboat, the panel tap. A wrap hook adds no graph node (see the module doc)."""
     from langchain.agents.middleware import AgentMiddleware, ModelResponse
     from langgraph.config import get_config
@@ -213,8 +181,8 @@ def _act_middleware(build_prompt, models):
     class AerysAct(AgentMiddleware):
         def wrap_model_call(self, request, handler):
             # create_agent's model node has already answered any malformed tool call with a
-            # synthetic error receipt. The old engine never did that, so the model is shown
-            # the history without them: the same bytes as before (turns.invalid_call_ids).
+            # synthetic error receipt. Hide it from the model: it is not a tool result
+            # from execution (turns.invalid_call_ids).
             repairs = invalid_call_ids(request.messages)
             history = [m for m in request.messages if not is_repair_receipt(m, repairs)]
             prompt, specialist, fast = build_prompt(history, get_config())
@@ -233,8 +201,7 @@ def _act_middleware(build_prompt, models):
 
 
 def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
-    """factory.build_action_graph's twin on create_agent: same arguments, same input
-    and output ({"messages": [...]}), same attributes for service.py to read."""
+    """Build the action loop with message input/output and service attributes."""
     from langchain.agents import create_agent
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
@@ -259,7 +226,7 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
     elif isinstance(models, AgentToolModels):
         default = models.conversational
     else:
-        # Never invoked: the hook calls the legacy model itself. A fake that answers
+        # Never invoked: the hook calls the supplied invoke model directly. A fake that answers
         # with an error string would be a lie, so it has nothing to say.
         default = FakeListChatModel(responses=[])
     from aerys_v2.outside_guard import outside_middleware, prepare_origin

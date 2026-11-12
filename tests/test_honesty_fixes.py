@@ -113,28 +113,21 @@ def test_gate_action_zero_tools_after_retry_marks():
 
 # ── FIX 1: gate wiring through ask() ─────────────────────────────────────────────
 
-class ZeroToolGraph:
-    """An action graph that ALWAYS answers in plain text — no tool ever runs. The
-    exact hallucinated-action shape: a claimed 'done' that touched nothing."""
-
-    def __init__(self, final="Both office lights are off."):
-        self.final = final
-        self.calls: list[str] = []
-
-    def invoke(self, inp: dict, config: dict) -> dict:
-        self.calls.append(inp["messages"][-1].content)
-        return {"messages": [AIMessage(content=self.final)]}
+def zero_tool_agent(final="Both office lights are off."):
+    from test_action_loop_agent import Rec
+    model = Rec(label="claim", script=[AIMessage(content=final), AIMessage(content=final)], log=[])
+    return build_action_graph(model, "s", tools=[]), model.log
 
 
 def test_nonvoice_zero_tool_action_bounces_once_then_marks():
     rec = Recorder()
     graph = build_graph(fake_model("unused"), soul="s")
-    stub = ZeroToolGraph()
+    stub, model_log = zero_tool_agent()
     out = ask(graph, "turn off the office lights", identity=CHRIS, thread_id="t-mark",
               router=action_router, action_graph=stub, record_turn=rec)
     assert out == "Both office lights are off."          # the reply is still emitted
-    # bounced exactly once — the second invoke carried the verbatim correction
-    assert stub.calls == ["turn off the office lights", ACTION_NO_TOOL_CORRECTION]
+    # Bounced exactly once inside the model node with the verbatim correction.
+    assert [p["messages"][-1][1] for p in model_log] == ["turn off the office lights", ACTION_NO_TOOL_CORRECTION]
     row = rec.wait(1)[0]
     assert NO_TOOL_ACTION_MARKER in json.loads(row["degraded"])  # the pattern is audited
     assert json.loads(row["tool_calls"]) == []                   # nothing ever executed
@@ -199,7 +192,7 @@ def test_nonvoice_zero_tool_action_that_calls_a_tool_on_retry_is_clean():
 def test_voice_zero_tool_action_marks_row_in_background():
     rec = Recorder()
     graph = build_graph(fake_model("speculative"), soul="s")
-    stub = ZeroToolGraph(final="Both office lights are on now.")
+    stub, model_log = zero_tool_agent(final="Both office lights are on now.")
     out = ask(graph, "turn on the office lights", identity=CHRIS, thread_id="voice:mark",
               router=action_router, action_graph=stub, record_turn=rec)
     assert out == "[warmly] On it"                        # caller hears the ack

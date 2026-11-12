@@ -1,4 +1,7 @@
 """Offline tool lifeboat: real bindings/graphs, fake provider calls and tools."""
+from action_model_probe import invoke_models, failing_models
+from aerys_v2.action_loop import build_agent_tool_models
+
 
 import json
 import logging
@@ -16,9 +19,7 @@ from aerys_v2.config import Settings
 from aerys_v2.factory import (
     LOCAL_ACTION_HARDENING,
     LOCAL_FALLBACK_FIRED,
-    LocalToolFailoverModel,
     build_action_graph,
-    build_api_tool_model,
     build_graph,
     build_model,
     track_local_tool_fallback,
@@ -58,31 +59,23 @@ def clean_fallback_flag():
     LOCAL_FALLBACK_FIRED.reset(token)
 
 
-def bindings(pair):
-    return [pair._conv, pair._auto, pair._forced, pair._fast_auto, pair._fast_forced]
-
-
 @pytest.mark.parametrize("name", [None, "qwen3:4b-instruct-2507-q4_K_M"])
 @pytest.mark.parametrize("pin,force", [("", True), ("pinned-model", True), ("", False)])
 def test_every_binding_has_same_unforced_local_tools(name, pin, force):
-    pair = build_api_tool_model(settings(
+    pair = build_agent_tool_models(settings(
         local_tool_model_name=name, action_model=pin, action_force_tool=force,
         local_model_timeout_s=231,
     ), [home_control])
-    for binding in bindings(pair):
-        assert isinstance(binding, LocalToolFailoverModel)
-        local = binding.lifeboat
-        assert local.bound.model_name == (name or "hermes3:8b")
-        assert local.bound.openai_api_base == "http://127.0.0.1:11434/v1"
-        assert local.bound.request_timeout == 231
-        assert local.bound.max_retries == 1
-        assert "tool_choice" not in local.kwargs
-        assert [t["function"]["name"] for t in local.kwargs["tools"]] == ["home_control"]
-        assert [t["name"] for t in binding.primary.kwargs["tools"]] == ["home_control"]
+    local = pair.lifeboat
+    assert local.model_name == (name or "hermes3:8b")
+    assert local.openai_api_base == "http://127.0.0.1:11434/v1"
+    assert local.request_timeout == 231
+    assert local.max_retries == 1
+    assert pair.lifeboat_tools == [home_control]
     from aerys_v2.anthropic_model import supports_forced_tool_choice
 
     forceable = supports_forced_tool_choice(pin or "claude-sonnet-5-5")
-    assert pair._forced.primary.kwargs.get("tool_choice") == ({"type": "any"} if force and forceable else None)
+    assert pair.standard[1] == bool(force and forceable)
 
 
 def test_unarmed_bindings_are_plain_and_do_not_construct_local_client(monkeypatch):
@@ -90,14 +83,11 @@ def test_unarmed_bindings_are_plain_and_do_not_construct_local_client(monkeypatc
         pytest.fail("unarmed tool lane constructed a local client")
 
     monkeypatch.setattr("langchain_openai.ChatOpenAI", unexpected)
-    pair = build_api_tool_model(settings(local_fallback_url=None), [home_control])
-    for binding in bindings(pair):
-        assert isinstance(binding.bound, ChatAnthropic)
-    # Sonnet 5.5 refuses a forced tool call on the API (live 400, 2026-10-07), so its
-    # forced lane is the auto binding; Haiku 5.5 still takes the forced pass.
-    assert "tool_choice" not in pair._forced.kwargs
-    assert pair._fast_forced.kwargs["tool_choice"] == {"type": "any"}
-    assert pair._conv.bound.model == pair._auto.bound.model == "claude-sonnet-5-5"
+    pair = build_agent_tool_models(settings(local_fallback_url=None), [home_control])
+    assert pair.lifeboat is None
+    assert all(isinstance(m, ChatAnthropic) for m in (pair.conversational, pair.standard[0], pair.fast[0]))
+    assert pair.standard[1] is False and pair.fast[1] is True
+    assert pair.conversational.model == pair.standard[0].model == "claude-sonnet-5-5"
 
 
 @pytest.mark.parametrize("specialist,fast,after_tool", [
@@ -119,18 +109,18 @@ def test_outage_invokes_each_lifeboat_with_hardening_and_no_force(
 
     monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
     monkeypatch.setattr(ChatOpenAI, "invoke", local)
-    pair = build_api_tool_model(settings(), [home_control])
+    pair = build_agent_tool_models(settings(), [home_control])
     system = SystemMessage(content="Charter, tools, identity, profile, clock, shared context.", id="s")
     prompt = [system, HumanMessage(content="turn on the light")]
     if after_tool:
         prompt += [AIMessage(content="", tool_calls=[{
             "name": "home_control", "args": {"operation": "turn_on"}, "id": "c1",
         }]), ToolMessage(content="Done", tool_call_id="c1")]
-    with caplog.at_level(logging.WARNING):
-        reply = pair.invoke(prompt, specialist=specialist, fast=fast, stop=["STOP"])
+    with track_local_tool_fallback(), caplog.at_level(logging.WARNING):
+        reply = invoke_models(pair, prompt, [home_control], specialist=specialist, fast=fast, stop=["STOP"])
     assert reply.content == "local result"
     assert len(cloud_calls) == len(local_calls) == 1
-    assert cloud_calls[0][0] is prompt
+    assert cloud_calls[0][0] == prompt
     assert cloud_calls[0][0][0].content == system.content
     local_prompt, kwargs = local_calls[0]
     assert local_prompt[0].content == system.content + LOCAL_ACTION_HARDENING
@@ -170,8 +160,9 @@ def test_connection_and_server_failures_fall_back(monkeypatch, error):
 
     monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
     monkeypatch.setattr(ChatOpenAI, "invoke", local)
-    pair = build_api_tool_model(settings(), [home_control])
-    assert pair.invoke([HumanMessage(content="light on")], specialist=True).content == "local"
+    pair = build_agent_tool_models(settings(), [home_control])
+    with track_local_tool_fallback():
+        assert invoke_models(pair, [HumanMessage(content="light on")], [home_control], specialist=True).content == "local"
     assert calls[0][0].content == LOCAL_ACTION_HARDENING
     assert LOCAL_FALLBACK_FIRED.get() is True
 
@@ -190,9 +181,9 @@ def test_ineligible_failures_reraise_unchanged_without_local(monkeypatch, error)
 
     monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
     monkeypatch.setattr(ChatOpenAI, "invoke", local)
-    pair = build_api_tool_model(settings(), [home_control])
+    pair = build_agent_tool_models(settings(), [home_control])
     with pytest.raises(type(error)) as caught:
-        pair.invoke([HumanMessage(content="light on")], specialist=True)
+        invoke_models(pair, [HumanMessage(content="light on")], [home_control], specialist=True)
     assert caught.value is error
     assert LOCAL_FALLBACK_FIRED.get() is False
 
@@ -209,28 +200,25 @@ def test_healthy_cloud_keeps_prompt_and_never_invokes_local(monkeypatch):
 
     monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
     monkeypatch.setattr(ChatOpenAI, "invoke", local)
-    pair = build_api_tool_model(settings(), [home_control])
+    pair = build_agent_tool_models(settings(), [home_control])
     prompt = [SystemMessage(content="cloud prompt"), HumanMessage(content="hello")]
-    assert pair.invoke(prompt).content == "cloud"
-    assert seen == [prompt] and seen[0] is prompt
+    assert invoke_models(pair, prompt, [home_control]).content == "cloud"
+    assert seen == [prompt]
     assert LOCAL_FALLBACK_FIRED.get() is False
 
 
 def test_receipt_crosses_copied_context_without_tainting_other_invocations():
     from contextvars import copy_context
-    from unittest.mock import Mock
 
-    primary = Mock()
-    primary.invoke.side_effect = connection_error()
-    model = LocalToolFailoverModel(primary, Mock())
+    model, model_log = failing_models(connection_error())
     prompt = [SystemMessage(content=[{"type": "text", "text": "charter"}])]
     with track_local_tool_fallback():
-        copy_context().run(model.invoke, prompt)
+        copy_context().run(invoke_models, model, prompt, [])
         assert LOCAL_FALLBACK_FIRED.get() is False  # node has its own context
     assert LOCAL_FALLBACK_FIRED.get() is True
-    forwarded = model.lifeboat.invoke.call_args.args[0]
+    forwarded = model_log[-1]["messages"]
     assert prompt[0].content == [{"type": "text", "text": "charter"}]
-    assert forwarded[0].content[-1] == {"type": "text", "text": LOCAL_ACTION_HARDENING}
+    assert forwarded[0][1][-1] == {"type": "text", "text": LOCAL_ACTION_HARDENING}
     LOCAL_FALLBACK_FIRED.set(False)
     with track_local_tool_fallback():
         pass
@@ -271,7 +259,7 @@ def test_real_graph_stamps_fallback_on_action_and_voice_turns(
 
     monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
     monkeypatch.setattr(ChatOpenAI, "invoke", local)
-    pair = build_api_tool_model(settings(), [home_control])
+    pair = build_agent_tool_models(settings(), [home_control])
     action = build_action_graph(pair, "soul", [home_control])
     graph = build_graph(GenericFakeChatModel(messages=iter([])), "soul")
     router = build_router(ChatAnthropic(model="test", api_key="sk-test"), "soul")
@@ -377,20 +365,17 @@ def test_real_graph_stamps_fallback_on_chat_turns(monkeypatch, first_reply, loca
 def test_the_tool_lifeboat_gets_the_text_and_is_told_it_cannot_see_the_image():
     """Board #28: the action path now inlines the turn's image; the local tool model is a
     text model that would error on it."""
-    from unittest.mock import Mock
     from aerys_v2.images import UNSEEN
 
-    primary = Mock()
-    primary.invoke.side_effect = connection_error()
-    model = LocalToolFailoverModel(primary, Mock())
+    model, model_log = failing_models(connection_error())
     prompt = [SystemMessage(content="charter"),
               HumanMessage(content=[{"type": "text", "text": "[image attached] find this lamp"},
                                     {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                                                  "data": "iVBORw0KGgo="}}])]
-    model.invoke(prompt)
-    forwarded = model.lifeboat.invoke.call_args.args[0]
-    human = [m for m in forwarded if isinstance(m, HumanMessage)][0]
-    assert human.content == [{"type": "text", "text": f"{UNSEEN} find this lamp"}]
+    invoke_models(model, prompt, [])
+    forwarded = model_log[-1]["messages"]
+    human = [content for kind, content in forwarded if kind == "human"][0]
+    assert human == [{"type": "text", "text": f"{UNSEEN} find this lamp"}]
 
 
 @tool
@@ -399,16 +384,24 @@ def search_web(query: str) -> str:
     return "results"
 
 
-def test_the_tool_lifeboat_carries_only_the_house_tools():
+def test_the_tool_lifeboat_carries_only_the_house_tools(monkeypatch):
     # Chris 2026-10-26: "house controls only honestly makes sense" — web tools can't work when the
     # cloud is out of reach, and all 23 schemas were ~6k tokens of the lifeboat's prompt.
-    pair = build_api_tool_model(settings(), [home_control, search_web])
-    for binding in bindings(pair):
-        assert [t["function"]["name"] for t in binding.lifeboat.kwargs["tools"]] == ["home_control"]
-        assert [t["name"] for t in binding.primary.kwargs["tools"]] == ["home_control", "search_web"]
+    pair = build_agent_tool_models(settings(), [home_control, search_web])
+    assert pair.lifeboat_tools == [home_control]
+    seen = []
+    def cloud(self, messages, config=None, **kwargs):
+        seen.append([t["name"] for t in kwargs["tools"]])
+        raise connection_error()
+    def local(self, messages, config=None, **kwargs):
+        seen.append([t["function"]["name"] for t in kwargs["tools"]])
+        return AIMessage(content="local")
+    monkeypatch.setattr(ChatAnthropic, "invoke", cloud)
+    monkeypatch.setattr(ChatOpenAI, "invoke", local)
+    invoke_models(pair, [HumanMessage(content="check the light")], [home_control, search_web])
+    assert seen == [["home_control", "search_web"], ["home_control"]]
 
 
 def test_a_lane_with_no_house_tools_keeps_its_own_on_the_lifeboat():
-    pair = build_api_tool_model(settings(), [search_web])
-    for binding in bindings(pair):
-        assert [t["function"]["name"] for t in binding.lifeboat.kwargs["tools"]] == ["search_web"]
+    pair = build_agent_tool_models(settings(), [search_web])
+    assert pair.lifeboat_tools == [search_web]

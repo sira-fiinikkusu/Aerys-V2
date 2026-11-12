@@ -1,4 +1,4 @@
-"""Per-invoke raw seam caching, through both action engines."""
+"""Per-invoke raw seam caching, through the action agent."""
 from collections import Counter
 from types import SimpleNamespace
 
@@ -9,13 +9,12 @@ from langchain_core.tools import tool
 import aerys_v2.factory as factory
 from aerys_v2.action_loop import build_agent_action_graph
 from aerys_v2.service import _invoke_action_graph
-from test_action_loop_agent import OLD_BUILD, Rec
+from test_action_loop_agent import Rec
 
 
-@pytest.mark.parametrize("build", [OLD_BUILD, build_agent_action_graph])
 @pytest.mark.parametrize("memo", [False, True])
 @pytest.mark.parametrize("privacy", ["public", "private"])
-def test_raw_seams_once_per_invoke(build, memo, privacy, monkeypatch):
+def test_raw_seams_once_per_invoke(memo, privacy, monkeypatch):
     from aerys_v2 import images
     counts = Counter()
     def seam(name, result):
@@ -36,7 +35,7 @@ def test_raw_seams_once_per_invoke(build, memo, privacy, monkeypatch):
         return [AIMessage(content="", tool_calls=[{"id": "call", "name": "echo", "args": {}}]),
                 AIMessage(content="Done")]
     model = Rec(label="model", script=script() + script(), log=[])
-    graph = build(model, "s", [echo], context_fn=seam("profile", "profile"),
+    graph = build_agent_action_graph(model, "s", [echo], context_fn=seam("profile", "profile"),
                   family_notes_fn=seam("family", "family"),
                   portable_context_fn=seam("portable", "portable"),
                   room_context_fn=seam("room", "room"),
@@ -94,10 +93,9 @@ def test_exact_arguments_and_mutable_identity():
     assert len(calls) == 3
 
 
-@pytest.mark.parametrize("build", [OLD_BUILD, build_agent_action_graph])
 @pytest.mark.parametrize("memo", [False, True])
 @pytest.mark.parametrize("new_person", [False, True])
-def test_people_named_by_tool_are_added_on_next_pass(build, memo, new_person, monkeypatch):
+def test_people_named_by_tool_are_added_on_next_pass(memo, new_person, monkeypatch):
     from datetime import datetime, timezone
     import psycopg
     import aerys_v2.services.context as context
@@ -131,7 +129,7 @@ def test_people_named_by_tool_are_added_on_next_pass(build, memo, new_person, mo
         return "Ask Blake too." if new_person else "Avery is ready."
     model = Rec(label="model", script=[AIMessage(content="", tool_calls=[
         {"id": "call", "name": "lookup", "args": {}}]), AIMessage(content="Done")], log=[])
-    graph = build(model, "s", [lookup], context_fn=seam)
+    graph = build_agent_action_graph(model, "s", [lookup], context_fn=seam)
     messages = [HumanMessage(content="Ask Avery")]
     config = {"configurable": {"identity": {"user_id": "sample", "privacy_context": "private"}}}
     if memo:
@@ -147,8 +145,7 @@ def test_people_named_by_tool_are_added_on_next_pass(build, memo, new_person, mo
     assert calls["connect"] == (2 + int(new_person) if memo else 4)  # one lazy people connection per pass with misses
 
 
-@pytest.mark.parametrize("build", [OLD_BUILD, build_agent_action_graph])
-def test_profile_and_image_failures_are_retried_in_graph(build, monkeypatch, caplog):
+def test_profile_and_image_failures_are_retried_in_graph(monkeypatch, caplog):
     from aerys_v2 import images
     calls = Counter()
     def profile(*args):
@@ -165,7 +162,7 @@ def test_profile_and_image_failures_are_retried_in_graph(build, monkeypatch, cap
     model = Rec(label="model", script=[AIMessage(content="", tool_calls=[
         {"id": f"call{i}", "name": "echo", "args": {}}]) for i in range(2)] +
         [AIMessage(content="Done")], log=[])
-    graph = build(model, "s", [echo], context_fn=profile)
+    graph = build_agent_action_graph(model, "s", [echo], context_fn=profile)
     with caplog.at_level("DEBUG", logger="aerys_v2.factory"):
         _invoke_action_graph(graph, [HumanMessage(
             content="check https://cdn.discordapp.com/attachments/a/b/photo.png")], {})

@@ -2,6 +2,8 @@
 ClaudeOAuthChatModel binds LangChain tools, the CLI's PreToolUse hook defers every call,
 tool_calls come back on the AIMessage, our graph runs them, results ride the next prompt.
 Offline: the warm client is faked; nothing spawns a subprocess."""
+from aerys_v2.action_loop import build_agent_tool_models
+
 import json
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -9,7 +11,7 @@ from langchain_core.tools import tool
 
 import aerys_v2.oauth_model as om
 from aerys_v2.config import Settings
-from aerys_v2.factory import SurfaceSplitToolModel, ToolModelPair, build_api_tool_model
+from aerys_v2.action_loop import SurfaceSplitAgentModels, AgentToolModels
 from aerys_v2.oauth_model import OAuthBackendError, ClaudeOAuthChatModel, _FORCE_TOOL_LINE, _RESULTS_FINAL_LINE, _flatten
 from aerys_v2.reflex import REFLEX_SURFACE
 
@@ -94,21 +96,32 @@ def test_second_pass_carries_the_result_and_answers(monkeypatch):
 def test_factory_puts_text_actions_on_the_plan_only_when_opted_in(monkeypatch):
     fresh(monkeypatch)
     api_only = Settings(_env_file=None, anthropic_api_key="t", model_backend="oauth")
-    assert not isinstance(build_api_tool_model(api_only, [light_state]), SurfaceSplitToolModel)
+    assert not isinstance(build_agent_tool_models(api_only, [light_state]), SurfaceSplitAgentModels)
     assert FakeWarm.made == []                                   # default: action path stays metered
     s = Settings(_env_file=None, anthropic_api_key="t", model_backend="oauth", oauth_tool_backend="oauth")
-    model = build_api_tool_model(s, [light_state])
-    assert isinstance(model, SurfaceSplitToolModel)
+    model = build_agent_tool_models(s, [light_state])
+    assert isinstance(model, SurfaceSplitAgentModels)
+    original_ask = FakeWarm.ask
+    def answer(self, prompt):
+        if self.prompts:
+            self.reply = ("The light is off.", [], {"stop_reason": "end_turn"})
+        return original_ask(self, prompt)
+    monkeypatch.setattr(FakeWarm, "ask", answer)
+    from aerys_v2.factory import build_action_graph
+    graph = build_action_graph(model, "soul", [light_state])
     tok = REFLEX_SURFACE.set("discord")
     try:
-        out = model.invoke([HumanMessage(content="is the office light on?")], specialist=True)
+        out = graph.invoke({"messages": [HumanMessage(content="is the office light on?")]},
+                           {"configurable": {"specialist": True}})
     finally:
         REFLEX_SURFACE.reset(tok)
-    assert out.tool_calls and out.tool_calls[0]["name"] == "light_state"
-    assert _FORCE_TOOL_LINE in FakeWarm.made[-1].prompts[-1]    # forced first specialist pass
+    assert out["messages"][-1].content == "The light is off."
+    assert [m.content for m in out["messages"] if m.type == "tool"] == ["off"]
+    assert len(FakeWarm.made) == 1 and len(FakeWarm.made[0].prompts) == 2
+    assert _FORCE_TOOL_LINE in FakeWarm.made[-1].prompts[0]    # forced first specialist pass
     both = Settings(_env_file=None, anthropic_api_key="t", model_backend="oauth", oauth_tool_backend="oauth",
                     oauth_voice_backend="oauth")
-    assert isinstance(build_api_tool_model(both, [light_state]), ToolModelPair)
+    assert isinstance(build_agent_tool_models(both, [light_state]), AgentToolModels)
 
 
 def test_double_failure_is_a_typed_backend_error(monkeypatch):
@@ -282,7 +295,7 @@ def test_turn_timeout_comes_from_settings(monkeypatch):
     fresh(monkeypatch)
     s = Settings(_env_file=None, anthropic_api_key="t", model_backend="oauth", oauth_tool_backend="oauth",
                  oauth_turn_timeout_s=42)
-    build_api_tool_model(s, [light_state])
+    build_agent_tool_models(s, [light_state])
     from aerys_v2 import factory as f
     m = f.build_model(s)
     inner = getattr(m, "primary", m)
