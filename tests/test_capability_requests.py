@@ -629,12 +629,3 @@ def test_a_withdrawn_request_is_not_a_gap():
     from aerys_v2.service import DROPPED_CANCELLED_MARKER, DROPPED_UNADDRESSED_MARKER
     assert classify_turn(turn(degraded=[DROPPED_CANCELLED_MARKER])) == []
     assert classify_turn(turn(degraded=[DROPPED_UNADDRESSED_MARKER])) == []
-
-
-def test_reading_outside_text_is_not_a_gap():
-    """The outside-text guard stamps untrusted_read on every turn that read a page, an email or a
-    file (service.py, 11/11): an audit tag, the guard working. Mined as an [error] it opened #154
-    (seen 3x by 11/12) for nothing. A real failure on the same turn still mines."""
-    assert classify_turn(turn(degraded=["untrusted_read"])) == []
-    found = classify_turn(turn(degraded=["untrusted_read", "ha_unreachable"]))
-    assert [g.summary for g in found] == ["degraded subsystem marker: ha_unreachable"]

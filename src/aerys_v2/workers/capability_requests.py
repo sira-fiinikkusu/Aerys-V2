@@ -74,10 +74,7 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # They stay in v2_turns for misroute-rate auditing — they just aren't gaps. The two
 # drop receipts (service.DROPPED_UNADDRESSED_MARKER / DROPPED_CANCELLED_MARKER) are the
 # same: a false wake and a withdrawn request ("never mind") are the gate working (#104).
-# untrusted_read is the outside-text guard's audit tag (service.py): the turn read a page, an
-# email or a file, and the guard is watching. Mined, it opened #154 for nothing (11/12).
-BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed", "dropped_cancelled",
-                               "untrusted_read"})
+BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed", "dropped_cancelled"})
 
 # These channels are test rigs whose failures describe the harness, not a
 # missing capability. The skip lives in Python, NOT in the miner's SQL: an
