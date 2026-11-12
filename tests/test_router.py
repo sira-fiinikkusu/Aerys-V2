@@ -331,3 +331,25 @@ def test_the_router_prompt_and_the_chat_side_both_know_passing_words_on():
     assert "tell Chris I love him" in " ".join(router._ROUTER_INSTRUCTIONS.split())
     source = inspect.getsource(factory)
     assert "no sending or passing on messages" in source and "a message to send or to" in source
+
+
+# Codex review (11/12): only ASKS count. A first-person plan or someone else's quoted words is not one,
+# and must neither route to action nor feed the claim gate.
+@pytest.mark.parametrize("text", [
+    "I'll tell him later",
+    "I'll tell Chris myself later",
+    "I'll pass it on when I see her",
+    'She said "tell him I said hi".',
+    "we'll let him know after dinner",
+])
+def test_plans_and_quotes_are_not_pass_on_asks(text):
+    from aerys_v2.router import plausibly_asks_for_action, plausibly_passes_words_on
+    assert not plausibly_passes_words_on(text)
+    assert not plausibly_asks_for_action(text)
+
+
+def test_a_pass_on_ask_never_overrides_an_unaddressed_verdict():
+    from aerys_v2.router import parse_route_reply
+    raw = '{"route":"action","ack":"Okay","unaddressed":true}'
+    assert parse_route_reply(raw, "can you tell him I'm on my way").unaddressed is True
+    assert parse_route_reply(raw, "turn off the lights").unaddressed is False   # device shapes still do

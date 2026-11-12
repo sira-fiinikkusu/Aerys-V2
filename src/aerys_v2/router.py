@@ -217,11 +217,16 @@ _KAEL_MARKERS = tuple(
 # Pass-on shapes (D33, 2026-11-12): her relay for a listed contact ("tell Chris ...") shipped with
 # no router vocabulary, and "please tell Chris I love him" routed to chat, where she said she
 # couldn't. This file's law again: a tool the router can't route to does not exist.
-_PASS_ON_MARKERS = (
-    "pass this on", "pass it on", "pass that on", "pass this along", "pass it along",
-    "pass that along", "pass on to", "pass along to", "let him know", "let chris know",
-    "tell chris", "tell him ",
+# REQUEST shapes only (Codex review, 11/12): "I'll tell him later" and a quoted "tell him I said hi" are
+# not asks, and as plain substrings they turned owner chat into action and fed the claim gate.
+_PASS_ON_QUOTED = re.compile(r'["\u201c][^"\u201d]*["\u201d]')
+_PASS_ON_ASK = re.compile(
+    r"(?:^|[.!?]\s+|\b(?:please|pls|can you|could you|would you|will you|go ahead and)\s+)"
+    r"(?:tell|let|message|text)\s+(?:chris|him)\b"
+    r"|\bpass\s+(?:this|it|that)\s+(?:on|along)\b|\bpass\s+(?:on|along)\s+to\b",
+    re.IGNORECASE,
 )
+_FIRST_PERSON_TAIL = re.compile(r"\b(?:i|i'll|i will|i'd|i can|i'm going to|we'll|we will)\s+$", re.IGNORECASE)
 
 # Music shapes for the degraded path — the 2026-07-18 addition (the music tool's
 # wiring, same day it shipped: a tool the router can't route to does not exist).
@@ -504,9 +509,13 @@ def plausibly_messages_kael(text: str) -> bool:
 
 
 def plausibly_passes_words_on(text: str) -> bool:
-    """Degraded-path heuristic: does this text ask her to pass words on to someone?"""
-    lowered = text.lower()
-    return any(marker in lowered for marker in _PASS_ON_MARKERS)
+    """Degraded-path heuristic: does this text ASK her to pass words on? Quoted words don't count
+    (they're someone else's), and neither does a first-person plan ("I'll pass it on")."""
+    bare = _PASS_ON_QUOTED.sub(" ", text).strip()
+    for m in _PASS_ON_ASK.finditer(bare):
+        if not _FIRST_PERSON_TAIL.search(bare[: m.start()]):
+            return True
+    return False
 
 
 def plausibly_sets_a_timer(text: str) -> bool:
@@ -515,7 +524,7 @@ def plausibly_sets_a_timer(text: str) -> bool:
     return any(marker in lowered for marker in _TIMER_MARKERS)
 
 
-def plausibly_asks_for_action(text: str) -> bool:
+def plausibly_asks_for_action(text: str, *, pass_on: bool = True) -> bool:
     """Does this text ask for something DONE (any armed capability)?
 
     The same union fallback_decision uses, exposed on its own so the text-side
@@ -532,7 +541,7 @@ def plausibly_asks_for_action(text: str) -> bool:
         or plausibly_wants_remember(text)
         or plausibly_wants_music(text)
         or plausibly_messages_kael(text)
-        or plausibly_passes_words_on(text)
+        or (pass_on and plausibly_passes_words_on(text))
         or plausibly_sets_a_timer(text)
     )
 
@@ -578,7 +587,9 @@ def parse_route_reply(
         # tier is a hint (see module docstring): normalize, never reject — a
         # garbage tier must not throw away a perfectly good route decision.
         unaddressed = data.get("unaddressed") is True
-        if unaddressed and plausibly_asks_for_action(user_text):
+        # A pass-on ask never overrides the verdict (Codex review, 11/12): "can you tell him..." said to
+        # someone else in the room is theirs to answer. Only the device-style shapes below do.
+        if unaddressed and plausibly_asks_for_action(user_text, pass_on=False):
             # Structural guard, not a prompt promise: a command-shaped message
             # is NEVER dropped, whatever the model judged — eating a real
             # "turn off the lights" is the one failure this feature must not
