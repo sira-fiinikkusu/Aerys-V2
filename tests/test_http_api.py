@@ -84,6 +84,7 @@ def test_ask_round_trip_with_defaults():
     assert r.json() == {
         "reply": "echo:hello|Chris (HTTP)|http:default",
         "thread_id": "http:default",
+        "keep_listening": False,
     }
 
 

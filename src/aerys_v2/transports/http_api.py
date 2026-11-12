@@ -62,6 +62,7 @@ class AskRequest(BaseModel):
 class AskReply(BaseModel):
     reply: str
     thread_id: str
+    keep_listening: bool = False
 
 
 class KaelNoteRequest(BaseModel):
@@ -129,6 +130,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
     # person-thread key builder the text gateways use — no drift on the format.
     from aerys_v2.transports.discord_gateway import person_thread_key
     from aerys_v2.config import speaker_person_map, home_job_member_map
+
+    from aerys_v2.keep_listening import ToggleReader, consume_dismissal, mark_opened
+
+    toggle = ToggleReader(settings)
 
     speaker_persons = speaker_person_map(settings) if settings is not None else {}
 
@@ -342,7 +347,18 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                     thread_id = person_thread_key(who[0])
         else:
             thread_id = body.thread_id
+        is_voice = bool(identity.get("voice"))
+        # Consume even when OFF, so re-enabling cannot resurrect an answered mic.
+        dismissed = is_voice and consume_dismissal(body.device_id, body.text)
+        if dismissed and toggle.enabled():
+            return AskReply(reply="", thread_id=thread_id)
         reply = ask_fn(body.text, identity, thread_id)
+        keep_listening = False
+        if is_voice:
+            from aerys_v2.service import strip_emotion_tags
+
+            keep_listening = strip_emotion_tags(reply).strip().endswith("?") and toggle.enabled()
+
         # Speaker redirect (2026-09-26): a voice turn from a satellite whose speaker
         # is gone is also spoken on the redirect target (Leviathan's desk speakers).
         if identity.get("voice") and speaker_redirect is not None:
@@ -353,7 +369,9 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # voice never lands here. The writer gates + fails open internally.
         if a2a_memory_fn is not None:
             a2a_memory_fn(thread_id, body.text, reply)
-        return AskReply(reply=reply, thread_id=thread_id)
+        if keep_listening:
+            mark_opened(body.device_id)
+        return AskReply(reply=reply, thread_id=thread_id, keep_listening=keep_listening)
 
     @app.post("/kael-note", response_model=KaelNoteReply)
     def kael_note_route(

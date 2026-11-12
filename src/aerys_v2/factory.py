@@ -411,7 +411,8 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     """Route a spoken follow-up to the right delivery for the ORIGINATING device.
 
     A mapped satellite (device_id in HA_SATELLITE_MAP) gets an assist_satellite
-    announce — the speaker plays it locally, exactly as before. Any OTHER device
+    announce, or start_conversation for a question when keep-listening is ON.
+    Any OTHER device
     (the headless Myo phone satellite, or an unmapped/None device_id) has NO
     announce-able entity: HA would otherwise play a phone turn's follow-up on a
     physical home speaker the remote owner can't hear. Those fire an `aerys_followup`
@@ -428,26 +429,33 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     import httpx
 
     from .speaker_redirect import speaker_redirect_for
+    from .keep_listening import ToggleReader, mark_opened
 
     base = settings.ha_base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
     satellite_map = satellite_map_from(settings.ha_satellite_map)
     display_map = satellite_map_from(settings.ha_display_followups)
     redirect = speaker_redirect_for(settings)
+    toggle = ToggleReader(settings)
 
     def route(text: str, device_id: str | None) -> None:
+        open_mic = bool(device_id and device_id in satellite_map
+                        and text.strip().endswith("?") and toggle.enabled())
         if redirect is not None and redirect.handles(device_id):
             # Speakerless-by-accident satellite (office, 2026-09-26): its follow-up
             # plays on the redirect target instead of a dead speaker.
             redirect.say(device_id, text)
-            return
+            if not open_mic:
+                return
         if device_id and device_id in satellite_map:
-            # Mapped satellite -> announce locally. preannounce=False: no chime
-            # before the follow-up (owner ask 2026-07-04), matching speak_fn_for.
+            # Questions can open the mic; all other speech keeps the announce path.
+            # preannounce=False preserves the existing no-chime behavior.
             r = httpx.post(
-                f"{base}/api/services/assist_satellite/announce",
+                f"{base}/api/services/assist_satellite/"
+                + ("start_conversation" if open_mic else "announce"),
                 headers=headers,
-                json={"entity_id": satellite_map[device_id], "message": text,
+                json={"entity_id": satellite_map[device_id],
+                      ("start_message" if open_mic else "message"): text,
                       "preannounce": False},
                 timeout=15.0,
             )
@@ -474,6 +482,8 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                 timeout=15.0,
             )
         r.raise_for_status()
+        if open_mic:
+            mark_opened(device_id)
 
     return route
 
@@ -2541,6 +2551,12 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False) -> list:
             from aerys_v2.tools.kael_checkins import build_kael_checkins_tool
 
             tools.append(build_kael_checkins_tool(PostgresCheckinStore(settings.database_url)))
+
+    if not guest and settings.ha_token is not None:
+        # Keep listening (11/11): his voice switch for input_boolean.aerys_keep_listening.
+        from aerys_v2.keep_listening import build_keep_listening_tool
+
+        tools.append(build_keep_listening_tool(settings))
 
     if not guest:
         from aerys_v2.tools.gmail_drafts import gmail_tools_for
