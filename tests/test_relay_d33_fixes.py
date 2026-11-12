@@ -32,7 +32,7 @@ def test_only_serving_desk_delivers_once():
     assert sent == [row] and row.status == 'sent'
 
 
-@pytest.mark.parametrize('name', [None, '', '  ', 'Chris', ' cHRis ', 'Chris.', 'chris p', '(Chris)'])
+@pytest.mark.parametrize('name', [None, '', '  ', 'Chris', ' cHRis ', 'Chris.', 'chris p', '(Chris)', 'Mr Chris'])
 def test_record_name_required_and_owner_name_reserved(name):
     relay, store, desk, sent = make_relay({'contact': name, 'owner': 'Chris'})
     result = relay.send('hello', dict(CONTACT, display_name='Sam'), '')
@@ -154,3 +154,10 @@ def test_overnight_relay_stays_out_of_morning_brief():
 def test_a_name_sharing_no_word_with_the_owner_is_fine():
     relay, store, desk, sent = make_relay({'contact': 'Christopher Robin', 'owner': 'Chris'})
     assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
+
+
+def test_a_shared_surname_is_fine():
+    relay, store, desk, sent = make_relay({'contact': 'Sam Rivera', 'owner': 'Alex Rivera'})
+    assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
+    relay, store, desk, sent = make_relay({'contact': 'Alex Smith', 'owner': 'Alex Rivera'})
+    assert relay.send('hello', CONTACT, '').startswith('Not passed on')

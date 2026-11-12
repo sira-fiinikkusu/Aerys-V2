@@ -72,8 +72,10 @@ class Relay:
             owner_name = str(self.person_name(self.owner) or '').strip()
             if not owner_name:
                 return 'Not passed on: I could not check the owner name on record.'
-            # "Chris.", "chris p": any word of his name in theirs reads as him in the quote.
-            if _name_words(name) & _name_words(owner_name):
+            # "Chris.", "chris p", "Mr Chris": his first name in theirs reads as him in the quote.
+            # A shared surname ("Sam Rivera" beside "Alex Rivera") doesn't.
+            first = re.findall(r'[^\W_]+', owner_name.casefold())[:1]
+            if set(first) & _name_words(name):
                 return 'Not passed on: your name on record matches the owner.'
             # Escape plainly, keeping the closing quote even when clipping the words.
             prefix = f'{name} says: '
