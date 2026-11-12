@@ -156,7 +156,7 @@ def test_a_long_failed_job_keeps_its_whole_report_and_a_whole_headline():
               "- **What happened:** I started on the homepage and typed the model in the search box. The search "
               "went through, but the next page was the bot-check screen that says \"Performing security "
               "verification\" with a checkbox.\n- **What I didn't do:** I didn't try to get past it.\n\n"
-              + "More detail. " * 140)
+              + "More detail. " * 140 + "\n\nNote to self: plan for a person to clear this live.")
     home = Home(job=Job(task=task, error=report))
     home.notices.receive(note(status="error"))
     home.notices.tick()
@@ -167,6 +167,10 @@ def test_a_long_failed_job_keeps_its_whole_report_and_a_whole_headline():
     assert '"Performing security verification" with a checkbox.' in detail and "\n- **What I didn't do:**" in detail
     assert len(detail) <= ERROR_CHARS and detail.endswith("…") and not detail.endswith(" …")
     assert len(text_copy(said, detail)) <= 2000          # one Discord message
+    short = Home(job=Job(task="Look it up", error="Blocked by a check.\n\nNote to self: plan for a person."))
+    short.notices.receive(note(status="error"))
+    short.notices.tick()
+    assert short.desk.store.rows[1].detail == "Blocked by a check."   # her notes to herself stay hers
 
 
 def test_about_and_clip_report_cut_at_words():

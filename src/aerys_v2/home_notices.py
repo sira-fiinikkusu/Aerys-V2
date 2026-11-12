@@ -348,7 +348,8 @@ class HomeNotices:
             if self.fetch is not None:
                 try:
                     job = self.fetch(notice) or Job()
-                    job = replace(job, result=without_working_notes(job.result))
+                    # A failed job's report goes in full now (11/11): her notes to herself come out of it too.
+                    job = replace(job, result=without_working_notes(job.result), error=without_working_notes(job.error))
                 except Exception as e:
                     if notice.attempts + 1 < DETAIL_TRIES:
                         self.store.tried(notice.id)
