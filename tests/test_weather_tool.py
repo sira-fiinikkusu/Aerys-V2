@@ -5,8 +5,12 @@ hourly, the no-invented-percentages rule (precipitation inches only), span
 fallback, and the honest-failure contract (HTTP errors and unreachable HA
 come back as strings, never raises)."""
 
-import httpx
+from datetime import datetime, timedelta
 
+import httpx
+import pytest
+
+from aerys_v2.tools import weather
 from aerys_v2.tools.weather import build_weather_tool
 
 ENTITY = "weather.forecast_home"
@@ -184,3 +188,133 @@ def test_weekend_skips_an_odd_row_instead_of_failing():
 
 def test_weekend_with_empty_forecast_is_reported_not_fabricated():
     assert tool(daily=[]).invoke({"span": "weekend"}) == "The weather provider returned no daily forecast."
+
+
+# NWS fixtures use symbolic points and endpoint names, never actual locations.
+@pytest.fixture
+def nws():
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 30, 15, tzinfo=tz)
+
+    periods = []
+    for offset, name in enumerate(("This Afternoon", "Tonight", "Saturday", "Saturday Night",
+                                   "Sunday", "Sunday Night", "Monday", "Monday Night")):
+        start = datetime(2026, 10, 30) + timedelta(days=offset // 2)
+        periods.append({"name": name, "startTime": f"{start:%Y-%m-%d}T{12 if offset % 2 == 0 else 18}:00:00-04:00",
+                        "probabilityOfPrecipitation": {"value": None if offset == 3 else offset * 10},
+                        "shortForecast": "Cloudy"})
+    hours = [{"startTime": f"2026-10-30T{15 + i:02}:00:00-04:00",
+              "probabilityOfPrecipitation": {"value": i}, "shortForecast": "Cloudy"}
+             for i in range(9)]
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        if "/points/" in url:
+            return {"properties": {"forecast": "https://example.invalid/daily",
+                                   "forecastHourly": "https://example.invalid/hourly"}}
+        return {"properties": {"periods": hours if url.endswith("hourly") else periods}}
+
+    return Clock, fetch, calls
+
+
+def nws_tool(fetch, **kwargs):
+    return build_weather_tool(base_url="http://ha:8123", token="t", entity_id=ENTITY,
+                              client=fake_ha(**kwargs), nws_point="LAT,LON", fetch_json=fetch)
+
+
+@pytest.mark.parametrize("span,expected", [
+    ("now", "This Afternoon 0% (Cloudy); Tonight 10% (Cloudy)"),
+    ("today", "This Afternoon 0% (Cloudy); Tonight 10% (Cloudy)"),
+    ("tomorrow", "Saturday 20% (Cloudy); Saturday Night no figure (Cloudy)"),
+    ("weekend", "Saturday 20%; Saturday Night no figure; Sunday 40%; Sunday Night 50%"),
+    ("week", "This Afternoon 0%; Tonight 10%; Saturday 20%; Saturday Night no figure; Sunday 40%; Sunday Night 50%; Monday 60%; Monday Night 70%"),
+    ("hourly", "15:00 0%; 16:00 1%; 17:00 2%; 18:00 3%; 19:00 4%; 20:00 5%; 21:00 6%; 22:00 7%"),
+])
+def test_nws_spans_preserve_ha_and_select_periods(monkeypatch, nws, span, expected):
+    clock, fetch, _ = nws
+    monkeypatch.setattr(weather, "datetime", clock)
+    assert nws_tool(fetch).invoke({"span": span}) == (
+        tool().invoke({"span": span}) + "\nRain chance (National Weather Service): " + expected)
+
+
+def test_nws_points_cached_across_tools_but_forecasts_fresh(nws):
+    _, fetch, calls = nws
+    for _ in range(2):
+        nws_tool(fetch).invoke({"span": "now"})
+    assert calls.count("https://api.weather.gov/points/LAT,LON") == 1
+    assert calls.count("https://example.invalid/daily") == 2
+
+
+@pytest.mark.parametrize("body", [None, {}, {"properties": {"periods": []}},
+                                  {"properties": {"periods": [{"startTime": "bad"}]}}])
+def test_nws_failure_is_honest_and_preserves_ha(body):
+    def fetch(url):
+        if body is None:
+            raise httpx.ConnectError("offline")
+        if "/points/" in url:
+            return {"properties": {"forecast": "https://example.invalid/daily",
+                                   "forecastHourly": "https://example.invalid/hourly"}}
+        return body
+    assert nws_tool(fetch).invoke({"span": "now"}) == (
+        tool().invoke({"span": "now"}) + "\nRain chance: not available right now.")
+
+
+def test_no_point_never_fetches_nws():
+    def fetch(url):
+        pytest.fail("NWS must not be fetched without a point")
+    t = build_weather_tool(base_url="http://ha:8123", token="t", entity_id=ENTITY,
+                           client=fake_ha(), fetch_json=fetch)
+    for span in weather._SPANS:
+        assert t.invoke({"span": span}) == tool().invoke({"span": span})
+
+
+def test_nws_default_fetch_sets_headers_and_checks_status(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(weather.httpx, "get", lambda url, **kw: client.get(
+        url, headers=kw["headers"], timeout=kw["timeout"], follow_redirects=kw["follow_redirects"]))
+    with pytest.raises(httpx.HTTPStatusError):
+        weather._fetch_nws_json("https://example.invalid/daily")
+    assert "aerys-v2" in requests[0].headers["User-Agent"]
+    assert requests[0].headers["Accept"] == "application/geo+json"
+    assert "Authorization" not in requests[0].headers
+
+
+def test_nws_point_failure_retries_and_ha_failure_still_has_chance(nws):
+    _, fetch, calls = nws
+    failed = False
+
+    def flaky(url):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise httpx.ConnectError("offline")
+        return fetch(url)
+
+    t = nws_tool(flaky, status=503)
+    assert t.invoke({"span": "now"}) == (
+        "Weather read failed: HA returned 503.\nRain chance: not available right now.")
+    assert "Tonight 10% (Cloudy)" in t.invoke({"span": "now"})
+    assert calls.count("https://api.weather.gov/points/LAT,LON") == 1
+
+
+def test_tomorrow_when_first_period_is_tonight(monkeypatch, nws):
+    clock, fetch, _ = nws
+    monkeypatch.setattr(weather, "datetime", clock)
+
+    def evening(url):
+        body = fetch(url)
+        if url.endswith("daily"):
+            body["properties"]["periods"] = body["properties"]["periods"][1:]
+        return body
+
+    out = nws_tool(evening).invoke({"span": "tomorrow"})
+    assert out.endswith("Saturday 20% (Cloudy); Saturday Night no figure (Cloudy)")

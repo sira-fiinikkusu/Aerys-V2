@@ -22,7 +22,9 @@ whole action turn). Reads only — no canary, no outbox, nothing to allowlist.
 """
 
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta
+from functools import lru_cache
+from typing import Callable
 
 import httpx
 from langchain_core.tools import tool
@@ -30,6 +32,74 @@ from langchain_core.tools import tool
 log = logging.getLogger(__name__)
 
 _SPANS = ("now", "today", "tomorrow", "hourly", "week", "weekend")
+
+
+_NWS_HEADERS = {
+    "User-Agent": "aerys-v2 weather (personal home installation)",
+    "Accept": "application/geo+json",
+}
+
+
+def _fetch_nws_json(url: str) -> dict:
+    # 5 s, not storm watch's 15: this runs inside a (voice) turn, and a slow NWS must only cost the line.
+    response = httpx.get(url, headers=_NWS_HEADERS, timeout=5.0, follow_redirects=True)
+    response.raise_for_status()
+    return response.json()
+
+
+@lru_cache(maxsize=128)
+def _nws_endpoints(point: str, fetch: Callable[[str], dict]) -> tuple[str, str]:
+    """Cache successful point discovery across tool instances in this process."""
+    properties = fetch(f"https://api.weather.gov/points/{point}")["properties"]
+    daily, hourly = properties["forecast"], properties["forecastHourly"]
+    if not isinstance(daily, str) or not daily or not isinstance(hourly, str) or not hourly:
+        raise ValueError("Missing NWS forecast endpoints")
+    return daily, hourly
+
+
+def _rain_chance(point: str, span: str, fetch: Callable[[str], dict]) -> str:
+    try:
+        daily, hourly = _nws_endpoints(point, fetch)
+        # Only point discovery is cached; forecasts are fetched anew.
+        periods = fetch(hourly if span == "hourly" else daily)["properties"]["periods"]
+        if span in ("now", "today"):
+            periods = periods[:2]
+        elif span == "hourly":
+            periods = periods[:8]
+        elif span == "tomorrow":
+            zone = datetime.fromisoformat(periods[0]["startTime"]).tzinfo
+            if zone is None:
+                raise ValueError("Missing NWS local offset")
+            tomorrow = datetime.now(zone).date() + timedelta(days=1)
+            periods = [p for p in periods
+                       if datetime.fromisoformat(p["startTime"]).date() == tomorrow]
+        elif span == "weekend":
+            periods = [p for p in periods
+                       if datetime.fromisoformat(p["startTime"]).weekday() >= 5]
+        if not periods:
+            return "Rain chance: not available right now."
+        pieces = []
+        for period in periods:
+            if span == "hourly":
+                start = datetime.fromisoformat(period["startTime"])
+                if start.tzinfo is None:
+                    raise ValueError("Missing NWS local offset")
+                label = start.strftime("%H:%M")
+            else:
+                label = period["name"]
+            value = period["probabilityOfPrecipitation"]["value"]
+            if value is not None and (isinstance(value, bool) or
+                                     not isinstance(value, (int, float)) or not 0 <= value <= 100):
+                raise ValueError("Invalid NWS probability")
+            chance = "no figure" if value is None else f"{_fmt_num(value)}%"
+            piece = f"{label} {chance}"
+            if span in ("now", "today", "tomorrow"):
+                piece += f" ({period['shortForecast']})"
+            pieces.append(piece)
+        return "Rain chance (National Weather Service): " + "; ".join(pieces)
+    except Exception:
+        # An NWS failure must never discard the HA answer or expose fetch errors.
+        return "Rain chance: not available right now."
 
 
 def _day_of(f: dict) -> date | None:
@@ -52,9 +122,11 @@ def build_weather_tool(
     token: str,
     entity_id: str,
     client: httpx.Client | None = None,
+    nws_point: str | None = None,
+    fetch_json: Callable[[str], dict] | None = None,
 ):
     """The armed get_weather tool. entity_id is the house's weather entity
-    (settings.ha_weather_entity); client is injectable for tests."""
+    (settings.ha_weather_entity); client and the NWS JSON fetch are injectable for tests."""
     http = client or httpx.Client(timeout=10.0)
     base = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}"}
@@ -110,30 +182,7 @@ def build_weather_tool(
             piece += f' {_fmt_num(f["precipitation"])}"'
         return piece
 
-    @tool
-    def get_weather(span: str = "now") -> str:
-        """ALWAYS use this for ANY weather question about home or the local
-        area — rain, forecast, temperature, wind, "should I bring a jacket".
-        NEVER use search_web for local weather: web results resolve the town
-        name wrong and return data for the wrong continent. This reads the
-        house's own Home Assistant weather station/provider.
-
-        span: "now" (current conditions), "today" (today's forecast),
-        "tomorrow", "hourly" (next hours, times in UTC),
-        "week" (every forecast day the provider has, about 6), or
-        "weekend" (only the Saturday and Sunday in the forecast; it says so
-        plainly when the forecast doesn't reach them).
-        Note: precipitation is reported in inches; this provider has no
-        rain-probability percentage — do not invent one.
-        """
-        want = (span or "now").strip().lower()
-        # "week" is inside "weekend": ask the narrower question first (Chris, lesson 2).
-        if "weekend" in want:
-            want = "weekend"
-        elif "week" in want:
-            want = "week"
-        if want not in _SPANS:
-            want = "now"
+    def _ha_weather(want: str) -> str:
         try:
             if want == "now":
                 return _current()
@@ -173,5 +222,37 @@ def build_weather_tool(
         except Exception as e:  # honest string, never a raise inside ToolNode
             log.warning("get_weather failed", exc_info=True)
             return f"Weather read failed: {e}"
+
+    @tool
+    def get_weather(span: str = "now") -> str:
+        """ALWAYS use this for ANY weather question about home or the local
+        area — rain, forecast, temperature, wind, "should I bring a jacket".
+        NEVER use search_web for local weather: web results resolve the town
+        name wrong and return data for the wrong continent. This reads the
+        house's own Home Assistant weather station/provider.
+
+        span: "now" (current conditions), "today" (today's forecast),
+        "tomorrow", "hourly" (next hours: HA times in UTC, NWS times in local time),
+        "week" (every forecast day the provider has, about 6), or
+        "weekend" (only the Saturday and Sunday in the forecast; it says so
+        plainly when the forecast doesn't reach them).
+        Note: the house's provider reports precipitation in inches only. The
+        rain chance (percent per period) comes from the National Weather Service
+        line; quote it as given. When it says not available or no figure, say
+        there is no figure; never invent a percentage.
+        """
+        want = (span or "now").strip().lower()
+        # "week" is inside "weekend": ask the narrower question first (Chris, lesson 2).
+        if "weekend" in want:
+            want = "weekend"
+        elif "week" in want:
+            want = "week"
+        if want not in _SPANS:
+            want = "now"
+        answer = _ha_weather(want)
+        point = (nws_point or "").strip()
+        if point:
+            answer += "\n" + _rain_chance(point, want, fetch_json or _fetch_nws_json)
+        return answer
 
     return get_weather

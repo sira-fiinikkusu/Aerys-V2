@@ -2301,6 +2301,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                 base_url=settings.ha_base_url,
                 token=settings.ha_token.get_secret_value(),
                 entity_id=settings.ha_weather_entity,
+                nws_point=settings.storm_watch_latlon,
             )
         )
 
