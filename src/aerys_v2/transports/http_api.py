@@ -11,6 +11,7 @@ taught the pattern — the header check happens before ANYTHING else runs.
 
 import hmac
 import logging
+import unicodedata
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -24,6 +25,27 @@ log = logging.getLogger(__name__)
 #: The identity an unrecognized voice lands on. Named once so the door and the
 #: engage gate cannot drift on what "a stranger spoke" means.
 GUEST_VOICE_ID = "voice-guest"
+
+
+_STOP_PHRASES = {
+    "stop", "stop talking", "stop it", "okay stop", "ok stop", "hold on",
+    "hold up", "thats enough", "enough", "be quiet", "quiet", "shush", "shh",
+}
+_STOP_NAMES = {"aerys", "harris", "iris", "ares", "aries", "eris"}
+
+
+def _is_stop_phrase(text: str) -> bool:
+    # Apostrophes disappear; other punctuation separates words.
+    normalized = "".join(
+        "" if char in "'’" else " " if unicodedata.category(char).startswith("P") else char
+        for char in text.lower()
+    )
+    words = normalized.split()
+    if words and words[0] in _STOP_NAMES:
+        words = words[1:]
+    if words and words[-1] in _STOP_NAMES:
+        words = words[:-1]
+    return " ".join(words) in _STOP_PHRASES
 
 
 class SpeakerTag(BaseModel):
@@ -350,6 +372,13 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         is_voice = bool(identity.get("voice"))
         # Consume even when OFF, so re-enabling cannot resurrect an answered mic.
         dismissed = is_voice and consume_dismissal(body.device_id, body.text)
+        # D34 barge-in ("Aerys, stop" while her voice plays on the desk speakers): cut her off, no
+        # model call. After the dismissal above, so a "stop" also clears a mic she had opened.
+        if (is_voice and speaker_redirect is not None and _is_stop_phrase(body.text)
+                and speaker_redirect.handles(body.device_id)
+                and speaker_redirect.playing(body.device_id)):
+            speaker_redirect.stop(body.device_id)
+            return AskReply(reply="", thread_id=thread_id, keep_listening=False)
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)
         reply = ask_fn(body.text, identity, thread_id)

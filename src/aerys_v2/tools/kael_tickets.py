@@ -56,6 +56,9 @@ def build_kael_tickets_tool(store, send, *, clock=None):
         sent (or answer a question Kael asked back); or when an ask isn't needed anymore.
         Never re-send the same ask with message_kael: add to its ticket here.
 
+        If someone asks you to tell Kael about something but hasn't said what
+        it is, ask them first. Never send Kael a message without the actual content.
+
         action: "check" (one ticket: its state and Kael's answer), "list" (recent
           tickets), "update" (send more on an open ticket), or "cancel".
         ticket: the ticket id, e.g. "T-12" (required for check, update and cancel).

@@ -53,6 +53,36 @@ class SpeakerRedirect:
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._targets
 
+    def playing(self, device_id: str | None) -> bool:
+        """Best-effort speaker playing; failures are harmless."""
+        if not self.handles(device_id):
+            return False
+        try:
+            response = self._client.get(
+                f"{self._targets[device_id]}/health",
+                headers=self._speaker_headers, timeout=1.5,
+            )
+            response.raise_for_status()
+            return response.json().get("playing") is True
+        except Exception:
+            log.debug("speaker redirect playing failed (harmless)", exc_info=True)
+            return False
+
+    def stop(self, device_id: str | None) -> bool:
+        """Best-effort speaker stop; failures are harmless."""
+        if not self.handles(device_id):
+            return False
+        try:
+            response = self._client.post(
+                f"{self._targets[device_id]}/stop",
+                headers=self._speaker_headers, timeout=3.0,
+            )
+            response.raise_for_status()
+            return response.json().get("stopped") is True
+        except Exception:
+            log.debug("speaker redirect stop failed (harmless)", exc_info=True)
+            return False
+
     def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return

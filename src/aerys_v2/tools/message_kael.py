@@ -86,6 +86,9 @@ def build_message_kael_tool(url: str, token: str, client: httpx.Client | None = 
         requests, limitations, and trackable work items use log_gap instead —
         that's the durable board he reviews; this is the tap on the shoulder.
 
+        If someone asks you to tell Kael about something but hasn't said what
+        it is, ask them first. Never send Kael a message without the actual content.
+
         Keep it to one message, not a conversation. Each message opens a
         ticket (T-12): Kael answers by ticket, his answer comes back into this
         conversation, and when the owner asked, his answer is brought to the

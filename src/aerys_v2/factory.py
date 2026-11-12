@@ -1686,7 +1686,9 @@ VOICE_ACK_OVERLAY = (
 # unnecessary tool use so banter stays banter (cross-review note: tool-armed
 # graphs drift procedural without a behavioral hint).
 VOICE_BANTER_OVERLAY = (
-    "This is a VOICE conversation. Keep replies concise and speakable. Weave "
+    "This is a VOICE conversation. Keep spoken replies short: a few sentences, "
+    "with the answer first. Say it as plain speech; never read lists, headings or markdown aloud. "
+    "If they ask for detail or the answer truly needs more, you may keep talking over voice. Weave "
     "in ElevenLabs v3 emotion tags — [warmly], [softly], [playfully], "
     "[thoughtfully] — where they fit the feeling; the speech engine performs "
     "them, listeners never hear the bracket text. Their words reach you via "
@@ -3411,8 +3413,10 @@ def build_graph(
             # v3 emotion tags (the n8n polisher's job, done prompt-side for free), plus a
             # transcription-fallibility caution (voice input is STT, not typed).
             voice_style = (
-                "\n\nThis is a VOICE conversation. Keep replies concise and "
-                "speakable. Weave in ElevenLabs v3 emotion tags — [warmly], "
+                "\n\nThis is a VOICE conversation. Keep spoken replies short: a few sentences, "
+                "with the answer first. Say it as plain speech; never read lists, headings or markdown aloud. "
+                "If they ask for detail or the answer truly needs more, you may keep talking over voice. "
+                "Weave in ElevenLabs v3 emotion tags — [warmly], "
                 "[softly], [playfully], [thoughtfully] — where they fit the "
                 "feeling; the speech engine performs them, listeners never hear "
                 "the bracket text. Their words reach you via speech-to-text and "
