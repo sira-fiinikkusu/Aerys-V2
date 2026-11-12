@@ -50,8 +50,12 @@ DETAIL_TRIES = 3            # passes that try to read the job's details before g
 ID_CHARS = 200
 METADATA_BYTES = 4096
 TASK_CHARS = 300
+#: The job, as the headline names it: its first sentence, never a word cut mid-way (Chris, 11/11:
+#: "Repor…" read as her answer being cut off).
+ABOUT_CHARS = 160
 RESULT_CHARS = 1500
-ERROR_CHARS = 300
+#: A job that didn't finish: its report goes in full as text, like a finished one's (Chris, 11/11).
+ERROR_CHARS = 1500
 EASTERN = ZoneInfo("America/New_York")
 _HOLD = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
 #: "Ever", for the desk's ledger: a job's notice is told once, however late a retry comes.
@@ -134,6 +138,32 @@ def clip(text, n: int) -> str:
     """At most n characters of it, whitespace runs collapsed, marked when cut."""
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= n else flat[: n - 1].rstrip() + "…"
+
+
+def clip_report(text, n: int) -> str:
+    """A report for his text copy: its line breaks kept (her lists stay lists), at most n characters,
+    cut at a word and marked when cut."""
+    lines = [" ".join(line.split()) for line in str(text or "").splitlines()]
+    kept = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    if len(kept) <= n:
+        return kept
+    cut = kept[: n - 1]
+    if not (cut[-1:].isspace() or kept[n - 1].isspace()) and (" " in cut or "\n" in cut):
+        cut = cut.rsplit(None, 1)[0]          # never half a word
+    return cut.rstrip() + "…"
+
+
+def about(task) -> str:
+    """The job, for a headline: its first sentence, end punctuation dropped (the line adds its own),
+    at most ABOUT_CHARS, cut at a word."""
+    flat = " ".join(str(task or "").split())
+    first = re.split(r"(?<=[.!?])\s+", flat, maxsplit=1)[0].rstrip(" .!?…")
+    if len(first) <= ABOUT_CHARS:
+        return first
+    cut = first[: ABOUT_CHARS - 1]
+    if not (cut.endswith(" ") or first[ABOUT_CHARS - 1] == " ") and " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:") + "…"
 
 
 def parse(payload) -> dict:
@@ -262,7 +292,7 @@ class HomeNotices:
         return "new" if new else "duplicate"
 
     def _headline(self, notice: Notice, job: Job) -> str:
-        task = clip(job.task, TASK_CHARS)
+        task = about(job.task)
         if notice.status != "success":
             return PLAIN[notice.status].format(about=f": {task}" if task else "")
         text = ""
@@ -345,7 +375,8 @@ class HomeNotices:
                             exc_info=True)
                 out["waiting"] += 1
                 continue
-            detail = clip(job.result, RESULT_CHARS) if notice.status == "success" else clip(job.error, ERROR_CHARS)
+            detail = (clip_report(job.result, RESULT_CHARS) if notice.status == "success"
+                      else clip_report(job.error, ERROR_CHARS))
             text_to = self._text_to(notice)
             try:
                 outcome = self.desk.reach_out(ReachEvent(
@@ -363,12 +394,12 @@ class HomeNotices:
     def _tell_member(self, notice: Notice, member: str, job: Job, now: datetime) -> str:
         """Her finished job, told to her (D19 rule 4): "handed", "waiting" (tried again next pass) or
         "skipped" (she couldn't be reached after MEMBER_TRIES; marked, not resent forever)."""
-        task = clip(job.task, TASK_CHARS)
-        about = f": {task}" if task else ""
+        task = about(job.task)
+        named = f": {task}" if task else ""
         if notice.status == "success":
-            text, more = MEMBER_DONE.format(about=about), clip(job.result, MEMBER_REPORT_CHARS)
+            text, more = MEMBER_DONE.format(about=named), clip_report(job.result, MEMBER_REPORT_CHARS)
         else:
-            text, more = PLAIN[notice.status].format(about=about), clip(job.error, ERROR_CHARS)
+            text, more = PLAIN[notice.status].format(about=named), clip_report(job.error, ERROR_CHARS)
         if more:
             text = f"{text}\n\n{more}"
         if notice.id not in self._told:

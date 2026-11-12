@@ -11,6 +11,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aerys_v2.home_notices import (
+    ABOUT_CHARS,
+    ERROR_CHARS,
+    about,
+    clip_report,
     DATA_ONLY,
     RESULT_CHARS,
     TASK_CHARS,
@@ -23,7 +27,7 @@ from aerys_v2.home_notices import (
     home_notices_for,
     parse,
 )
-from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk, Where
+from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk, Where, text_copy
 from aerys_v2.transports.http_api import build_app
 from test_reach_desk import World
 
@@ -141,6 +145,37 @@ def test_a_job_that_didnt_finish_never_reads_as_done():
         assert said == f"{lead}: Build me a plane tracker." and home.composed == []    # never her words
         assert "done" not in said.lower()
         assert home.desk.store.rows[1].detail == ("the API key was refused")
+
+
+def test_a_long_failed_job_keeps_its_whole_report_and_a_whole_headline():
+    # 11/11: the headline cut the task at "Repor…" and the report at "Perform…".
+    task = ("Find the cheapest 2026 white compact SUV on the dealer site. Use your browser on the home machine: "
+            "start from the homepage, search the model, filter to white, sort by lowest price, and open the "
+            "cheapest listing. Report the price, mileage and the listing link.")
+    report = ("I couldn't get you the listing. The site's bot check stopped me before any results loaded.\n\n"
+              "- **What happened:** I started on the homepage and typed the model in the search box. The search "
+              "went through, but the next page was the bot-check screen that says \"Performing security "
+              "verification\" with a checkbox.\n- **What I didn't do:** I didn't try to get past it.\n\n"
+              + "More detail. " * 140)
+    home = Home(job=Job(task=task, error=report))
+    home.notices.receive(note(status="error"))
+    home.notices.tick()
+    said = home.world.spoken[0][0]
+    assert said == "That job at home didn't finish: Find the cheapest 2026 white compact SUV on the dealer site."
+    detail = home.desk.store.rows[1].detail
+    assert detail.startswith("I couldn't get you the listing.") and "\n- **What happened:**" in detail
+    assert '"Performing security verification" with a checkbox.' in detail and "\n- **What I didn't do:**" in detail
+    assert len(detail) <= ERROR_CHARS and detail.endswith("…") and not detail.endswith(" …")
+    assert len(text_copy(said, detail)) <= 2000          # one Discord message
+
+
+def test_about_and_clip_report_cut_at_words():
+    assert about("Make a calendar.") == "Make a calendar"
+    assert about("  Fix the   lights!  Then rest. ") == "Fix the lights"
+    long = "word " * 60
+    assert about(long).endswith("word…") and len(about(long)) <= ABOUT_CHARS
+    assert clip_report("a\n\n\n\nb  c", 50) == "a\n\nb c"
+    assert clip_report("alpha beta gamma", 12) == "alpha beta…"
 
 
 def test_an_interrupted_run_says_nothing_its_successor_will():
