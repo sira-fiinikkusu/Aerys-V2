@@ -76,6 +76,18 @@ def _refusal(request, text):
                        tool_call_id=request.tool_call.get('id', ''))
 
 
+def _answer(request, verdict, conf):
+    """The gate's verdict as the tool result. A refusal that is the approval system failing (infra)
+    marks the turn guard_error, so it mines as outside_guard_failed; a wait or a no doesn't."""
+    if verdict.go:
+        return None
+    if getattr(verdict, 'infra', False):
+        holder = conf.get('outside_text')
+        if holder is not None:
+            holder['guard_error'] = True
+    return _refusal(request, verdict.text)
+
+
 def _decide(request, gate):
     sources = sources_for(request)
     conf = request.runtime.config.get('configurable') or {}
@@ -116,7 +128,7 @@ def _decide(request, gate):
                             detail=(f'{notice(sources)}\n\nTo: {mail["to"]}\nSubject: {mail["subject"]}'
                                     f'\n\n{mail["body"]}'),
                             what=payload['what'])
-        return None if verdict.go else _refusal(request, verdict.text)
+        return _answer(request, verdict, conf)
     if gate is None:
         return _refusal(request, 'Not done: after reading outside text this needs the owner’s '
                         'Approve button, which is unavailable. Nothing happened.')
@@ -131,7 +143,7 @@ def _decide(request, gate):
                             kind='outside text', summary=f'Approve {name}',
                             detail=notice(sources) + '\n\n' + json.dumps(args, ensure_ascii=False),
                             what=payload['what'])
-    return None if verdict.go else _refusal(request, verdict.text)
+    return _answer(request, verdict, conf)
 
 
 def outside_guard(request, handler, *, gate=None):

@@ -87,6 +87,9 @@ GATE_DOWN = "Not done: I couldn't check whether this needs Chris's OK just now, 
 class Verdict:
     go: bool
     text: str = ""
+    # The approval system itself failed (approvals unreadable, the button couldn't be raised, a lookup
+    # down), as opposed to a wait or a no. Telemetry only: the answer is the same refusal either way.
+    infra: bool = False
 
 
 GO = Verdict(True)
@@ -433,7 +436,7 @@ class HandsGate:
             twins = self.store.same_request(HOME_JOB, {"tool": name, **dict(args or {})})
         except Exception:
             log.warning("hands gate: couldn't check what's queued for %s; refused", name, exc_info=True)
-            return Verdict(False, GATE_DOWN)
+            return Verdict(False, GATE_DOWN, infra=True)
         now = self.clock()
         for row in twins:
             if row.status == "running" or (row.status == "done" and row.finished_at is not None
@@ -446,7 +449,7 @@ class HandsGate:
                 retired = self.store.drop(row.id, "asked for directly; done that way", now)
             except Exception:
                 log.warning("hands gate: couldn't retire queued action %s; refused", row.id, exc_info=True)
-                return Verdict(False, GATE_DOWN)
+                return Verdict(False, GATE_DOWN, infra=True)
             if not retired:                                # the watcher took it between the read and now
                 return Verdict(False, f"That's already being done ({row.args.get('what') or 'the job he approved'}); "
                                       "it isn't done twice.")
@@ -471,12 +474,12 @@ class HandsGate:
         if platform not in PLATFORMS or not to:
             return Verdict(False, "Not sent: I need a platform (Discord, Telegram or email) and who it's for. Ask Chris.")
         if self.people is None:
-            return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.")
+            return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.", infra=True)
         try:
             found = self.people(platform, to) if resolved is None else resolved
         except Exception:
             log.warning("hands gate: the people lookup failed; nothing sent", exc_info=True)
-            return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.")
+            return Verdict(False, "Not sent: I can't check who that is right now, so nothing went. Ask Chris.", infra=True)
         # One destination is one person at one address; anything more is his to pick.
         found = [p for p in found or [] if str(p.get("person_id") or "")]
         destinations: dict[tuple[str, str], dict] = {}
@@ -507,7 +510,7 @@ class HandsGate:
             approved = [r for r in rows if self.approvals.status(r.approval_id) == "approved"]
         except Exception:
             log.warning("hands gate: couldn't read the contact's confirmations; nothing sent", exc_info=True)
-            return Verdict(False, GATE_DOWN)
+            return Verdict(False, GATE_DOWN, infra=True)
         if tainted:
             from aerys_v2.outside_guard import notice
             what = f"your message to {name} after reading outside text"
@@ -580,7 +583,7 @@ class HandsGate:
             if last is not None:
                 state = self.approvals.status(last.approval_id)
                 if state == "unknown":
-                    return Verdict(False, GATE_DOWN)
+                    return Verdict(False, GATE_DOWN, infra=True)
                 if last.status == "waiting" and state == "pending":
                     return Verdict(False, f"Still waiting: Chris hasn't answered the button for {last.args.get('what') or what} "
                                           "yet. Nothing has been done; it goes the moment he taps Approve.")
@@ -598,7 +601,7 @@ class HandsGate:
                     continue
                 state = self.approvals.status(r.approval_id)
                 if state == "unknown":
-                    return Verdict(False, GATE_DOWN)
+                    return Verdict(False, GATE_DOWN, infra=True)
                 if r.status == "waiting" and state == "pending":
                     return Verdict(False, f"Still waiting: Chris hasn't answered the button for {r.args.get('what') or what} "
                                           "yet (asked from another conversation). Nothing has been done; it goes the "
@@ -628,7 +631,8 @@ class HandsGate:
                                       "yet. Nothing has been done; ask again after he answers.")
         except Exception:
             log.warning("hands gate: couldn't put %s to him; nothing done", action, exc_info=True)
-            return Verdict(False, "Not done: I couldn't put this to Chris for his OK just now, so nothing happened.")
+            return Verdict(False, "Not done: I couldn't put this to Chris for his OK just now, so nothing happened.",
+                           infra=True)
         log.info("hands gate: %s waits for his button (approval %s)", action, approval_id)
         return Verdict(False, f"Waiting for Chris: I've asked him on Discord (a button, and a notification on his "
                               f"phone) to OK {what}. Nothing has been done; it goes only when he taps Approve. "
@@ -752,7 +756,7 @@ def home_job_middleware(gate: HandsGate):
                                     request.state)
         except Exception:
             log.warning("hands gate: deciding %s failed; refused", name, exc_info=True)
-            verdict = Verdict(False, GATE_DOWN)
+            verdict = Verdict(False, GATE_DOWN, infra=True)
         if verdict.go:
             return None
         return ToolMessage(content=verdict.text, tool_call_id=call.get("id") or "", name=name)

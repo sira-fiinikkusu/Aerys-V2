@@ -473,3 +473,21 @@ def test_a_guard_error_leaves_its_own_marker_so_it_still_mines(monkeypatch):
     degraded = captured[0]['degraded']
     gaps = classify_turn(turn(degraded=json.loads(degraded) if isinstance(degraded, str) else degraded))  # jsonb, as the DB returns it
     assert [g.summary for g in gaps] == ['degraded subsystem marker: outside_guard_failed']
+
+
+def test_an_approval_system_failure_leaves_the_guard_marker_but_a_wait_does_not():
+    """Codex recheck (11/12): the hands gate answers its own failures (approvals down, the button
+    couldn't be raised) with an ordinary refusal, so they too would have gone quiet. They carry
+    infra=True now; the guard turns that into guard_error. Waiting for his tap stays unmarked."""
+    from aerys_v2.hands_gate import GATE_DOWN, Verdict
+    class Gate:
+        def __init__(self, verdict): self.verdict = verdict
+        def _ask(self, *a, **k): return self.verdict
+        def home_job(self, *a, **k): return self.verdict
+    read = [ToolMessage(content='outside', name='read_email', tool_call_id='read')]
+    for verdict, failed in ((Verdict(False, GATE_DOWN, infra=True), True),
+                            (Verdict(False, 'Waiting for Chris: tap Approve.'), False)):
+        req = request(read, name='save_contact_email', args={'person': 'Sam', 'email': 'sam@example.com'})
+        assert outside_guard(req, lambda r: pytest.fail('sent'), gate=Gate(verdict)).content == verdict.text
+        sink = req.runtime.config['configurable']['outside_text']
+        assert bool(sink.get('guard_error')) is failed and sink.get('untrusted_read') is True
