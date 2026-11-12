@@ -104,3 +104,4 @@ The diff report itself (staging vs prod — the gate for the lease flip), dedup 
 soft-delete-replace (prod-writer work), the `memory_write` lease flip, writing to prod
 memories, and any second worker. Shadow rows pile up quietly until the comparison says
 the port is trustworthy.
+
