@@ -13,3 +13,6 @@ not in this repo) is how a non-controversial change ships without a per-change g
 
 After the deploy, every live check must pass and no error lines may appear; otherwise it rolls back to the previous
 image and checkout by itself. Everything it refuses still goes to the owner as a per-change go line.
+
+Every run, refused or not, leaves one line in `~/bench/kael-deploy.log` on the rack host: REFUSED (and why),
+ROLLED BACK (and which check failed), or the live revision it moved to.
