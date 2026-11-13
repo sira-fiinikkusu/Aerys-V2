@@ -35,3 +35,6 @@ CREATE TABLE IF NOT EXISTS v2_wakeups (
 );
 
 CREATE INDEX IF NOT EXISTS idx_wakeups_due ON v2_wakeups (status, next_run_at);
+
+-- Idempotent for a table made by an earlier draft of this migration (claim_token came in the review).
+ALTER TABLE v2_wakeups ADD COLUMN IF NOT EXISTS claim_token TEXT;
