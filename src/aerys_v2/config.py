@@ -494,6 +494,20 @@ class Settings(BaseSettings):
     # been read), "live", or "off". Off unless followups is true.
     followups: bool = False
     followup_plans: str = "shadow"
+    # HER OWN WAKE-UPS (wakeups.py; D40/D41, 2026-11-12): she sets herself one-off or recurring
+    # wake-ups for any task (wake_me), and when one fires she runs one unattended action turn and
+    # tells him (an owed answer through the reach desk), stays quiet, or ends it. The rails, the
+    # owner's defaults ("we can adjust later"): at most wakeup_max_active active, fires at least
+    # wakeup_min_interval_minutes apart, wakeup_default_days to its end unless she sets one and
+    # at most wakeup_max_days; per run wakeup_step_limit graph steps and wakeup_timeout_minutes of
+    # wall clock. Off unless wakeups is true (the tool, the wake graph and the runner).
+    wakeups: bool = False
+    wakeup_max_active: int = 10
+    wakeup_min_interval_minutes: int = 5
+    wakeup_default_days: int = 7
+    wakeup_max_days: int = 90
+    wakeup_step_limit: int = 40
+    wakeup_timeout_minutes: float = 10.0
     # HER WELCOME-HOME HELLO (welcome.py; board #178; the owner, 2026-11-09: "the 30+ minutes
     # away works for me", and "she could be inquisitive if i left without anything on the
     # schedule or she could ask how my appointment went"). When welcome_home_entity (his

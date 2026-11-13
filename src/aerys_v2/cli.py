@@ -426,6 +426,12 @@ def main() -> None:
             from aerys_v2.followups import followups_for, start_followups
 
             start_followups(followups_for(settings, reach_desk))
+            # Her own wake-ups (D40/D41): what she set herself to check later runs here, one
+            # unattended action turn each on the wake graph, results through the desk. Off unless
+            # WAKEUPS is set.
+            from aerys_v2.wakeups import start_wakeups, wakeups_for
+
+            start_wakeups(wakeups_for(settings, reach_desk, action_graph=action_graph))
             start_home_notices(home_notices)
             # Her long jobs at home (s3-02): a job he approved by button is started by this one
             # watcher (the other transports only ask), and she's told in her thread how it went.

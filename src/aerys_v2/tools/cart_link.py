@@ -143,6 +143,9 @@ def build_cart_link_tool(settings, *, send=None):
             requested = send_to_his_discord or is_voice_turn(identity, thread) or is_lens_surface(identity)
             if not requested:
                 return result
+            if identity.get('unattended'):
+                # A wake-up (D40) reaches him only through the desk: the link goes in her TELL.
+                return result + '\nNot sent: from a wake-up the link goes in what you tell him.'
             who = asker(identity, thread, settings.owner_person_id)
             # Kael's line is his id too, but only he asks for himself (send_message refuses it the same way).
             if who not in (OWNER_TEXT, OWNER_VOICE, OWNER_ASK) or str(thread or '').startswith('kael:'):

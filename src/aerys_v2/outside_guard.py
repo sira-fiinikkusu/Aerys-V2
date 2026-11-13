@@ -40,6 +40,10 @@ def origin_sources(identity, thread_id, owner, shared_surface_ids=(), members=No
     if (identity.get('surface') == 'sticky'
             or identity.get('device_id') in shared_surface_ids):
         sources.append('shared surface')
+    # D40/D41 (wakeups.py): a wake-up she set herself runs with nobody there. Whatever it read or
+    # was told, reaching anyone from it waits for his tap.
+    if identity.get('unattended'):
+        sources.append('unattended wake-up')
     return sources
 
 

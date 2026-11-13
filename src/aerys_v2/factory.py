@@ -2514,6 +2514,14 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
 
             tools.append(build_check_back_tool(PostgresFollowupStore(settings.database_url),
                                                withdraw=PostgresReachStore(settings.database_url).withdraw))
+        if settings.wakeups:
+            # HER WAKE-UPS (D40/D41, 11/12): she sets herself a later check, for any task, and the
+            # wake-ups runner (wakeups.py) runs it as an unattended action turn at its time.
+            from aerys_v2.wakeups import PostgresWakeupStore, WakeRails, build_wake_me_tool
+
+            tools.append(build_wake_me_tool(PostgresWakeupStore(settings.database_url),
+                                            rails=WakeRails.from_settings(settings),
+                                            owner_person_id=str(settings.owner_person_id or "")))
 
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
@@ -2645,6 +2653,10 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
             from aerys_v2.followups import CHECK_BACK_OVERLAY
 
             parts.append(CHECK_BACK_OVERLAY)
+        if settings.wakeups:
+            from aerys_v2.wakeups import WAKE_ME_OVERLAY
+
+            parts.append(WAKE_ME_OVERLAY)
     if not guest and settings.email_app_password is not None and settings.email_address:
         parts.append(EMAIL_OVERLAY)
     return "\n\n".join(parts)
@@ -2716,6 +2728,25 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else
                                   HandsWatcher(outside_gate) if outside_gate is not None else None)
+    # HER WAKE-UPS (wakeups.py; D40/D41, 11/12): a wake turn runs unattended on a graph of its own,
+    # built here by the same builder from these same tools (the guest graph's pattern), with her
+    # memory taken out and the house tools' writes refused (wake_tools), behind this same gate seen
+    # through WakeGate. The outside guard runs before any tool, so the forbidden writes that are
+    # reach-outs are refused by that view of the gate before a button is raised for them.
+    action_graph.wake_graph = None
+    if getattr(settings, "wakeups", False) and settings.database_url and settings.owner_person_id is not None:
+        from aerys_v2.wakeups import WakeGate, wake_tools
+
+        wake_list = wake_tools(tools)
+        wake_models, _ = _action_engine(settings, wake_list)
+        action_graph.wake_graph = build(
+            wake_models, soul, wake_list,
+            context_fn=context_fn_for(settings, profile_only=True),
+            overlay=overlay,
+            presence_fn=presence_fn_for(settings),
+            context_trailing=settings.prompt_context_trailing,
+            **{**extra, "outside_gate": WakeGate(outside_gate) if outside_gate is not None else None},
+        )
     # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
     # command through this same tool before the specialist speaks. Graph
     # configuration, never state — like history_window_messages.
