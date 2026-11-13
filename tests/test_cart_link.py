@@ -139,7 +139,7 @@ def test_toolnode_runtime_and_schema():
     sent = []
     tool = build_cart_link_tool(settings(discord_bot_token='placeholder', approvals_owner_discord_id='123'),
                                 send=lambda *args: sent.append(args))
-    assert set(tool.tool_call_schema.model_json_schema()['properties']) == {'store', 'items', 'send_to_his_discord'}
+    assert set(tool.tool_call_schema.model_json_schema()['properties']) == {'store', 'items', 'send_to_his_discord', 'kind'}
     builder = StateGraph(MessagesState)
     builder.add_node('tools', ToolNode([tool]))
     builder.add_edge(START, 'tools')
@@ -233,3 +233,24 @@ def test_amazon_ref_suffix_still_accepted():
 
 def test_walmart_dot_segments_refused():
     assert build_cart_link('walmart', [{'product': 'https://walmart.com/ip/../12345'}]).startswith('Refused: item 1:')
+
+
+def test_product_page_links_are_canonical():
+    assert build_cart_link('amazon', [{'product': 'https://www.amazon.com/x/dp/B000TEST01/ref=a?k=https://evil.example'},
+                                      {'product': 'b000test02', 'quantity': 3}], 'product_page') == (
+        'https://www.amazon.com/dp/B000TEST01\nhttps://www.amazon.com/dp/B000TEST02')
+    assert build_cart_link('walmart', [{'product': 'https://www.walmart.com/ip/Slug/12345?x=1#y'}],
+                           'product_page') == 'https://www.walmart.com/ip/12345'
+    assert build_cart_link('amazon', [{'product': ASIN}], 'checkout').startswith('Refused:')
+    assert build_cart_link('amazon', [{'product': 'https://evil.example/dp/B000TEST01'}], 'product_page').startswith('Refused: item 1:')
+
+
+def test_product_page_dm_on_voice():
+    sent = []
+    tool = build_cart_link_tool(settings(discord_bot_token='placeholder', approvals_owner_discord_id='123'),
+                                send=lambda *args: sent.append(args))
+    runtime = SimpleNamespace(config={'configurable': {
+        'identity': {'user_id': '1', 'voice': True, 'speaker': {'id': 'owner'}}, 'thread_id': 'person:1'}})
+    result = tool.func('amazon', [{'product': ASIN}], runtime, False, 'product_page')
+    assert sent[0][1:] == ('123', f'For your Amazon cart, tap Add to Cart on it:\nhttps://www.amazon.com/dp/{ASIN}\n-Aerys')
+    assert 'Sent the link to his Discord DM.' in result and 'add.html' not in result

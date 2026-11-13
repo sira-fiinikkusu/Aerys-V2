@@ -2618,7 +2618,9 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
             "When he asks to put a product in his Amazon or Walmart cart, find the exact product "
             "page with your web tools, then call add_to_cart_link; if you cannot find "
             "the exact product, ask. Never make a cart link yourself or present a web page's link "
-            "as a cart link. On voice or the glasses call the tool (it sends to his Discord); "
+            "as a cart link. Amazon's cart link only adds items sold by Amazon.com itself; when the "
+            "listing shows another seller or you can't tell, use kind='product_page'. "
+            "On voice or the glasses call the tool (it sends to his Discord); "
             "on text give him its exact link in the reply. Relay any sending failure honestly.")
     if not guest and settings.ha_token is not None:
         parts.append(ACTION_OVERLAY)

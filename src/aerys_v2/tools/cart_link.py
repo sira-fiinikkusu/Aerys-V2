@@ -7,6 +7,7 @@ no page text, arbitrary destination, login, or purchase crosses this boundary.
 from __future__ import annotations
 
 import re
+from typing import Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from langchain_core.tools import tool
@@ -29,8 +30,11 @@ class CartItem(BaseModel):
     quantity: StrictInt = 1
 
 
-def build_cart_link(store: str, items: list[dict]) -> str:
-    """Return a canonical URL or a refusal; never retain unvalidated URL parts."""
+def build_cart_link(store: str, items: list[dict], kind: str = 'cart') -> str:
+    """Return a canonical URL (or, for kind='product_page', one canonical product page per line)
+    or a refusal; never retain unvalidated URL parts."""
+    if kind not in ('cart', 'product_page'):
+        return "Refused: kind must be cart or product_page."
     if not isinstance(store, str) or store not in _HOSTS:
         return 'Refused: store must be amazon or walmart.'
     if not isinstance(items, list) or not 1 <= len(items) <= 10:
@@ -70,6 +74,12 @@ def build_cart_link(store: str, items: list[dict]) -> str:
             except ValueError:
                 return prefix + 'malformed product URL.'
         validated.append((candidate, quantity))
+    if kind == 'product_page':
+        # Amazon's cart link silently skips items sold by other sellers (11/12 test tap): the
+        # product page lets him press Add to Cart himself. Quantity is his to set there.
+        path = '/dp/{}' if store == 'amazon' else '/ip/{}'
+        host = 'www.amazon.com' if store == 'amazon' else 'www.walmart.com'
+        return '\n'.join(urlunsplit(('https', host, path.format(pid), '', '')) for pid, _ in validated)
     if store == 'amazon':
         params = [(key, value) for i, (pid, qty) in enumerate(validated, 1)
                   for key, value in ((f'ASIN.{i}', pid), (f'Quantity.{i}', qty))]
@@ -91,23 +101,33 @@ def build_cart_link_tool(settings, *, send=None):
     """Inject delivery for offline tests; resolve his destination at send time."""
     @tool
     def add_to_cart_link(store: str, items: list[CartItem], runtime: ToolRuntime,
-                         send_to_his_discord: StrictBool = False) -> str:
+                         send_to_his_discord: StrictBool = False,
+                         kind: Literal['cart', 'product_page'] = 'cart') -> str:
         """Build an Amazon or Walmart cart link from exact product URLs or IDs.
 
         Supply 1–10 items with product and quantity (default 1, maximum 20).
-        Find the exact product first; never invent a cart URL. Verified owner voice
-        and glasses turns send to his Discord automatically; on text set
+        Find the exact product first; never invent a cart URL. Amazon's cart link
+        only adds items sold by Amazon.com itself: when the listing shows another
+        seller, or you can't tell, use kind='product_page' (his tap opens the item
+        and he presses Add to Cart). Walmart's cart link works as is. Verified owner
+        voice and glasses turns send to his Discord automatically; on text set
         send_to_his_discord only when asked. Nothing is bought.
         """
         raw = [item.model_dump() if isinstance(item, CartItem) else item for item in items]
-        link = build_cart_link(store, raw)
+        link = build_cart_link(store, raw, kind)
         if link.startswith('Refused:'):
             return link
         label = 'Amazon' if store == 'amazon' else 'Walmart'
         count = len(raw)
         noun = 'item' if count == 1 else 'items'
-        result = (f'{label} cart ({count} {noun}):\n{link}\n'
-                  'Give him this link exactly as written. His tap adds it to his own cart; nothing is bought.')
+        if kind == 'product_page':
+            result = (f'{label} product {"page" if count == 1 else "pages"} ({count} {noun}):\n{link}\n'
+                      'Give him these links exactly as written. Each opens the item; he presses Add to Cart.')
+            message = f'For your {label} cart, tap Add to Cart on {"it" if count == 1 else "each"}:\n{link}\n-Aerys'
+        else:
+            result = (f'{label} cart ({count} {noun}):\n{link}\n'
+                      'Give him this link exactly as written. His tap adds it to his own cart; nothing is bought.')
+            message = f'Add to your {label} cart ({count} {noun}):\n{link}\n-Aerys'
         try:
             config = runtime.config
             identity = identity_from_config(config)
@@ -124,7 +144,6 @@ def build_cart_link_tool(settings, *, send=None):
             destination = owner_id_for(settings)()
             if not destination:
                 return result + '\nNot sent: his Discord destination is not available.'
-            message = f'Add to your {label} cart ({count} {noun}):\n{link}\n-Aerys'
             send(settings.discord_bot_token.get_secret_value(), str(destination), message)
             return result + '\nSent the link to his Discord DM.'
         except Exception:
