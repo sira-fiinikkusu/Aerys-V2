@@ -119,7 +119,8 @@ def test_a_voice_ask_with_a_long_answer_is_said_as_one_short_line_with_the_full_
     assert relay(answered("voice")) is True
     assert len(world.spoken) == 1
     said = world.spoken[0][0]
-    assert len(said) < 120 and "Discord" in said and "*" not in said
+    # One short line: since T-16 (11/13) it carries a sentence or two of what it is, within the spoken limit.
+    assert len(said) <= 280 and "Discord" in said and "*" not in said
     assert world.texts and world.texts[0][0] == "discord" and "45 minutes" in world.texts[0][1]
 
 
@@ -257,7 +258,10 @@ def test_t7_the_pointer_is_said_aloud_and_never_echoed_in_the_text():
     relay = ticket_relay_for(None, owner_settings(), model=Says(LONG), desk=desk)
     assert relay(answered("voice")) is True
     said = world.spoken[0][0]
-    assert said == "Kael got back to me on that; the full answer is on Discord."
+    # T-16 (the owner, 11/13): a sentence or two of what it is goes between the two halves.
+    assert said.startswith("Kael got back to me on that: ") and said.endswith("; the full answer is on Discord.")
+    note = said[len("Kael got back to me on that: "):-len("; the full answer is on Discord.")]
+    assert 0 < len(note) <= 180 and "**" not in note and "Discord" not in note
     (surface, text, _), = world.texts
     assert surface == "discord" and "full answer is on Discord" not in text and "45 minutes" in text
 
@@ -270,3 +274,48 @@ def test_text_copy_drops_only_a_pointer_headline():
     assert text_copy(p, "") == p                                  # nothing to point at: the line stays
     assert text_copy("Rain at 4.", "Radar: a band from the west.") == "Rain at 4.\n\nRadar: a band from the west."
     assert text_copy("The full answer is on Discord. Really.", "x").startswith("The full answer")
+
+
+
+class Seq:
+    """A model double that answers each call in turn (her words first, then the short note)."""
+    def __init__(self, *texts):
+        self.texts = list(texts)
+
+    def invoke(self, messages):
+        from langchain_core.messages import AIMessage
+        return AIMessage(content=self.texts.pop(0))
+
+
+def test_t16_the_short_note_is_the_models_and_said_before_the_pointer():
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    relay = ticket_relay_for(None, owner_settings(),
+                             model=Seq(LONG, "Your home jobs are planned: Opus leads, 45 minutes each."), desk=desk)
+    assert relay(answered("voice")) is True
+    assert world.spoken[0][0] == ("Kael got back to me on that: Your home jobs are planned: Opus leads, 45 minutes "
+                                  "each; the full answer is on Discord.")
+
+
+def test_t16_a_failed_note_falls_back_to_her_first_words():
+    class Fails:
+        calls = 0
+        def invoke(self, messages):
+            Fails.calls += 1
+            if Fails.calls == 1:
+                from langchain_core.messages import AIMessage
+                return AIMessage(content=LONG)
+            raise RuntimeError("model down")
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    assert ticket_relay_for(None, owner_settings(), model=Fails(), desk=desk)(answered("voice")) is True
+    said = world.spoken[0][0]
+    assert said.startswith("Kael got back to me on that: Kael here") and said.endswith("; the full answer is on Discord.")
+
+
+def test_t16_spoken_note_is_short_plain_and_unpunctuated():
+    from aerys_v2.kael_line import spoken_note
+    assert spoken_note("**Done.** It's live.") == "Done. It's live"
+    long = "First point here. " + "word " * 80
+    out = spoken_note(long)
+    assert len(out) <= 180 and not out.endswith(".")

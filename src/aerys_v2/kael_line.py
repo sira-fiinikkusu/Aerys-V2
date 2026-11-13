@@ -695,7 +695,30 @@ def _text_surface_name(desk) -> str:
     return "Telegram" if surface == "telegram" else "Discord"
 
 
-def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str):
+NOTE_MAX = 180
+#: T-16 (the owner, 11/13): "she can still say 'kael got back to me on that' but before she says 'the full answer
+#: is on discord' she can give me a short 1 or 2 sentence note about what it is."
+TICKET_NOTE_PROMPT = (
+    "Kael answered something Chris asked. In one or two short sentences, under 170 characters, say what "
+    "the answer is, for saying aloud: plain words, no markdown, no lists, never mention Discord or "
+    "Telegram, never add anything Kael didn't say. Reply with ONLY those sentences."
+)
+
+
+def spoken_note(text: str, limit: int = NOTE_MAX) -> str:
+    """A short note for a pointer line: plain words, at most LIMIT characters cut at a word, no closing
+    punctuation (the pointer's own '; the full answer is on ...' follows it)."""
+    note = " ".join(plain_for_voice(text or "").split())
+    if len(note) > limit:
+        cut = note[:limit].rsplit(" ", 1)[0]
+        # Prefer ending on a sentence inside the limit, then on a clause, and only then on a bare word.
+        end = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        clause = max(cut.rfind(", "), cut.rfind(": "), cut.rfind("; "))
+        note = cut[:end + 1] if end >= 40 else cut[:clause] if clause >= 60 else cut
+    return note.rstrip(" .!?;:,")
+
+
+def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str, note: str = ""):
     """D20 (the owner, 11/09 14:53: "if i ask her in discord she should respond to tickets from
     discord"). Asked on Discord or Telegram: the answer goes back THERE, as text, never aloud
     (at night it's a silent text, D15). Asked by voice or anywhere else: the desk's follow-me
@@ -718,8 +741,11 @@ def _owed_ticket_event(desk, ticket, *, source: str, text: str, dedupe_key: str)
     where = _text_surface_name(desk)
     # T-7: said aloud, never echoed in the text it points to (reach.text_copy); she speaks for herself:
     # Kael got back to HER (the owner, 11/11: "she should say 'Kael got back to me on that'").
-    line = (pointer_line("Your ask to Kael is still open", "the details are", where) if source == "ticket_notice"
-            else pointer_line("Kael got back to me on that", "the full answer is", where))
+    lead = "Your ask to Kael is still open" if source == "ticket_notice" else "Kael got back to me on that"
+    note = spoken_note(note)
+    if note:
+        lead = f"{lead}: {note}"          # T-16: what it is, in a sentence or two, before the pointer
+    line = pointer_line(lead, "the details are" if source == "ticket_notice" else "the full answer is", where)
     return ReachEvent(source=source, topic="kael", headline=line, detail=text, owed=True, dedupe_key=dedupe_key)
 
 
@@ -763,9 +789,25 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> C
         if not text or _HOLD_RE.match(text):
             text = f"Kael got back to me ({name}): {ticket.answer}"
         if desk is not None:
+            note = ""
+            if (getattr(ticket, "asked_on", None) not in TEXT_SURFACES
+                    and len(plain_for_voice(text)) > SPOKEN_MAX):
+                # Too long to say: a sentence or two of what it is goes before the pointer (T-16).
+                try:
+                    from aerys_v2.factory import build_model
+                    from aerys_v2.service import _reply_text
+
+                    note = _reply_text((model or build_model(settings)).invoke([
+                        SystemMessage(content=TICKET_NOTE_PROMPT),
+                        HumanMessage(content=f"What Chris asked: {ticket.ask}\n\nKael's answer: {ticket.answer}"),
+                    ])).strip()
+                except Exception:
+                    log.warning("ticket %s relay: no short note; its first words instead", name)
+                if not note or _HOLD_RE.match(note):
+                    note = text                   # spoken_note() takes its first sentence or two
             answered = getattr(ticket, "answered_at", None)
             return desk.reach_out(_owed_ticket_event(
-                desk, ticket, source="ticket", text=text,
+                desk, ticket, source="ticket", text=text, note=note,
                 dedupe_key=f"ticket:{ticket.id}:{answered.isoformat() if answered else ''}",
             )) in ("sent", "queued", "duplicate")
         if not reach(text):
@@ -817,7 +859,7 @@ def owner_notice_for(graph, settings, *, reach=None, desk=None) -> Callable[...,
         if desk is not None:
             since = getattr(ticket, "waiting_since", None) or ticket.created_at
             return desk.reach_out(_owed_ticket_event(
-                desk, ticket, source="ticket_notice", text=text,
+                desk, ticket, source="ticket_notice", text=text, note=f"the one about {ask}",
                 dedupe_key=f"ticket-notice:{ticket.id}:{since.isoformat() if since else ''}",
             )) in ("sent", "queued", "duplicate")
         if not reach(text):
