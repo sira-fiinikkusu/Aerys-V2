@@ -150,7 +150,8 @@ def test_toolnode_runtime_and_schema():
             {'name': 'add_to_cart_link', 'args': args, 'id': 'cart-1', 'type': 'tool_call'}])]},
             config={'configurable': {'identity': {'user_id': '1', 'surface': 'lens'},
                                      'thread_id': 'person:1'}})['messages'][-1].content
-    result = run({'store': 'walmart', 'items': [{'product': '12345'}, {'product': '67890', 'quantity': 2}]})
+    assert tool.tool_call_schema.model_json_schema()['properties']['store'].get('enum') == ['amazon', 'walmart']
+    result = run({'store': 'Walmart', 'items': [{'product': '12345'}, {'product': '67890', 'quantity': 2}]})
     link = WALMART + ',67890_2'
     assert link in result
     assert sent[0][1:] == ('123', f'Add to your Walmart cart (2 items):\n{link}\n-Aerys')
@@ -254,3 +255,8 @@ def test_product_page_dm_on_voice():
     result = tool.func('amazon', [{'product': ASIN}], runtime, False, 'product_page')
     assert sent[0][1:] == ('123', f'For your Amazon cart, tap Add to Cart on it:\nhttps://www.amazon.com/dp/{ASIN}\n-Aerys')
     assert 'Sent the link to his Discord DM.' in result and 'add.html' not in result
+
+
+def test_store_name_is_case_insensitive():
+    assert build_cart_link(' Walmart ', [{'product': '12345'}]) == WALMART
+    assert build_cart_link('AMAZON', [{'product': ASIN}]) == AMAZON

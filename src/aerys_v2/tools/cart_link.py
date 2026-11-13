@@ -7,12 +7,12 @@ no page text, arbitrary destination, login, or purchase crosses this boundary.
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
-from pydantic import BaseModel, ConfigDict, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, StrictBool, StrictInt, StrictStr
 
 from aerys_v2.approvals import owner_id_for
 from aerys_v2.hands_gate import OWNER_ASK, OWNER_TEXT, OWNER_VOICE, asker
@@ -22,6 +22,11 @@ _HOSTS = {'amazon': {'amazon.com', 'www.amazon.com', 'smile.amazon.com'},
           'walmart': {'walmart.com', 'www.walmart.com'}}
 _SHORT = {'a.co', 'amzn.to', 'walmrt.us', 'amzn.com', 'walm.art'}
 _IDS = {'amazon': r'[A-Z0-9]{10}', 'walmart': r'[0-9]{5,15}'}
+
+
+# The schema shows the model both names; a capitalised "Walmart" is lowercased before it's checked.
+StoreName = Annotated[Literal['amazon', 'walmart'],
+                      BeforeValidator(lambda v: v.strip().lower() if isinstance(v, str) else v)]
 
 
 class CartItem(BaseModel):
@@ -35,6 +40,8 @@ def build_cart_link(store: str, items: list[dict], kind: str = 'cart') -> str:
     or a refusal; never retain unvalidated URL parts."""
     if kind not in ('cart', 'product_page'):
         return "Refused: kind must be cart or product_page."
+    # The live probe (11/12) sent "Walmart" and burned a refusal on capitalisation.
+    store = store.strip().lower() if isinstance(store, str) else store
     if not isinstance(store, str) or store not in _HOSTS:
         return 'Refused: store must be amazon or walmart.'
     if not isinstance(items, list) or not 1 <= len(items) <= 10:
@@ -100,7 +107,7 @@ def _validation_refusal(error) -> str:
 def build_cart_link_tool(settings, *, send=None):
     """Inject delivery for offline tests; resolve his destination at send time."""
     @tool
-    def add_to_cart_link(store: str, items: list[CartItem], runtime: ToolRuntime,
+    def add_to_cart_link(store: StoreName, items: list[CartItem], runtime: ToolRuntime,
                          send_to_his_discord: StrictBool = False,
                          kind: Literal['cart', 'product_page'] = 'cart') -> str:
         """Build an Amazon or Walmart cart link from exact product URLs or IDs.
@@ -117,6 +124,7 @@ def build_cart_link_tool(settings, *, send=None):
         link = build_cart_link(store, raw, kind)
         if link.startswith('Refused:'):
             return link
+        store = store.strip().lower()
         label = 'Amazon' if store == 'amazon' else 'Walmart'
         count = len(raw)
         noun = 'item' if count == 1 else 'items'
