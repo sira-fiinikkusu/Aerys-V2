@@ -213,3 +213,16 @@ def test_an_unreadable_occurrence_never_spends(occurrence):
     tool.invoke({**{k: v for k, v in ADD.items() if k != "at"}, "cron": "0 * * * *"}, config=owner_turn())
     assert not wake_send(sender, occurrence=occurrence).startswith("Sent:")
     assert store.get(1).pinned_spent is None
+
+
+def test_a_pinned_wake_up_keeps_its_kind():
+    # Codex 11/13: a one-off counts its occurrence as "once", a recurring one by fire time; switching
+    # between them would break the in-order spend, so a pinned wake-up can't switch.
+    b, sender, sent, store, tool = life()
+    tool.invoke(ADD, config=owner_turn())
+    assert tool.invoke({"action": "update", "id": 1, "cron": "0 14 * * 5"}, config=owner_turn()).startswith("NOT DONE")
+    assert tool.invoke({"action": "update", "id": 1, "at": "2026-11-13T15:00"}, config=owner_turn()).startswith("Updated")
+    weekly = {**{k: v for k, v in ADD.items() if k != "at"}, "cron": "0 14 * * 5"}
+    tool.invoke(weekly, config=owner_turn())
+    assert tool.invoke({"action": "update", "id": 2, "at": "2026-11-14T15:00"}, config=owner_turn()).startswith("NOT DONE")
+    assert store.get(1).kind == "once" and store.get(2).kind == "recurring"

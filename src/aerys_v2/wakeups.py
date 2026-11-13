@@ -657,6 +657,11 @@ def build_wake_me_tool(store, *, rails: WakeRails = WakeRails(), owner_person_id
         elif str(cron or "").strip():
             fields.update(kind="recurring", at=None, cron=" ".join(cron.split()))
         kind = fields.get("kind", w.kind)
+        if w.pinned_send and kind != w.kind:
+            # D42: his message is spent once per occurrence, in order; a one-off and a recurring one
+            # count occurrences differently, so a pinned wake-up keeps its kind (Codex 11/13).
+            return ("NOT DONE: this wake-up carries his message, so it can't switch between one-off and "
+                    "recurring; cancel it and set a new one.")
         when = fields.get("at", w.at) if kind == "once" else None
         if str(until or "").strip():
             end, why = end_for(until, now, when)
