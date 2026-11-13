@@ -47,6 +47,15 @@ _STOP_NAMES = {"aerys", "harris", "iris", "ares", "aries", "eris"}
 _STOP_TAILS = {"stop talking", "stop it", "okay stop", "ok stop", "shut up", "be quiet", "thats enough",
                "that is enough", "enough already", "hush", "shush", "shh", "stop please", "please stop"}
 _ECHO_RUN = 6
+_ECHO_HEARD_MAX, _ECHO_SAID_MAX = 80, 600       # bounded work per turn (Codex 11/13)
+_QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which", "is", "are", "was", "were", "do",
+                   "does", "did", "can", "could", "would", "should", "will", "wont", "isnt", "arent", "didnt"}
+
+
+def _asks(text: str) -> bool:
+    """A question, not a command: the speech-to-text marks it, or it opens like one."""
+    words = _words(text)
+    return (text or "").strip().endswith("?") or bool(words and words[0] in _QUESTION_WORDS)
 
 
 def _words(text: str) -> list[str]:
@@ -61,7 +70,9 @@ def _is_echo(text: str, said: str) -> bool:
     """11/13: her own voice coming back through the mic: a run of at least _ECHO_RUN of her recent words,
     in order, making up nearly all of what it heard. A question about what she said ("were those bright
     lights moving around?") shares a few words, never a long verbatim run (Codex 11/13)."""
-    heard, hers = _words(text), _words(said)
+    if _asks(text):                     # "Why do the office lights…?" is his, whatever it quotes
+        return False
+    heard, hers = _words(text)[-_ECHO_HEARD_MAX:], _words(said)[-_ECHO_SAID_MAX:]
     if len(heard) < _ECHO_RUN or not hers:
         return False
     best, prev = 0, [0] * (len(hers) + 1)
@@ -72,7 +83,7 @@ def _is_echo(text: str, said: str) -> bool:
                 cur[j] = prev[j - 1] + 1
                 best = max(best, cur[j])
         prev = cur
-    return best >= _ECHO_RUN and best >= 0.8 * len(heard)
+    return best >= _ECHO_RUN and best >= 0.9 * len(heard)
 
 
 def _ends_with_stop(text: str, said: str = "") -> bool:
@@ -80,6 +91,8 @@ def _ends_with_stop(text: str, said: str = "") -> bool:
     of what it heard is his. A bare "stop" there counts after her name, or after her own words."""
     if _is_stop_phrase(text):
         return True
+    if _asks(text):                     # "Why did you stop talking?" is a question, not a stop
+        return False
     words = _words(text)
     named = False
     while words and words[-1] in _STOP_NAMES:
@@ -514,15 +527,19 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if (is_voice and speaker_redirect is not None
                 and getattr(speaker_redirect, "handles", lambda _d: False)(body.device_id)
                 and getattr(speaker_redirect, "quick_playing", lambda _d: False)(body.device_id) is True):
-            from aerys_v2.speaker_redirect import hush, recent_said
+            from aerys_v2.speaker_redirect import hush, recent_said, turn_started
 
+            said = recent_said(body.device_id)
+            if not _ends_with_stop(body.text, said) and _is_echo(body.text, said):
+                # Only her own voice came back through the mic: nobody spoke, so she carries on.
+                log.info("voice: on %s the mic heard only her own voice; dropped, she carries on", body.device_id)
+                return AskReply(reply="", thread_id=thread_id, keep_listening=False)
             hushed = hush(body.device_id)
             speaker_redirect.stop(body.device_id, hush_at=hushed)
-            said = recent_said(body.device_id)
-            if _ends_with_stop(body.text, said) or _is_echo(body.text, said):
-                log.info("voice: barge-in on %s; she stopped (%s)", body.device_id,
-                         "his stop" if _ends_with_stop(body.text, said) else "her own voice in the mic")
+            if _ends_with_stop(body.text, said):
+                log.info("voice: barge-in on %s; he said stop", body.device_id)
                 return AskReply(reply="", thread_id=thread_id, keep_listening=False)
+            turn_started(body.device_id)        # his new words start after the hush: their answer plays
             log.info("voice: barge-in on %s; she stopped for his new words", body.device_id)
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)

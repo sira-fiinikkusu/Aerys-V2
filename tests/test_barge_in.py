@@ -87,15 +87,34 @@ def test_a_plain_stop_still_works(words):
     assert sp.stops == ["office"] and asked == []
 
 
-def test_her_own_voice_in_the_mic_is_never_answered():
+def test_her_own_voice_in_the_mic_is_never_answered_and_never_stops_her():
+    # Codex 11/13: nobody spoke, so she carries on (the answer she's giving isn't cut off)
     sp = Speaker()
     say, asked = door(sp)
     say("Jet Flight 146 reported bright lights moving around and randomly appearing")
-    assert sp.stops == ["office"] and asked == []
+    assert sp.stops == [] and asked == []
+
+
+def test_his_new_question_over_her_is_answered_aloud():
+    # Codex 11/13 BLOCKER: the turn began before the hush, so its own answer was silenced
+    from aerys_v2.speaker_redirect import _since, hushed_at
+    sp = Speaker()
+    seen = []
+
+    def ask(text, identity, thread_id):
+        seen.append(_since() > hushed_at("office") > 0)
+        return "ok"
+
+    c = TestClient(build_app(ask, "sekrit", owner_person_id="owner-uuid", speaker_redirect=sp))
+    c.post("/ask", json={"text": "what's the weather tomorrow", "thread_id": "voice:beta", "voice": True,
+                         "device_id": "office"}, headers={"Authorization": "Bearer sekrit"})
+    assert sp.stops == ["office"] and seen == [True]
 
 
 @pytest.mark.parametrize("words", ["Why is the office so quiet?", "Were those bright lights moving around?",
-                                   "where's the next bus stop", "is that enough", "what's the weather tomorrow"])
+                                   "where's the next bus stop", "is that enough", "what's the weather tomorrow",
+                                   "Why did you stop talking?",
+                                   "Why did Executive Jet Flight 146 report bright lights moving around?"])
 def test_his_own_words_over_her_stop_her_and_are_answered(words):
     # Codex 11/13: an ordinary question ending in "quiet", a follow-up quoting her, a bus stop
     sp = Speaker()
@@ -180,3 +199,22 @@ def test_speakers_get_the_short_version_and_a_display_gets_it_all(monkeypatch):
     ink = next(b for u, b in posts if u.endswith("/example_show"))
     assert sat["message"] == spoken(long) and len(sat["message"]) < len(long)
     assert ink["message"] == long
+
+
+def test_the_echo_check_is_bounded():
+    import time
+    from aerys_v2.transports.http_api import _is_echo
+    t = time.monotonic()
+    _is_echo("word " * 5000, "word " * 30000)
+    assert time.monotonic() - t < 1.0
+
+
+def test_shortening_keeps_the_words_the_status_and_a_closing_question():
+    from aerys_v2.spoken import SPOKEN_MORE, spoken
+    tagged = spoken("[warmly]\n" + "explanation " * 40)
+    assert tagged.startswith("[warmly] explanation") and "explanation" in tagged
+    failed = spoken("I tried to send the message to Megan on Discord " + "while the connection kept dropping " * 9
+                    + "and nothing was sent. Then I stopped.")
+    assert "Nothing was sent." in failed and failed.endswith(SPOKEN_MORE)
+    asked = spoken("Here is a long answer. " * 20 + "Want me to keep going?")
+    assert asked.endswith("Want me to keep going?")

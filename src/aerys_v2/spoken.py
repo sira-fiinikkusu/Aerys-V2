@@ -18,9 +18,20 @@ _STATUS = re.compile(r"\b(tap|approve|approval|waiting|failed|couldn't|could not
                      r"not sent|wasn't sent|nothing (?:was|has been|went))\b", re.I)
 
 
+_TAG_ONLY = re.compile(r"^(\[[a-z ]+\]\s*)+$", re.I)
+_CLAUSE = re.compile(r",\s+|;\s+|\s+(?:and|but|so)\s+")
+
+
 def spoken(text: str, limit: int = SPOKEN_MAX) -> str:
     plain = _URL.sub("", _LINK.sub(r"\1", _MD.sub("", str(text or ""))))
-    lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    lines: list[str] = []
+    for ln in (ln.strip() for ln in plain.splitlines()):
+        if not ln:
+            continue
+        if lines and _TAG_ONLY.match(lines[-1]):      # a tag on its own line belongs to the words after it
+            lines[-1] = f"{lines[-1]} {ln}"
+        else:
+            lines.append(ln)
     joined = " ".join(ln if (ln[-1] in ".!?:" or len(lines) == 1) else ln + "." for ln in lines)
     plain = re.sub(r"\s{2,}", " ", joined).strip()
     if len(plain) <= limit:
@@ -33,6 +44,12 @@ def spoken(text: str, limit: int = SPOKEN_MAX) -> str:
         head.append(sentence)
     rest = sentences[len(head):]
     if not head:                                   # one long first sentence: cut it at a word
-        head, rest = [sentences[0][:limit].rsplit(" ", 1)[0].rstrip(",;:") + "."], sentences[1:]
-    status = next((s for s in rest if _STATUS.search(s) and len(s) <= 200), None)
-    return " ".join([*head, *([status] if status else []), SPOKEN_MORE])
+        cut = sentences[0][:limit].rsplit(" ", 1)[0].rstrip(",;:")
+        head, rest = [cut + "."], [sentences[0][len(cut):].strip(" ,;:"), *sentences[1:]]
+    # How things stand (waiting on his tap, it failed) is never what gets cut: the clause that says so.
+    status = next((c.strip().rstrip(".") + "." for s in rest for c in reversed(_CLAUSE.split(s))
+                   if _STATUS.search(c) and len(c) <= 200), None)
+    status = status[0].upper() + status[1:] if status else None
+    # A closing question stays: it is how the mic knows to open again.
+    question = rest[-1] if rest and rest[-1].endswith("?") and len(rest[-1]) <= 160 else None
+    return " ".join([*head, *([status] if status else []), question or SPOKEN_MORE])
