@@ -2484,12 +2484,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             from aerys_v2.tools.report_to_kael import build_report_to_kael_tool, reports_for
             tools.append(build_report_to_kael_tool(reports_for(settings, relay)))
 
+    message_sender = None
     if not guest:
         from aerys_v2.tools.send_message import build_send_message_tool, build_messages_sent_tool
         if getattr(settings, "messages_as_herself", False):
             from aerys_v2.hands_gate import hands_gate_for
             message_gate = hands_gate_for(settings)
-            sender = getattr(message_gate, "message_sender", None)
+            sender = message_sender = getattr(message_gate, "message_sender", None)
             if sender is not None:
                 tools.extend([build_send_message_tool(sender), build_messages_sent_tool(sender)])
             else:
@@ -2519,9 +2520,13 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             # wake-ups runner (wakeups.py) runs it as an unattended action turn at its time.
             from aerys_v2.wakeups import PostgresWakeupStore, WakeRails, build_wake_me_tool
 
-            tools.append(build_wake_me_tool(PostgresWakeupStore(settings.database_url),
-                                            rails=WakeRails.from_settings(settings),
-                                            owner_person_id=str(settings.owner_person_id or "")))
+            wake_store = PostgresWakeupStore(settings.database_url)
+            if message_sender is not None:
+                # D42 (11/13): a message he asks for when a wake-up is set goes at its time, untapped.
+                message_sender.wake_store = wake_store
+            tools.append(build_wake_me_tool(wake_store, rails=WakeRails.from_settings(settings),
+                                            owner_person_id=str(settings.owner_person_id or ""),
+                                            pin=message_sender.pin_recipient if message_sender is not None else None))
 
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         # KAEL DESK LINE (gap #14, her own ask 2026-07-25): real-time pings into
