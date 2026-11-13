@@ -2735,7 +2735,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     # reach-outs are refused by that view of the gate before a button is raised for them.
     action_graph.wake_graph = None
     if getattr(settings, "wakeups", False) and settings.database_url and settings.owner_person_id is not None:
-        from aerys_v2.wakeups import WakeGate, wake_tools
+        from aerys_v2.wakeups import WakeGate, wake_middleware, wake_tools
 
         wake_list = wake_tools(tools)
         wake_models, _ = _action_engine(settings, wake_list)
@@ -2745,7 +2745,8 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
             overlay=overlay,
             presence_fn=presence_fn_for(settings),
             context_trailing=settings.prompt_context_trailing,
-            **{**extra, "outside_gate": WakeGate(outside_gate) if outside_gate is not None else None},
+            **{**extra, "outside_gate": WakeGate(outside_gate) if outside_gate is not None else None,
+               "extra_middleware": wake_middleware(extra.get("extra_middleware") or [])},
         )
     # Phase 4 (2026-09-19): the live decider may carry out ONE plain device
     # command through this same tool before the specialist speaks. Graph

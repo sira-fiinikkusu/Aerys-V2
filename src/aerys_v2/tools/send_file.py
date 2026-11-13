@@ -279,6 +279,9 @@ def build_send_file_tool(*, home_url: str, home_token: str, owner_person_id: str
         identity = identity_from_config(config)
         if str(identity.get("user_id") or "") != str(owner_person_id):
             return "NOT SENT: files from her home machine go only to Chris, when he asks."
+        if identity.get("unattended"):
+            # A wake-up (D40) reaches him only through the desk, which keeps his quiet hours.
+            return "NOT SENT: from a wake-up, say where the file is in what you tell him; he can ask for it."
         rel = _relative(path)
         if not rel:
             return "NOT SENT: say which file: its path in your home workspace."

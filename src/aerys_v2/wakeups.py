@@ -205,7 +205,8 @@ def next_fire(cron, after: datetime, tz=EASTERN) -> datetime | None:
     time fires once, at its first occurrence (a daily 01:30 fires once). A time skipped by the
     spring-forward lands an hour later, the way cron runs it."""
     trigger = cron_trigger(cron) if isinstance(cron, str) else cron
-    wall = after.astimezone(tz).replace(tzinfo=None, fold=0)
+    # Whole seconds: 18:14:59.5 must still find 18:15:00 (Codex review, 11/12).
+    wall = after.astimezone(tz).replace(tzinfo=None, microsecond=0, fold=0)
     for _ in range(400):           # the repeated hour can hold a few dozen already-passed slots
         nxt = trigger.get_next_fire_time(None, (wall + timedelta(seconds=1)).replace(tzinfo=timezone.utc))
         if nxt is None:
@@ -318,8 +319,9 @@ class MemoryWakeupStore:
     def claim(self, wid, now, until):
         with self.lock:
             r = self.rows.get(wid)
-            if r is None or r.status != "active" or (r.claimed_until is not None and r.claimed_until >= now):
-                return None
+            if (r is None or r.status != "active" or r.next_run_at is None or r.next_run_at > now
+                    or (r.claimed_until is not None and r.claimed_until >= now)):
+                return None             # not due any more (a stale snapshot) or held: never a second run
             r.claimed_until = until
             return self._copy(r)
 
@@ -404,9 +406,11 @@ class PostgresWakeupStore:
     def claim(self, wid, now, until):
         # One statement: whichever runner's UPDATE lands first holds the lease; the other gets no row.
         with self._connect() as conn:
+            # ...and only while it's still due: a runner holding a stale snapshot of a row another
+            # runner already ran (and moved on) gets nothing (Codex review, 11/12).
             row = conn.execute(f"UPDATE v2_wakeups SET claimed_until = %s WHERE id = %s AND status = 'active' "
-                               f"AND (claimed_until IS NULL OR claimed_until < %s) RETURNING {self.COLUMNS}",
-                               (until, wid, now)).fetchone()
+                               f"AND next_run_at <= %s AND (claimed_until IS NULL OR claimed_until < %s) "
+                               f"RETURNING {self.COLUMNS}", (until, wid, now, now)).fetchone()
         return self._row(row) if row else None
 
     @staticmethod
@@ -705,6 +709,65 @@ def wake_tools(tools: list) -> list:
     return out
 
 
+#: What a wake turn may call, enforced on every tool call whatever offers the tool (a middleware's
+#: tools too: the home-job file sender came back that way; Codex review, 11/12). None = refused
+#: outright; (arg, values) = only those actions (the reads). Anything not listed is hers as usual.
+WAKE_FENCE: dict[str, tuple[str, tuple[str, ...]] | None] = {
+    **{name: None for name in WAKE_DROPPED},
+    "timer": None,                                   # every timer action starts or cancels one
+    "cancel_async_task": None,                       # stopping his home job is his call
+    "manage_list": ("action", ("show",)),            # the family's lists: read, never change
+    "reach_prefs": ("action", ("show",)),            # his delivery settings: read, never change
+    "home_control": ("operation", ("get_state",)),
+    "control_alarm": ("action", ("status",)),
+}
+
+
+def fenced(name: str, args) -> bool:
+    rule = WAKE_FENCE.get(str(name or ""), ())
+    if rule == ():
+        return False
+    if rule is None:
+        return True
+    arg, allowed = rule
+    return str(((args or {}) if isinstance(args, dict) else {}).get(arg) or "").strip().lower() not in allowed
+
+
+def wake_fence_middleware():
+    """The wake graph's last word on tools: a fenced call never reaches its tool."""
+    import asyncio
+
+    from langchain.agents.middleware import AgentMiddleware
+    from langchain_core.messages import ToolMessage
+
+    def refusal(request):
+        call = getattr(request, "tool_call", None) or {}
+        name = call.get("name") or ""
+        if not fenced(name, call.get("args")):
+            return None
+        log.info("wake-up: %s refused by the fence", name)
+        return ToolMessage(content=NOT_FROM_WAKE, tool_call_id=call.get("id") or "", name=name)
+
+    class WakeFence(AgentMiddleware):
+        def wrap_tool_call(self, request, handler):
+            refused = refusal(request)
+            return handler(request) if refused is None else refused
+
+        async def awrap_tool_call(self, request, handler):
+            refused = await asyncio.to_thread(refusal, request)
+            return await handler(request) if refused is None else refused
+
+    return WakeFence()
+
+
+def wake_middleware(middleware: list) -> list:
+    """The action graph's extra middleware for a wake graph: the fence first, and any middleware that
+    would offer a dropped tool (the home-job file sender) left out, so she isn't even shown it."""
+    keep = [m for m in (middleware or [])
+            if not any(getattr(t, "name", "") in WAKE_DROPPED for t in (getattr(m, "tools", None) or []))]
+    return [wake_fence_middleware(), *keep]
+
+
 def refused_in_wake(payload) -> str | None:
     """Why a reach-out the outside guard is about to put to him is never a wake-up's to make, or None."""
     tool = str((payload or {}).get("tool") or "")
@@ -871,6 +934,19 @@ class WakeUps:
                  rails: WakeRails = WakeRails(), clock: Callable[[], datetime] | None = None):
         self.desk, self.store, self.run_turn, self.rails = desk, store, run_turn, rails
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # A thread can't be killed: a run past its limit keeps going until its own step limit or a
+        # tool's timeout ends it. While it lives, its wake-up is never started again, and its lease is
+        # renewed each pass so another runner can't take it either (Codex review, 11/12).
+        self._live: dict[int, threading.Thread] = {}
+        self._live_lock = threading.Lock()
+
+    def _still_running(self, wid: int) -> bool:
+        with self._live_lock:
+            worker = self._live.get(wid)
+            if worker is not None and not worker.is_alive():
+                self._live.pop(wid, None)
+                worker = None
+        return worker is not None
 
     def _owed(self, w: Wakeup, headline: str, key: str, *, detail: str = "") -> str:
         outcome = self.desk.reach_out(ReachEvent(source=SOURCE, topic=TOPIC, headline=headline, detail=detail,
@@ -893,6 +969,8 @@ class WakeUps:
         worker.start()
         worker.join(self.rails.timeout.total_seconds())
         if worker.is_alive():
+            with self._live_lock:
+                self._live[w.id] = worker          # its result, whenever it comes, is dropped
             log.warning("wake-up %s: the run passed its %s limit; a failure (its lease runs out on its own)",
                         w.id, self.rails.timeout)
             return None, "timed out"
@@ -971,6 +1049,10 @@ class WakeUps:
 
     def _one(self, w: Wakeup, out: dict) -> None:
         now = self.clock()
+        if self._still_running(w.id):
+            self.store.update(w.id, claimed_until=now + LEASE)      # still ours: hold it
+            out["skipped"] += 1
+            return
         claimed = self.store.claim(w.id, now, now + LEASE)
         if claimed is None:
             out["skipped"] += 1                             # another runner, or a slow run, holds it
@@ -1001,8 +1083,23 @@ class WakeUps:
             return
         self._run(w, out)
 
+    def _reap(self) -> None:
+        """A run that outlived its limit has finished at last: its lease (held, and renewed, while it
+        lived) is released, so the wake-up's next run isn't held up for the rest of a lease."""
+        with self._live_lock:
+            done = [wid for wid, worker in self._live.items() if not worker.is_alive()]
+            for wid in done:
+                self._live.pop(wid, None)
+        for wid in done:
+            try:
+                self.store.update(wid, claimed_until=None)
+                log.info("wake-up %s: the overdue run finished; released", wid)
+            except Exception as e:
+                log.warning("wake-up %s: couldn't release after the overdue run (%s)", wid, type(e).__name__)
+
     def tick(self) -> dict:
         out = {"ran": 0, "told": 0, "failed": 0, "missed": 0, "ended": 0, "skipped": 0}
+        self._reap()
         try:
             rows = self.store.due(self.clock())
         except Exception:

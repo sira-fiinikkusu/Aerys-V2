@@ -379,7 +379,8 @@ def test_a_run_that_outlives_its_limit_keeps_its_lease_and_is_not_started_twice(
         life.tick_at(NOW + timedelta(minutes=m))
     assert started == [1]
     release.set()
-    life.tick_at(NOW + timedelta(minutes=36))               # lease free; the fires it missed are skipped
+    life.runner._live[1].join(5)                            # the overdue run really ends
+    life.tick_at(NOW + timedelta(minutes=36))               # reaped: lease free; missed fires are skipped
     life.tick_at(NOW + timedelta(minutes=40))
     assert started == [1, 1]
 
@@ -393,6 +394,7 @@ def test_a_timed_out_one_off_tries_again_when_its_lease_frees_not_marked_missed(
     life.tick_at(NOW + timedelta(minutes=30))
     assert life.store.rows[1].next_run_at == NOW + timedelta(hours=1)        # the lease's end
     release.set()
+    life.runner._live[1].join(5)
     assert life.tick_at(NOW + timedelta(hours=1, minutes=1))["told"] == 1   # the first tick after it frees
     assert life.store.rows[1].status == "ended"
 
@@ -426,8 +428,11 @@ def test_two_runners_on_one_store_run_it_once():
     release.set()
     first.join(5)
     assert b.tick()["ran"] == 0 and calls == [1]            # done, and its next fire is later
-    assert life.store.claim(1, life.clock["now"], life.clock["now"] + timedelta(minutes=30)) is not None
+    # Not due yet, so no claim at all (a stale view can't take it); at its next fire, exactly one.
     assert life.store.claim(1, life.clock["now"], life.clock["now"] + timedelta(minutes=30)) is None
+    later = NOW + timedelta(minutes=10)
+    assert life.store.claim(1, later, later + timedelta(minutes=30)) is not None
+    assert life.store.claim(1, later, later + timedelta(minutes=30)) is None
 
 
 # --- 6. her answer ---------------------------------------------------------------------------------------------
@@ -668,3 +673,96 @@ def test_cart_link_never_dms_from_a_wake_turn():
         "identity": {"user_id": "1", "platform": "wake", "unattended": True}, "thread_id": "wake:7"}})
     result = tool.func("walmart", [{"product": "12345"}], runtime, True)
     assert sent == [] and "addToCart?items=12345_1" in result and "Not sent" in result
+
+
+# --- Codex review fixes (11/12) ------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name,args,refused", [
+    ("timer", {"action": "start", "duration": "5 minutes"}, True),
+    ("timer", {"action": "cancel"}, True),
+    ("manage_list", {"action": "add", "list_name": "shopping", "item": "x"}, True),
+    ("manage_list", {"action": "show", "list_name": "shopping"}, False),
+    ("reach_prefs", {"action": "awake"}, True),
+    ("reach_prefs", {"action": "show"}, False),
+    ("send_file_to_chris", {"path": "report.txt"}, True),
+    ("cancel_async_task", {"task_id": "t"}, True),
+    ("check_async_task", {"task_id": "t"}, False),
+    ("home_control", {"operation": "turn_on", "entity_id": "light.x"}, True),
+    ("home_control", {"operation": "get_state", "entity_id": "light.x"}, False),
+    ("search_web", {"query": "flight"}, False),
+])
+def test_the_wake_fence(name, args, refused):
+    from aerys_v2.wakeups import fenced
+    assert fenced(name, args) is refused
+
+
+def test_the_fence_refuses_a_middleware_offered_tool_before_it_runs():
+    from types import SimpleNamespace
+    from aerys_v2.wakeups import NOT_FROM_WAKE, wake_fence_middleware, wake_middleware
+
+    ran = []
+    fence = wake_fence_middleware()
+    req = SimpleNamespace(tool_call={"name": "send_file_to_chris", "args": {"path": "r.txt"}, "id": "c1"})
+    out = fence.wrap_tool_call(req, lambda r: ran.append(r) or "sent")
+    assert ran == [] and out.content == NOT_FROM_WAKE and out.tool_call_id == "c1"
+    ok = SimpleNamespace(tool_call={"name": "search_web", "args": {"query": "q"}, "id": "c2"})
+    assert fence.wrap_tool_call(ok, lambda r: "ran") == "ran"
+
+    files = SimpleNamespace(tools=[SimpleNamespace(name="send_file_to_chris")])
+    jobs = SimpleNamespace(tools=[SimpleNamespace(name="check_async_task")])
+    mw = wake_middleware([jobs, files])
+    assert files not in mw and jobs in mw and type(mw[0]).__name__ == "WakeFence"
+
+
+def test_send_file_refuses_an_unattended_turn():
+    import inspect
+    from aerys_v2.tools import send_file
+    assert 'identity.get("unattended")' in inspect.getsource(send_file)
+
+
+def test_next_fire_with_fractional_seconds_doesnt_skip_a_slot():
+    from aerys_v2.wakeups import EASTERN, next_fire
+    after = datetime(2026, 11, 12, 18, 14, 59, 500000, tzinfo=EASTERN)
+    assert next_fire("*/15 * * * *", after).astimezone(EASTERN).strftime("%H:%M") == "18:15"
+    exact = datetime(2026, 11, 12, 18, 15, 0, tzinfo=EASTERN)
+    assert next_fire("*/15 * * * *", exact).astimezone(EASTERN).strftime("%H:%M") == "18:30"
+
+
+def test_a_stale_snapshot_cannot_claim_a_run_already_moved_on():
+    from aerys_v2.wakeups import MemoryWakeupStore
+    store = MemoryWakeupStore()
+    t0 = datetime(2026, 11, 12, 23, 0, tzinfo=timezone.utc)
+    w = store.add(thread_id="t", note="n", kind="recurring", at=None, cron="*/5 * * * *",
+                  until=t0 + timedelta(days=1), next_run_at=t0, now=t0, cap=10)
+    assert store.claim(w.id, t0, t0 + timedelta(minutes=30)) is not None
+    store.update(w.id, claimed_until=None, next_run_at=t0 + timedelta(minutes=5))   # A ran and moved it on
+    assert store.claim(w.id, t0 + timedelta(seconds=30), t0 + timedelta(minutes=30)) is None   # B's stale view
+
+
+def test_a_run_past_its_limit_is_never_started_again_while_it_lives():
+    import threading
+    from aerys_v2.wakeups import MemoryWakeupStore, TurnResult, WakeRails, WakeUps
+    store = MemoryWakeupStore()
+    clock = {"t": datetime(2026, 11, 12, 23, 0, tzinfo=timezone.utc)}
+    w = store.add(thread_id="t", note="n", kind="recurring", at=None, cron="*/5 * * * *",
+                  until=clock["t"] + timedelta(days=1), next_run_at=clock["t"], now=clock["t"], cap=10)
+    release, started = threading.Event(), []
+
+    def slow(wk, seed):
+        started.append(wk.id)
+        release.wait(5)
+        return TurnResult("QUIET")
+
+    class Desk:
+        def reach_out(self, e):
+            return "sent"
+
+    r = WakeUps(Desk(), store, run_turn=slow, rails=WakeRails(timeout=timedelta(seconds=0.05)),
+                clock=lambda: clock["t"])
+    r.tick()                                            # times out; the thread lives on
+    for minutes in (35, 70, 105):                       # well past the 30-minute lease, more than once
+        clock["t"] = datetime(2026, 11, 12, 23, 0, tzinfo=timezone.utc) + timedelta(minutes=minutes)
+        store.update(w.id, next_run_at=clock["t"])      # due again
+        r.tick()
+    assert started == [w.id]                            # one worker ever
+    release.set()
