@@ -191,3 +191,25 @@ def test_her_wake_turn_is_told_the_exact_words_and_where():
     w = plain.add(thread_id="t", note="n", kind="once", at=NOW, cron=None, until=NOW + timedelta(hours=1),
                   next_run_at=NOW, now=NOW, cap=10)
     assert "without his tap" not in seed_for(w, NOW, 1)
+
+
+def test_a_stale_run_never_spends_after_a_later_occurrence():
+    # Codex 11/13 (re-review): run A sends 16:00, overstays and loses its lease; run B sends 17:00; A,
+    # still alive, tries 16:00 again. Occurrences only move forward, so A's can't spend.
+    b, sender, sent, store, tool = life()
+    hourly = {**{k: v for k, v in ADD.items() if k != "at"}, "cron": "0 * * * *"}
+    assert tool.invoke(hourly, config=owner_turn()).startswith("Set:")
+    assert wake_send(sender, occurrence="2026-11-13T16:00:00-05:00").startswith("Sent:")
+    sender.ledger.rows.clear()
+    assert wake_send(sender, occurrence="2026-11-13T17:00:00-05:00").startswith("Sent:")
+    sender.ledger.rows.clear()
+    assert not wake_send(sender, occurrence="2026-11-13T16:00:00-05:00").startswith("Sent:")
+    assert store.get(1).pinned_spent == "2026-11-13T17:00:00-05:00"
+
+
+@pytest.mark.parametrize("occurrence", ["sometime", "2026-11-13T16:00:00", "once-more"])
+def test_an_unreadable_occurrence_never_spends(occurrence):
+    b, sender, sent, store, tool = life()
+    tool.invoke({**{k: v for k, v in ADD.items() if k != "at"}, "cron": "0 * * * *"}, config=owner_turn())
+    assert not wake_send(sender, occurrence=occurrence).startswith("Sent:")
+    assert store.get(1).pinned_spent is None

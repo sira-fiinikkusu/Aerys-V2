@@ -114,8 +114,9 @@ class Wakeup:
     created_at: datetime | None = None
     claim_token: str | None = None
     #: D42 (11/13): the message he asked for when it was set: who (resolved then) and the exact words.
-    #: Fixed like the note. pinned_spent is the occurrence that spent it ("once" for a one-off, the fire
-    #: time for a recurring one): once per scheduled occurrence, changed only by spend_pin.
+    #: Fixed like the note. pinned_spent is the latest occurrence that spent it ("once" for a one-off, the
+    #: fire time for a recurring one): occurrences only move forward, so one at or before it never spends
+    #: again (a stale run that lost its lease included). Changed only by spend_pin.
     pinned_send: dict | None = None
     pinned_spent: str | None = None
 
@@ -372,10 +373,10 @@ class MemoryWakeupStore:
 
 
     def spend_pin(self, wid, occurrence) -> bool:
-        """Mark his pinned message spent for this occurrence; False when it already was."""
+        """Mark his pinned message spent for this occurrence; False when it, or a later one, already did."""
         with self.lock:
             r = self.rows.get(wid)
-            if r is None or not r.pinned_send or not occurrence or r.pinned_spent == occurrence:
+            if r is None or not r.pinned_send or not _after(occurrence, r.pinned_spent):
                 return False
             r.pinned_spent = occurrence
             return True
@@ -498,14 +499,20 @@ class PostgresWakeupStore:
                                 (*values, wid)).fetchone() is not None
 
     def spend_pin(self, wid, occurrence) -> bool:
-        """Mark his pinned message spent for this occurrence, atomically: two sends of one occurrence (a
-        twin call, a run that overstayed its limit, a retry of a failed one-off) can't both pass."""
-        if not occurrence:
+        """Mark his pinned message spent for this occurrence, atomically: a twin call, a run that overstayed
+        its limit, a retry of a failed one-off, or a stale run that lost its lease after a later occurrence
+        spent can't pass. A one-off spends once ever; a recurring occurrence only after the latest spent."""
+        if not _after(occurrence, None):
             return False
         with self._connect() as conn:
-            return conn.execute("UPDATE v2_wakeups SET pinned_spent = %s WHERE id = %s AND pinned_send IS NOT NULL "
-                                "AND pinned_spent IS DISTINCT FROM %s RETURNING id",
-                                (occurrence, wid, occurrence)).fetchone() is not None
+            if occurrence == "once":
+                sql = ("UPDATE v2_wakeups SET pinned_spent = 'once' WHERE id = %s AND pinned_send IS NOT NULL "
+                       "AND pinned_spent IS NULL RETURNING id")
+                return conn.execute(sql, (wid,)).fetchone() is not None
+            sql = ("UPDATE v2_wakeups SET pinned_spent = %s WHERE id = %s AND pinned_send IS NOT NULL AND "
+                   "(pinned_spent IS NULL OR (pinned_spent <> 'once' AND pinned_spent::timestamptz < %s::timestamptz)) "
+                   "RETURNING id")
+            return conn.execute(sql, (occurrence, wid, occurrence)).fetchone() is not None
 
 
 # --- the tool ---------------------------------------------------------------------------------------
@@ -907,6 +914,24 @@ def wake_identity(owner: str) -> dict:
     text: hands_gate.asker places it as his /ask line, and outside_guard taints it)."""
     return {"user_id": str(owner), "platform": "wake", "unattended": True,
             "display_name": "your own wake-up", "privacy_context": "private"}
+
+
+def _after(occurrence, spent) -> bool:
+    """May this occurrence spend, given the latest that did? "once" only if none did; a fire time only if
+    it is a real time later than the latest spent fire time. Anything unreadable can't."""
+    if occurrence == "once":
+        return spent is None
+    try:
+        when = datetime.fromisoformat(str(occurrence))
+        if when.tzinfo is None:
+            return False
+        if spent is None:
+            return True
+        if spent == "once":
+            return False
+        return when > datetime.fromisoformat(str(spent))
+    except (TypeError, ValueError):
+        return False
 
 
 def occurrence_of(w: Wakeup) -> str:
