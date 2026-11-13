@@ -379,7 +379,7 @@ def test_a_run_that_outlives_its_limit_keeps_its_lease_and_is_not_started_twice(
         life.tick_at(NOW + timedelta(minutes=m))
     assert started == [1]
     release.set()
-    life.runner._live[1].join(5)                            # the overdue run really ends
+    life.runner._live[1][0].join(5)                            # the overdue run really ends
     life.tick_at(NOW + timedelta(minutes=36))               # reaped: lease free; missed fires are skipped
     life.tick_at(NOW + timedelta(minutes=40))
     assert started == [1, 1]
@@ -394,7 +394,7 @@ def test_a_timed_out_one_off_tries_again_when_its_lease_frees_not_marked_missed(
     life.tick_at(NOW + timedelta(minutes=30))
     assert life.store.rows[1].next_run_at == NOW + timedelta(hours=1)        # the lease's end
     release.set()
-    life.runner._live[1].join(5)
+    life.runner._live[1][0].join(5)
     assert life.tick_at(NOW + timedelta(hours=1, minutes=1))["told"] == 1   # the first tick after it frees
     assert life.store.rows[1].status == "ended"
 
@@ -766,3 +766,52 @@ def test_a_run_past_its_limit_is_never_started_again_while_it_lives():
         r.tick()
     assert started == [w.id]                            # one worker ever
     release.set()
+
+
+# --- Codex re-review (11/12): leases are owned by a token -------------------------------------------------
+
+def test_a_live_overdue_run_keeps_its_lease_past_30_minutes_so_a_second_runner_never_starts():
+    from aerys_v2.wakeups import MemoryWakeupStore, WakeRails
+    store = MemoryWakeupStore()
+    t0 = datetime(2026, 11, 12, 23, 0, tzinfo=timezone.utc)
+    clock = {"t": t0}
+    w = store.add(thread_id="t", note="n", kind="recurring", at=None, cron="*/5 * * * *",
+                  until=t0 + timedelta(days=1), next_run_at=t0, now=t0, cap=10)
+    release, started = threading.Event(), []
+
+    def slow(wk, seed):
+        started.append(wk.id)
+        release.wait(5)
+        return TurnResult("QUIET")
+
+    class Desk:
+        def reach_out(self, e):
+            return "sent"
+
+    rails = WakeRails(timeout=timedelta(seconds=0.05))
+    a = WakeUps(Desk(), store, run_turn=slow, rails=rails, clock=lambda: clock["t"])
+    b = WakeUps(Desk(), store, run_turn=slow, rails=rails, clock=lambda: clock["t"])
+    a.tick()                                                    # A times out; its thread lives
+    for minute in range(1, 41):                                 # A renews every pass, B tries every pass
+        clock["t"] = t0 + timedelta(minutes=minute)
+        a.tick()
+        b.tick()
+    assert started == [w.id]
+    release.set()
+    a._live[w.id][0].join(5)
+
+
+def test_reaping_never_clears_a_lease_someone_else_now_holds():
+    from aerys_v2.wakeups import MemoryWakeupStore
+    store = MemoryWakeupStore()
+    t0 = datetime(2026, 11, 12, 23, 0, tzinfo=timezone.utc)
+    w = store.add(thread_id="t", note="n", kind="once", at=t0, cron=None, until=t0 + timedelta(days=1),
+                  next_run_at=t0, now=t0, cap=10)
+    mine = store.claim(w.id, t0, t0 + timedelta(minutes=30))
+    store.rows[w.id].claimed_until = t0                         # suppose my lease lapsed...
+    theirs = store.claim(w.id, t0 + timedelta(minutes=1), t0 + timedelta(minutes=31))
+    assert theirs is not None and theirs.claim_token != mine.claim_token
+    assert store.release(w.id, mine.claim_token) is False       # ...my late release is refused
+    assert store.renew(w.id, mine.claim_token, t0 + timedelta(hours=1)) is False
+    assert store.rows[w.id].claim_token == theirs.claim_token and store.rows[w.id].claimed_until is not None
+    assert store.release(w.id, theirs.claim_token) is True

@@ -6,7 +6,8 @@
 --   note        her words to her future self, written by an attended turn at add; NEVER updated
 --               afterwards (wakeups.py's stores refuse it): a wake turn can't rewrite its own orders
 --   claimed_until  a runner's lease: a wake-up is claimed before it runs, so a slow run is never
---               started twice, by this brain or another
+--               started twice, by this brain or another; claim_token says whose lease it is, and only
+--               that holder renews or releases it
 --   run_log     the last 10 runs: time, outcome, her summary (<= 600 chars), the tools she used.
 --               Fed back to the next run as untrusted data, never as instructions.
 -- note and run_log are the private part: never logged (ids, statuses and outcomes only).
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS v2_wakeups (
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
     last_run_at          TIMESTAMPTZ,
     claimed_until        TIMESTAMPTZ,
+    claim_token          TEXT,                                -- whose lease it is: renew/release need it
     run_log              JSONB NOT NULL DEFAULT '[]'::jsonb,
     CHECK ((kind = 'once' AND at IS NOT NULL) OR (kind = 'recurring' AND cron IS NOT NULL))
 );

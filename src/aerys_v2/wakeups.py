@@ -37,6 +37,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -111,6 +112,7 @@ class Wakeup:
     claimed_until: datetime | None = None
     run_log: list = field(default_factory=list)
     created_at: datetime | None = None
+    claim_token: str | None = None
 
 
 @dataclass
@@ -322,8 +324,24 @@ class MemoryWakeupStore:
             if (r is None or r.status != "active" or r.next_run_at is None or r.next_run_at > now
                     or (r.claimed_until is not None and r.claimed_until >= now)):
                 return None             # not due any more (a stale snapshot) or held: never a second run
-            r.claimed_until = until
+            r.claimed_until, r.claim_token = until, uuid.uuid4().hex
             return self._copy(r)
+
+    def renew(self, wid, token, until) -> bool:
+        with self.lock:
+            r = self.rows.get(wid)
+            if r is None or not token or r.claim_token != token:
+                return False
+            r.claimed_until = until
+            return True
+
+    def release(self, wid, token) -> bool:
+        with self.lock:
+            r = self.rows.get(wid)
+            if r is None or not token or r.claim_token != token:
+                return False            # someone else's lease now: never ours to clear
+            r.claimed_until, r.claim_token = None, None
+            return True
 
     def update(self, wid, **fields):
         _updatable(fields)
@@ -351,7 +369,7 @@ class PostgresWakeupStore:
     """v2_wakeups (db/migrations/030). Fresh short connections per call."""
 
     COLUMNS = ("id, thread_id, note, kind, at, cron, until, next_run_at, tz, status, paused_reason, runs, "
-               "consecutive_failures, last_run_at, claimed_until, run_log, created_at")
+               "consecutive_failures, last_run_at, claimed_until, run_log, created_at, claim_token")
     #: Taken while the active wake-ups are counted and one more is made active: two turns can't
     #: both take the last place under the cap.
     CAP_LOCK = "SELECT pg_advisory_xact_lock(hashtext('v2_wakeups:active'))"
@@ -372,7 +390,7 @@ class PostgresWakeupStore:
         return Wakeup(id=r[0], thread_id=r[1], note=r[2], kind=r[3], at=r[4], cron=r[5], until=r[6],
                       next_run_at=r[7], tz=r[8], status=r[9], paused_reason=r[10], runs=r[11],
                       consecutive_failures=r[12], last_run_at=r[13], claimed_until=r[14],
-                      run_log=list(log_ or []), created_at=r[16])
+                      run_log=list(log_ or []), created_at=r[16], claim_token=r[17])
 
     def add(self, *, thread_id, note, kind, at, cron, until, next_run_at, now, cap, tz=WAKE_TZ):
         with self._connect() as conn:
@@ -408,10 +426,25 @@ class PostgresWakeupStore:
         with self._connect() as conn:
             # ...and only while it's still due: a runner holding a stale snapshot of a row another
             # runner already ran (and moved on) gets nothing (Codex review, 11/12).
-            row = conn.execute(f"UPDATE v2_wakeups SET claimed_until = %s WHERE id = %s AND status = 'active' "
-                               f"AND next_run_at <= %s AND (claimed_until IS NULL OR claimed_until < %s) "
-                               f"RETURNING {self.COLUMNS}", (until, wid, now, now)).fetchone()
+            row = conn.execute(f"UPDATE v2_wakeups SET claimed_until = %s, claim_token = %s WHERE id = %s "
+                               f"AND status = 'active' AND next_run_at <= %s "
+                               f"AND (claimed_until IS NULL OR claimed_until < %s) RETURNING {self.COLUMNS}",
+                               (until, uuid.uuid4().hex, wid, now, now)).fetchone()
         return self._row(row) if row else None
+
+    def renew(self, wid, token, until) -> bool:
+        if not token:
+            return False
+        with self._connect() as conn:
+            return conn.execute("UPDATE v2_wakeups SET claimed_until = %s WHERE id = %s AND claim_token = %s "
+                                "RETURNING id", (until, wid, token)).fetchone() is not None
+
+    def release(self, wid, token) -> bool:
+        if not token:
+            return False
+        with self._connect() as conn:
+            return conn.execute("UPDATE v2_wakeups SET claimed_until = NULL, claim_token = NULL WHERE id = %s "
+                                "AND claim_token = %s RETURNING id", (wid, token)).fetchone() is not None
 
     @staticmethod
     def _sets(fields: dict) -> tuple[str, list]:
@@ -937,16 +970,13 @@ class WakeUps:
         # A thread can't be killed: a run past its limit keeps going until its own step limit or a
         # tool's timeout ends it. While it lives, its wake-up is never started again, and its lease is
         # renewed each pass so another runner can't take it either (Codex review, 11/12).
-        self._live: dict[int, threading.Thread] = {}
+        self._live: dict[int, tuple[threading.Thread, str | None]] = {}
         self._live_lock = threading.Lock()
 
     def _still_running(self, wid: int) -> bool:
         with self._live_lock:
-            worker = self._live.get(wid)
-            if worker is not None and not worker.is_alive():
-                self._live.pop(wid, None)
-                worker = None
-        return worker is not None
+            entry = self._live.get(wid)
+        return entry is not None and entry[0].is_alive()
 
     def _owed(self, w: Wakeup, headline: str, key: str, *, detail: str = "") -> str:
         outcome = self.desk.reach_out(ReachEvent(source=SOURCE, topic=TOPIC, headline=headline, detail=detail,
@@ -970,7 +1000,7 @@ class WakeUps:
         worker.join(self.rails.timeout.total_seconds())
         if worker.is_alive():
             with self._live_lock:
-                self._live[w.id] = worker          # its result, whenever it comes, is dropped
+                self._live[w.id] = (worker, w.claim_token)    # its result, whenever it comes, is dropped
             log.warning("wake-up %s: the run passed its %s limit; a failure (its lease runs out on its own)",
                         w.id, self.rails.timeout)
             return None, "timed out"
@@ -1013,8 +1043,7 @@ class WakeUps:
                  "tools": list((result.tools if result is not None else [])[:20])}
         fields: dict = {"runs": run, "last_run_at": now, "run_log": [*(cur.run_log or []), entry][-LOG_KEEP:],
                         "consecutive_failures": cur.consecutive_failures + 1 if failed else 0}
-        if error != "timed out":
-            fields["claimed_until"] = None                  # released; an overstaying run keeps its lease
+        release = error != "timed out"                      # an overstaying run keeps its lease (_reap)
         pause = False
         if cur.status != "active":
             pass                                            # paused or ended while it ran: that stands
@@ -1041,6 +1070,8 @@ class WakeUps:
             except Exception as e:
                 log.warning("wake-up %s: couldn't tell him it paused (%s)", w.id, type(e).__name__)
         self.store.update(w.id, **fields)
+        if release:
+            self.store.release(w.id, w.claim_token)
         out["ran"] += 1
         out["told"] += int(outcome == "told" or (answer.kind == "end" and bool(answer.text)))
         out["failed"] += int(failed)
@@ -1050,8 +1081,7 @@ class WakeUps:
     def _one(self, w: Wakeup, out: dict) -> None:
         now = self.clock()
         if self._still_running(w.id):
-            self.store.update(w.id, claimed_until=now + LEASE)      # still ours: hold it
-            out["skipped"] += 1
+            out["skipped"] += 1                                     # _reap holds its lease
             return
         claimed = self.store.claim(w.id, now, now + LEASE)
         if claimed is None:
@@ -1059,7 +1089,8 @@ class WakeUps:
             return
         w = claimed
         if w.until <= now:
-            self.store.update(w.id, status="ended", claimed_until=None)
+            self.store.update(w.id, status="ended")
+            self.store.release(w.id, w.claim_token)
             log.info("wake-up %s: past its end; ended", w.id)
             out["ended"] += 1
             return
@@ -1068,34 +1099,41 @@ class WakeUps:
             if w.kind == "once":
                 self._owed(w, MISSED_LINE.format(when=_local(w.at, _zone(w.tz))), f"wake:{w.id}:missed",
                            detail=f"What it was for (my note to myself): {_clip(w.note, 300)}")
-                self.store.update(w.id, status="missed", claimed_until=None)
+                self.store.update(w.id, status="missed")
+                self.store.release(w.id, w.claim_token)
                 log.info("wake-up %s: missed", w.id)
                 out["missed"] += 1
                 return
             # No backfill: the fires it missed are skipped, and it runs at its next slot from now.
             nxt = next_fire(w.cron, now, _zone(w.tz))
             if nxt is None or nxt > w.until:
-                self.store.update(w.id, status="ended", claimed_until=None)
+                self.store.update(w.id, status="ended")
             else:
-                self.store.update(w.id, next_run_at=nxt, claimed_until=None)
+                self.store.update(w.id, next_run_at=nxt)
+            self.store.release(w.id, w.claim_token)
             log.info("wake-up %s: missed fires skipped", w.id)
             out["skipped"] += 1
             return
         self._run(w, out)
 
     def _reap(self) -> None:
-        """A run that outlived its limit has finished at last: its lease (held, and renewed, while it
-        lived) is released, so the wake-up's next run isn't held up for the rest of a lease."""
+        """Runs that outlived their limit: a live one's lease is renewed every pass (by its token, so it
+        is never anyone else's); a finished one's lease is released (only if it is still ours), so the
+        wake-up's next run isn't held up for the rest of a lease (Codex re-review, 11/12)."""
+        now = self.clock()
         with self._live_lock:
-            done = [wid for wid, worker in self._live.items() if not worker.is_alive()]
-            for wid in done:
-                self._live.pop(wid, None)
-        for wid in done:
+            entries = list(self._live.items())
+        for wid, (worker, token) in entries:
             try:
-                self.store.update(wid, claimed_until=None)
-                log.info("wake-up %s: the overdue run finished; released", wid)
+                if worker.is_alive():
+                    self.store.renew(wid, token, now + LEASE)
+                    continue
+                with self._live_lock:
+                    self._live.pop(wid, None)
+                if self.store.release(wid, token):
+                    log.info("wake-up %s: the overdue run finished; released", wid)
             except Exception as e:
-                log.warning("wake-up %s: couldn't release after the overdue run (%s)", wid, type(e).__name__)
+                log.warning("wake-up %s: couldn't renew or release (%s)", wid, type(e).__name__)
 
     def tick(self) -> dict:
         out = {"ran": 0, "told": 0, "failed": 0, "missed": 0, "ended": 0, "skipped": 0}
