@@ -10,8 +10,11 @@ taught the pattern — the header check happens before ANYTHING else runs.
 """
 
 import hmac
+import threading
+import time
 import logging
 import unicodedata
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -25,6 +28,10 @@ log = logging.getLogger(__name__)
 #: The identity an unrecognized voice lands on. Named once so the door and the
 #: engage gate cannot drift on what "a stranger spoke" means.
 GUEST_VOICE_ID = "voice-guest"
+#: T-17 (11/13): one forever-thread for every unrecognized voice let a 2 AM stray ("Call Ryan's nearest")
+#: answer his "Thank you" eight hours later. A guest conversation is a SESSION per device: after this
+#: many quiet seconds the next guest turn starts a fresh thread and sees nothing older.
+GUEST_SESSION_IDLE_S = 600
 
 
 _STOP_PHRASES = {
@@ -122,7 +129,8 @@ class KaelTicketUpdate(BaseModel):
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
               a2a_memory_fn=None, settings=None, speaker_redirect=None,
-              kael_tickets=None, home_notice_fn=None, home_webhook_token: str | None = None) -> FastAPI:
+              kael_tickets=None, home_notice_fn=None, home_webhook_token: str | None = None,
+              guest_clock=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
 
     owner_person_id: when set, every authed HTTP caller IS the owner. The Bearer
@@ -203,6 +211,21 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         name = (speaker_id or "").strip().lower()
         return (speaker_persons.get(name) == owner_person_id
                 and confidence >= settings.voice_speaker_min_confidence)
+
+    clock = guest_clock or time.monotonic
+    guest_sessions: dict[str, tuple[float, str]] = {}
+    guest_lock = threading.Lock()
+
+    def guest_thread(device_id) -> str:
+        """The guest's thread for THIS conversation: per device, and new after GUEST_SESSION_IDLE_S of quiet."""
+        key = str(device_id or "-")
+        with guest_lock:
+            now = clock()
+            last, session = guest_sessions.get(key, (None, ""))
+            if not session or last is None or now - last > GUEST_SESSION_IDLE_S:
+                session = f"{key}:{int(time.time())}-{uuid.uuid4().hex[:6]}"   # unique even within a second
+            guest_sessions[key] = (now, session)
+        return f"{person_thread_key(GUEST_VOICE_ID)}:{session}"
 
     def voice_thread() -> str:
         """The checkpointer thread a voice turn rides. When an owner is configured (the
@@ -366,7 +389,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                     identity["speaker"]["unsure"] = True
                 if who is not None:
                     identity["user_id"], identity["display_name"] = who
-                    thread_id = person_thread_key(who[0])
+                    thread_id = (guest_thread(body.device_id) if who[0] == GUEST_VOICE_ID
+                                 else person_thread_key(who[0]))
         else:
             thread_id = body.thread_id
         is_voice = bool(identity.get("voice"))
