@@ -2524,6 +2524,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             if message_sender is not None:
                 # D42 (11/13): a message he asks for when a wake-up is set goes at its time, untapped.
                 message_sender.wake_store = wake_store
+                log.info("D42: a message he asks for when a wake-up is set goes untapped")
             tools.append(build_wake_me_tool(wake_store, rails=WakeRails.from_settings(settings),
                                             owner_person_id=str(settings.owner_person_id or ""),
                                             pin=message_sender.pin_recipient if message_sender is not None else None))

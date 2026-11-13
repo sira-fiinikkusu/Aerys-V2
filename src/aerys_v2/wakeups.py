@@ -114,9 +114,10 @@ class Wakeup:
     created_at: datetime | None = None
     claim_token: str | None = None
     #: D42 (11/13): the message he asked for when it was set: who (resolved then) and the exact words.
-    #: Fixed like the note; pinned_run is the run that spent it (once per run), changed only by spend_pin.
+    #: Fixed like the note. pinned_spent is the occurrence that spent it ("once" for a one-off, the fire
+    #: time for a recurring one): once per scheduled occurrence, changed only by spend_pin.
     pinned_send: dict | None = None
-    pinned_run: int = 0
+    pinned_spent: str | None = None
 
 
 @dataclass
@@ -370,13 +371,13 @@ class MemoryWakeupStore:
             return True
 
 
-    def spend_pin(self, wid, run) -> bool:
-        """Mark his pinned message spent for this run; False when this run already spent it."""
+    def spend_pin(self, wid, occurrence) -> bool:
+        """Mark his pinned message spent for this occurrence; False when it already was."""
         with self.lock:
             r = self.rows.get(wid)
-            if r is None or not r.pinned_send or r.pinned_run == run:
+            if r is None or not r.pinned_send or not occurrence or r.pinned_spent == occurrence:
                 return False
-            r.pinned_run = run
+            r.pinned_spent = occurrence
             return True
 
 
@@ -385,7 +386,7 @@ class PostgresWakeupStore:
 
     COLUMNS = ("id, thread_id, note, kind, at, cron, until, next_run_at, tz, status, paused_reason, runs, "
                "consecutive_failures, last_run_at, claimed_until, run_log, created_at, claim_token, "
-               "pinned_send, pinned_run")
+               "pinned_send, pinned_spent")
     #: Taken while the active wake-ups are counted and one more is made active: two turns can't
     #: both take the last place under the cap.
     CAP_LOCK = "SELECT pg_advisory_xact_lock(hashtext('v2_wakeups:active'))"
@@ -408,7 +409,7 @@ class PostgresWakeupStore:
                       consecutive_failures=r[12], last_run_at=r[13], claimed_until=r[14],
                       run_log=list(log_ or []), created_at=r[16], claim_token=r[17],
                       pinned_send=(json.loads(r[18]) if isinstance(r[18], str) else r[18]) or None,
-                      pinned_run=r[19] or 0)
+                      pinned_spent=r[19])
 
     def add(self, *, thread_id, note, kind, at, cron, until, next_run_at, now, cap, tz=WAKE_TZ, pinned=None):
         with self._connect() as conn:
@@ -496,11 +497,15 @@ class PostgresWakeupStore:
             return conn.execute(f"UPDATE v2_wakeups SET {sets} WHERE id = %s AND status = 'paused' RETURNING id",
                                 (*values, wid)).fetchone() is not None
 
-    def spend_pin(self, wid, run) -> bool:
-        """Mark his pinned message spent for this run, atomically: two sends in one run can't both pass."""
+    def spend_pin(self, wid, occurrence) -> bool:
+        """Mark his pinned message spent for this occurrence, atomically: two sends of one occurrence (a
+        twin call, a run that overstayed its limit, a retry of a failed one-off) can't both pass."""
+        if not occurrence:
+            return False
         with self._connect() as conn:
-            return conn.execute("UPDATE v2_wakeups SET pinned_run = %s WHERE id = %s AND pinned_send IS NOT NULL "
-                                "AND pinned_run IS DISTINCT FROM %s RETURNING id", (run, wid, run)).fetchone() is not None
+            return conn.execute("UPDATE v2_wakeups SET pinned_spent = %s WHERE id = %s AND pinned_send IS NOT NULL "
+                                "AND pinned_spent IS DISTINCT FROM %s RETURNING id",
+                                (occurrence, wid, occurrence)).fetchone() is not None
 
 
 # --- the tool ---------------------------------------------------------------------------------------
@@ -589,7 +594,7 @@ def build_wake_me_tool(store, *, rails: WakeRails = WakeRails(), owner_person_id
             return None, ("NOT DONE: a message goes at its time without his tap only when he asks for it himself "
                           "(his own text, or his voice surely his) with nothing outside read first. Set the "
                           "wake-up without message_to and message, and its message will wait for his tap.")
-        got = pin(to, words)
+        got = pin(to, words, identity, str(conf.get("thread_id") or ""))
         if isinstance(got, str):
             return None, got
         return got, ""
@@ -904,10 +909,21 @@ def wake_identity(owner: str) -> dict:
             "display_name": "your own wake-up", "privacy_context": "private"}
 
 
-def wake_config(wake_id: int, owner: str, *, steps: int = 40) -> dict:
+def occurrence_of(w: Wakeup) -> str:
+    """D42: which scheduled occurrence a run is, fixed when it starts: a one-off is one occurrence however
+    often it retries; a recurring one is its fire time. His pinned message goes once per occurrence."""
+    if w.kind == "once":
+        return "once"
+    return w.next_run_at.isoformat() if w.next_run_at is not None else ""
+
+
+def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = "") -> dict:
     # outside_text and room_sink are made here, by the caller, like ask() does: LangGraph copies
     # configurable shallowly, so the guard's holder is the same dict for the model and the tools.
-    return {"configurable": {"thread_id": f"wake:{wake_id}", "identity": wake_identity(owner),
+    identity = wake_identity(owner)
+    if occurrence:
+        identity["wake_occurrence"] = str(occurrence)     # set by the runner, never by her
+    return {"configurable": {"thread_id": f"wake:{wake_id}", "identity": identity,
                              "outside_text": {}, "room_sink": {}, "specialist": True, "tier": "standard"},
             "recursion_limit": int(steps)}
 
@@ -930,7 +946,8 @@ def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, st
         CURRENT_TURN_TEXT.set("")
         LOCATION_TURN.set(set())
         TRAVEL_ZONE.set({})
-        result, _ = _run_action_gated(graph, [HumanMessage(content=seed)], wake_config(w.id, owner, steps=steps))
+        config = wake_config(w.id, owner, steps=steps, occurrence=occurrence_of(w))
+        result, _ = _run_action_gated(graph, [HumanMessage(content=seed)], config)
         messages = result["messages"]
         return TurnResult(_reply_text(messages[-1]) if messages else "",
                           [c.get("name") for c in extract_tool_calls(messages) if c.get("name")])

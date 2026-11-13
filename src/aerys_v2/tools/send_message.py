@@ -96,9 +96,11 @@ class MessageSender:
         #: D42: her wake-ups' store, so a wake turn can send the message he asked for (factory sets it).
         self.wake_store = None
 
-    def pin_recipient(self, to, text):
+    def pin_recipient(self, to, text, identity=None, thread=''):
         """D42: who a wake-up's message goes to (resolved now, one person on her list) and its exact
-        words, kept when he asks for it. A dict, or why not."""
+        words, kept when he asks for it. The same callers as send(): never a kael: line. A dict, or why not."""
+        if str((identity or {}).get('user_id') or '') != str(self.gate.owner) or str(thread).startswith('kael:'):
+            return 'NOT DONE: only the owner can ask me to message someone.'
         words = str(text or '').strip()
         if not words:
             return 'NOT DONE: I need the words to send.'
@@ -118,14 +120,16 @@ class MessageSender:
         return {'person_id': pid, 'address': address, 'name': str(p.get('name') or to),
                 'handle': str(p.get('handle') or address), 'text': words}
 
-    def _wake_pin(self, thread, destinations, text):
+    def _wake_pin(self, thread, identity, destinations, text):
         """D42: the message he asked for when this wake-up was set: the same person at the same address,
-        the same words, once per run. Spent before it goes, so a crash or a twin call can't send it twice.
-        Anything unreadable is no pin (the button stays)."""
+        the same words, once per scheduled occurrence (the runner's key in the identity, fixed for the
+        run). Spent before it goes, so a crash, a twin call, an overstaying run or a retry can't send it
+        twice. Anything unreadable is no pin (the button stays)."""
         from aerys_v2.wakeups import own_wake_id
 
         wid = own_wake_id({'thread_id': thread})
-        if self.wake_store is None or wid is None or len(destinations) != 1:
+        occurrence = str(identity.get('wake_occurrence') or '')
+        if self.wake_store is None or wid is None or not occurrence or len(destinations) != 1:
             return None
         try:
             w = self.wake_store.get(wid)
@@ -134,7 +138,7 @@ class MessageSender:
             if (not pin or (pid, address) != (str(pin.get('person_id') or ''), str(pin.get('address') or ''))
                     or signed(str(text or '').strip()) != signed(str(pin.get('text') or '').strip())):
                 return None
-            if not self.wake_store.spend_pin(wid, w.runs + 1):
+            if not self.wake_store.spend_pin(wid, occurrence):
                 return None
             return str(pin['text'])
         except Exception:
@@ -241,7 +245,7 @@ class MessageSender:
             # D42: a wake turn's only outside source is being unattended; the message he asked for when
             # it was set is his word already, so for exactly that send the wake-up isn't outside text.
             if tuple(sources) == ('unattended wake-up',) and identity.get('unattended'):
-                pinned = self._wake_pin(thread, destinations, text)
+                pinned = self._wake_pin(thread, identity, destinations, text)
                 if pinned is not None:
                     sources, words = (), signed(pinned)
             # Use one lookup snapshot for both approval and delivery: a name cannot resolve differently

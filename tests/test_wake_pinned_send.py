@@ -40,8 +40,9 @@ def life(*, confirmed=True):
     return b, sender, sent, store, tool
 
 
-def wake_send(sender, text=WORDS, to="sam", sources=("unattended wake-up",), thread="wake:1"):
-    return sender.send(to, text, "discord", wake_identity(OWNER), thread, sources)
+def wake_send(sender, text=WORDS, to="sam", sources=("unattended wake-up",), thread="wake:1", occurrence="once"):
+    identity = {**wake_identity(OWNER), **({"wake_occurrence": occurrence} if occurrence else {})}
+    return sender.send(to, text, "discord", identity, thread, sources)
 
 
 def test_pinned_on_his_clean_turn():
@@ -100,8 +101,8 @@ def test_at_its_time_his_message_goes_once_with_no_button():
     assert wake_send(sender).startswith("Sent:")
     assert sent[-1] == (ADDRESS, WORDS + "\n-Aerys")
     assert len(b.approval_store.rows) == buttons
-    assert store.get(1).pinned_run == 1
-    assert not wake_send(sender).startswith("Sent:")          # the same run: not twice
+    assert store.get(1).pinned_spent == "once"
+    assert not wake_send(sender).startswith("Sent:")          # the same occurrence: not twice
     assert sum(1 for s in sent if s[1] == WORDS + "\n-Aerys") == 1
 
 
@@ -111,6 +112,7 @@ def test_at_its_time_his_message_goes_once_with_no_button():
     {"sources": ("search_web", "unattended wake-up")},                      # read outside text first
     {"thread": "wake:2"},                                                    # another wake-up
     {"thread": "person:owner-thread"},                                       # not a wake turn
+    {"occurrence": ""},                                                      # no runner key: no pin
 ])
 def test_anything_else_still_waits_for_his_tap(kw):
     b, sender, sent, store, tool = life()
@@ -120,17 +122,49 @@ def test_anything_else_still_waits_for_his_tap(kw):
     before = list(sent)
     assert not wake_send(sender, **kw).startswith("Sent:")
     assert sent == before
-    assert store.get(1).pinned_run == 0
+    assert store.get(1).pinned_spent is None
 
 
-def test_a_new_run_may_send_it_again():
+def test_a_recurring_one_sends_once_per_occurrence():
+    b, sender, sent, store, tool = life()
+    weekly = {**{k: v for k, v in ADD.items() if k != "at"}, "cron": "0 14 * * 5"}
+    assert tool.invoke(weekly, config=owner_turn()).startswith("Set:")
+    assert wake_send(sender, occurrence="2026-11-13T14:00:00-05:00").startswith("Sent:")
+    store.update(1, runs=1)                                   # the runner finished that occurrence
+    sender.ledger.rows.clear()                                # no recent attempt left to dedupe on
+    assert not wake_send(sender, occurrence="2026-11-13T14:00:00-05:00").startswith("Sent:")
+    assert wake_send(sender, occurrence="2026-11-20T14:00:00-05:00").startswith("Sent:")
+    assert store.get(1).pinned_spent == "2026-11-20T14:00:00-05:00"
+
+
+def test_an_overstaying_or_retried_one_off_never_sends_it_twice():
+    # Codex 11/13: a run that overstays its limit (the runner bumps runs while it still works) and a
+    # failed one-off's retry both carry the same occurrence: the pin is spent for good.
     b, sender, sent, store, tool = life()
     tool.invoke(ADD, config=owner_turn())
     assert wake_send(sender).startswith("Sent:")
-    store.update(1, runs=1)                                   # the runner finished run 1
-    sender.ledger.rows.clear()                                # a week later: no recent attempt
-    assert wake_send(sender).startswith("Sent:")
-    assert store.get(1).pinned_run == 2
+    store.update(1, runs=1, consecutive_failures=1)           # timed out / failed; a retry is due
+    sender.ledger.rows.clear()                                # past the delivery dedupe window
+    assert not wake_send(sender).startswith("Sent:")
+    assert sum(1 for s in sent if s[1] == WORDS + "\n-Aerys") == 1
+
+
+def test_never_pinned_from_the_kael_line():
+    b, sender, sent, store, tool = life()
+    kael = owner_turn()
+    kael["configurable"]["thread_id"] = "kael:escape-test"
+    assert tool.invoke(ADD, config=kael).startswith("NOT DONE")
+    assert store.open() == []
+
+
+def test_the_runner_keys_each_occurrence():
+    from aerys_v2.wakeups import occurrence_of, wake_config
+    b, sender, sent, store, tool = life()
+    tool.invoke(ADD, config=owner_turn())
+    once = store.get(1)
+    assert occurrence_of(once) == "once"
+    assert wake_config(1, OWNER, occurrence="once")["configurable"]["identity"]["wake_occurrence"] == "once"
+    assert "wake_occurrence" not in wake_config(1, OWNER)["configurable"]["identity"]
 
 
 def test_unpinned_wake_ups_are_unchanged():
