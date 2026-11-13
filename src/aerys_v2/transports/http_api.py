@@ -419,7 +419,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if body.voice or str(body.thread_id or "").startswith("voice"):
             from aerys_v2.speaker_redirect import turn_started
 
-            turn_started(body.device_id)        # what this turn says later belongs to this generation
+            turn_started(body.device_id)        # what this turn says later is from a turn begun now
             identity["voice"] = True
             thread_id = voice_thread()
             if body.speaker is None:
@@ -469,8 +469,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                 and speaker_redirect.playing(body.device_id)):
             from aerys_v2.speaker_redirect import hush
 
-            hush(body.device_id)                # 11/13: what's still on its way stays quiet too
-            speaker_redirect.stop(body.device_id)
+            hushed = hush(body.device_id)       # 11/13: what's still on its way stays quiet too
+            speaker_redirect.stop(body.device_id, hush_at=hushed)
             return AskReply(reply="", thread_id=thread_id, keep_listening=False)
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)
@@ -530,8 +530,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         device = body.device_id
         if (speaker_redirect is not None and speaker_redirect.handles(device)
                 and speaker_redirect.playing(device)):
-            hush(device)                        # first: nothing on its way starts her up again
-            if not speaker_redirect.stop(device):
+            hushed = hush(device)               # first: nothing on its way starts her up again
+            if not speaker_redirect.stop(device, hush_at=hushed):
                 log.warning("voice: the button pressed on %s, but the speaker didn't confirm the stop", device)
                 return {"did": "nothing", "why": "the speaker didn't stop"}
             log.info("voice: the button hushed her on %s", device)

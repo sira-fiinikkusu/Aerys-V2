@@ -29,7 +29,8 @@ def test_stop_shortcut(text, playing, voice, device, stops):
     assert result.reply == ('' if stops else 'normal reply')
     assert result.keep_listening is False
     if stops:
-        speaker.stop.assert_called_once_with(device)
+        speaker.stop.assert_called_once()
+        assert speaker.stop.call_args.args == (device,) and speaker.stop.call_args.kwargs["hush_at"] > 0  # 11/13 hush floor
         ask.assert_not_called()
         speaker.say.assert_not_called()
     else:

@@ -47,7 +47,8 @@ def test_office_reply_is_rendered_in_her_voice_and_sent_to_the_desk():
     assert tts_body == {"engine_id": "tts.eleven", "message": "[warmly] That's K-PAX (2001).",
                         "language": "en", "options": {"voice": "arabella"}}   # tags kept, markdown gone
     assert play_url == "http://lev:8410/play" and play_auth == "Bearer spk"
-    assert play_body == {"url": "http://192.168.1.155:8123/api/tts_proxy/x.mp3"}
+    assert {k: v for k, v in play_body.items() if k != "since"} == {"url": "http://192.168.1.155:8123/api/tts_proxy/x.mp3"}
+    assert isinstance(play_body["since"], float)          # 11/13: when its turn began, for the hush floor
 
 
 def test_unmapped_devices_empty_text_and_failures_are_quiet():

@@ -266,8 +266,10 @@ def test_redirect_playback_gates_mic(rig, monkeypatch, delivery, text, state, pl
     else:
         followup_router_for(settings)(text, "sat")
     assert during == [([], {})]
-    assert plays == [({"url": "http://ha.example/clip.mp3", **({"wait": True} if waiting else {})},
-                      130.0 if waiting else 5.0)]
+    # 11/13: every clip also carries when its turn began ("since"), for the speaker's hush floor.
+    assert [({k: v for k, v in body.items() if k != "since"}, t) for body, t in plays] == [
+        ({"url": "http://ha.example/clip.mp3", **({"wait": True} if waiting else {})}, 130.0 if waiting else 5.0)]
+    assert all(isinstance(body.get("since"), float) for body, _ in plays)
     if waiting and played is True:
         assert posts == [("http://ha.example/api/services/assist_satellite/start_conversation",
                           {"entity_id": "assist_satellite.example", "start_message": "Mm?", "preannounce": False})]

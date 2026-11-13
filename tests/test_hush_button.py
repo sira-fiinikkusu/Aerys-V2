@@ -21,7 +21,7 @@ class Speaker:
     def playing(self, device_id):
         return self.is_playing
 
-    def stop(self, device_id):
+    def stop(self, device_id, hush_at=None):
         self.stops.append(device_id)
         return True
 
@@ -101,18 +101,18 @@ def test_queued_speech_counts_as_talking():
     assert not redirect({"playing": False, "queued": 0}).playing("office")
 
 
-# --- Codex 11/13: a hush ends what the turns before it were going to say, and nothing undoes that ---
+# --- Codex 11/13: a hush ends what the turns before it were going to say; the speaker is the judge ----
 
 @pytest.fixture(autouse=True)
-def _fresh_generations():
+def _fresh_hushes():
     from aerys_v2 import speaker_redirect as sr
-    sr._GEN.clear()
+    sr._HUSH_AT.clear()
     yield
-    sr._GEN.clear()
+    sr._HUSH_AT.clear()
 
 
 class Stuck(Speaker):
-    def stop(self, device_id):
+    def stop(self, device_id, hush_at=None):
         self.stops.append(device_id)
         return False
 
@@ -122,114 +122,160 @@ def test_a_stop_the_speaker_did_not_confirm_is_not_called_a_hush(monkeypatch):
     assert r.json() == {"did": "nothing", "why": "the speaker didn't stop"}
 
 
-def redirect_recording(on_play=None):
+class Desk:
+    """The desk speaker's own rule (aerys-speaker.py): a clip from before its last hush is refused."""
+
+    def __init__(self, on_play=None):
+        self.floor, self.played, self.posts, self.on_play = 0.0, [], [], on_play
+
+    def client(self):
+        desk = self
+
+        class R:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.body
+
+        class Client:
+            def post(self, url, json=None, **kw):
+                desk.posts.append(url)
+                if url.endswith("tts_get_url"):
+                    return R({"url": "http://tts/x.mp3"})
+                if url.endswith("/stop"):
+                    desk.floor = max(desk.floor, (json or {}).get("hush_at") or 0.0)
+                    return R({"stopped": True})
+                if desk.on_play is not None:
+                    desk.on_play()
+                since = (json or {}).get("since")
+                if since is not None and since < desk.floor:
+                    return R({"played": False, "stale": True})
+                desk.played.append(since)
+                return R({"played": True})
+
+            def get(self, *a, **kw):
+                return R({"playing": False, "queued": 0})
+        return Client()
+
+
+def redirect_on(desk):
     from aerys_v2.speaker_redirect import SpeakerRedirect
-    posts = []
-
-    class R:
-        def __init__(self, body):
-            self.body = body
-
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return self.body
-
-    class Client:
-        def post(self, url, **kw):
-            posts.append(url)
-            if url.endswith("/play") and on_play is not None:
-                on_play()
-            if url.endswith("tts_get_url"):
-                return R({"url": "http://tts/x.mp3"})
-            return R({"played": True, "stopped": True})
-
-        def get(self, *a, **kw):
-            return R({"playing": False, "queued": 0})
-
-    r = SpeakerRedirect(ha_base_url="http://ha", ha_token="t", engine="e", voice="v", language="en",
-                        targets={"office": "http://desk"}, speaker_token="s", client=Client(), async_send=False)
-    return r, posts
+    return SpeakerRedirect(ha_base_url="http://ha", ha_token="t", engine="e", voice="v", language="en",
+                           targets={"office": "http://desk"}, speaker_token="s", client=desk.client(),
+                           async_send=False)
 
 
-def in_a_turn(fn):
-    """Run fn inside a voice turn that began now (its own context, like a request or its follow-up)."""
+def in_a_turn():
+    """A voice turn that began now, in its own context (like a request, or its background follow-up)."""
     import contextvars
     from aerys_v2.speaker_redirect import turn_started
-
-    def go():
-        turn_started("office")
-        return fn
     ctx = contextvars.copy_context()
-    ctx.run(go)
+    ctx.run(turn_started, "office")
     return ctx
 
 
-def test_a_late_answer_from_before_the_hush_never_plays():
+def tick(monkeypatch):
+    """Each call to the clock is a little later (the hush must land after the turn began)."""
+    from aerys_v2 import speaker_redirect as sr
+    t = {"now": 1_000.0}
+
+    def now():
+        t["now"] += 1.0
+        return t["now"]
+    monkeypatch.setattr(sr.time, "time", now)
+
+
+def test_a_late_answer_from_before_the_hush_never_plays(monkeypatch):
     from aerys_v2.speaker_redirect import hush
-    r, posts = redirect_recording()
-    turn = in_a_turn(None)
+    tick(monkeypatch)
+    desk = Desk()
+    r = redirect_on(desk)
+    turn = in_a_turn()
     hush("office")
     reopened = []
     turn.run(r.say, "office", "the research answer, arriving late", then=lambda: reopened.append(1))
-    assert posts == [] and reopened == []
+    assert desk.played == [] and reopened == [] and desk.posts == []      # never even made
 
 
-def test_his_next_turn_never_revives_the_old_one():
+def test_his_next_turn_never_revives_the_old_one(monkeypatch):
     from aerys_v2.speaker_redirect import hush
-    r, posts = redirect_recording()
-    old = in_a_turn(None)
+    tick(monkeypatch)
+    desk = Desk()
+    r = redirect_on(desk)
+    old = in_a_turn()
     hush("office")
-    new = in_a_turn(None)                                       # he speaks again after the hush
+    new = in_a_turn()
     old.run(r.say, "office", "the old answer")
-    assert not any(p.endswith("/play") for p in posts)
     new.run(r.say, "office", "his new answer")
-    assert any(p.endswith("/play") for p in posts)
+    assert len(desk.played) == 1
 
 
-def test_a_clip_being_made_when_the_hush_lands_never_plays():
-    from aerys_v2.speaker_redirect import generation, hush
-    r, posts = redirect_recording()
-    gen = generation("office")
-    hush("office")
-    reopened = []
-    r._say("office", "a clip already being made", lambda: reopened.append(1), gen)
-    assert not any(p.endswith("/play") for p in posts) and reopened == []
-
-
-def test_a_hush_landing_while_play_is_on_its_way_stops_it():
+def test_the_speaker_refuses_a_clip_that_slipped_past_the_check(monkeypatch):
+    # Codex: the clip passed the brain's check, then the hush + /stop landed, then /play arrived.
     from aerys_v2.speaker_redirect import hush
-    r, posts = None, None
-    r, posts = redirect_recording(on_play=lambda: hush("office"))
+    tick(monkeypatch)
+    r = None
+    desk = Desk(on_play=lambda: r.stop("office", hush_at=hush("office")))
+    r = redirect_on(desk)
     reopened = []
-    r.say("office", "slips past the check", then=lambda: reopened.append(1))
-    assert posts[-1].endswith("/stop") and reopened == []
+    in_a_turn().run(r.say, "office", "slips past the check", then=lambda: reopened.append(1))
+    assert desk.played == [] and reopened == []
 
 
-def test_speech_that_belongs_to_no_turn_still_speaks_after_a_hush():
-    # the reach desk (a wake-up's TELL, a ticket answer): not what he hushed, and never logged as spoken
-    # without being said
+def test_an_old_clip_never_stops_a_newer_one(monkeypatch):
     from aerys_v2.speaker_redirect import hush
-    r, posts = redirect_recording()
-    hush("office")
+    tick(monkeypatch)
+    desk = Desk()
+    r = redirect_on(desk)
+    old = in_a_turn()
+    r.stop("office", hush_at=hush("office"))
+    new = in_a_turn()
+    new.run(r.say, "office", "his new answer")
+    old.run(r._say, "office", "the old clip, finishing late", None, None)   # no turn time: plays as now
+    assert not any(p.endswith("/stop") for p in desk.posts[1:])
+
+
+def test_a_hush_on_any_speaker_holds_that_turns_speech_there(monkeypatch):
+    from aerys_v2.speaker_redirect import SpeakerRedirect, hush
+    tick(monkeypatch)
+    desk = Desk()
+    r = SpeakerRedirect(ha_base_url="http://ha", ha_token="t", engine="e", voice="v", language="en",
+                        targets={"office": "http://desk", "kitchen": "http://desk"}, speaker_token="s",
+                        client=desk.client(), async_send=False)
+    turn = in_a_turn()                                         # the turn began in the office
+    hush("kitchen")
+    turn.run(r.say, "kitchen", "its follow-up, routed to the kitchen")
+    assert desk.played == []
+
+
+def test_speech_that_belongs_to_no_turn_still_speaks_after_a_hush(monkeypatch):
+    # the reach desk (a wake-up's TELL, a ticket answer): not what he hushed, never logged as said unsaid
+    from aerys_v2.speaker_redirect import hush
+    tick(monkeypatch)
+    desk = Desk()
+    r = redirect_on(desk)
+    r.stop("office", hush_at=hush("office"))
     r.say("office", "your 3 PM reminder")
-    assert any(p.endswith("/play") for p in posts)
+    assert len(desk.played) == 1
 
 
-def test_a_voice_stop_also_ends_what_was_on_its_way(monkeypatch):
-    from aerys_v2.speaker_redirect import generation
-    sp = Speaker(playing=True)
+def test_a_voice_stop_and_the_button_both_hush(monkeypatch):
+    from aerys_v2.speaker_redirect import hushed_at
+
+    class Sp(Speaker):
+        def stop(self, device_id, hush_at=None):
+            self.stops.append((device_id, hush_at))
+            return True
+    sp = Sp(playing=True)
     c = TestClient(build_app(lambda *a: "ok", "sekrit", owner_person_id="owner-uuid",
                              speaker_redirect=sp, settings=settings()))
-    before = generation("office")
     c.post("/ask", json={"text": "Aerys, stop!", "thread_id": "voice:beta", "voice": True, "device_id": "office"},
            headers={"Authorization": "Bearer sekrit"})
-    assert sp.stops == ["office"] and generation("office") == before + 1
-
-
-def test_the_button_hush_moves_the_generation_on(monkeypatch):
-    from aerys_v2.speaker_redirect import generation
-    before = generation("office")
-    r, opened, asked = press(Speaker(playing=True), monkeypatch)
-    assert r.json() == {"did": "hushed"} and generation("office") == before + 1
+    assert sp.stops and sp.stops[-1][1] == hushed_at("office") > 0
+    sp2 = Sp(playing=True)
+    r, opened, asked = press(sp2, monkeypatch)
+    assert r.json() == {"did": "hushed"} and sp2.stops[-1][1] == hushed_at("office")

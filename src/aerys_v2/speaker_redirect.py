@@ -19,6 +19,7 @@ import contextvars
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 
 log = logging.getLogger(__name__)
@@ -28,38 +29,40 @@ log = logging.getLogger(__name__)
 _MARKDOWN = re.compile(r"(\*\*|__|`+|^#+\s*)", re.M)
 
 #: Chris 11/13 (the office button, "she shuts up"): a hush ends everything she was going to say there
-#: for the turns that came before it: the clip playing, what's queued, a clip still being made, a
-#: research answer still coming, a mic reopen. Each speaker has a generation; a hush moves it on. A turn
-#: notes the generation it started in (turn_started, carried to its background follow-up through the
-#: copied context), and its speech plays only while that generation is current, so a hush is never
-#: undone by what comes after it. Speech that belongs to no turn (the reach desk) plays in the current
-#: generation. Shared by every redirect in this process (the /ask door and the follow-up router build
-#: their own).
-_GEN: dict[str, int] = {}
-_GEN_LOCK = threading.Lock()
-_TURN: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar("speaker_turn", default=None)
+#: for the turns that began before it: the clip playing, what's queued, a clip still being made, a
+#: research answer still coming, a mic reopen. A turn notes when it began (turn_started, carried to its
+#: background follow-up through the copied context); every clip carries that time ("since"), and the
+#: speaker itself refuses a clip from before its last hush ("hush_at" on /stop). The speaker is the
+#: judge, so no race between connections can let a hushed clip through, and a newer clip is never
+#: stopped by an older one. Speech that belongs to no turn (the reach desk) is "since now": it plays.
+#: Wall-clock seconds from this brain on both sides, so a restart doesn't reset anything.
+_HUSH_AT: dict[str, float] = {}
+_HUSH_LOCK = threading.Lock()
+_TURN: contextvars.ContextVar[float | None] = contextvars.ContextVar("speaker_turn", default=None)
 
 
-def generation(device_id: str | None) -> int:
-    with _GEN_LOCK:
-        return _GEN.get(str(device_id or ""), 0)
-
-
-def hush(device_id: str | None) -> None:
+def hush(device_id: str | None) -> float:
+    """Hush this speaker as of now; returns the time, for the speaker's own floor."""
+    now = time.time()
     if device_id:
-        with _GEN_LOCK:
-            _GEN[str(device_id)] = _GEN.get(str(device_id), 0) + 1
+        with _HUSH_LOCK:
+            _HUSH_AT[str(device_id)] = max(_HUSH_AT.get(str(device_id), 0.0), now)
+    return now
 
 
-def turn_started(device_id: str | None) -> None:
-    """A voice turn arrived on this speaker: what it says later belongs to this generation."""
-    if device_id:
-        _TURN.set((str(device_id), generation(device_id)))
+def hushed_at(device_id: str | None) -> float:
+    with _HUSH_LOCK:
+        return _HUSH_AT.get(str(device_id or ""), 0.0)
 
 
-def _speech_generation(device_id: str) -> int:
+def turn_started(device_id: str | None = None) -> None:
+    """A voice turn began now: whatever it says later, on any speaker, is from this turn."""
+    _TURN.set(time.time())
+
+
+def _since() -> float:
     turn = _TURN.get()
-    return turn[1] if turn is not None and turn[0] == str(device_id) else generation(device_id)
+    return turn if turn is not None else time.time()
 
 
 def parse_targets(raw: str) -> dict[str, str]:
@@ -105,14 +108,16 @@ class SpeakerRedirect:
             log.debug("speaker redirect playing failed (harmless)", exc_info=True)
             return False
 
-    def stop(self, device_id: str | None) -> bool:
-        """Best-effort speaker stop; failures are harmless."""
+    def stop(self, device_id: str | None, hush_at: float | None = None) -> bool:
+        """Best-effort speaker stop; failures are harmless. With hush_at the speaker also refuses
+        every later clip from a turn that began before it."""
         if not self.handles(device_id):
             return False
         try:
             response = self._client.post(
                 f"{self._targets[device_id]}/stop",
                 headers=self._speaker_headers, timeout=3.0,
+                json={"hush_at": hush_at} if hush_at is not None else {},
             )
             response.raise_for_status()
             return response.json().get("stopped") is True
@@ -123,18 +128,18 @@ class SpeakerRedirect:
     def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return
-        gen = _speech_generation(device_id)
-        if gen != generation(device_id):
+        since = _since()
+        if hushed_at(device_id) > since:
             log.info("speaker redirect: hushed on %s since this turn began; not saying it", device_id)
             return
         if self._async:
-            threading.Thread(target=self._say, args=(device_id, text, then, gen), daemon=True).start()
+            threading.Thread(target=self._say, args=(device_id, text, then, since), daemon=True).start()
         else:
-            self._say(device_id, text, then, gen)
+            self._say(device_id, text, then, since)
 
     def _say(self, device_id: str, text: str, then: Callable[[], None] | None = None,
-             gen: int | None = None) -> None:
-        gen = generation(device_id) if gen is None else gen
+             since: float | None = None) -> None:
+        since = time.time() if since is None else since
         try:
             r = self._client.post(
                 f"{self._ha}/api/tts_get_url",
@@ -144,15 +149,12 @@ class SpeakerRedirect:
             )
             r.raise_for_status()
             url = r.json()["url"]
-            if generation(device_id) != gen:
+            if hushed_at(device_id) > since:
                 return                       # hushed while it was being made: it never plays
             p = self._client.post(f"{self._targets[device_id]}/play", headers=self._speaker_headers,
-                                  json={"url": url, **({"wait": True} if then is not None else {})},
+                                  json={"url": url, "since": since, **({"wait": True} if then is not None else {})},
                                   timeout=130.0 if then is not None else 5.0)
             p.raise_for_status()
-            if generation(device_id) != gen:
-                self.stop(device_id)         # a hush landed while /play was on its way: it ends here
-                return
             if then is not None and p.json().get("played") is True:
                 then()
         except Exception:
