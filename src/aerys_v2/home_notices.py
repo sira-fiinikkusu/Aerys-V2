@@ -416,7 +416,11 @@ class HomeNotices:
         if notice.status == "success":
             text, more = MEMBER_DONE.format(about=named), clip_report(job.result, MEMBER_REPORT_CHARS)
         elif notice.status == "check_in":
-            text, more = self._headline(notice, job), clip_report(notice.metadata.get("summary"), 2000)
+            # Only Chris continues a job (D41), so the member hears who decides.
+            hours = max(1, round((notice.metadata.get("seconds_used") or 0) / 3600))
+            text = (f"Your job at home has been going {hours} hours{named}. It's paused until Chris says "
+                    "keep going, or stop.")
+            more = clip_report(notice.metadata.get("summary"), 2000)
         else:
             text, more = PLAIN[notice.status].format(about=named), clip_report(job.error, ERROR_CHARS)
         if more:

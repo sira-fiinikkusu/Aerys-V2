@@ -143,17 +143,9 @@ def test_continue_connection_failures_return_plain_refusal(home, monkeypatch, st
     # Before the extend nothing changed; after a successful extend the job HAS more time (Kael, 11/12:
     # saying "nothing changed" there was false), and asking again starts the run.
     expected = ("NOT DONE: couldn't reach the home machine; nothing changed." if stage == "extend" else
-                "NOT DONE: the job has more time now, but I couldn't start its next run; ask me again and I'll start it.")
+                "NOT DONE: the job has more time now, but its next run didn't start. Tell him; an update to the job (update_async_task) starts it.")
     assert expected in tool_texts(out)
     assert b.ledger.rows[tid][1] == old
-
-
-def test_continue_after_an_earlier_extend_queues_the_run(home, monkeypatch):
-    b, tid, status = setup_job(home, monkeypatch)
-    status.update(code=409, job_status="ready")          # extended by an earlier try; idle and ready
-    out, _ = b.turn([call("continue_home_job", {"task_id": tid}), AIMessage(content="Continued")], IDENTITY)
-    assert [c[1] for c in home.calls][-1] == f"/threads/{tid}/runs"
-    assert not any("NOT DONE" in text for text in tool_texts(out))
 
 
 def test_continue_unknown_task_does_not_extend(home, monkeypatch):
@@ -176,3 +168,20 @@ def test_other_status_does_not_interpret_checkin_counters():
     h = Home()
     h.notices.receive(note("error", metadata={"seconds_used": "not a counter"}))
     assert h.notices.tick()["handed"] == 1
+
+
+def test_a_second_continue_never_queues_another_run(home, monkeypatch):
+    b, tid, status = setup_job(home, monkeypatch)
+    b.turn([call("continue_home_job", {"task_id": tid}), AIMessage(content="Continued")], IDENTITY)
+    status["code"] = 409                                  # running now: no longer at a check-in
+    out, _ = b.turn([call("continue_home_job", {"task_id": tid}), AIMessage(content="Refused")], IDENTITY)
+    assert "NOT DONE: that job isn't waiting at a check-in." in tool_texts(out)
+    assert [c[1].rsplit("/", 1)[-1] for c in home.calls].count("runs") == 1
+
+
+def test_continue_refuses_after_outside_text(home, monkeypatch):
+    b, tid, _ = setup_job(home, monkeypatch)
+    out, _ = b.turn([call("read_web_page", {"url": "https://example.test/page"}),
+                     call("continue_home_job", {"task_id": tid}), AIMessage(content="Refused")], IDENTITY)
+    assert any("fresh 'keep going'" in text for text in tool_texts(out))
+    assert not any(c[1].endswith("/extend") for c in home.calls)

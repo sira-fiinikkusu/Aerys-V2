@@ -552,6 +552,17 @@ def continue_home_job_tool(*, url, token, ledger, owner_person_id, subagents, me
         if (str(thread or "").startswith("kael:") or
                 asker(identity, thread, owner_person_id, members) not in (OWNER_TEXT, OWNER_VOICE, OWNER_ASK)):
             return "NOT DONE: only the verified owner can continue a home job."
+        # His word, fresh: not a turn that read a page, an email, a relay, a shared surface or an unsure
+        # voice. The outside guard doesn't see this tool, so it asks the same question itself (Codex, 11/12).
+        try:
+            from types import SimpleNamespace
+            from aerys_v2.outside_guard import sources_for
+            tainted = sources_for(SimpleNamespace(runtime=runtime, state=runtime.state))
+        except Exception:
+            return "NOT DONE: I couldn't check this turn for outside text, so nothing changed."
+        if tainted:
+            return ("NOT DONE: this turn read outside text, so a home job only continues on a fresh "
+                    "'keep going' from him.")
         try:
             with ledger.locked(owner_person_id) as session:
                 tasks = session.load(owner_person_id)
@@ -565,18 +576,12 @@ def continue_home_job_tool(*, url, token, ledger, owner_person_id, subagents, me
                 if response.status_code == 404:
                     return "NOT DONE: no such job."
                 if response.status_code == 409:
-                    # Already extended by an earlier try whose run then failed to queue: it's ready
-                    # and idle, so queue the run now instead of leaving it stuck (Kael, 11/12).
-                    try:
-                        values = (httpx.get(base, headers=auth, timeout=10.0).json() or {}).get("values") or {}
-                    except Exception:
-                        values = {}
-                    if values.get("job_status") != "ready":
-                        return "NOT DONE: that job isn't waiting at a check-in."
-                else:
-                    response.raise_for_status()
-                failure = ("NOT DONE: the job has more time now, but I couldn't start its next run; "
-                           "ask me again and I'll start it.")
+                    # Only from a check-in. (No "already extended, queue it anyway" retry: the job reads
+                    # "ready" while a run is executing too, so that path re-queued runs. Codex, 11/12.)
+                    return "NOT DONE: that job isn't waiting at a check-in."
+                response.raise_for_status()
+                failure = ("NOT DONE: the job has more time now, but its next run didn't start. Tell him; "
+                           "an update to the job (update_async_task) starts it.")
                 state = {**runtime.state, "async_tasks": tasks}
                 result = update_tool.func(
                     task_id=task_id,
