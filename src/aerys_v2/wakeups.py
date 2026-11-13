@@ -748,6 +748,7 @@ def wake_tools(tools: list) -> list:
 WAKE_FENCE: dict[str, tuple[str, tuple[str, ...]] | None] = {
     **{name: None for name in WAKE_DROPPED},
     "timer": None,                                   # every timer action starts or cancels one
+    "continue_home_job": None,
     "cancel_async_task": None,                       # stopping his home job is his call
     "manage_list": ("action", ("show",)),            # the family's lists: read, never change
     "reach_prefs": ("action", ("show",)),            # his delivery settings: read, never change

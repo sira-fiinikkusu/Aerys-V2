@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 from dataclasses import dataclass, field, replace
@@ -41,7 +42,7 @@ from aerys_v2.reach import ReachEvent
 
 log = logging.getLogger(__name__)
 
-STATUSES = ("success", "error", "cancelled", "interrupted", "timeout")
+STATUSES = ("success", "error", "cancelled", "interrupted", "timeout", "check_in")
 #: Surfaces a notice can be texted back to (the desk's text_to).
 TEXT_SURFACES = ("discord", "telegram")
 SOURCE, TOPIC = "home-job", "jobs"
@@ -86,6 +87,8 @@ MEMBER_TRIES = 6
 
 #: What a job that didn't succeed says: fixed sentences, never her words, never "done".
 PLAIN = {
+    "check_in": "That job at home has been going {hours} hours{about}. "
+                "It's paused until you say: keep going, or stop.",
     "error": "That job at home didn't finish{about}.",
     "timeout": "That job at home ran out of time before it finished{about}.",
     "cancelled": "That job at home was stopped before it finished{about}.",
@@ -182,6 +185,15 @@ def parse(payload) -> dict:
             log.warning("home notice for run %s: metadata missing its shape or over %d bytes; kept as {}",
                         run_id.strip(), METADATA_BYTES)
         metadata = {}
+    if status == "check_in":
+        metadata = dict(metadata)
+        metadata["summary"] = clip_report(payload.get("summary", metadata.get("summary")), 2000)
+        metadata["reason"] = clip(payload.get("reason", metadata.get("reason")), 300)
+        for key in ("seconds_used", "steps_used"):
+            value = payload.get(key, metadata.get(key))
+            metadata.pop(key, None)
+            if type(value) in (int, float) and math.isfinite(value):
+                metadata[key] = value
     return {"run_id": run_id.strip(), "thread_id": thread_id.strip(), "status": status, "metadata": metadata}
 
 
@@ -294,7 +306,9 @@ class HomeNotices:
     def _headline(self, notice: Notice, job: Job) -> str:
         task = about(job.task)
         if notice.status != "success":
-            return PLAIN[notice.status].format(about=f": {task}" if task else "")
+            return PLAIN[notice.status].format(about=f": {task}" if task else "",
+                                               hours=(max(1, round((notice.metadata.get("seconds_used") or 0) / 3600))
+                                                      if notice.status == "check_in" else 0))
         text = ""
         if self.compose is not None:
             try:
@@ -378,6 +392,8 @@ class HomeNotices:
                 continue
             detail = (clip_report(job.result, RESULT_CHARS) if notice.status == "success"
                       else clip_report(job.error, ERROR_CHARS))
+            if notice.status == "check_in":
+                detail = clip_report(notice.metadata.get("summary"), 2000)
             text_to = self._text_to(notice)
             try:
                 outcome = self.desk.reach_out(ReachEvent(
@@ -399,6 +415,8 @@ class HomeNotices:
         named = f": {task}" if task else ""
         if notice.status == "success":
             text, more = MEMBER_DONE.format(about=named), clip_report(job.result, MEMBER_REPORT_CHARS)
+        elif notice.status == "check_in":
+            text, more = self._headline(notice, job), clip_report(notice.metadata.get("summary"), 2000)
         else:
             text, more = PLAIN[notice.status].format(about=named), clip_report(job.error, ERROR_CHARS)
         if more:

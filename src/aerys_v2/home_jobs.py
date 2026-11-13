@@ -50,6 +50,9 @@ from aerys_v2.hands_gate import (
     HOME_JOB,
     HOME_TOOLS,
     OTHER,
+    OWNER_TEXT,
+    OWNER_VOICE,
+    OWNER_ASK,
     START,
     TEXT_PLATFORMS,
     UPDATE,
@@ -87,7 +90,7 @@ NOT_RECORDED = (" (I couldn't write this job down, so I may not be able to check
 HOME_DESCRIPTION = (
     "Your own home machine (a VM that's yours): you there, on Opus, with your helpers and minions, "
     "for long work that shouldn't hold up a conversation: building something, researching in depth, "
-    "organizing files. A job gets 45 minutes and 150 steps; Chris hears when it's done. Deleting, "
+    "organizing files. A job can run up to 24 hours; then it checks in with Chris and waits for his word. Deleting, "
     "money, messaging people and reaching outside the machine still stop for him there."
 )
 #: A household member's own project (D19 slice 4): the same home machine, her own folder there.
@@ -108,7 +111,10 @@ HOME_JOBS_OVERLAY = (
     "Chris's tap, tell him it's waiting on his button and never say it started. To hand him a file "
     "your home job made, send_file_to_chris with its path: it lands in his DM. When he asks what you "
     "sent him, files_sent_to_chris is the record (direct sends aren't jobs, so the job list won't "
-    "show them); answer from it and don't send the file again unless he asks you to."
+    "show them); answer from it and don't send the file again unless he asks you to. "
+    "When a job checks in, tell him plainly what it's done and what's left, and ask keep going or stop. "
+    "Call continue_home_job only on his clear keep-going; on stop, cancel it the usual way. "
+    "Never continue one on your own."
 )
 
 
@@ -525,6 +531,79 @@ def home_job_executor(subagents, ledger, owner_person_id: str) -> Callable:
     return run
 
 
+def continue_home_job_tool(*, url, token, ledger, owner_person_id, subagents, members=None):
+    """An attended owner's check-in decision, serialized with other job changes."""
+    import httpx
+    from urllib.parse import quote
+    from langchain_core.tools import StructuredTool
+    from langgraph.prebuilt import ToolRuntime
+    from langgraph.types import Command
+
+    update_tool = next(t for t in subagents.tools if t.name == UPDATE)
+    failure = "NOT DONE: couldn't reach the home machine; nothing changed."
+
+    def continue_home_job(task_id: str, runtime: ToolRuntime):
+        failure = "NOT DONE: couldn't reach the home machine; nothing changed."
+        config = runtime.config or {}
+        identity = identity_from_config(config) or {}
+        thread = (config.get("configurable") or {}).get("thread_id")
+        if identity.get("unattended"):
+            return "NOT DONE: only his own word continues a home job."
+        if (str(thread or "").startswith("kael:") or
+                asker(identity, thread, owner_person_id, members) not in (OWNER_TEXT, OWNER_VOICE, OWNER_ASK)):
+            return "NOT DONE: only the verified owner can continue a home job."
+        try:
+            with ledger.locked(owner_person_id) as session:
+                tasks = session.load(owner_person_id)
+                task_id = task_id.strip()
+                tracked = tasks.get(task_id)
+                if not tracked:
+                    return "NOT DONE: no such job."
+                base = f"{url.rstrip('/')}/threads/{quote(tracked['thread_id'], safe='')}"
+                auth = {"Authorization": f"Bearer {token}"}
+                response = httpx.post(f"{base}/extend", headers=auth, json={}, timeout=10.0)
+                if response.status_code == 404:
+                    return "NOT DONE: no such job."
+                if response.status_code == 409:
+                    # Already extended by an earlier try whose run then failed to queue: it's ready
+                    # and idle, so queue the run now instead of leaving it stuck (Kael, 11/12).
+                    try:
+                        values = (httpx.get(base, headers=auth, timeout=10.0).json() or {}).get("values") or {}
+                    except Exception:
+                        values = {}
+                    if values.get("job_status") != "ready":
+                        return "NOT DONE: that job isn't waiting at a check-in."
+                else:
+                    response.raise_for_status()
+                failure = ("NOT DONE: the job has more time now, but I couldn't start its next run; "
+                           "ask me again and I'll start it.")
+                state = {**runtime.state, "async_tasks": tasks}
+                result = update_tool.func(
+                    task_id=task_id,
+                    message="He said keep going. Continue the job from your workspace and notes.",
+                    runtime=dataclasses.replace(runtime, state=state))
+                if not isinstance(result, Command) or not isinstance(result.update, dict):
+                    return failure
+                changed = result.update.get("async_tasks")
+                if not changed:
+                    return failure
+                try:
+                    session.save(owner_person_id, keep_asked_on(changed, tasks, asked_from(identity, thread)))
+                except Exception:
+                    return "The continuation was queued." + NOT_RECORDED
+                return result
+        except Exception:
+            return failure
+
+    # Resolve the locally imported runtime type for schema inference under future annotations.
+    continue_home_job.__annotations__["runtime"] = ToolRuntime
+    return StructuredTool.from_function(
+        continue_home_job,
+        description="Continue a home job paused at a check-in, only on the owner's clear keep-going. "
+                    "Never call this on your own or from a wake-up.",
+        handle_validation_error="NOT DONE: provide the home job's task_id.")
+
+
 # --- arming ------------------------------------------------------------------------------------
 
 
@@ -554,6 +633,9 @@ def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
         gate.read_only_agents = frozenset(a for a in gate.read_only_agents if a != HOME_AGENT)
     # Order matters: his jobs are loaded first, so the gate can name the job a change is for;
     # then the gate decides; then the official tools run.
+    subagents.tools = [*subagents.tools, continue_home_job_tool(
+        url=url, token=token, ledger=ledger, owner_person_id=owner_person_id,
+        subagents=subagents, members=gate.members)]
     middleware = [home_ledger_middleware(ledger, owner_person_id, gate.members), home_job_middleware(gate), subagents]
     if files is not None:
         middleware.append(files)
