@@ -65,6 +65,26 @@ def _since() -> float:
     return turn if turn is not None else time.time()
 
 
+#: 11/13: what she said lately on each speaker, shared by every redirect in this process (the /ask door
+#: and the follow-up router), so the door can tell her own voice coming back through the mic from his.
+RECENT_SAID_S = 180
+_SAID: dict[str, list[tuple[float, str]]] = {}
+
+
+def note_said(device_id: str | None, text: str) -> None:
+    if device_id and text:
+        now = time.time()
+        with _HUSH_LOCK:
+            kept = [(t, s) for t, s in _SAID.get(str(device_id), []) if now - t < RECENT_SAID_S]
+            _SAID[str(device_id)] = [*kept[-5:], (now, text)]
+
+
+def recent_said(device_id: str | None) -> str:
+    now = time.time()
+    with _HUSH_LOCK:
+        return " ".join(s for t, s in _SAID.get(str(device_id or ""), []) if now - t < RECENT_SAID_S)
+
+
 def parse_targets(raw: str) -> dict[str, str]:
     """'device_id=http://host:port,…' -> {device_id: base_url}."""
     out: dict[str, str] = {}
@@ -91,7 +111,12 @@ class SpeakerRedirect:
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._targets
 
-    def playing(self, device_id: str | None) -> bool:
+    def quick_playing(self, device_id: str | None) -> bool:
+        """playing(), asked with a short timeout: the door asks on every turn from a redirected speaker,
+        and a speaker that doesn't answer must not hold his turn up (Codex 11/13)."""
+        return self.playing(device_id, timeout=0.4)
+
+    def playing(self, device_id: str | None, timeout: float = 1.5) -> bool:
         """Best-effort: is she talking there, a clip playing or more queued behind it? Failures read
         as not talking (harmless). 11/13: "On it." queued behind a long answer is still her talking."""
         if not self.handles(device_id):
@@ -99,7 +124,7 @@ class SpeakerRedirect:
         try:
             response = self._client.get(
                 f"{self._targets[device_id]}/health",
-                headers=self._speaker_headers, timeout=1.5,
+                headers=self._speaker_headers, timeout=timeout,
             )
             response.raise_for_status()
             health = response.json()
@@ -132,6 +157,7 @@ class SpeakerRedirect:
         if hushed_at(device_id) > since:
             log.info("speaker redirect: hushed on %s since this turn began; not saying it", device_id)
             return
+        note_said(device_id, text)
         if self._async:
             threading.Thread(target=self._say, args=(device_id, text, then, since), daemon=True).start()
         else:

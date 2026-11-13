@@ -246,6 +246,8 @@ def test_redirect_playback_gates_mic(rig, monkeypatch, delivery, text, state, pl
     def transport(request):
         if request.url.path == "/api/tts_get_url":
             return httpx.Response(200, json={"url": "http://ha.example/clip.mp3"})
+        if request.url.path == "/health":            # 11/13: the door asks whether she's talking first
+            return httpx.Response(200, json={"playing": False, "queued": 0})
         during.append((list(posts), dict(kl.opened_mic)))
         plays.append((json.loads(request.content), request.extensions["timeout"]["read"]))
         if played == "timeout":

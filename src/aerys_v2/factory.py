@@ -439,6 +439,10 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     toggle = ToggleReader(settings)
 
     def route(text: str, device_id: str | None) -> None:
+        from .spoken import spoken
+
+        # 11/13: what's SPOKEN is short plain speech; a display gets the whole text (Codex 11/13).
+        read, text = text, spoken(text)
         open_mic = bool(device_id and device_id in satellite_map
                         and text.strip().endswith("?") and toggle.enabled())
         if redirect is not None and redirect.handles(device_id):
@@ -482,7 +486,7 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
             r = httpx.post(
                 f"{base}/api/services/{domain}/{service}",
                 headers=headers,
-                json={"message": text},
+                json={"message": read},
                 timeout=15.0,
             )
         else:
@@ -1673,7 +1677,10 @@ VOICE_ACK_OVERLAY = (
     "sometimes garbles a word (e.g. 'one' heard as 'on'); if the wording looks "
     "slightly off or self-contradictory, execute the reading consistent with "
     "that spoken acknowledgment. Only if the command is truly unexecutable or "
-    "unsafe, call no_action with the problem stated in one plain sentence."
+    "unsafe, call no_action with the problem stated in one plain sentence. "
+    "Your answer is SPOKEN aloud after that acknowledgment: keep it to two or three "
+    "sentences, the answer first, as plain speech; never lists, headings, links or "
+    "markdown. If there is more worth knowing, say so in one short line and stop."
 )
 
 

@@ -8,34 +8,38 @@ from aerys_v2.speaker_redirect import SpeakerRedirect
 from aerys_v2.transports.http_api import AskRequest, build_app
 
 
-@pytest.mark.parametrize('text,playing,voice,device,stops', [
-    ('Aerys, stop!', True, True, 'office', True),
-    ('stop harris', True, True, 'office', True),
-    ('stop', False, True, 'office', False),
-    ('stop the music', True, True, 'office', False),
-    ('stop the timer', True, True, 'office', False),
-    ('stop please', True, True, 'office', False),
-    ('stop', True, False, 'office', False),
-    ('stop', True, True, 'other', False),
+# 11/13: while she's talking, anything said there cuts her off (cut); only a stop goes unanswered.
+@pytest.mark.parametrize('text,playing,voice,device,cut,answered', [
+    ('Aerys, stop!', True, True, 'office', True, False),
+    ('stop harris', True, True, 'office', True, False),
+    ('stop please', True, True, 'office', True, False),
+    ('stop', False, True, 'office', False, True),
+    ('stop the music', True, True, 'office', True, True),
+    ('stop the timer', True, True, 'office', True, True),
+    ('stop', True, False, 'office', False, True),
+    ('stop', True, True, 'other', False, True),
 ])
-def test_stop_shortcut(text, playing, voice, device, stops):
+def test_stop_shortcut(text, playing, voice, device, cut, answered):
     ask = Mock(return_value='normal reply')
     speaker = Mock()
     speaker.handles.side_effect = lambda d: d == 'office'
     speaker.playing.return_value = playing
+    speaker.quick_playing.return_value = playing
     app = build_app(ask, 'placeholder', speaker_redirect=speaker)
     route = next(r.endpoint for r in app.routes if r.path == '/ask')
     result = route(AskRequest(text=text, voice=voice, device_id=device))
-    assert result.reply == ('' if stops else 'normal reply')
-    assert result.keep_listening is False
-    if stops:
+    assert result.reply == ('normal reply' if answered else '')
+    if cut:
         speaker.stop.assert_called_once()
         assert speaker.stop.call_args.args == (device,) and speaker.stop.call_args.kwargs["hush_at"] > 0  # 11/13 hush floor
+    else:
+        speaker.stop.assert_not_called()
+    if answered:
+        ask.assert_called_once()
+    else:
+        assert result.keep_listening is False
         ask.assert_not_called()
         speaker.say.assert_not_called()
-    else:
-        ask.assert_called_once()
-        speaker.stop.assert_not_called()
 
 
 @pytest.mark.parametrize('method,path,key,timeout', [

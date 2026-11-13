@@ -267,6 +267,9 @@ def test_a_voice_stop_and_the_button_both_hush(monkeypatch):
     from aerys_v2.speaker_redirect import hushed_at
 
     class Sp(Speaker):
+        def quick_playing(self, device_id):
+            return self.is_playing
+
         def stop(self, device_id, hush_at=None):
             self.stops.append((device_id, hush_at))
             return True

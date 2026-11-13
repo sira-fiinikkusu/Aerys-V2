@@ -41,15 +41,59 @@ _STOP_PHRASES = {
     "hold up", "thats enough", "enough", "be quiet", "quiet", "shush", "shh",
 }
 _STOP_NAMES = {"aerys", "harris", "iris", "ares", "aries", "eris"}
+#: 11/13: stop phrases that end a longer capture while she's talking ("…Air traffic control, that's
+#: enough"). Never a word that ends ordinary questions ("why is the office so quiet?", "is that enough?");
+#: a bare "stop" at the end counts only after her name or after her own words (see _ends_with_stop).
+_STOP_TAILS = {"stop talking", "stop it", "okay stop", "ok stop", "shut up", "be quiet", "thats enough",
+               "that is enough", "enough already", "hush", "shush", "shh", "stop please", "please stop"}
+_ECHO_RUN = 6
+
+
+def _words(text: str) -> list[str]:
+    # Apostrophes disappear; other punctuation separates words.
+    return "".join(
+        "" if char in "'’" else " " if unicodedata.category(char).startswith("P") else char
+        for char in (text or "").lower()
+    ).split()
+
+
+def _is_echo(text: str, said: str) -> bool:
+    """11/13: her own voice coming back through the mic: a run of at least _ECHO_RUN of her recent words,
+    in order, making up nearly all of what it heard. A question about what she said ("were those bright
+    lights moving around?") shares a few words, never a long verbatim run (Codex 11/13)."""
+    heard, hers = _words(text), _words(said)
+    if len(heard) < _ECHO_RUN or not hers:
+        return False
+    best, prev = 0, [0] * (len(hers) + 1)
+    for h in heard:
+        cur = [0] * (len(hers) + 1)
+        for j, w in enumerate(hers, 1):
+            if w == h:
+                cur[j] = prev[j - 1] + 1
+                best = max(best, cur[j])
+        prev = cur
+    return best >= _ECHO_RUN and best >= 0.8 * len(heard)
+
+
+def _ends_with_stop(text: str, said: str = "") -> bool:
+    """11/13: while she's talking the mic hears her too ("…Air traffic control stop."): a stop at the END
+    of what it heard is his. A bare "stop" there counts after her name, or after her own words."""
+    if _is_stop_phrase(text):
+        return True
+    words = _words(text)
+    named = False
+    while words and words[-1] in _STOP_NAMES:
+        words, named = words[:-1], True
+    if any(len(words) >= n and " ".join(words[-n:]) in _STOP_TAILS for n in (1, 2, 3)):
+        return True
+    if words and words[-1] == "stop":
+        before = words[:-1]
+        return named or bool(before and before[-1] in _STOP_NAMES) or _is_echo(" ".join(before), said)
+    return False
 
 
 def _is_stop_phrase(text: str) -> bool:
-    # Apostrophes disappear; other punctuation separates words.
-    normalized = "".join(
-        "" if char in "'’" else " " if unicodedata.category(char).startswith("P") else char
-        for char in text.lower()
-    )
-    words = normalized.split()
+    words = _words(text)
     if words and words[0] in _STOP_NAMES:
         words = words[1:]
     if words and words[-1] in _STOP_NAMES:
@@ -462,16 +506,24 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         is_voice = bool(identity.get("voice"))
         # Consume even when OFF, so re-enabling cannot resurrect an answered mic.
         dismissed = is_voice and consume_dismissal(body.device_id, body.text)
-        # D34 barge-in ("Aerys, stop" while her voice plays on the desk speakers): cut her off, no
-        # model call. After the dismissal above, so a "stop" also clears a mic she had opened.
-        if (is_voice and speaker_redirect is not None and _is_stop_phrase(body.text)
-                and speaker_redirect.handles(body.device_id)
-                and speaker_redirect.playing(body.device_id)):
-            from aerys_v2.speaker_redirect import hush
+        # D34 barge-in, 11/13: while her voice plays on the desk speakers (or more is queued), anything
+        # he says there cuts her off first (and holds what's on its way: the hush). A stop at the END of
+        # what the mic heard, or a capture that is her own voice coming back, ends it there with no model
+        # call; anything else is his new ask. (11/13 18:08: "…Air traffic control stop." missed the old
+        # whole-phrase check and she talked on.) After the dismissal above, so a "stop" also clears a mic.
+        if (is_voice and speaker_redirect is not None
+                and getattr(speaker_redirect, "handles", lambda _d: False)(body.device_id)
+                and getattr(speaker_redirect, "quick_playing", lambda _d: False)(body.device_id) is True):
+            from aerys_v2.speaker_redirect import hush, recent_said
 
-            hushed = hush(body.device_id)       # 11/13: what's still on its way stays quiet too
+            hushed = hush(body.device_id)
             speaker_redirect.stop(body.device_id, hush_at=hushed)
-            return AskReply(reply="", thread_id=thread_id, keep_listening=False)
+            said = recent_said(body.device_id)
+            if _ends_with_stop(body.text, said) or _is_echo(body.text, said):
+                log.info("voice: barge-in on %s; she stopped (%s)", body.device_id,
+                         "his stop" if _ends_with_stop(body.text, said) else "her own voice in the mic")
+                return AskReply(reply="", thread_id=thread_id, keep_listening=False)
+            log.info("voice: barge-in on %s; she stopped for his new words", body.device_id)
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)
         reply = ask_fn(body.text, identity, thread_id)
