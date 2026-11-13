@@ -319,3 +319,11 @@ def test_t16_spoken_note_is_short_plain_and_unpunctuated():
     long = "First point here. " + "word " * 80
     out = spoken_note(long)
     assert len(out) <= 180 and not out.endswith(".")
+
+
+
+def test_t16_a_note_never_carries_link_syntax_strikes_emphasis_or_surface_names():
+    from aerys_v2.kael_line import spoken_note
+    out = spoken_note("Discord Telegram [done](https://x.example) ~~failed~~ _pending_. Full notes on Discord.")
+    assert "Discord" not in out and "Telegram" not in out and "](" not in out and "~~" not in out and "_" not in out
+    assert out == "done failed pending. Full notes"

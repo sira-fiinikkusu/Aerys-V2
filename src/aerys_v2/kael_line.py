@@ -708,7 +708,15 @@ TICKET_NOTE_PROMPT = (
 def spoken_note(text: str, limit: int = NOTE_MAX) -> str:
     """A short note for a pointer line: plain words, at most LIMIT characters cut at a word, no closing
     punctuation (the pointer's own '; the full answer is on ...' follows it)."""
-    note = " ".join(plain_for_voice(text or "").split())
+    note = plain_for_voice(text or "")
+    # What plain_for_voice leaves for speech but a pointer note must not carry (Codex, 11/13): link
+    # syntax (keep the words), strikethrough, single-underscore emphasis, and any mention of the text
+    # surfaces (the pointer itself names where the full answer is).
+    note = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", note)
+    note = re.sub(r"~~(.+?)~~", r"\1", note)
+    note = re.sub(r"(?<![\w])_(?!_)(.+?)(?<!_)_(?![\w])", r"\1", note)
+    note = re.sub(r"(?i)\s*\b(?:(?:on|in|via|over|to)\s+)?(?:discord|telegram)\b", "", note)
+    note = " ".join(note.split())
     if len(note) > limit:
         cut = note[:limit].rsplit(" ", 1)[0]
         # Prefer ending on a sentence inside the limit, then on a clause, and only then on a bare word.
