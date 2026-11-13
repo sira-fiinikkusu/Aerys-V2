@@ -15,10 +15,10 @@ on a daemon thread; every failure is a debug log — a dark desk speaker costs n
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 import threading
-import time
 from collections.abc import Callable
 
 log = logging.getLogger(__name__)
@@ -27,36 +27,39 @@ log = logging.getLogger(__name__)
 #: does not — asterisks and backticks have no business in speech
 _MARKDOWN = re.compile(r"(\*\*|__|`+|^#+\s*)", re.M)
 
-#: Chris 11/13 (the office button, "she shuts up"): a hush holds a speaker quiet until he speaks there
-#: again, so speech already on its way (a clip mid-TTS, a research answer still coming, a mic reopen)
-#: doesn't start her up again. Shared by every redirect in this process (the /ask door and the
-#: follow-up router build their own); it lapses on its own after HUSH_HOLD_S.
-HUSH_HOLD_S = 600
-_HUSHED: dict[str, float] = {}
-_HUSH_LOCK = threading.Lock()
+#: Chris 11/13 (the office button, "she shuts up"): a hush ends everything she was going to say there
+#: for the turns that came before it: the clip playing, what's queued, a clip still being made, a
+#: research answer still coming, a mic reopen. Each speaker has a generation; a hush moves it on. A turn
+#: notes the generation it started in (turn_started, carried to its background follow-up through the
+#: copied context), and its speech plays only while that generation is current, so a hush is never
+#: undone by what comes after it. Speech that belongs to no turn (the reach desk) plays in the current
+#: generation. Shared by every redirect in this process (the /ask door and the follow-up router build
+#: their own).
+_GEN: dict[str, int] = {}
+_GEN_LOCK = threading.Lock()
+_TURN: contextvars.ContextVar[tuple[str, int] | None] = contextvars.ContextVar("speaker_turn", default=None)
+
+
+def generation(device_id: str | None) -> int:
+    with _GEN_LOCK:
+        return _GEN.get(str(device_id or ""), 0)
 
 
 def hush(device_id: str | None) -> None:
     if device_id:
-        with _HUSH_LOCK:
-            _HUSHED[str(device_id)] = time.monotonic()
+        with _GEN_LOCK:
+            _GEN[str(device_id)] = _GEN.get(str(device_id), 0) + 1
 
 
-def unhush(device_id: str | None) -> None:
+def turn_started(device_id: str | None) -> None:
+    """A voice turn arrived on this speaker: what it says later belongs to this generation."""
     if device_id:
-        with _HUSH_LOCK:
-            _HUSHED.pop(str(device_id), None)
+        _TURN.set((str(device_id), generation(device_id)))
 
 
-def hushed(device_id: str | None) -> bool:
-    if not device_id:
-        return False
-    with _HUSH_LOCK:
-        at = _HUSHED.get(str(device_id))
-        if at is not None and time.monotonic() - at >= HUSH_HOLD_S:
-            _HUSHED.pop(str(device_id), None)
-            return False
-        return at is not None
+def _speech_generation(device_id: str) -> int:
+    turn = _TURN.get()
+    return turn[1] if turn is not None and turn[0] == str(device_id) else generation(device_id)
 
 
 def parse_targets(raw: str) -> dict[str, str]:
@@ -120,15 +123,18 @@ class SpeakerRedirect:
     def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return
-        if hushed(device_id):
-            log.info("speaker redirect: %s is hushed; not saying it", device_id)
+        gen = _speech_generation(device_id)
+        if gen != generation(device_id):
+            log.info("speaker redirect: hushed on %s since this turn began; not saying it", device_id)
             return
         if self._async:
-            threading.Thread(target=self._say, args=(device_id, text, then), daemon=True).start()
+            threading.Thread(target=self._say, args=(device_id, text, then, gen), daemon=True).start()
         else:
-            self._say(device_id, text, then)
+            self._say(device_id, text, then, gen)
 
-    def _say(self, device_id: str, text: str, then: Callable[[], None] | None = None) -> None:
+    def _say(self, device_id: str, text: str, then: Callable[[], None] | None = None,
+             gen: int | None = None) -> None:
+        gen = generation(device_id) if gen is None else gen
         try:
             r = self._client.post(
                 f"{self._ha}/api/tts_get_url",
@@ -138,13 +144,16 @@ class SpeakerRedirect:
             )
             r.raise_for_status()
             url = r.json()["url"]
-            if hushed(device_id):
+            if generation(device_id) != gen:
                 return                       # hushed while it was being made: it never plays
             p = self._client.post(f"{self._targets[device_id]}/play", headers=self._speaker_headers,
                                   json={"url": url, **({"wait": True} if then is not None else {})},
                                   timeout=130.0 if then is not None else 5.0)
             p.raise_for_status()
-            if then is not None and p.json().get("played") is True and not hushed(device_id):
+            if generation(device_id) != gen:
+                self.stop(device_id)         # a hush landed while /play was on its way: it ends here
+                return
+            if then is not None and p.json().get("played") is True:
                 then()
         except Exception:
             log.debug("speaker redirect failed (harmless)", exc_info=True)

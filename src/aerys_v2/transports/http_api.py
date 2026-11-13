@@ -417,9 +417,9 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # (voice=False, non-voice thread — curl/tests) is byte-for-byte unchanged.
         owner_turn = False                           # D43: a voice turn that was surely or likely HIM
         if body.voice or str(body.thread_id or "").startswith("voice"):
-            from aerys_v2.speaker_redirect import unhush
+            from aerys_v2.speaker_redirect import turn_started
 
-            unhush(body.device_id)              # he spoke there: a hush from before is over
+            turn_started(body.device_id)        # what this turn says later belongs to this generation
             identity["voice"] = True
             thread_id = voice_thread()
             if body.speaker is None:
@@ -525,7 +525,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         """Chris 11/13 ("a shut up and listen toggle"): his office button 4. If she's talking there (a
         clip playing or more queued), she stops and the queue is dropped; if she's quiet, that satellite's
         mic opens as if he'd said her name. A button can't be misheard."""
-        from aerys_v2.speaker_redirect import hush, unhush
+        from aerys_v2.speaker_redirect import hush
 
         device = body.device_id
         if (speaker_redirect is not None and speaker_redirect.handles(device)
@@ -536,7 +536,6 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                 return {"did": "nothing", "why": "the speaker didn't stop"}
             log.info("voice: the button hushed her on %s", device)
             return {"did": "hushed"}
-        unhush(device)                          # he's about to talk: her answer must be heard
         from aerys_v2.factory import satellite_map_from
 
         satellite = satellite_map_from(settings.ha_satellite_map).get(device) if settings is not None else None
