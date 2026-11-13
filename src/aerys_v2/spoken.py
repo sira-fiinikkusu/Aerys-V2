@@ -47,9 +47,14 @@ def spoken(text: str, limit: int = SPOKEN_MAX) -> str:
         cut = sentences[0][:limit].rsplit(" ", 1)[0].rstrip(",;:")
         head, rest = [cut + "."], [sentences[0][len(cut):].strip(" ,;:"), *sentences[1:]]
     # How things stand (waiting on his tap, it failed) is never what gets cut: the clause that says so.
-    status = next((c.strip().rstrip(".") + "." for s in rest for c in reversed(_CLAUSE.split(s))
-                   if _STATUS.search(c) and len(c) <= 200), None)
-    status = status[0].upper() + status[1:] if status else None
     # A closing question stays: it is how the mic knows to open again.
     question = rest[-1] if rest and rest[-1].endswith("?") and len(rest[-1]) <= 160 else None
-    return " ".join([*head, *([status] if status else []), question or SPOKEN_MORE])
+    status: list[str] = []
+    for s in rest:
+        if s is question:
+            continue
+        for c in _CLAUSE.split(s):
+            c = c.strip()
+            if _STATUS.search(c) and len(c) <= 200 and sum(map(len, status)) + len(c) <= 240:
+                status.append(c[0].upper() + c[1:].rstrip(".") + ".")
+    return " ".join([*head, *status[:2], question or SPOKEN_MORE])

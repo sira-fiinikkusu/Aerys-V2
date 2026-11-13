@@ -49,7 +49,8 @@ _STOP_TAILS = {"stop talking", "stop it", "okay stop", "ok stop", "shut up", "be
 _ECHO_RUN = 6
 _ECHO_HEARD_MAX, _ECHO_SAID_MAX = 80, 600       # bounded work per turn (Codex 11/13)
 _QUESTION_WORDS = {"who", "what", "when", "where", "why", "how", "which", "is", "are", "was", "were", "do",
-                   "does", "did", "can", "could", "would", "should", "will", "wont", "isnt", "arent", "didnt"}
+                   "does", "did", "can", "could", "would", "should", "will", "wont", "isnt", "arent", "didnt",
+                   "whats", "whos", "wheres", "whens", "whys", "hows", "whatre", "wheres"}
 
 
 def _asks(text: str) -> bool:
@@ -70,11 +71,19 @@ def _is_echo(text: str, said: str) -> bool:
     """11/13: her own voice coming back through the mic: a run of at least _ECHO_RUN of her recent words,
     in order, making up nearly all of what it heard. A question about what she said ("were those bright
     lights moving around?") shares a few words, never a long verbatim run (Codex 11/13)."""
+    run, heard = _echo_run(text, said)
+    if heard >= _ECHO_RUN and run == heard:
+        return True                     # word for word what she said, even her own question
     if _asks(text):                     # "Why do the office lights…?" is his, whatever it quotes
         return False
+    return heard >= _ECHO_RUN and run >= _ECHO_RUN and run >= 0.9 * heard
+
+
+def _echo_run(text: str, said: str) -> tuple[int, int]:
+    """(the longest run of her recent words, in order, inside what the mic heard; how many words it heard)."""
     heard, hers = _words(text)[-_ECHO_HEARD_MAX:], _words(said)[-_ECHO_SAID_MAX:]
-    if len(heard) < _ECHO_RUN or not hers:
-        return False
+    if not heard or not hers:
+        return 0, len(heard)
     best, prev = 0, [0] * (len(hers) + 1)
     for h in heard:
         cur = [0] * (len(hers) + 1)
@@ -83,7 +92,7 @@ def _is_echo(text: str, said: str) -> bool:
                 cur[j] = prev[j - 1] + 1
                 best = max(best, cur[j])
         prev = cur
-    return best >= _ECHO_RUN and best >= 0.9 * len(heard)
+    return best, len(heard)
 
 
 def _ends_with_stop(text: str, said: str = "") -> bool:
@@ -93,6 +102,9 @@ def _ends_with_stop(text: str, said: str = "") -> bool:
         return True
     if _asks(text):                     # "Why did you stop talking?" is a question, not a stop
         return False
+    run, heard = _echo_run(text, said)
+    if heard >= _ECHO_RUN and run == heard:
+        return False                    # her own words ("…please stop talking") are not his stop
     words = _words(text)
     named = False
     while words and words[-1] in _STOP_NAMES:

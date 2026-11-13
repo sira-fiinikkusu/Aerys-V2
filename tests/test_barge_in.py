@@ -218,3 +218,20 @@ def test_shortening_keeps_the_words_the_status_and_a_closing_question():
     assert "Nothing was sent." in failed and failed.endswith(SPOKEN_MORE)
     asked = spoken("Here is a long answer. " * 20 + "Want me to keep going?")
     assert asked.endswith("Want me to keep going?")
+
+
+def test_the_last_edges_codex_found():
+    # Codex 11/13 re-check: a contracted question is his; her own question or stop wording coming back
+    # word for word is echo, not his; both status clauses survive; a closing question isn't said twice.
+    from aerys_v2.spoken import spoken
+    from aerys_v2.transports.http_api import _ends_with_stop, _is_echo
+    quote = "reported bright lights moving around and randomly appearing and disappearing"
+    assert not _is_echo("What's " + quote, quote)
+    her_q = "Would you like me to explain the next step?"
+    assert _is_echo(her_q, her_q) and not _ends_with_stop(her_q, her_q)
+    her_stop = "The voice command you need is please stop talking"
+    assert _is_echo(her_stop, her_stop) and not _ends_with_stop(her_stop, her_stop)
+    both = spoken("Here is a long answer. " * 20 + "The message was not sent and will need approval.")
+    assert "The message was not sent." in both and "Will need approval." in both
+    asked = spoken("Here is a long answer. " * 20 + "Would you approve the request?")
+    assert asked.count("Would you approve the request?") == 1 and "?." not in asked
