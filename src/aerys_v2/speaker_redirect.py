@@ -54,7 +54,8 @@ class SpeakerRedirect:
         return bool(device_id) and device_id in self._targets
 
     def playing(self, device_id: str | None) -> bool:
-        """Best-effort speaker playing; failures are harmless."""
+        """Best-effort: is she talking there, a clip playing or more queued behind it? Failures read
+        as not talking (harmless). 11/13: "On it." queued behind a long answer is still her talking."""
         if not self.handles(device_id):
             return False
         try:
@@ -63,7 +64,8 @@ class SpeakerRedirect:
                 headers=self._speaker_headers, timeout=1.5,
             )
             response.raise_for_status()
-            return response.json().get("playing") is True
+            health = response.json()
+            return health.get("playing") is True or int(health.get("queued") or 0) > 0
         except Exception:
             log.debug("speaker redirect playing failed (harmless)", exc_info=True)
             return False

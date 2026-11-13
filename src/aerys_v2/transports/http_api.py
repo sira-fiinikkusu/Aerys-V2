@@ -90,6 +90,24 @@ class AskRequest(BaseModel):
     speaker: SpeakerTag | None = None
 
 
+class HushRequest(BaseModel):
+    """The office button (Chris 11/13): which satellite it sits beside."""
+    device_id: str = Field(min_length=1, max_length=128)
+
+
+def _open_mic(settings, satellite: str) -> None:
+    """Open a satellite's mic as if he'd said her name (the keep-listening reopen, on demand)."""
+    import httpx
+
+    r = httpx.post(
+        f"{settings.ha_base_url.rstrip('/')}/api/services/assist_satellite/start_conversation",
+        headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
+        json={"entity_id": satellite, "start_message": "Mm?", "preannounce": False},
+        timeout=15.0,
+    )
+    r.raise_for_status()
+
+
 class AskReply(BaseModel):
     reply: str
     thread_id: str
@@ -495,6 +513,31 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if keep_listening:
             mark_opened(body.device_id)
         return AskReply(reply=reply, thread_id=thread_id, keep_listening=keep_listening)
+
+    @app.post("/voice/hush-or-listen")
+    def hush_or_listen(body: HushRequest, _: None = Depends(require_token)) -> dict:
+        """Chris 11/13 ("a shut up and listen toggle"): his office button 4. If she's talking there (a
+        clip playing or more queued), she stops and the queue is dropped; if she's quiet, that satellite's
+        mic opens as if he'd said her name. A button can't be misheard."""
+        device = body.device_id
+        if (speaker_redirect is not None and speaker_redirect.handles(device)
+                and speaker_redirect.playing(device)):
+            speaker_redirect.stop(device)
+            log.info("voice: the button hushed her on %s", device)
+            return {"did": "hushed"}
+        from aerys_v2.factory import satellite_map_from
+
+        satellite = satellite_map_from(settings.ha_satellite_map).get(device) if settings is not None else None
+        if not satellite or settings.ha_token is None:
+            return {"did": "nothing", "why": "no satellite for that device"}
+        try:
+            _open_mic(settings, satellite)
+        except Exception:
+            log.warning("voice: the button couldn't open the mic on %s", device)
+            return {"did": "nothing", "why": "the mic didn't open"}
+        mark_opened(device)
+        log.info("voice: the button opened the mic on %s", device)
+        return {"did": "listening"}
 
     @app.post("/kael-note", response_model=KaelNoteReply)
     def kael_note_route(
