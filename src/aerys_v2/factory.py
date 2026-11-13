@@ -2029,6 +2029,7 @@ def _action_prompt_builder(
     def assemble(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
         # Same identity rule as the chat node: from per-call config, never state.
         identity = identity_from_config(config)
+        turn_overlay = overlay(config) if callable(overlay) else overlay
         # SPECIALIST MODE (2026-09-04) rides `configurable` like spoken_ack: set by
         # service.py on ACTION routes only. On: the charter replaces the soul and
         # the first pass must call a tool. Off (voice banter — every voice turn
@@ -2143,14 +2144,14 @@ def _action_prompt_builder(
         static_ack, dynamic_ack = ("", ack_block) if spoken_ack else (ack_block, "")
         if context_trailing:
             prompt = prompt_with_context(
-                f"{persona}\n\n{overlay}{static_ack}", messages,
+                f"{persona}\n\n{turn_overlay}{static_ack}", messages,
                 f"{dynamic_ack}{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}",
             )
         else:
             # The pre-2026-09-19 layout, byte for byte: every block in the
             # system prompt, ahead of the history.
             system = SystemMessage(
-                content=f"{persona}\n\n{overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}"
+                content=f"{persona}\n\n{turn_overlay}{ack_block}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{shared}"
             )
             prompt = [system, *messages]
         # The current turn's image, for her tool-using side too (board #28, 2026-09-29):
@@ -2471,6 +2472,8 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         relay = relay_for(settings, reach_desk)
         if relay is not None:
             tools.extend([build_pass_to_chris_tool(relay), build_relay_status_tool(relay)])
+            from aerys_v2.tools.report_to_kael import build_report_to_kael_tool, reports_for
+            tools.append(build_report_to_kael_tool(reports_for(settings, relay)))
 
     if not guest:
         from aerys_v2.tools.send_message import build_send_message_tool, build_messages_sent_tool
@@ -2722,6 +2725,15 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
     tools = action_tools_for(settings, guest=True, reach_desk=reach_desk)
     if not tools:
         return None
+    from aerys_v2.tools.pass_to_chris import relay_for
+    from aerys_v2.tools.report_to_kael import guest_report_overlay
+    relay = relay_for(settings, reach_desk)
+
+    def guest_overlay(config):
+        conf = (config or {}).get('configurable') or {}
+        extra = guest_report_overlay(relay, conf.get('identity') or {}, conf.get('thread_id', ''))
+        return action_overlay_for(settings, guest=True) + ("\n" + extra if extra else "")
+
     # Structural on either engine: a separate graph built from the guest tool list.
     models, build = _action_engine(settings, tools)
     return build(
@@ -2729,7 +2741,7 @@ def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomC
         soul,
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
-        overlay=action_overlay_for(settings, guest=True),
+        overlay=guest_overlay,
         context_trailing=settings.prompt_context_trailing,
         # A guest in a PUBLIC room holds that room too; the fence inside the helper
         # is what keeps a DM out, not the caller's status.
@@ -3244,6 +3256,7 @@ def build_graph(
     action_context: str = "requests",
     action_context_messages: int = 40,
     voice_action_context_messages: int = 12,
+    guest_overlay_fn=None,
 ) -> object:
     """START → chat → END, checkpointed.
 
@@ -3279,6 +3292,7 @@ def build_graph(
         # contamination bug Aerys V1 actually had). Person-keyed threads removed the
         # shared thread that made that possible; this config-only rule stays as the belt.
         identity = identity_from_config(config)
+        guest_overlay = guest_overlay_fn(config) if guest_overlay_fn else ""
         caller_line = (
             f"The current caller is {_safe_display_name(identity.get('display_name', 'Unknown Caller'))}."
         )
@@ -3477,13 +3491,13 @@ def build_graph(
         messages = window_messages(messages, history_window_messages)
         if context_trailing:
             prompt = prompt_with_context(
-                f"{soul}\n\n{capability}{voice_style}", messages,
+                f"{soul}\n\n{guest_overlay}{capability}{voice_style}", messages,
                 f"{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}",
             )
         else:
             # The pre-2026-09-19 layout, byte for byte (see Settings.prompt_context_trailing).
             system = SystemMessage(
-                content=f"{soul}\n\n{capability}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{voice_style}"
+                content=f"{soul}\n\n{guest_overlay}{capability}\n{caller_line}{knowledge}{where_when}{presence}{voice_room}{room}{portable}{family}{voice_style}"
             )
             prompt = [system, *messages]
         # Her own eyes (2026-09-28): the current turn's Discord images are fetched and

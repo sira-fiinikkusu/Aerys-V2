@@ -31,6 +31,7 @@ The ask and the answer are the private part: never logged. Logs carry ids and st
 from __future__ import annotations
 
 import logging
+import hashlib
 import re
 import threading
 from dataclasses import dataclass
@@ -149,12 +150,24 @@ class TicketStore(Protocol):
 MARKS = ("relayed_at", "nagged_at", "escalated_at")
 
 
+def report_marker(person):
+    # A fixed suffix on immutable ask keeps the quota durable without a schema change.
+    return "\nReport source: " + hashlib.sha256(person.encode()).hexdigest()
+
+
+def report_day(now):
+    from aerys_v2.reach import EASTERN
+    start = now.astimezone(EASTERN).replace(hour=0, minute=0, second=0, microsecond=0)
+    return start, start + timedelta(days=1)
+
+
 class MemoryTicketStore:
     """In-process store (tests, dev boxes). Same semantics as the Postgres one."""
 
     def __init__(self, items: Iterable[Ticket] = ()):
         self.items = {t.id: t for t in items}
         self._next = max(self.items, default=0) + 1
+        self._report_lock = threading.Lock()
 
     def open(self, thread_id, ask, for_owner, now, asked_on=None):
         t = Ticket(id=self._next, thread_id=thread_id, ask=ask, for_owner=for_owner,
@@ -162,6 +175,15 @@ class MemoryTicketStore:
         self.items[t.id] = t
         self._next += 1
         return t
+
+    def open_report(self, person, thread_id, ask, now):
+        marker = report_marker(person)
+        start, end = report_day(now)
+        with self._report_lock:
+            if sum(t.ask.endswith(marker) and start <= t.created_at < end
+                   for t in self.items.values()) >= 5:
+                return None
+            return self.open(thread_id, ask + marker, False, now, asked_on="discord")
 
     def get(self, ticket_id):
         return self.items.get(ticket_id)
@@ -263,6 +285,31 @@ class PostgresTicketStore:
             f"RETURNING {self.COLUMNS}",
             (thread_id, ask, for_owner, now, now, ask, now, now, asked_on))
 
+    def recent_turn_ids(self, thread_id):
+        with self._connect() as conn:
+            return [r[0] for r in conn.execute(
+                "SELECT id FROM v2_turns WHERE thread_id = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT 5", (thread_id,)).fetchall()]
+
+    def open_report(self, person, thread_id, ask, now):
+        marker = report_marker(person)
+        start, end = report_day(now)
+        with self._connect() as conn:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 37))", (marker,))
+            count = conn.execute(
+                "SELECT count(*) FROM v2_kael_tickets WHERE right(ask, %s) = %s "
+                "AND created_at >= %s AND created_at < %s",
+                (len(marker), marker, start, end)).fetchone()[0]
+            if count >= 5:
+                return None
+            words = ask + marker
+            row = conn.execute(
+                "INSERT INTO v2_kael_tickets (thread_id, ask, for_owner, created_at, updated_at, "
+                "outbox, last_try_at, waiting_since, asked_on) "
+                f"VALUES (%s, %s, FALSE, %s, %s, %s, %s, %s, 'discord') RETURNING {self.COLUMNS}",
+                (thread_id, words, now, now, words, now, now)).fetchone()
+        return self._ticket(row)
+
     def get(self, ticket_id):
         return self._one(f"SELECT {self.COLUMNS} FROM v2_kael_tickets WHERE id = %s", (ticket_id,))
 
@@ -339,18 +386,20 @@ class PostgresTicketStore:
 # --- the line --------------------------------------------------------------------------
 
 
-def line_text(ticket: Ticket, text: str) -> str:
-    return f"(ticket {label(ticket.id)}) {' '.join(text.split())}"[:LINE_LIMIT]
+def line_text(ticket: Ticket, text: str, *, preserve_lines=False) -> str:
+    is_report = bool(re.search(r'\nReport source: [0-9a-f]{64}$', ticket.ask))
+    clean = text.strip() if preserve_lines or is_report else ' '.join(text.split())
+    return f"(ticket {label(ticket.id)}) {clean}"[:LINE_LIMIT]
 
 
-def line_sender(url: str, token: str, client: httpx.Client | None = None) -> Callable[[Ticket, str], bool]:
+def line_sender(url: str, token: str, client: httpx.Client | None = None, *, preserve_lines=False) -> Callable[[Ticket, str], bool]:
     """send(ticket, text) for the watcher and her tool: her line to Kael, carrying the
     ticket's return address. 202 = delivered; anything else is False (retried later)."""
     http = client or httpx.Client(timeout=10.0)
 
     def send(ticket: Ticket, text: str) -> bool:
         try:
-            resp = http.post(url, json={"message": line_text(ticket, text), "thread_id": ticket.thread_id,
+            resp = http.post(url, json={"message": line_text(ticket, text, preserve_lines=preserve_lines), "thread_id": ticket.thread_id,
                                         "ticket_id": label(ticket.id)},
                              headers={"Authorization": f"Bearer {token}"})
         except httpx.HTTPError:

@@ -502,6 +502,16 @@ def main() -> None:
         portable_context = portable_context_fn_for(settings)
         reflex = reflex_for(settings)
         content_privacy = privacy_shadow_for(settings, content_privacy_fn_for(settings), reflex)
+        from aerys_v2.tools.pass_to_chris import relay_queue_for, relay_for
+        from aerys_v2.tools.report_to_kael import guest_report_overlay
+        relay_desk = relay_queue_for(settings)
+        contact_relay = relay_for(settings, relay_desk)
+
+        def contact_overlay(config):
+            conf = (config or {}).get('configurable') or {}
+            text = guest_report_overlay(contact_relay, conf.get('identity') or {}, conf.get('thread_id', ''))
+            return text + "\n" if text else ""
+
         graph = build_graph(
             build_model(settings), soul=soul, checkpointer=cp,
             history_window_messages=settings.history_window_messages,
@@ -512,6 +522,7 @@ def main() -> None:
             # (degrade-safe: memory-free graph on DB-less boxes).
             context_fn=context_fn_for(settings),
             tier_models=tier_models_for(settings),
+            guest_overlay_fn=contact_overlay,
             room_context_fn=room_context,
             portable_context_fn=portable_context,
         )
@@ -523,8 +534,6 @@ def main() -> None:
         face_push = face_pusher_for(settings)
         # Discord contacts use this local guest graph, not the HTTP action graph.
         # The shared reach ledger is drained by the existing --serve desk watcher.
-        from aerys_v2.tools.pass_to_chris import relay_queue_for
-        relay_desk = relay_queue_for(settings)
         router = action_graph = guest_action_graph = None
         stack = action_stack_for(
             settings, soul, room_context_fn=room_context,

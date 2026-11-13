@@ -77,9 +77,10 @@ def test_discord_runner_wires_context_fn(monkeypatch, relay_on):
     def fake_build_graph(model, *, soul, checkpointer, context_fn, tier_models,
                          room_context_fn, portable_context_fn, history_window_messages,
                          context_trailing, action_context, action_context_messages,
-                         voice_action_context_messages):
+                         voice_action_context_messages, guest_overlay_fn):
         graph_calls.update(
             model=model, soul=soul, checkpointer=checkpointer,
+            guest_overlay_fn=guest_overlay_fn,
             context_fn=context_fn, tier_models=tier_models,
             room_context_fn=room_context_fn,
             portable_context_fn=portable_context_fn,
@@ -123,6 +124,7 @@ def test_discord_runner_wires_context_fn(monkeypatch, relay_on):
     # The regression guard: context_fn is threaded from context_fn_for(settings)
     # into build_graph, so Discord text chats recall long-term memory — plus the
     # room-context seam (channel-recent multi-person block) wired the same way.
+    assert graph_calls.pop("guest_overlay_fn")({}) == ""
     assert graph_calls == {
         "model": "MODEL",
         "soul": "SOUL",
