@@ -1673,7 +1673,10 @@ VOICE_ACK_OVERLAY = (
     "sometimes garbles a word (e.g. 'one' heard as 'on'); if the wording looks "
     "slightly off or self-contradictory, execute the reading consistent with "
     "that spoken acknowledgment. Only if the command is truly unexecutable or "
-    "unsafe, call no_action with the problem stated in one plain sentence."
+    "unsafe, call no_action with the problem stated in one plain sentence. "
+    "Your answer is SPOKEN aloud after that acknowledgment: keep it to two or three "
+    "sentences, the answer first, as plain speech; never lists, headings, links or "
+    "markdown. If there is more worth knowing, say so in one short line and stop."
 )
 
 

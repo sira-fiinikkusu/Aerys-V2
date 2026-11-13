@@ -2096,6 +2096,30 @@ def _needs_spoken_followup(
     return not all(note.startswith(WRITE_OK_PREFIX) for note in tool_notes)
 
 
+#: 11/13 ("would not shut up"): a researched answer after a spoken ack was read aloud whole, 998
+#: characters with bullets. What's spoken after an ack is plain speech, cut at a sentence near this;
+#: the whole answer stays in her history, so "tell me more" still has it.
+SPOKEN_FOLLOWUP_MAX = 300
+SPOKEN_MORE = "There's more if you want it."
+_SPOKEN_MD = re.compile(r"(\*\*|__|`+|^#+\s*|^\s*[-*\u2022]\s+|^\s*\d+[.)]\s+)", re.M)
+
+
+def spoken_followup(text: str, limit: int = SPOKEN_FOLLOWUP_MAX) -> str:
+    """Her follow-up as speech: no markdown, line breaks as pauses, and at most about `limit`
+    characters, cut at a sentence; when cut, one short line says there's more."""
+    plain = _SPOKEN_MD.sub("", str(text or ""))
+    plain = re.sub(r"\[([^\]]+)\]\((?:https?://)[^)]+\)", r"\1", plain)          # [label](link) -> label
+    plain = re.sub(r"https?://\S+", "", plain)
+    lines = [ln.strip() for ln in plain.splitlines() if ln.strip()]
+    plain = " ".join(ln if ln[-1] in ".!?:" else ln + "." for ln in lines)
+    plain = re.sub(r"\s{2,}", " ", plain).strip()
+    if len(plain) <= limit:
+        return plain
+    cut = max(plain.rfind(p, 0, limit) for p in (". ", "! ", "? "))
+    head = plain[:cut + 1] if cut > limit // 3 else plain[:limit].rsplit(" ", 1)[0] + "."
+    return f"{head} {SPOKEN_MORE}"
+
+
 def _deliver_followup(
     text: str,
     device_id: str | None,
@@ -2107,6 +2131,7 @@ def _deliver_followup(
     (per-device: mapped satellite -> announce, phone -> aerys_followup event); else
     the legacy speak_fn(text, resolved_entity) path (tests, dev). A delivery failure
     is logged and swallowed — the durable history write never depends on it."""
+    text = spoken_followup(text)
     try:
         if followup_router is not None:
             followup_router(text, device_id)

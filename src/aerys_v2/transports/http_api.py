@@ -43,13 +43,33 @@ _STOP_PHRASES = {
 _STOP_NAMES = {"aerys", "harris", "iris", "ares", "aries", "eris"}
 
 
-def _is_stop_phrase(text: str) -> bool:
+def _words(text: str) -> list[str]:
     # Apostrophes disappear; other punctuation separates words.
-    normalized = "".join(
+    return "".join(
         "" if char in "'’" else " " if unicodedata.category(char).startswith("P") else char
-        for char in text.lower()
-    )
-    words = normalized.split()
+        for char in (text or "").lower()
+    ).split()
+
+
+def _ends_with_stop(text: str) -> bool:
+    """11/13: while she's talking the mic hears her too ("…Air traffic control stop."): a stop phrase
+    at the END of what it heard is his, whatever came before it."""
+    words = _words(text)
+    while words and words[-1] in _STOP_NAMES:
+        words = words[:-1]
+    return any(" ".join(words[-n:]) in _STOP_PHRASES for n in (1, 2, 3) if len(words) >= n)
+
+
+def _mostly_her_words(text: str, said: str) -> bool:
+    """11/13: a capture that is mostly the words she's saying right now is her own voice coming back
+    through the mic, not something he said."""
+    heard = [w for w in _words(text) if len(w) > 2 and w not in _STOP_NAMES]
+    hers = {w for w in _words(said) if len(w) > 2}
+    return len(heard) >= 4 and bool(hers) and sum(w in hers for w in heard) / len(heard) >= 0.6
+
+
+def _is_stop_phrase(text: str) -> bool:
+    words = _words(text)
     if words and words[0] in _STOP_NAMES:
         words = words[1:]
     if words and words[-1] in _STOP_NAMES:
@@ -441,13 +461,21 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         is_voice = bool(identity.get("voice"))
         # Consume even when OFF, so re-enabling cannot resurrect an answered mic.
         dismissed = is_voice and consume_dismissal(body.device_id, body.text)
-        # D34 barge-in ("Aerys, stop" while her voice plays on the desk speakers): cut her off, no
-        # model call. After the dismissal above, so a "stop" also clears a mic she had opened.
-        if (is_voice and speaker_redirect is not None and _is_stop_phrase(body.text)
-                and speaker_redirect.handles(body.device_id)
+        # D34 barge-in, 11/13: while her voice plays on the desk speakers (or more is queued), anything
+        # he says there cuts her off first. A stop at the end of what the mic heard, or a capture that is
+        # mostly her own words coming back, ends it there: no model call. Anything else is his new ask.
+        # (11/13 18:08: "…Air traffic control stop." missed the old whole-phrase check and she talked on.)
+        # After the dismissal above, so a "stop" also clears a mic she had opened.
+        if (is_voice and speaker_redirect is not None
+                and getattr(speaker_redirect, "handles", lambda _d: False)(body.device_id)
                 and speaker_redirect.playing(body.device_id)):
             speaker_redirect.stop(body.device_id)
-            return AskReply(reply="", thread_id=thread_id, keep_listening=False)
+            said = getattr(speaker_redirect, "last_said", lambda _d: "")(body.device_id)
+            if _ends_with_stop(body.text) or _mostly_her_words(body.text, said):
+                log.info("voice: barge-in on %s, she stopped (%s)", body.device_id,
+                         "stop" if _ends_with_stop(body.text) else "her own voice in the mic")
+                return AskReply(reply="", thread_id=thread_id, keep_listening=False)
+            log.info("voice: barge-in on %s, she stopped for his new words", body.device_id)
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)
         reply = ask_fn(body.text, identity, thread_id)

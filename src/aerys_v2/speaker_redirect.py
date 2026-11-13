@@ -49,12 +49,17 @@ class SpeakerRedirect:
         self._speaker_headers = {"Authorization": f"Bearer {speaker_token}"}
         self._client = client or httpx.Client(timeout=30.0)
         self._async = async_send
+        self._said: dict[str, str] = {}          # 11/13: what she last sent to each speaker (echo check)
+
+    def last_said(self, device_id: str | None) -> str:
+        return self._said.get(str(device_id or ""), "")
 
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._targets
 
     def playing(self, device_id: str | None) -> bool:
-        """Best-effort speaker playing; failures are harmless."""
+        """Best-effort: is she talking there, a clip playing or more queued behind it? Failures read
+        as not talking (harmless). 11/13: "On it." queued behind a long answer is still her talking."""
         if not self.handles(device_id):
             return False
         try:
@@ -63,7 +68,8 @@ class SpeakerRedirect:
                 headers=self._speaker_headers, timeout=1.5,
             )
             response.raise_for_status()
-            return response.json().get("playing") is True
+            health = response.json()
+            return health.get("playing") is True or int(health.get("queued") or 0) > 0
         except Exception:
             log.debug("speaker redirect playing failed (harmless)", exc_info=True)
             return False
@@ -86,6 +92,7 @@ class SpeakerRedirect:
     def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return
+        self._said[str(device_id)] = text
         if self._async:
             threading.Thread(target=self._say, args=(device_id, text, then), daemon=True).start()
         else:
