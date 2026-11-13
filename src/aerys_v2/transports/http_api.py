@@ -222,9 +222,12 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         with guest_lock:
             now = clock()
             last, session = guest_sessions.get(key, (None, ""))
-            if not session or last is None or now - last > GUEST_SESSION_IDLE_S:
+            if not session or last is None or now - last >= GUEST_SESSION_IDLE_S:
                 session = f"{key}:{int(time.time())}-{uuid.uuid4().hex[:6]}"   # unique even within a second
             guest_sessions[key] = (now, session)
+            if len(guest_sessions) > 256:                      # bounded: forget devices quiet a day or more
+                for k in [k for k, (seen, _) in guest_sessions.items() if now - seen >= 86400]:
+                    guest_sessions.pop(k, None)
         return f"{person_thread_key(GUEST_VOICE_ID)}:{session}"
 
     def voice_thread() -> str:
