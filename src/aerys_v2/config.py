@@ -315,6 +315,11 @@ class Settings(BaseSettings):
     # match floor the turn is merely uncertain and stays the owner's — fail-open on
     # identity, the same posture the STT wrapper takes when the recognizer is down.
     voice_guest_demote_below: float = Field(default=0.25, ge=0, le=1)
+    # D43 (Chris 11/13, board #195): a short clip right after he spoke on the same speaker is his by default.
+    # The week before, 3 of 9 clips answered as a guest came 16-30 s after him on the same satellite and all
+    # three were him ("Thank you." is too short for the recognizer). An "unknown" verdict on a device that heard
+    # him within this many seconds becomes the unsure band (his by default only); 0 turns it off.
+    voice_owner_carry_s: int = Field(default=60, ge=0, le=300)
     # Chris 2026-09-22: "if the voice is me she should be able to recall what the room
     # said in general for the last number of turns... I dont want guests to be able to
     # poke her memory in that way." The room she LISTENS in, by satellite rather than by

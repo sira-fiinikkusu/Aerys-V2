@@ -215,6 +215,27 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
     clock = guest_clock or time.monotonic
     guest_sessions: dict[str, tuple[float, str]] = {}
     guest_lock = threading.Lock()
+    owner_heard: dict[str, float] = {}         # D43: when each device last heard HIM (never a carried clip)
+
+    def heard_owner(device_id) -> None:
+        if not device_id:
+            return
+        with guest_lock:
+            now = clock()
+            owner_heard[str(device_id)] = now
+            if len(owner_heard) > 256:
+                for k in [k for k, seen in owner_heard.items() if now - seen >= 86400]:
+                    owner_heard.pop(k, None)
+
+    def owner_just_spoke(device_id) -> float | None:
+        """D43: seconds since this device last heard him, when inside voice_owner_carry_s; else None."""
+        window = int(getattr(settings, "voice_owner_carry_s", 0) or 0) if settings is not None else 0
+        if not device_id or window <= 0:
+            return None
+        with guest_lock:
+            seen = owner_heard.get(str(device_id))
+            age = None if seen is None else clock() - seen
+        return age if age is not None and 0 <= age <= window else None
 
     def guest_thread(device_id) -> str:
         """The guest's thread for THIS conversation: per device, and new after GUEST_SESSION_IDLE_S of quiet."""
@@ -371,6 +392,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # person_id" bug, 2026-07-05). Both paths get ack-then-act, emotion tags, and
         # content tagged fail-closed 'private' at ingest like a DM. A plain caller
         # (voice=False, non-voice thread — curl/tests) is byte-for-byte unchanged.
+        owner_turn = False                           # D43: a voice turn that was surely or likely HIM
         if body.voice or str(body.thread_id or "").startswith("voice"):
             identity["voice"] = True
             thread_id = voice_thread()
@@ -381,6 +403,16 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                 # Who spoke decides WHOSE turn this is. The Bearer proved the owner's
                 # infrastructure is calling; the voice decides the person.
                 who = resolve_speaker(body.speaker.id, body.speaker.confidence)
+                # D43 (11/13): the recognizer named no one, and this speaker heard him moments ago ("Thank
+                # you." after his ask is too short to score): his turn by default only, never a named voice.
+                carried = None
+                if (who is not None and who[0] == GUEST_VOICE_ID and owner_person_id
+                        and (body.speaker.id or "unknown").strip().lower() == "unknown"):
+                    carried = owner_just_spoke(body.device_id)
+                    if carried is not None:
+                        who = None
+                        log.info("voice: an unknown clip on %s %ds after him counts as his by default (D43)",
+                                 body.device_id, int(carried))
                 if who is None and owner_person_id and not owner_confirmed(body.speaker.id, body.speaker.confidence):
                     identity[VOICE_OWNER_ASSUMED_KEY] = True    # the unsure band: his by default only
                 # The DOOR decides whether a verdict demotes; the gate obeys that flag
@@ -388,6 +420,11 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                 demoted = who is not None and who[0] == GUEST_VOICE_ID
                 identity["speaker"] = {"id": body.speaker.id, "confidence": body.speaker.confidence,
                                        "demoted": demoted}
+                if carried is not None:
+                    identity["speaker"]["carried"] = True
+                elif who is None and owner_person_id:
+                    heard_owner(body.device_id)              # his own turn (named or the unsure band)
+                    owner_turn = True
                 if who is not None and who[0] in members and body.speaker.confidence < settings.voice_speaker_min_confidence:
                     identity["speaker"]["unsure"] = True
                 if who is not None:
@@ -409,6 +446,8 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         if dismissed and toggle.enabled():
             return AskReply(reply="", thread_id=thread_id)
         reply = ask_fn(body.text, identity, thread_id)
+        if owner_turn:
+            heard_owner(body.device_id)                  # D43: the window runs from when she finished answering him
         keep_listening = False
         if is_voice:
             from aerys_v2.service import strip_emotion_tags
