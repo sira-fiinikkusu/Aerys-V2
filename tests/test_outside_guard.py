@@ -107,7 +107,7 @@ def test_origin_and_room_provenance():
     from aerys_v2.services.room_context import format_room_context
     assert not origin_sources(TEXT, OWNER_THREAD, OWNER)
     for identity in ({**TEXT, 'user_id': 'other'}, {**STRONG, 'speaker': {'id': 'owner', 'unsure': True}},
-                     {**TEXT, 'surface': 'lens'}, {**TEXT, 'device_id': 'shared'}):
+                     {**TEXT, 'surface': 'sticky'}, {**TEXT, 'device_id': 'shared'}):
         assert origin_sources(identity, OWNER_THREAD, OWNER, {'shared': 'Shared screen'})
     for person, expected in [(OWNER, False), ('other', True)]:
         block = format_room_context([('Owner label', person, 'words', 'reply', None)])

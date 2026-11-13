@@ -23,7 +23,7 @@ def make_relay(names):
 
 def test_only_serving_desk_delivers_once():
     relay, store, desk, sent = make_relay({'contact': 'Sam', 'owner': 'Chris'})
-    assert relay.send('hello', dict(CONTACT, display_name='Chris'), '') == 'Passed on to Chris.'
+    assert relay.send('hello', dict(CONTACT, display_name='Chris'), '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     row = next(r for r in store.rows.values() if r.source == 'relay')
     assert row.status == 'queued' and row.headline == 'Sam says: "hello"'
     assert sent == []
@@ -85,7 +85,7 @@ def test_factory_uses_shared_queue_and_memories_names(monkeypatch):
     monkeypatch.setattr(gates, 'hands_gate_for', lambda s: SimpleNamespace(message_sender=SimpleNamespace(
         people={'contact'}, gate=SimpleNamespace(owner='owner'))))
     relay = relay_for(settings, queue)
-    assert relay.send('hello', dict(CONTACT, display_name='Platform Sam'), '') == 'Passed on to Chris.'
+    assert relay.send('hello', dict(CONTACT, display_name='Platform Sam'), '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     assert lookups == [('contact',), ('owner',)]
     assert next(r for r in queue.store.rows.values() if r.source == 'relay').headline == 'Record Sam says: "hello"'
 
@@ -136,7 +136,7 @@ def test_overnight_relay_stays_out_of_morning_brief():
     h = House(NIGHT)
     queue = ReachQueue(h.desk.store, clock=lambda: h.clock['now'])
     relay = Relay('owner', {'contact'}, queue, {'owner': 'Chris', 'contact': 'Sam'}.get)
-    assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
+    assert relay.send('hello', CONTACT, '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     row = next(r for r in h.desk.store.rows.values() if r.source == 'relay')
     assert h.desk.tick()['sent'] == 0
     h.at(IN_OFFICE)
@@ -153,11 +153,11 @@ def test_overnight_relay_stays_out_of_morning_brief():
 
 def test_a_name_sharing_no_word_with_the_owner_is_fine():
     relay, store, desk, sent = make_relay({'contact': 'Christopher Robin', 'owner': 'Chris'})
-    assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
+    assert relay.send('hello', CONTACT, '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
 
 
 def test_a_shared_surname_is_fine():
     relay, store, desk, sent = make_relay({'contact': 'Sam Rivera', 'owner': 'Alex Rivera'})
-    assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
+    assert relay.send('hello', CONTACT, '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     relay, store, desk, sent = make_relay({'contact': 'Alex Smith', 'owner': 'Alex Rivera'})
     assert relay.send('hello', CONTACT, '').startswith('Not passed on')

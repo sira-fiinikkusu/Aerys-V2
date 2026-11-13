@@ -19,20 +19,19 @@ def setup():
                  {'owner': 'Chris', 'contact': 'Sam', 'second': 'Second'}.get), sent, desk
 
 
-def test_quote_and_cap_and_next_day():
+def test_quote_without_cap_and_next_day():
     relay, sent, desk = setup()
-    assert relay.send('Say "hello"', CONTACT, 'person:contact') == 'Passed on to Chris.'
+    assert relay.send('Say "hello"', CONTACT, 'person:contact') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     desk.tick()
     assert sent[0].headline == 'Sam says: "Say \\"hello\\""'
     assert (sent[0].source, sent[0].topic, sent[0].owed) == ('relay', 'messages', False)
-    for _ in range(2):
-        assert relay.send('hello', CONTACT, '') == 'Passed on to Chris.'
-    assert 'daily limit' in relay.send('fourth', CONTACT, '')
+    for i in range(4):
+        assert relay.send(f'hello {i}', CONTACT, '').startswith('Queued for Chris.')
     desk.tick()
-    assert len(sent) == 3
-    assert relay.send('other', dict(CONTACT, user_id='second'), '') == 'Passed on to Chris.'
+    assert len(sent) == 5
+    assert relay.send('other', dict(CONTACT, user_id='second'), '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     desk.clock = lambda: DAY + timedelta(days=1)
-    assert relay.send('tomorrow', CONTACT, '') == 'Passed on to Chris.'
+    assert relay.send('tomorrow', CONTACT, '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
 
 
 @pytest.mark.parametrize('identity,thread', [({}, ''), ({'user_id': 'stranger'}, ''),
@@ -52,7 +51,7 @@ def test_mute_failure_and_long_quote():
     desk.tick()
     assert not sent and not [r for r in desk.store.rows.values() if r.source == 'relay']
     desk.store._prefs = Prefs(budget=8)
-    assert relay.send('x' * 800, CONTACT, '') == 'Passed on to Chris.'
+    assert relay.send('x' * 800, CONTACT, '') == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)."
     desk.tick()
     assert len(sent[0].headline) <= 400 and sent[0].headline.endswith('"')
     relay.desk.enqueue = lambda e: (_ for _ in ()).throw(OSError())
@@ -72,7 +71,7 @@ def test_engine_relay():
                           {'configurable': {'identity': CONTACT, 'thread_id': 'person:contact'}})
     desk.tick()
     assert sent[0].headline == 'Sam says: "See you soon"'
-    assert any(isinstance(m, ToolMessage) and m.content == 'Passed on to Chris.' for m in result['messages'])
+    assert any(isinstance(m, ToolMessage) and m.content == "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while)." for m in result['messages'])
 
 
 def test_relay_is_outside_only_for_reply_turn():
@@ -87,7 +86,7 @@ def test_relay_is_outside_only_for_reply_turn():
 
 def test_signal_allows_contact_relay():
     from aerys_v2.workers.signals import answers_not_relays
-    assert not answers_not_relays([{'input_text': 'Tell Chris hello', 'emitted_reply': 'Passed on to Chris.',
+    assert not answers_not_relays([{'input_text': 'Tell Chris hello', 'emitted_reply': "Queued for Chris. He gets it as soon as he's free (a meeting or his quiet hours can hold it a while).",
                                    'channel': 'discord'}]).failed
 
 
@@ -102,9 +101,12 @@ def test_factory_switch_and_side(monkeypatch, guest):
     s = settings(messages_as_herself=True)
     names = lambda **kw: {t.name for t in action_tools_for(s, guest=guest, **kw)}
     assert ('pass_to_chris' in names(reach_desk=desk)) is guest
+    assert ('relay_status' in names(reach_desk=desk)) is guest
     assert 'pass_to_chris' not in names()
+    assert 'relay_status' not in names()
     s.messages_as_herself = False
     assert 'pass_to_chris' not in names(reach_desk=desk)
+    assert 'relay_status' not in names(reach_desk=desk)
 
 
 @pytest.mark.parametrize("context", ["requests", "full"])
@@ -139,60 +141,12 @@ def test_said_hook_seed_and_engine_guard(context, escalated):
     assert 'relay' in list(b.approval_store.rows.values())[-1].detail
 
 
-def test_parallel_cap():
+def test_parallel_duplicate():
     from concurrent.futures import ThreadPoolExecutor
     relay, sent, desk = setup()
     with ThreadPoolExecutor(max_workers=6) as pool:
         results = list(pool.map(lambda _: relay.send('hi', CONTACT, ''), range(10)))
-    assert results.count('Passed on to Chris.') == 3
+    assert sum(r.startswith('Queued for Chris.') for r in results) == 1
+    assert sum('already queued' in r for r in results) == 9
     desk.tick()
-    assert len(sent) == 3
-
-
-@pytest.mark.parametrize('count', [0, 3])
-def test_postgres_reservation_commits_before_desk(monkeypatch, count):
-    from aerys_v2.reach import PostgresReachStore
-    relay, sent, desk = setup()
-    events = []
-    class Conn:
-        def __enter__(self):
-            events.append('begin')
-            return self
-        def __exit__(self, *a):
-            events.append('commit')
-        def execute(self, sql, args):
-            events.append(sql.split()[0])
-            return SimpleNamespace(fetchone=lambda: (count,))
-    store = PostgresReachStore('unused')
-    monkeypatch.setattr(store, '_connect', Conn)
-    relay.desk.store = store
-    def reach(event):
-        assert events[-1] == 'commit'
-        events.append('desk')
-        return 'queued'
-    relay.desk.enqueue = reach
-    result = relay.send('hello', CONTACT, '')
-    if count == 3:
-        assert result.startswith('Not passed on') and events == ['begin', 'SELECT', 'SELECT', 'commit']
-    else:
-        assert result == 'Passed on to Chris.'
-        assert events == ['begin', 'SELECT', 'SELECT', 'INSERT', 'commit', 'desk']
-
-
-def test_reservation_commit_failure_never_reaches_desk(monkeypatch):
-    from aerys_v2.reach import PostgresReachStore
-    relay, sent, desk = setup()
-    class Conn:
-        def __enter__(self):
-            return self
-        def __exit__(self, *a):
-            raise OSError('commit failed')
-        def execute(self, *a):
-            return SimpleNamespace(fetchone=lambda: (0,))
-    store = PostgresReachStore('unused')
-    monkeypatch.setattr(store, '_connect', Conn)
-    relay.desk.store = store
-    calls = []
-    relay.desk.enqueue = lambda e: calls.append(e)
-    assert relay.send('hello', CONTACT, '').startswith('Not passed on')
-    assert not calls
+    assert len(sent) == 1

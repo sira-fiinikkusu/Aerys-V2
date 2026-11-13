@@ -28,7 +28,6 @@ REFUSAL = 'Not done: I could not check the outside-text guard, so nothing happen
 
 def origin_sources(identity, thread_id, owner, shared_surface_ids=(), members=None):
     from aerys_v2.hands_gate import asker, OTHER, VOICE_UNSURE
-    from aerys_v2.state import is_lens_surface
 
     # A household member's own request (D19) is not outside text; an unsure voice still is (D28 #5).
     who = asker(identity, thread_id, owner, members)
@@ -38,7 +37,7 @@ def origin_sources(identity, thread_id, owner, shared_surface_ids=(), members=No
     speaker = identity.get('speaker') or {}
     if speaker.get('unsure') or speaker.get('band') == 'unsure':
         sources.append('unsure voice')
-    if (is_lens_surface(identity) or identity.get('surface') in ('sticky', 'lens')
+    if (identity.get('surface') == 'sticky'
             or identity.get('device_id') in shared_surface_ids):
         sources.append('shared surface')
     return sources

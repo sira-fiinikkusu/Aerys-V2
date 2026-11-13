@@ -284,7 +284,7 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
                             silent=True, voice="wait", not_before=meeting_until)
         after = "until 10 minutes after" if hold == "meeting" else "until he's up"
         return Decision("queue", f"{hold}: waits {after}", not_before=meeting_until)
-    if not event.owed and not event.brief and sent_today >= prefs.budget:
+    if event.source != "relay" and not event.owed and not event.brief and sent_today >= prefs.budget:
         if event.urgency == "timely":
             return Decision("send", f"over today's budget ({prefs.budget}), but timely")
         return Decision("drop", f"over today's budget ({prefs.budget})")
@@ -295,7 +295,8 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
 
 
 class ReachStore(Protocol):
-    def reserve_relay(self, person: str, now: datetime) -> bool: ...
+    def enqueue_relay(self, event: ReachEvent, now: datetime) -> bool: ...
+    def relays_since(self, prefix: str, since: datetime) -> list[Reach]: ...
     def add(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
             not_before: datetime | None) -> Reach: ...
     def recently_sent(self, dedupe_key: str, since: datetime) -> bool: ...
@@ -330,14 +331,17 @@ class MemoryReachStore:
         self._prefs = prefs
         self.changes: list = []
 
-    def reserve_relay(self, person, now):
-        key = f"relay:{now.astimezone(EASTERN).date()}:{person}"
+    def enqueue_relay(self, event, now):
         with self._relay_lock:
-            if sum(r.source == "relay_limit" and r.dedupe_key == key for r in self.rows.values()) >= 3:
+            if self.decided(event.dedupe_key, now - timedelta(minutes=10)):
                 return False
-            self.add(ReachEvent(source="relay_limit", topic="messages", headline="Relay reservation",
-                                dedupe_key=key), now, status="dropped", reason="daily relay slot", not_before=None)
+            self.add(event, now, status="queued", reason="awaiting serving desk", not_before=None)
             return True
+
+    def relays_since(self, prefix, since):
+        return sorted((r for r in self.rows.values() if r.source == "relay"
+                       and (r.dedupe_key or "").startswith(prefix)
+                       and r.created_at >= since), key=lambda r: (r.created_at, r.id), reverse=True)
 
     def add(self, event, now, *, status, reason, not_before):
         r = Reach(id=self._next, source=event.source, topic=event.topic, urgency=event.urgency, owed=event.owed,
@@ -393,7 +397,7 @@ class MemoryReachStore:
                        and r.delivered_at and r.delivered_at >= since), key=lambda r: r.id)
 
     def sent_since(self, since):
-        return sum(1 for r in self.rows.values() if r.status == "sent" and not r.owed and not r.brief
+        return sum(1 for r in self.rows.values() if r.status == "sent" and r.source != "relay" and not r.owed and not r.brief
                    and r.urgency != "safety" and r.delivered_at and r.delivered_at >= since)
 
     def due(self, now):
@@ -465,20 +469,27 @@ class PostgresReachStore:
                  list(event.folds), event.text_only, event.text_to)).fetchone()
         return self._row(row)
 
-    def reserve_relay(self, person, now):
-        # Committed before delivery: uncertain attempts consume a slot. The existing
-        # ledger and transaction lock enforce the cap across processes and restarts.
-        key = f"relay:{now.astimezone(EASTERN).date()}:{person}"
+    def enqueue_relay(self, event, now):
+        # Serialize the rolling check and insert across producers, in one transaction.
         with self._connect() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 33))", (key,))
-            count = conn.execute("SELECT count(*) FROM v2_reachouts WHERE source = 'relay_limit' "
-                                 "AND dedupe_key = %s", (key,)).fetchone()[0]
-            if count >= 3:
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 36))", (event.dedupe_key,))
+            if conn.execute("SELECT 1 FROM v2_reachouts WHERE source = 'relay' AND dedupe_key = %s "
+                            "AND created_at >= %s LIMIT 1",
+                            (event.dedupe_key, now - timedelta(minutes=10))).fetchone():
                 return False
             conn.execute("INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, "
-                         "headline, dedupe_key, status, reason) VALUES (%s, %s, 'relay_limit', 'messages', "
-                         "'routine', 'Relay reservation', %s, 'dropped', 'daily relay slot')", (now, now, key))
+                         "headline, dedupe_key, status, reason) VALUES (%s, %s, 'relay', 'messages', "
+                         "'routine', %s, %s, 'queued', 'awaiting serving desk')",
+                         (now, now, event.headline, event.dedupe_key))
         return True
+
+    def relays_since(self, prefix, since):
+        # Prefix consists only of a fixed label, hex digest and colons (no LIKE wildcards).
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE source = 'relay' "
+                                "AND dedupe_key LIKE %s AND created_at >= %s "
+                                "ORDER BY created_at DESC, id DESC", (prefix + "%", since)).fetchall()
+        return [self._row(r) for r in rows]
 
     def add_new(self, event, now, *, status, reason, not_before):
         """add(), unless a row with this dedupe key exists in ANY state, ever: one statement,
@@ -549,7 +560,7 @@ class PostgresReachStore:
     def sent_since(self, since):
         with self._connect() as conn:
             return conn.execute(
-                "SELECT count(*) FROM v2_reachouts WHERE status = 'sent' AND NOT owed AND NOT brief "
+                "SELECT count(*) FROM v2_reachouts WHERE status = 'sent' AND source <> 'relay' AND NOT owed AND NOT brief "
                 "AND urgency <> 'safety' AND delivered_at >= %s", (since,)).fetchone()[0]
 
     def due(self, now):

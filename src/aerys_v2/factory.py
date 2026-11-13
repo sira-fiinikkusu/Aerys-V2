@@ -2467,10 +2467,10 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                                             owner_names=lambda: contacts.names_of(owner)))
 
     if guest:
-        from aerys_v2.tools.pass_to_chris import relay_for, build_pass_to_chris_tool
+        from aerys_v2.tools.pass_to_chris import relay_for, build_pass_to_chris_tool, build_relay_status_tool
         relay = relay_for(settings, reach_desk)
         if relay is not None:
-            tools.append(build_pass_to_chris_tool(relay))
+            tools.extend([build_pass_to_chris_tool(relay), build_relay_status_tool(relay)])
 
     if not guest:
         from aerys_v2.tools.send_message import build_send_message_tool, build_messages_sent_tool
