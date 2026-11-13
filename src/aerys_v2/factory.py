@@ -2448,6 +2448,15 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
 
         tools.append(build_log_gap_tool(gaps_conn_factory))
 
+    if not guest and (settings.tavily_api_key is not None or settings.firecrawl_api_key is not None):
+        # CART LINKS (D39, 2026-11-12): owner-side, and only beside the web tools she needs
+        # to find the exact product; with no web armed there is nothing to build a link from.
+        from aerys_v2.tools.cart_link import build_cart_link_tool
+        from aerys_v2.kael_line import _discord_dm_send
+
+        tools.append(build_cart_link_tool(
+            settings, send=_discord_dm_send if settings.discord_bot_token else None))
+
     if not guest:
         # REMEMBER (2026-09-06): she keeps a fact on purpose, through the same
         # writer the extractor uses. Owner-side only (a guest must not write
@@ -2604,6 +2613,13 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
     doesn't).
     """
     parts = []
+    if not guest and (settings.tavily_api_key is not None or settings.firecrawl_api_key is not None):
+        parts.append(
+            "When he asks to put a product in his Amazon or Walmart cart, find the exact product "
+            "page with your web tools, then call add_to_cart_link; if you cannot find "
+            "the exact product, ask. Never make a cart link yourself or present a web page's link "
+            "as a cart link. On voice or the glasses call the tool (it sends to his Discord); "
+            "on text give him its exact link in the reply. Relay any sending failure honestly.")
     if not guest and settings.ha_token is not None:
         parts.append(ACTION_OVERLAY)
         parts.append(TIMER_OVERLAY)

@@ -33,7 +33,8 @@ decide which path handles it:
   SHOPPING AND AVAILABILITY are "action" too, and they are the easy ones to
   miss because they sound like small talk: what a store sells or stocks, which
   brands or products exist, what something costs, restaurant menus or hours,
-  where to buy something. "Is there a canned strawberry mimosa I can get at
+  where to buy something, and putting something in his Amazon or Walmart cart.
+  "Is there a canned strawberry mimosa I can get at
   Publix?" is "action" — naming real products you cannot verify is the same
   failure as guessing a device's state. Whenever the reply would name a
   specific brand, product, price, or storefront, choose "action".

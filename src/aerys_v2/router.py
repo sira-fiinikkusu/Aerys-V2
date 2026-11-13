@@ -158,6 +158,15 @@ _SEARCH_MARKERS = (
     "menu", "open today", "near me", "where can",
 )
 
+# Cart links (D39, 2026-11-12): "put dish soap in my Amazon cart" carries none of the shopping
+# markers when the store is Amazon. Whole words and a cart-shaped phrase only: substrings would
+# catch "the cartoon", "cartridge" and "the Amazon rainforest" and override "unaddressed".
+_CART_ASK = re.compile(
+    r"\b(?:in|into|to|onto)\s+(?:my|the|his|our)\s+(?:(?:amazon|walmart)\s+)?cart\b"
+    r"|\b(?:amazon|walmart)\s+cart\b",
+    re.IGNORECASE,
+)
+
 # Email / gap-logging shapes for the degraded path — the 2026-07-11 additions.
 # Same over-trigger-toward-action bias: a needless action hop costs a tool
 # refusal, while a chat route here either hallucinates mail she never read or
@@ -282,7 +291,8 @@ decide which path handles it:
   SHOPPING AND AVAILABILITY are "action" too, and they are the easy ones to
   miss because they sound like small talk: what a store sells or stocks, which
   brands or products exist, what something costs, restaurant menus or hours,
-  where to buy something. "Is there a canned strawberry mimosa I can get at
+  where to buy something, and putting something in his Amazon or Walmart cart.
+  "Is there a canned strawberry mimosa I can get at
   Publix?" is "action" — naming real products you cannot verify is the same
   failure as guessing a device's state. Whenever the reply would name a
   specific brand, product, price, or storefront, choose "action".
@@ -518,6 +528,11 @@ def plausibly_passes_words_on(text: str) -> bool:
     return False
 
 
+def plausibly_fills_a_cart(text: str) -> bool:
+    """Degraded-path heuristic: an ask to put something in his Amazon/Walmart cart (D39)."""
+    return bool(_CART_ASK.search(text))
+
+
 def plausibly_sets_a_timer(text: str) -> bool:
     """Degraded-path heuristic: a timer/alarm/reminder ask."""
     lowered = text.lower()
@@ -543,6 +558,7 @@ def plausibly_asks_for_action(text: str, *, pass_on: bool = True) -> bool:
         or plausibly_messages_kael(text)
         or (pass_on and plausibly_passes_words_on(text))
         or plausibly_sets_a_timer(text)
+        or plausibly_fills_a_cart(text)
     )
 
 
