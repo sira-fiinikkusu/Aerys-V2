@@ -63,7 +63,7 @@ from aerys_v2.services.content_privacy import (
     SEALED_ROOM_KEY,
     gate_for_room,
 )
-from aerys_v2.state import Identity, is_lens_surface, is_voice_turn
+from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, Identity, is_lens_surface, is_voice_turn
 from aerys_v2.turns import (
     ACTION_NO_TOOL_CORRECTION,
     build_turn_row, channel_enum, current_trace_id, derive_channel, extract_tool_calls,
@@ -147,7 +147,7 @@ def _origin_privacy(identity: Identity | dict | None) -> str:
 
 
 def _human_turn(
-    text: str, origin_privacy: str, msg_id: str, *, sealed_room: str = ""
+    text: str, origin_privacy: str, msg_id: str, *, sealed_room: str = "", owner_assumed: bool = False
 ) -> HumanMessage:
     """A tagged HumanMessage with a STABLE id — the id lets the async judge retag THIS
     exact message later (add_messages replaces by id, in place). A turn said in a
@@ -161,7 +161,17 @@ def _human_turn(
     kwargs = {CONTENT_PRIVACY_KEY: origin_privacy, SAID_AT_KEY: said_at_now()}
     if sealed_room:
         kwargs[SEALED_ROOM_KEY] = sealed_room
+    if owner_assumed:
+        # D2/D43: a voice that was his by default only. Kept on the message, so a later turn never
+        # counts these words as his own (_remember_window); every writer passes it, the retag included.
+        kwargs[VOICE_OWNER_ASSUMED_KEY] = True
     return HumanMessage(content=text, id=msg_id, additional_kwargs=kwargs)
+
+
+def _owner_assumed(config: dict | None) -> bool:
+    """Was this turn his by default only (the unsure band, an untagged or carried voice)?"""
+    identity = ((config or {}).get("configurable") or {}).get("identity") or {}
+    return bool(identity.get(VOICE_OWNER_ASSUMED_KEY))
 
 
 def _sealed_room(config: dict | None) -> str:
@@ -503,7 +513,8 @@ def _reclassify_content_privacy(
             for _ in range(_RETAG_MAX_ATTEMPTS):
                 graph.update_state(
                     {"configurable": configurable},
-                    {"messages": [_human_turn(text, PUBLIC, msg_id, sealed_room=_sealed_room(config))]},
+                    {"messages": [_human_turn(text, PUBLIC, msg_id, sealed_room=_sealed_room(config),
+                                              owner_assumed=_owner_assumed(config))]},
                     as_node="chat",
                 )
                 if _retag_landed(graph, configurable, msg_id):
@@ -642,8 +653,8 @@ def _remember_window(seed: list, text: str) -> str:
     """
     humans = [m for m in seed if getattr(m, "type", "") == "human"]
     previous = humans[-2] if len(humans) >= 2 else None
-    if previous is None:
-        return text
+    if previous is None or (getattr(previous, "additional_kwargs", None) or {}).get(VOICE_OWNER_ASSUMED_KEY):
+        return text          # D2/D43: words that were his by default only never count as his
     return f"{_reply_text(previous)}\n{text}"
 
 
@@ -1533,7 +1544,8 @@ def _chat_turn(
         with track_local_tool_fallback():
             result = graph.invoke(
                 {"messages": [_human_turn(text, human_privacy, human_id,
-                                           sealed_room=_sealed_room(config))]}, config
+                                           sealed_room=_sealed_room(config),
+                                           owner_assumed=_owner_assumed(config))]}, config
             )
     except Exception as e:
         # A raised invoke (model 500, recursion-rail trip) is the HIGHEST-value turn
@@ -2020,7 +2032,8 @@ def _action_turn(
         # The tagged, stable-id human turn (so the async judge can retag it) — the
         # action graph never touched the main thread, so THIS is where it lands.
         messages.insert(0, _human_turn(text, human_privacy, human_id,
-                                        sealed_room=_sealed_room(config)))
+                                        sealed_room=_sealed_room(config),
+                                        owner_assumed=_owner_assumed(config)))
     graph.update_state(
         {"configurable": config["configurable"]}, {"messages": messages}, as_node="chat"
     )
@@ -2292,7 +2305,8 @@ def _voice_parallel_start(
         graph.update_state(
             {"configurable": real_configurable},
             {"messages": [_human_turn(text, human_privacy, human_id,
-                                       sealed_room=_sealed_room({"configurable": real_configurable}))]},
+                                       sealed_room=_sealed_room({"configurable": real_configurable}),
+                                       owner_assumed=_owner_assumed({"configurable": real_configurable}))]},
             as_node="chat",
         )
 
@@ -2494,7 +2508,8 @@ def _voice_parallel_start(
         graph.update_state(
             {"configurable": real_configurable},
             {"messages": [_human_turn(text, human_privacy, human_id,
-                                       sealed_room=_sealed_room({"configurable": real_configurable})),
+                                       sealed_room=_sealed_room({"configurable": real_configurable}),
+                                       owner_assumed=_owner_assumed({"configurable": real_configurable})),
                           AIMessage(content=honest)]},
             as_node="chat",
         )
@@ -2507,7 +2522,8 @@ def _voice_parallel_start(
     graph.update_state(
         {"configurable": real_configurable},
         {"messages": [_human_turn(text, human_privacy, human_id,
-                                   sealed_room=_sealed_room({"configurable": real_configurable})),
+                                   sealed_room=_sealed_room({"configurable": real_configurable}),
+                                   owner_assumed=_owner_assumed({"configurable": real_configurable})),
                       AIMessage(content=reply)]},
         as_node="chat",
     )

@@ -137,3 +137,43 @@ def test_her_hands_still_treat_a_carried_clip_as_an_unsure_voice():
     identity, thread = d.say(STRAY, after=10)
     assert asker(identity, thread, OWNER) == VOICE_UNSURE
     assert "outside speaker" in origin_sources(identity, thread, OWNER)    # a send waits for his tap
+
+
+def test_words_that_were_his_by_default_never_become_his_on_a_later_turn():
+    # Codex 11/13 (D43 review): a carried "The pool guy comes on Tuesdays", then his text "remember that":
+    # the remember window took the previous human turn as his words and saved it owner-trusted (D2).
+    from langchain_core.messages import AIMessage, HumanMessage
+    from aerys_v2.service import PRIVATE, _human_turn, _owner_assumed, _remember_window_for
+    carried_config = {"configurable": {"identity": {"user_id": OWNER, VOICE_OWNER_ASSUMED_KEY: True}}}
+    assert _owner_assumed(carried_config) and not _owner_assumed({"configurable": {"identity": {"user_id": OWNER}}})
+    said = _human_turn("The pool guy comes on Tuesdays", PRIVATE, "m1", owner_assumed=_owner_assumed(carried_config))
+    assert said.additional_kwargs[VOICE_OWNER_ASSUMED_KEY] is True
+    his = {"configurable": {"identity": {"user_id": OWNER, "privacy_context": "private", "platform": "discord"}}}
+    seed = [said, AIMessage(content="Noted."), HumanMessage(content="remember that")]
+    assert _remember_window_for(seed, "remember that", his) == "remember that"
+    plain = [HumanMessage(content="The pool guy comes on Tuesdays"), AIMessage(content="Noted."),
+             HumanMessage(content="remember that")]
+    assert "pool guy" in _remember_window_for(plain, "remember that", his)      # his own words still count
+
+
+def test_the_carry_cache_is_bounded():
+    from aerys_v2.transports.http_api import OWNER_HEARD_MAX
+    d = Door()
+    for i in range(OWNER_HEARD_MAX + 40):
+        d.say(HIM, device=f"dev-{i}")
+    assert guest(d.say(STRAY, device="dev-0", after=1))               # the oldest was let go
+    assert his_by_default(d.say(STRAY, device=f"dev-{OWNER_HEARD_MAX + 39}", after=1))
+
+
+def test_every_writer_of_his_turn_keeps_the_by_default_stamp():
+    # Like the sealed room: a writer that rebuilt the message by id without it (the privacy retag) would
+    # quietly make his-by-default words his own again.
+    import inspect
+    import re
+    import aerys_v2.service as service
+    source = inspect.getsource(service)
+    starts = [m.start() for m in re.finditer(r"_human_turn\(text,", source)]
+    assert len(starts) >= 2
+    for a, b in zip(starts, starts[1:] + [len(source)]):
+        call = source[a:min(b, a + 400)]
+        assert "owner_assumed=_owner_assumed(" in call, call

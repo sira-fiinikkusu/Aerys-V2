@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 #: The identity an unrecognized voice lands on. Named once so the door and the
 #: engage gate cannot drift on what "a stranger spoke" means.
 GUEST_VOICE_ID = "voice-guest"
+OWNER_HEARD_MAX = 256          # D43: devices remembered for the carry window
+OWNER_CARRY_MAX_S = 300        # the setting's ceiling (config.voice_owner_carry_s)
 #: T-17 (11/13): one forever-thread for every unrecognized voice let a 2 AM stray ("Call Ryan's nearest")
 #: answer his "Thank you" eight hours later. A guest conversation is a SESSION per device: after this
 #: many quiet seconds the next guest turn starts a fresh thread and sees nothing older.
@@ -223,8 +225,11 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         with guest_lock:
             now = clock()
             owner_heard[str(device_id)] = now
-            if len(owner_heard) > 256:
-                for k in [k for k, seen in owner_heard.items() if now - seen >= 86400]:
+            if len(owner_heard) > OWNER_HEARD_MAX:
+                # Bounded (Codex 11/13): an entry past the longest window is useless; then the oldest go.
+                for k in [k for k, seen in owner_heard.items() if now - seen > OWNER_CARRY_MAX_S]:
+                    owner_heard.pop(k, None)
+                for k in sorted(owner_heard, key=owner_heard.get)[:max(0, len(owner_heard) - OWNER_HEARD_MAX)]:
                     owner_heard.pop(k, None)
 
     def owner_just_spoke(device_id) -> float | None:
