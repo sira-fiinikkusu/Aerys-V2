@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from collections.abc import Callable
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,37 @@ log = logging.getLogger(__name__)
 #: emotion tags for ElevenLabs v3 stay in (her pipeline voice reads them); markdown
 #: does not — asterisks and backticks have no business in speech
 _MARKDOWN = re.compile(r"(\*\*|__|`+|^#+\s*)", re.M)
+
+#: Chris 11/13 (the office button, "she shuts up"): a hush holds a speaker quiet until he speaks there
+#: again, so speech already on its way (a clip mid-TTS, a research answer still coming, a mic reopen)
+#: doesn't start her up again. Shared by every redirect in this process (the /ask door and the
+#: follow-up router build their own); it lapses on its own after HUSH_HOLD_S.
+HUSH_HOLD_S = 600
+_HUSHED: dict[str, float] = {}
+_HUSH_LOCK = threading.Lock()
+
+
+def hush(device_id: str | None) -> None:
+    if device_id:
+        with _HUSH_LOCK:
+            _HUSHED[str(device_id)] = time.monotonic()
+
+
+def unhush(device_id: str | None) -> None:
+    if device_id:
+        with _HUSH_LOCK:
+            _HUSHED.pop(str(device_id), None)
+
+
+def hushed(device_id: str | None) -> bool:
+    if not device_id:
+        return False
+    with _HUSH_LOCK:
+        at = _HUSHED.get(str(device_id))
+        if at is not None and time.monotonic() - at >= HUSH_HOLD_S:
+            _HUSHED.pop(str(device_id), None)
+            return False
+        return at is not None
 
 
 def parse_targets(raw: str) -> dict[str, str]:
@@ -88,6 +120,9 @@ class SpeakerRedirect:
     def say(self, device_id: str | None, text: str, *, then: Callable[[], None] | None = None) -> None:
         if not self.handles(device_id) or not (text or "").strip():
             return
+        if hushed(device_id):
+            log.info("speaker redirect: %s is hushed; not saying it", device_id)
+            return
         if self._async:
             threading.Thread(target=self._say, args=(device_id, text, then), daemon=True).start()
         else:
@@ -103,11 +138,13 @@ class SpeakerRedirect:
             )
             r.raise_for_status()
             url = r.json()["url"]
+            if hushed(device_id):
+                return                       # hushed while it was being made: it never plays
             p = self._client.post(f"{self._targets[device_id]}/play", headers=self._speaker_headers,
                                   json={"url": url, **({"wait": True} if then is not None else {})},
                                   timeout=130.0 if then is not None else 5.0)
             p.raise_for_status()
-            if then is not None and p.json().get("played") is True:
+            if then is not None and p.json().get("played") is True and not hushed(device_id):
                 then()
         except Exception:
             log.debug("speaker redirect failed (harmless)", exc_info=True)
