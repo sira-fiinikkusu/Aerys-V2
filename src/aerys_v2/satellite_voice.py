@@ -49,6 +49,8 @@ class SatelliteVoice:
         self._satellites = dict(satellites)
         self._client = client or httpx.Client(timeout=5.0)
         self._settle_s, self._guard_s, self._async_guard = settle_s, guard_s, async_guard
+        self._guards: dict[str, tuple[float, float]] = {}   # device -> (hush floor, deadline)
+        self._lock = threading.Lock()
 
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._satellites
@@ -65,6 +67,8 @@ class SatelliteVoice:
             state = r.json().get("state")
         except Exception:
             log.debug("satellite talking check failed", exc_info=True)
+            return None
+        if not isinstance(state, str):
             return None
         if state == "responding":
             return True
@@ -93,27 +97,46 @@ class SatelliteVoice:
             time.sleep(0.15)
 
     def guard(self, device_id: str | None, hushed: float) -> None:
-        """For a few seconds after a stop, stop her again if she starts talking there for no turn
-        that began after it (a follow-up already on its way to HA when he stopped her)."""
+        """For a few seconds after a stop, stop her again whenever she starts talking there for no
+        turn that began after it (a follow-up already on its way to HA when he stopped her). Best
+        effort, not a cancellation: HA has no turn to check a clip against. One guard per satellite;
+        another stop moves its floor and deadline (Codex 11/14)."""
         if not self.handles(device_id):
             return
+        with self._lock:
+            running = device_id in self._guards
+            floor = max(hushed, self._guards[device_id][0]) if running else hushed
+            self._guards[device_id] = (floor, time.monotonic() + self._guard_s)
+        if running:
+            return
         if self._async_guard:
-            threading.Thread(target=self._guard, args=(device_id, hushed), daemon=True).start()
+            threading.Thread(target=self._guard, args=(device_id,), daemon=True).start()
         else:
-            self._guard(device_id, hushed)
+            self._guard(device_id)
 
-    def _guard(self, device_id: str, hushed: float) -> None:
+    def _guard(self, device_id: str) -> None:
         from .speaker_redirect import last_turn
 
-        deadline = time.monotonic() + self._guard_s
-        while time.monotonic() < deadline:
-            time.sleep(0.3)
-            if last_turn(device_id) > hushed:
-                return                          # his new ask: its answer is his
-            if self.talking(device_id, timeout=0.5) is True:
+        try:
+            while True:
+                with self._lock:
+                    hushed, deadline = self._guards[device_id]
+                    if time.monotonic() >= deadline or last_turn(device_id) > hushed:
+                        del self._guards[device_id]  # done, or his new ask: its answer is his
+                        return
+                time.sleep(0.3)
+                if self.talking(device_id, timeout=0.5) is not True:
+                    continue
+                with self._lock:
+                    hushed = self._guards[device_id][0]
+                if last_turn(device_id) > hushed:
+                    continue                    # he asked something new while HA answered
                 log.info("voice: %s started talking again after the stop, for nothing newer; stopped", device_id)
                 self.stop(device_id)
-                return
+        except Exception:
+            log.warning("voice: the guard on %s failed", device_id, exc_info=True)
+            with self._lock:
+                self._guards.pop(device_id, None)
 
 
 def satellite_voice_for(settings) -> SatelliteVoice | None:

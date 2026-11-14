@@ -172,10 +172,15 @@ class StoppedRequest(BaseModel):
     wake_word: str = Field(default="", max_length=64)
     state: str = Field(default="", max_length=32)
     changed_s: float | None = Field(default=None, ge=0)
+    # When HA got the wake word (epoch seconds): the hold dates from then, so an ask he began after it
+    # is never held, and a notice that arrives late is dropped (Codex 11/14).
+    at: float | None = Field(default=None, ge=0)
 
 
 #: an idle satellite that changed this recently was talking a moment ago: her name then was a stop
 JUST_STOPPED_S = 3.0
+#: a wake-word notice older than this is stale (HA and the rack are on one LAN, both on NTP)
+STOPPED_STALE_S = 10.0
 
 
 def _open_mic(settings, satellite: str) -> None:
@@ -680,7 +685,10 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             state == "idle" and body.changed_s is not None and body.changed_s <= JUST_STOPPED_S)
         if body.wake_word.strip().lower() != "stop" and not talking:
             return {"did": "nothing"}           # she was quiet: a new ask, its own turn
-        satellite_voice.guard(device, hush(device))
+        if body.at is not None and body.at < time.time() - STOPPED_STALE_S:
+            log.warning("voice: a stale stop notice for %s (%.0f s old); ignored", device, time.time() - body.at)
+            return {"did": "nothing", "why": "stale"}
+        satellite_voice.guard(device, hush(device, at=body.at))
         log.info("voice: the satellite on %s stopped her (%s); what's on its way is held",
                  device, body.wake_word.strip() or "a wake word")
         return {"did": "held"}

@@ -41,9 +41,10 @@ _HUSH_LOCK = threading.Lock()
 _TURN: contextvars.ContextVar[float | None] = contextvars.ContextVar("speaker_turn", default=None)
 
 
-def hush(device_id: str | None) -> float:
-    """Hush this speaker as of now; returns the time, for the speaker's own floor."""
-    now = time.time()
+def hush(device_id: str | None, at: float | None = None) -> float:
+    """Hush this speaker as of now, or as of an earlier moment (at: when a satellite heard the stop,
+    so a turn he began after it is never held); returns the time, for the speaker's own floor."""
+    now = time.time() if at is None else min(time.time(), at)
     if device_id:
         with _HUSH_LOCK:
             _HUSH_AT[str(device_id)] = max(_HUSH_AT.get(str(device_id), 0.0), now)
@@ -55,8 +56,10 @@ def hushed_at(device_id: str | None) -> float:
         return _HUSH_AT.get(str(device_id or ""), 0.0)
 
 
-#: when the latest voice turn began on each device (11/14: a satellite's second stop must spare his new ask)
+#: when the latest voice turn began on each device (11/14: a satellite's second stop must spare his new ask).
+#: Bounded: any authed /ask may name a device (Codex 11/14).
 _TURN_AT: dict[str, float] = {}
+TURN_AT_MAX = 256
 
 
 def turn_started(device_id: str | None = None) -> None:
@@ -66,6 +69,8 @@ def turn_started(device_id: str | None = None) -> None:
     if device_id:
         with _HUSH_LOCK:
             _TURN_AT[str(device_id)] = now
+            if len(_TURN_AT) > TURN_AT_MAX:
+                del _TURN_AT[min(_TURN_AT, key=_TURN_AT.get)]
 
 
 def last_turn(device_id: str | None) -> float:

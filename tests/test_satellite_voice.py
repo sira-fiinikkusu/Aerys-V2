@@ -34,9 +34,9 @@ class HA:
     """HA's side: the satellite's state, and its stop action (which quiets it unless told otherwise).
     after_stop: what reads return after the first stop, in order (a 500 for "fail"), then the state."""
 
-    def __init__(self, state="responding", stops=True, fail=False, after_stop=()):
+    def __init__(self, state="responding", stops=True, fail=False, after_stop=(), on_get=None):
         self.state, self.stops, self.fail, self.calls = state, stops, fail, []
-        self.after_stop, self.stopped = list(after_stop), 0
+        self.after_stop, self.stopped, self.on_get = list(after_stop), 0, on_get
 
     def client(self):
         ha = self
@@ -47,11 +47,11 @@ class HA:
                 return httpx.Response(500)
             if request.method == "POST":
                 ha.stopped += 1
-                if ha.stopped > 1:
-                    ha.after_stop = []
                 if ha.stops:
                     ha.state = "idle"
                 return httpx.Response(200, json=[])
+            if ha.on_get is not None:
+                ha.on_get()
             if ha.stopped and ha.after_stop:
                 state = ha.after_stop.pop(0)
                 return httpx.Response(500) if state == "fail" else httpx.Response(200, json={"state": state})
@@ -76,6 +76,7 @@ def test_responding_is_talking_quiet_states_are_quiet_and_the_rest_is_unknown():
     assert satellite(HA("listening")).talking("office") is False
     assert satellite(HA("unavailable")).talking("office") is None      # never guessed as quiet (Codex)
     assert satellite(HA(fail=True)).talking("office") is None
+    assert satellite(HA(state=[])).talking("office") is None           # an odd body is unknown, not a crash
     assert satellite(HA("responding")).talking("garage") is False
 
 
@@ -169,6 +170,33 @@ def test_a_follow_up_already_on_its_way_when_he_pressed_is_stopped_again(monkeyp
     assert r.json() == {"did": "hushed"} and ha.stopped == 2
 
 
+def test_the_guard_keeps_watch_through_its_window():
+    # two follow-ups were on their way: each is stopped, not just the first (Codex 11/14)
+    ha = HA("responding", after_stop=["idle", "responding", "idle", "responding", "idle"])
+    sv = satellite(ha, guard_s=1.5)
+    assert sv.stop("office") is True
+    sv.guard("office", sr.hush("office"))
+    assert ha.stopped == 3
+
+
+def test_one_guard_per_satellite_however_many_stops(monkeypatch):
+    import aerys_v2.satellite_voice as satv
+
+    started = []
+    monkeypatch.setattr(satv.threading, "Thread", lambda **kw: type("T", (), {"start": lambda self: started.append(1)})())
+    sv = SatelliteVoice(ha_base_url="http://ha", ha_token="t", satellites={"office": ENTITY}, client=HA().client())
+    for _ in range(20):
+        sv.guard("office", sr.hush("office"))
+    assert len(started) == 1
+
+
+def test_a_new_ask_that_lands_while_the_guard_reads_ha_is_spared():
+    ha = HA("responding", on_get=lambda: sr.turn_started("office"))
+    sv = satellite(ha)
+    sv.guard("office", sr.hush("office"))
+    assert ha.stopped == 0
+
+
 def test_the_second_stop_spares_the_answer_to_his_new_ask():
     ha = HA("responding")
     sv = satellite(ha)
@@ -208,6 +236,33 @@ def test_a_stop_the_satellite_heard_itself_holds_what_is_on_its_way(monkeypatch,
                                        "changed_s": changed_s}, headers=AUTH)
     assert r.json()["did"] == did
     assert (sr.hushed_at("office") > 0) is (did == "held")
+
+
+def test_the_hold_dates_from_when_the_satellite_heard_it(monkeypatch):
+    # a notice that lands after he began a new ask must not hold that ask (Codex 11/14)
+    route, posts = router(monkeypatch)
+    old = turn()
+    heard = sr.time.time()
+    new = turn()
+    c, _ = door(monkeypatch, satellite(HA("idle")))
+    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": "stop", "at": heard}, headers=AUTH)
+    assert r.json()["did"] == "held"
+    old.run(route, "the old turn's follow-up", "office")
+    new.run(route, "the answer to his new ask", "office")
+    assert [k["json"]["message"] for _, k in posts] == ["the answer to his new ask"]
+
+
+def test_a_stale_stop_notice_is_dropped(monkeypatch):
+    c, _ = door(monkeypatch, satellite(HA("idle")))
+    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": "stop", "at": sr.time.time() - 60},
+               headers=AUTH)
+    assert r.json()["did"] == "nothing" and sr.hushed_at("office") == 0
+
+
+def test_the_turn_table_stays_bounded():
+    for n in range(sr.TURN_AT_MAX + 50):
+        sr.turn_started(f"device-{n}")
+    assert len(sr._TURN_AT) == sr.TURN_AT_MAX and "device-0" not in sr._TURN_AT
 
 
 def test_the_stopped_door_only_holds_her_own_satellites(monkeypatch):
@@ -258,6 +313,14 @@ def test_a_follow_up_from_a_turn_he_stopped_is_never_announced(monkeypatch):
     sr.hush("office")
     old.run(route, "the flight search finished", "office")
     assert posts == []
+
+
+def test_her_follow_up_still_leaves_through_the_context_handoff():
+    # the floor needs the turn's context in the follow-up thread; keep service.py handing it over
+    import inspect
+
+    from aerys_v2 import service
+    assert "threading.Thread(target=_in_ctx(_complete_action)" in inspect.getsource(service)
 
 
 def test_the_real_follow_up_thread_carries_the_turn_it_came_from(monkeypatch):
