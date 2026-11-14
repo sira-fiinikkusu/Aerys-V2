@@ -27,12 +27,14 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
+from urllib.parse import quote
 from typing import Any, Callable
 
 import httpx
 from langchain_core.tools import tool
+from langgraph.prebuilt import ToolRuntime
 
 log = logging.getLogger(__name__)
 
@@ -344,6 +346,87 @@ def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250,
     return out
 
 
+#: D47 (11/14): her read of a sensor is the whole reading, the way Kael reads it: units, class and the
+#: attributes, not just the bare state ("172" with no "min" was all she got). Light/display noise and
+#: oversized values stay out; whereabouts never come along (the 11/02 location ruling: precise position
+#: only when he asks for something nearby): trackers, people, zones and geocoded sensors keep today's
+#: state-only read, and any other attribute shaped like a location is dropped.
+_DETAIL_SKIP = frozenset({"friendly_name", "icon", "entity_picture", "supported_features", "supported_color_modes",
+                          "rgb_color", "hs_color", "xy_color", "brightness", "color_mode", "attribution",
+                          "restored", "editable", "id", "options", "effect"})
+DETAIL_MAX = 1500                 # characters of attributes per entity
+_WHEREABOUTS_DOMAINS = ("device_tracker.", "person.", "zone.")
+HISTORY_MAX_HOURS = 168
+HISTORY_POINTS = 48
+
+
+def whereabouts(entity_id: str) -> bool:
+    return entity_id.startswith(_WHEREABOUTS_DOMAINS) or "geocoded" in entity_id or "location" in entity_id
+
+
+def private_entity(entity_id: str, prefixes: tuple[str, ...]) -> bool:
+    """One of his own phone/watch readings (HA_PRIVATE_ENTITIES prefixes, kept out of this public repo)."""
+    return any(entity_id.startswith(p) for p in prefixes if p)
+
+
+def reading_details(entity_id: str, data: dict) -> dict:
+    from aerys_v2.services.location_guard import location_shaped
+
+    attrs = data.get("attributes") or {}
+    out: dict = {}
+    for key in ("unit_of_measurement", "device_class", "state_class"):
+        if attrs.get(key) is not None:
+            out[key] = attrs[key]
+    if data.get("last_updated"):
+        out["last_updated"] = data["last_updated"]
+    if whereabouts(entity_id):
+        return out
+    extra: dict = {}
+    size = 0
+    for key, value in attrs.items():
+        if key in _DETAIL_SKIP or key in out or key.endswith("_list"):
+            continue
+        if isinstance(value, (list, tuple)):
+            value = list(value)[:10]
+        elif isinstance(value, dict) or not isinstance(value, (str, int, float, bool, type(None))):
+            value = str(value)[:200]
+        elif isinstance(value, str):
+            value = value[:200]
+        if location_shaped(f"{key}: {value}") or location_shaped(str(value)):
+            continue
+        size += len(str(key)) + len(str(value))
+        if size > DETAIL_MAX:
+            extra["more"] = "further attributes left out (size)"
+            break
+        extra[key] = value
+    if extra:
+        out["attributes"] = extra
+    return out
+
+
+def history_points(rows: list, now: datetime) -> list[list[str]]:
+    """HA history rows -> [[local time, state], ...]: dead and repeated states dropped, thinned evenly to
+    HISTORY_POINTS (the first and last kept)."""
+    from aerys_v2.hands_gate import EASTERN
+
+    points: list[list[str]] = []
+    last = None
+    for row in rows:
+        state = str(row.get("state"))
+        if state in DEAD_STATES or state == last:
+            continue
+        at = datetime.fromisoformat(str(row.get("last_changed")).replace("Z", "+00:00")).astimezone(EASTERN)
+        label = at.strftime("%I:%M %p").lstrip("0")
+        if at.date() != now.astimezone(EASTERN).date():
+            label = f"{at.strftime('%a')} {label}"
+        points.append([label, state])
+        last = state
+    if len(points) > HISTORY_POINTS:
+        step = (len(points) - 1) / (HISTORY_POINTS - 1)
+        points = [points[round(i * step)] for i in range(HISTORY_POINTS)]
+    return points
+
+
 def build_home_control_tool(
     *,
     base_url: str,
@@ -352,6 +435,9 @@ def build_home_control_tool(
     client: httpx.Client | None = None,
     conn_factory: ConnFactory | None = None,
     aliases: dict[str, tuple[str, ...]] | None = None,
+    private_entities: tuple[str, ...] = (),
+    owner_person_id: str | None = None,
+    clock: Callable[[], datetime] | None = None,
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -437,8 +523,9 @@ def build_home_control_tool(
     def _resolve_targets(raw: str, op: str) -> tuple[list[str], str | None]:
         return resolve_targets(raw, op, canary_entities, aliases)
 
-    def _read_state(entity: str) -> dict | str:
-        """GET one entity's state: a dict, or an honest error STRING."""
+    def _read_state(entity: str, full: bool = False) -> dict | str:
+        """GET one entity's state: a dict, or an honest error STRING. full: the whole reading (her own
+        get_state, D47); the write path's read-backs only need the state."""
         try:
             r = _get_with_retry(http, f"{base}/api/states/{entity}", headers)
             if r.status_code == 404:
@@ -476,12 +563,65 @@ def build_home_control_tool(
                 out["color_capable"] = bool(COLOR_MODES & set(attrs["supported_color_modes"]))
             if attrs.get("rgb_color") is not None:
                 out["rgb_color"] = list(attrs["rgb_color"])
+            if full:
+                out.update(reading_details(entity, data))
             return out
         except httpx.HTTPError as e:
             return f"Home Assistant is unreachable right now ({e})."
         except (ValueError, TypeError) as e:
             # Malformed JSON / odd attribute types: honest string, never a raise.
             return f"Home Assistant returned an unreadable reply for {entity} ({e})."
+
+    def _private_refusal(targets: list[str], runtime) -> str | None:
+        """D47: his own phone and watch readings only come to him: his DM or typed line, a voice she's
+        sure is his, his glasses or his own wake-up, never a room others read."""
+        if not any(private_entity(e, private_entities) for e in targets):
+            return None
+        from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read, runtime_identity
+
+        identity, thread = runtime_identity(runtime)
+        why = his_private_read(identity, thread, owner_person_id)
+        if why is None:
+            return None
+        if why == SHARED:
+            return ("Couldn't read that here: it's one of his own phone or watch readings, and others can read "
+                    "this room. Ask me in a DM, or by voice.")
+        if why == NOT_HIM:
+            return "Couldn't read that: it's one of his own phone or watch readings, for him only."
+        return ("Couldn't read that: his phone and watch readings are for him, and I'm not sure it's him. "
+                "Type it to me, or ask again when I know your voice.")
+
+    def _history(entity: str, hours: int | None) -> dict | str:
+        """How a reading moved over the last few hours: changes only, in his clock, thinned to a page."""
+        if whereabouts(entity):
+            return f"No history for {entity}: where he's been is never read back as a trail."
+        span = max(1, min(int(hours or 24), HISTORY_MAX_HOURS))
+        now = (clock or (lambda: datetime.now(timezone.utc)))()
+        start = quote((now - timedelta(hours=span)).isoformat())
+        try:
+            r = _get_with_retry(
+                http, f"{base}/api/history/period/{start}?filter_entity_id={quote(entity)}"
+                      "&minimal_response&no_attributes&significant_changes_only", headers)
+            r.raise_for_status()
+            body = r.json()
+            rows = body[0] if isinstance(body, list) and body and isinstance(body[0], list) else []
+            current = _read_state(entity, full=True)
+        except httpx.HTTPError as e:
+            return f"Home Assistant is unreachable right now ({e})."
+        except (ValueError, TypeError, IndexError) as e:
+            return f"Home Assistant returned an unreadable history for {entity} ({e})."
+        try:
+            points = history_points(rows, now)
+        except (ValueError, TypeError) as e:
+            return f"Home Assistant returned an unreadable history for {entity} ({e})."
+        out = {"entity_id": entity, "hours": span, "changes": points}
+        if isinstance(current, dict):
+            for key in ("friendly_name", "unit_of_measurement", "device_class"):
+                if current.get(key) is not None:
+                    out[key] = current[key]
+        if not points:
+            out["note"] = "no recorded changes in that span"
+        return out
 
     def _desired_phrase(op: str, pct: int | None, color: str | None = None) -> str:
         if op == "turn_off":
@@ -551,7 +691,7 @@ def build_home_control_tool(
     @tool
     def home_control(
         operation: str, entity_id: str, brightness_pct: int | None = None,
-        color: str | None = None,
+        color: str | None = None, hours: int | None = None, runtime: ToolRuntime = None,
     ) -> str:
         """Control or inspect the smart home via Home Assistant.
 
@@ -559,8 +699,13 @@ def build_home_control_tool(
         toggle a device, dim/brighten a light, change a light's COLOR, or asks
         whether a light/switch is currently on or what color it is.
 
-        operation: one of "get_state", "turn_on", "turn_off", "toggle",
-        "set_brightness", "set_color".
+        operation: one of "get_state", "history", "turn_on", "turn_off", "toggle",
+        "set_brightness", "set_color". get_state returns the whole reading: state,
+        unit, device class, when it last updated and its attributes. history shows
+        how a reading moved over the last `hours` (default 24, up to 168): its
+        changes in his clock, for trends like how a night's sleep or a heart rate
+        went. His own phone and watch readings answer only to him in his own rooms
+        (a DM, his voice, his glasses); elsewhere the tool says so.
         entity_id: WHAT to control — any ONE of:
           - an exact entity id ("light.office_lamp", "switch.desk_fan");
           - a comma-separated list of exact ids (one call controls them all);
@@ -591,14 +736,23 @@ def build_home_control_tool(
         in the requested state — say that plainly.
         """
         op = operation.strip().lower()
-        targets, problem = _resolve_targets(entity_id, op)
+        targets, problem = _resolve_targets(entity_id, "get_state" if op == "history" else op)
         if problem:
             return problem
         label = ", ".join(targets)
 
-        # ---- reads: unrestricted (looking can't break anything) -------------
+        # ---- reads: anything, except his own phone/watch readings outside his own rooms (D47) ----
+        if op in ("get_state", "history"):
+            refusal = _private_refusal(targets, runtime)
+            if refusal:
+                return refusal
         if op == "get_state":
-            results = [_read_state(e) for e in targets]
+            results = [_read_state(e, full=True) for e in targets]
+            if len(results) == 1:
+                return results[0] if isinstance(results[0], str) else json.dumps(results[0])
+            return json.dumps(results)
+        if op == "history":
+            results = [_history(e, hours) for e in targets]
             if len(results) == 1:
                 return results[0] if isinstance(results[0], str) else json.dumps(results[0])
             return json.dumps(results)
@@ -606,7 +760,7 @@ def build_home_control_tool(
         if op not in WRITE_OPS:
             return (
                 f"Unknown operation '{operation}'. "
-                "Valid operations: get_state, turn_on, turn_off, toggle, set_brightness, set_color."
+                "Valid operations: get_state, history, turn_on, turn_off, toggle, set_brightness, set_color."
             )
 
         # ---- writes: domain gate, then canary gate — over EVERY target -------
@@ -804,6 +958,8 @@ def build_search_entities_tool(
     base_url: str,
     token: str,
     client: httpx.Client | None = None,
+    private_entities: tuple[str, ...] = (),
+    owner_person_id: str | None = None,
 ):
     """Close over the config and return the READ-ONLY entity discovery tool.
 
@@ -819,7 +975,7 @@ def build_search_entities_tool(
     http = client or httpx.Client(timeout=10.0)
 
     @tool
-    def search_entities(query: str) -> str:
+    def search_entities(query: str, runtime: ToolRuntime = None) -> str:
         """Find Home Assistant entity ids by name. READ-ONLY — never changes anything.
 
         Call this BEFORE home_control's get_state when you lack the exact
@@ -827,6 +983,7 @@ def build_search_entities_tool(
         give home_control the room or device name directly — no search) —
         i.e. whenever the user names a device colloquially:
         a car name ("jolteon"), a sensor ("office temperature"), a person's phone,
+        his watch or phone health readings ("heart rate", "steps", "sleep"),
         a nickname. NEVER guess an entity id — guesses 404; searching works.
 
         query: one or more words to match, e.g. "jolteon battery" or
@@ -918,8 +1075,19 @@ def build_search_entities_tool(
             )
         picked = (live or scored)[:SEARCH_LIMIT]
 
+        # D47: his own phone/watch readings show their names (she still needs the id) but not their
+        # values outside his own rooms; get_state says why.
+        hide = False
+        if private_entities and any(private_entity(e, private_entities) for _, e, _, _ in picked):
+            from aerys_v2.rooms import his_private_read, runtime_identity
+
+            identity, thread = runtime_identity(runtime)
+            hide = his_private_read(identity, thread, owner_person_id) is not None
         lines = []
         for _, entity, friendly, item in picked:
+            if hide and private_entity(entity, private_entities):
+                lines.append(f"{entity} | {friendly or '(no name)'} | (his own reading: not here)")
+                continue
             state = str(item.get("state"))
             if len(state) > STATE_TRUNCATE_AT:
                 state = state[:STATE_TRUNCATE_AT] + "…"

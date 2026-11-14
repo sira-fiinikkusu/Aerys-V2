@@ -2273,6 +2273,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             room_aliases as _room_aliases,
         )
 
+        private_entities = tuple(p.strip() for p in settings.ha_private_entities.split(",") if p.strip())
         conn_factory = None
         if settings.database_url is not None:
             import psycopg
@@ -2289,12 +2290,16 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                 canary_entities=canary_set(settings.ha_canary_entities),
                 conn_factory=conn_factory,
                 aliases=_room_aliases(settings.ha_room_aliases),
+                private_entities=private_entities,
+                owner_person_id=str(settings.owner_person_id or ""),
             )
         )
         tools.append(
             build_search_entities_tool(
                 base_url=settings.ha_base_url,
                 token=settings.ha_token.get_secret_value(),
+                private_entities=private_entities,
+                owner_person_id=str(settings.owner_person_id or ""),
             )
         )
         # The timer tool rides the same HA door (base_url + token) as home_control
@@ -2598,11 +2603,6 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
 
         tools.extend(gmail_tools_for(settings))
 
-    if not guest and settings.ha_token is not None and settings.ha_sleep_sensors:
-        # His sleep (his ask 11/13: "the same full view of me"): read-only, to him only.
-        from aerys_v2.tools.his_sleep import build_his_sleep_tool
-
-        tools.append(build_his_sleep_tool(settings))
 
     if not guest and settings.email_app_password is not None and settings.email_address:
         # EMAIL (her own mailbox, 2026-07-11 scope) — owner-side only, like HOME:

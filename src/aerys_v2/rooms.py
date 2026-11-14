@@ -26,6 +26,25 @@ def on_his_face(identity) -> bool:
     return str(ident.get("surface") or "") == LENS_SURFACE
 
 
+NOT_HIM, SHARED, UNSURE = "not him", "shared", "unsure"
+
+
+def his_private_read(identity, thread: str, owner: str | None) -> str | None:
+    """May she read one of his own private things (his phone and watch readings) into this turn?
+    None = yes: his typed line or a voice she's sure is his, his glasses, or his own wake-up, in a room
+    that's only his. Otherwise why not (NOT_HIM, SHARED, UNSURE), so the tool can say so plainly."""
+    from aerys_v2.hands_gate import OWNER_ASK, OWNER_TEXT, OWNER_VOICE, asker
+
+    ident = identity if isinstance(identity, dict) else {}
+    if not owner or str(ident.get("user_id") or "") != str(owner) or str(thread or "").startswith("kael:"):
+        return NOT_HIM
+    if shared_room(ident):
+        return SHARED
+    who = asker(ident, thread, owner)
+    own_line = who == OWNER_ASK and (on_his_face(ident) or str(ident.get("platform") or "") == "wake")
+    return None if who in (OWNER_TEXT, OWNER_VOICE) or own_line else UNSURE
+
+
 def runtime_identity(runtime) -> tuple[dict, str]:
     """(identity, thread_id) from a tool's injected runtime; empty when there is none."""
     conf = (getattr(runtime, "config", None) or {}).get("configurable") or {}
