@@ -5,7 +5,7 @@ never ride along. Placeholder ids only."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -285,3 +285,14 @@ def test_a_position_past_the_clip_or_the_thinning_still_refuses_the_whole_histor
 def test_a_missing_history_state_is_unreadable_not_none(row):
     out = read(places_tool([[row]]), "sensor.phone_battery", op="history")
     assert isinstance(out, str) and "unreadable history" in out
+
+
+def test_a_week_long_history_asks_ha_for_the_whole_week():
+    # without end_time HA stops one day after the start: a week came back as its oldest day (11/14)
+    from urllib.parse import parse_qs, unquote, urlparse
+    calls = []
+    read(tool(calls), "sensor.office_temperature", op="history", hours=168)
+    url = urlparse(next(c for c in calls if "/api/history/period/" in c))
+    start = datetime.fromisoformat(unquote(url.path.rsplit("/", 1)[-1]))
+    end = datetime.fromisoformat(parse_qs(url.query)["end_time"][0])
+    assert end - start == timedelta(hours=168) and end == NOW
