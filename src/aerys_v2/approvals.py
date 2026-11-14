@@ -84,20 +84,22 @@ class MemoryApprovalStore:
         self._decision_lock = threading.Lock()
 
     def request(self, kind, summary, detail, now, expires_at, key, approvers=None):
-        for r in self.rows.values():
-            if r.request_key == key:
-                return r, False
-        a = Approval(self._next, kind, summary, detail, now, expires_at, request_key=key, approvers=approvers)
-        self.rows[a.id] = a
-        self._next += 1
-        return a, True
+        with self._decision_lock:
+            for r in self.rows.values():
+                if r.request_key == key:
+                    return r, False
+            a = Approval(self._next, kind, summary, detail, now, expires_at, request_key=key, approvers=approvers)
+            self.rows[a.id] = a
+            self._next += 1
+            return a, True
 
     def get(self, approval_id):
         return self.rows.get(approval_id)
 
     def pending(self, now):
-        return sorted((r for r in self.rows.values() if r.status == "pending" and r.expires_at > now),
-                      key=lambda r: r.id)
+        with self._decision_lock:
+            return sorted((r for r in self.rows.values() if r.status == "pending" and r.expires_at > now),
+                          key=lambda r: r.id)
 
     def pinged(self, approval_id, now):
         self.rows[approval_id].pinged_at = now

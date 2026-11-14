@@ -68,7 +68,7 @@ def test_unknown_name_asks_without_sending_or_approval(voice):
     b.gate.people = lambda *a: []
     result = call(sender, to='Unknown Person', identity={**TEXT, 'voice': voice})
     if voice:
-        assert result == "NOT DONE: I heard a name that doesn't match anyone I know; ask him who he means."
+        assert result == "Not sent: I heard a name that doesn't match anyone I know; ask him who he means."
     else:
         assert result == "Not sent: I don't know who Discord Unknown Person is. Ask Chris who it is before sending anything."
     assert not sent and not ledger.rows and not b.approval_store.rows
@@ -77,7 +77,7 @@ def test_unknown_name_asks_without_sending_or_approval(voice):
 def test_legacy_voice_unknown_name():
     b, sender, sent, ledger = setup()
     b.gate.people = lambda *a: []
-    assert sender.send('Unknown Person', 'hello', 'discord', TEXT, 'voice:test', ()).startswith('NOT DONE: I heard a name')
+    assert sender.send('Unknown Person', 'hello', 'discord', TEXT, 'voice:test', ()).startswith('Not sent: I heard a name')
     assert not sent and not ledger.rows and not b.approval_store.rows
 
 

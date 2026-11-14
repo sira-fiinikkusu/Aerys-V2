@@ -240,7 +240,7 @@ class MessageSender:
             destinations = {(str(p['person_id']), str(p.get('address') or '').strip()): p
                             for p in matches or [] if p.get('person_id')}
             if not destinations and is_voice_turn(identity, thread):
-                return "NOT DONE: I heard a name that doesn't match anyone I know; ask him who he means."
+                return "Not sent: I heard a name that doesn't match anyone I know; ask him who he means."
             if len(destinations) == 1:
                 (pid, address), = destinations
                 if pid not in self.people and pid != str(self.gate.owner):
