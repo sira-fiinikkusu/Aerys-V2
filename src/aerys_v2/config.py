@@ -670,6 +670,11 @@ class Settings(BaseSettings):
     # single-satellite behavior) — never a silent drop. Same CSV convention as
     # ha_canary_entities.
     ha_satellite_map: str = ""
+    # csv of "night=sensor…,last=sensor…,now=sensor…": the owner's sleep as his phone reports it to HA
+    # (his ask 11/13: "the same full view of me"). night = last night's total (attrs sessions, last_end);
+    # last = the latest stretch (attrs startTime, endTime); now = how sure the phone is he's asleep (%).
+    # Any key may be missing; empty = her his_sleep tool isn't built.
+    ha_sleep_sensors: str = ""
     # csv of "device_id=domain.service" pairs for SPEAKERLESS voice devices
     # (e-ink displays): a follow-up for a mapped device is WRITTEN to its
     # screen via that HA service (an ESPHome user action, e.g.
