@@ -7,6 +7,7 @@ from functools import lru_cache
 import json
 from pathlib import Path
 import re
+import threading
 from types import SimpleNamespace
 
 import yaml
@@ -75,6 +76,11 @@ class FreshSkillsMiddleware(SkillsMiddleware):
         return await super().abefore_agent({**state, "skills_metadata": None}, runtime, config)
 
 
+#: one skill write at a time in this process: her parallel tool calls and the approved replay share it.
+#: Two containers writing the same skill in the same instant would still race; that is not a case she has.
+_WRITE_LOCK = threading.Lock()
+
+
 class OwnerSkillWrites(AgentMiddleware):
     def __init__(self, owner, backend):
         self.owner = owner
@@ -111,12 +117,32 @@ class OwnerSkillWrites(AgentMiddleware):
         return None
 
     def wrap_tool_call(self, request, handler):
-        refused = self.refusal(request)
-        return refused if refused is not None else handler(request)
+        if request.tool_call['name'] not in WRITE_TOOLS:
+            return handler(request)
+        # Check and write as one step: two edits validated against the same snapshot could
+        # otherwise combine into a file neither would pass (Codex 11/14 second pass).
+        with _WRITE_LOCK:
+            refused = self.refusal(request)
+            return refused if refused is not None else handler(request)
 
     async def awrap_tool_call(self, request, handler):
-        refused = self.refusal(request)
-        return refused if refused is not None else await handler(request)
+        if request.tool_call['name'] not in WRITE_TOOLS:
+            return await handler(request)
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                      # driven without a loop (tests): nothing else can run
+            loop = None
+        if loop is None:
+            _WRITE_LOCK.acquire()
+        else:                                     # never block the loop: another write may hold the lock
+            await loop.run_in_executor(None, _WRITE_LOCK.acquire)
+        try:
+            refused = self.refusal(request)
+            return refused if refused is not None else await handler(request)
+        finally:
+            _WRITE_LOCK.release()
 
 
 def skills_middleware(store, owner_person_id):

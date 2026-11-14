@@ -539,3 +539,37 @@ def test_the_mark_comes_from_this_turns_reading_never_from_earlier_marks():
     assert _action_reply('today', quiet, [earlier, read_now]).additional_kwargs == {'outside_read': True}
     held = {'configurable': {'outside_text': {'outside_read': True}}}
     assert _action_reply('a failed read still counts', held).additional_kwargs == {'outside_read': True}
+
+
+def test_two_edits_at_once_cannot_combine_into_a_file_neither_would_pass():
+    # Codex 11/14 second pass: both validated against one snapshot, then both applied
+    import threading
+    from types import SimpleNamespace as _NS
+    from aerys_v2 import skills as sk
+    store = InMemoryStore()
+    path = '/skills/sample/SKILL.md'
+    sk.backend_for(store).write(path, '---\nname: sample\ndescription: A sample workflow\n---\nGeneric workflow\n---\n')
+    middleware = sk.skills_middleware(store, OWNER)
+    ident = {'user_id': OWNER, 'platform': 'discord', 'privacy_context': 'private', 'channel_kind': 'dm'}
+    edits = [{'file_path': path, 'old_string': 'Generic workflow', 'new_string': 'Account 123456789012345678'},
+             {'file_path': path, 'old_string': 'description: A sample workflow\n---\n', 'new_string': 'description: '}]
+    gate = threading.Barrier(2)
+    real_refusal = sk.OwnerSkillWrites.refusal
+
+    def slow_refusal(self, request):
+        verdict = real_refusal(self, request)
+        try:
+            gate.wait(timeout=0.5)           # without the lock both checks pass before either write
+        except threading.BrokenBarrierError:
+            pass
+        return verdict
+    sk.OwnerSkillWrites.refusal = slow_refusal
+    try:
+        threads = [threading.Thread(target=sk.approved_write, args=(middleware, _NS(
+            thread_id='person:owner', args={'tool': 'edit_file', 'identity': ident, 'tool_args': e}))) for e in edits]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+    finally:
+        sk.OwnerSkillWrites.refusal = real_refusal
+    stored = sk.backend_for(store).download_files([path])[0].content.decode('utf-8')
+    sk.validate_skill('sample', stored)                  # whatever landed still passes
