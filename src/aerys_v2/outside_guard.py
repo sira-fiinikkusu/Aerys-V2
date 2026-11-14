@@ -17,7 +17,7 @@ READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_docum
 # draft_in_his_gmail is deliberately absent: a draft reaches no one; the owner
 # reviews and sends it himself. It is also absent from action_executor's allowed set.
 REACH_OUT = frozenset({'send_message', 'send_email', 'start_async_task', 'update_async_task', 'message_kael',
-                      'sticky_note', 'log_gap', 'control_alarm', 'remember', 'save_contact_email'})
+                      'sticky_note', 'log_gap', 'control_alarm', 'remember', 'save_contact_email', 'write_file', 'edit_file'})
 #: D29 #1 (2026-11-11): her own home jobs' results are trusted for her notes and for asking Kael;
 #: sending to people and starting or changing jobs after them still waits for his tap.
 HOME_JOB_READERS = frozenset({'check_async_task', 'list_async_tasks'})
@@ -182,12 +182,17 @@ def outside_middleware(gate=None):
     return OutsideTextGuard()
 
 
-def action_executor(tools):
+def action_executor(tools, *, skill_middleware=None):
     """The watcher invokes only the exact registered tool and args shown on his button."""
     allowed = {t.name: t for t in tools if t.name in REACH_OUT - {
         'send_message', 'start_async_task', 'update_async_task'} or t.name == 'kael_tickets'}
 
     def execute(row):
+        if skill_middleware is not None and row.args.get('tool') in ('write_file', 'edit_file'):
+            from aerys_v2.skills import approved_write
+            result = approved_write(skill_middleware, row)
+            prefixes = {'write_file': ('Updated file ',), 'edit_file': ('Successfully replaced ',)}
+            return result.content.startswith(prefixes[row.args['tool']]), result.content
         tool = allowed.get(row.args.get('tool'))
         if tool is None:
             return False, 'Not done: the approved tool is unavailable.'

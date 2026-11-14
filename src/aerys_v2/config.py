@@ -249,6 +249,7 @@ class Settings(BaseSettings):
     # MUST target `aerys_v2`, never prod `aerys` — run_boot_assertions() below
     # refuses to start otherwise (the two-database footgun, made unbootable).
     database_url: str | None = None
+    her_skills: bool = False
 
     # ---- MEMORY-RETRIEVAL block (long-term context) --------------------------
     # None = memory context OFF. Points at the PROD aerys database (memories/

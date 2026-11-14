@@ -2730,11 +2730,17 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     if home_jobs is not None:
         overlay = "\n\n".join(part for part in (overlay, home_jobs.overlay) if part)
         extra["extra_middleware"] = home_jobs.middleware
+    skill_layers = None
+    if settings.her_skills and settings.database_url:
+        from aerys_v2.skills import skills_middleware, store_for
+
+        skill_layers = skills_middleware(store_for(settings), settings.owner_person_id)
+        extra["extra_middleware"] = [*extra.get("extra_middleware", ()), *skill_layers]
     from aerys_v2.hands_gate import hands_gate_for, HandsWatcher
     from aerys_v2.outside_guard import OUTSIDE_ACTION, action_executor
     outside_gate = home_jobs.gate if home_jobs is not None else hands_gate_for(settings)
     if outside_gate is not None:
-        outside_gate.executors[OUTSIDE_ACTION] = action_executor(tools)
+        outside_gate.executors[OUTSIDE_ACTION] = action_executor(tools, skill_middleware=skill_layers)
     extra.update(outside_gate=outside_gate, guard_owner=str(settings.owner_person_id or ""))
     action_graph = build(
         models,
