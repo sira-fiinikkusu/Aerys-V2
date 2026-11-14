@@ -371,9 +371,17 @@ _PLACE_WORDS = frozenset({"lat", "latitude", "lon", "lng", "long", "longitude", 
                           "heading", "place", "city", "country", "region", "zone", "position"})
 
 
+#: long place words caught anywhere inside a key part ("gpslatitude", "homeaddress"): specific enough
+#: that no health key holds one (Codex 11/14: GPSLatitude)
+_PLACE_INSIDE = ("latitude", "longitude", "address", "location", "coordinate", "geocode", "altitude",
+                 "thoroughfare", "locality", "postal")
+
+
 def _place_key(key: str) -> bool:
-    words = re.split(r"[^a-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", key).lower())
-    return any(w in _PLACE_WORDS for w in words)
+    split = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)          # GPSLatitude -> GPS_Latitude
+    split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", split)             # homeAddress -> home_Address
+    words = re.split(r"[^a-z0-9]+", split.lower())
+    return any(w in _PLACE_WORDS or any(p in w for p in _PLACE_INSIDE) for w in words)
 
 
 PRECISE_PLACE = ("That's his precise location. It's only read through where_is_chris_nearby, when he asks "

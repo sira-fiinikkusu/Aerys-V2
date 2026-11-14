@@ -264,7 +264,8 @@ def test_history_hours_are_bounded_and_zero_means_one(hours, span):
 def test_health_keys_stay_and_place_keys_go_by_word_not_by_letters():
     from aerys_v2.tools.home_control import reading_details
     attrs = {"sleep_latency": 18, "platelet_count": 250, "latest_sample": 64, "duration": 420,
-             "gps_latitude": 1, "latitude": 2, "homeAddress": "x", "Location Name": "y", "geocoded": "z"}
+             "gps_latitude": 1, "latitude": 2, "homeAddress": "x", "Location Name": "y", "geocoded": "z",
+             "GPSLatitude": 26.951234, "GPSLongitude": -82.351234, "gpslatitude": 3, "HOMEADDRESS": "w"}
     assert reading_details("sensor.sleep", {"attributes": attrs})["attributes"] == {
         "sleep_latency": 18, "platelet_count": 250, "latest_sample": 64, "duration": 420}
 
