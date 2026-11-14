@@ -1676,11 +1676,17 @@ EMAIL_OVERLAY = (
 # office light on?' — the router acked 'off', then this subgraph, seeing both
 # 'off' and 'on', ASKED 'did you mean on or off?'. The question was announced to
 # a one-way satellite the user can't answer, contradicting the ack already
-# spoken. Rule: on this path, resolve garble toward the ack; never ask.
+# spoken. Resolve garble toward the ack, except unknown recipients must be clarified.
+VOICE_RECIPIENT_RULE = (
+    "Voice transcription can mishear names. If a heard name matches no one you know, "
+    "ask who he meant before sending anything, even after a spoken acknowledgment. "
+    "Never substitute another person or guess a recipient from a similar-sounding name. "
+)
+
 VOICE_ACK_OVERLAY = (
     "This command arrived by VOICE and the user was ALREADY told, out loud: "
     "{ack!r}. This channel is one-way — the user cannot hear or answer a "
-    "question from you, so NEVER ask a clarifying question. Speech-to-text "
+    "question from you, so NEVER ask a clarifying question except for an unknown recipient. Speech-to-text "
     "sometimes garbles a word (e.g. 'one' heard as 'on'); if the wording looks "
     "slightly off or self-contradictory, execute the reading consistent with "
     "that spoken acknowledgment. If a search on the words you heard finds nothing AND those "
@@ -1691,7 +1697,8 @@ VOICE_ACK_OVERLAY = (
     "unsafe, call no_action with the problem stated in one plain sentence. "
     "Your answer is SPOKEN aloud after that acknowledgment: keep it to two or three "
     "sentences, the answer first, as plain speech; never lists, headings, links or "
-    "markdown. If there is more worth knowing, say so in one short line and stop."
+    "markdown. If there is more worth knowing, say so in one short line and stop. "
+    + VOICE_RECIPIENT_RULE
 )
 
 
@@ -1717,7 +1724,8 @@ VOICE_BANTER_OVERLAY = (
     "tools in hand: use one when the request "
     "actually needs it (a device, a message, a search, a timer), and just "
     "talk when it doesn't — most conversation needs no tool at all. Never "
-    "claim you did something a tool didn't actually do."
+    "claim you did something a tool didn't actually do. "
+    + VOICE_RECIPIENT_RULE
 )
 
 

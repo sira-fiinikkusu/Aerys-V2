@@ -520,7 +520,7 @@ from aerys_v2.service import _honest_reply_for_failure  # noqa: E402
 
 def test_recursion_rail_becomes_an_honest_line():
     line = _honest_reply_for_failure(GraphRecursionError("Recursion limit of 10 reached"))
-    assert line and "went in circles" in line
+    assert line and "ran out of steps before finishing" in line
     assert _honest_reply_for_failure(RuntimeError("boom")) is None  # other classes unchanged
 
 

@@ -557,14 +557,13 @@ def _reclassify_if_needed(
 class Rails:
     """Per-request safety limits (cross-review #13) — enforced at the seam, not by prompts.
 
-    turn_limit went live with the TOOLS block: with tools wired, a confused model
-    can loop tool-call → result → tool-call forever; the rail (as LangGraph's
-    recursion_limit) makes the 10th hop a hard stop instead of an Opus-budget
-    incineration.
+    turn_limit bounds LangGraph super-steps: owner turns default to 60.
+    ask() caps non-owner turns at 10, including allowlisted guests and callers
+    without a configured owner. The wall-clock budget is independent.
     """
 
     wall_clock_s: float = 90.0
-    turn_limit: int = 10
+    turn_limit: int = 60
 
 
 class TurnTimeout(RuntimeError):
@@ -1127,8 +1126,8 @@ def _honest_reply_for_failure(exc: BaseException) -> str | None:
     reply. The rail is doing its job; the caller still deserves a sentence."""
     if isinstance(exc, GraphRecursionError):
         return (
-            "I went in circles on that one and stopped myself — the reading never "
-            "came together. Ask me again in a moment, or tell me which device to look at."
+            "I ran out of steps before finishing that one. "
+            "Ask me again, or narrow it down a little."
         )
     return rate_limit_reply(str(exc) or type(exc).__name__)
 
@@ -1254,6 +1253,12 @@ def ask(
         if action_graph is None:
             router = None
 
+    # The action allowlist can include guests; only the configured owner gets 60.
+    from aerys_v2 import factory
+
+    owner_turn = bool(factory._OWNER_ID) and identity.get("user_id") == factory._OWNER_ID
+    step_limit = rails.turn_limit if owner_turn else min(rails.turn_limit, 10)
+
     started = time.monotonic()
     # A mutable holder the graph writes into and the audit row reads back out.
     # `configurable` is the existing per-call channel and LangGraph copies it
@@ -1265,7 +1270,7 @@ def ask(
     config = {
         "configurable": {"thread_id": thread_id, "identity": identity,
                          "room_sink": room_sink, "outside_text": {}},
-        "recursion_limit": rails.turn_limit,
+        "recursion_limit": step_limit,
     }
 
     with _turn_span(str(thread_id), text):

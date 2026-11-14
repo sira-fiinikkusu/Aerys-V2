@@ -13,6 +13,7 @@ from langgraph.prebuilt import ToolRuntime
 
 from aerys_v2.hands_gate import MESSAGE
 from aerys_v2.outside_guard import sources_for
+from aerys_v2.state import is_voice_turn
 
 log = logging.getLogger(__name__)
 WINDOW = timedelta(minutes=10)
@@ -238,6 +239,8 @@ class MessageSender:
             matches = self.gate.people('discord', str(to).strip().lstrip('@'))
             destinations = {(str(p['person_id']), str(p.get('address') or '').strip()): p
                             for p in matches or [] if p.get('person_id')}
+            if not destinations and is_voice_turn(identity, thread):
+                return "NOT DONE: I heard a name that doesn't match anyone I know; ask him who he means."
             if len(destinations) == 1:
                 (pid, address), = destinations
                 if pid not in self.people and pid != str(self.gate.owner):
