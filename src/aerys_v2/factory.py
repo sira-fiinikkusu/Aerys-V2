@@ -2484,6 +2484,12 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             settings, send=_discord_dm_send if settings.discord_bot_token else None))
 
     if not guest:
+        from aerys_v2.approvals import approvals_for
+        from aerys_v2.tools.pending_requests import build_pending_requests_tool
+
+        approvals = approvals_for(settings)
+        if approvals is not None:
+            tools.append(build_pending_requests_tool(approvals))
         # REMEMBER (2026-09-06): she keeps a fact on purpose, through the same
         # writer the extractor uses. Owner-side only (a guest must not write
         # into the owner's memory); armed exactly when the writer can be built.

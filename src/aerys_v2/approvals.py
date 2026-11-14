@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time as _time
 import uuid
 from dataclasses import dataclass, replace
@@ -80,6 +81,7 @@ class MemoryApprovalStore:
         self.rows: dict[int, Approval] = {}
         self._next = 1
         self.posts = {}
+        self._decision_lock = threading.Lock()
 
     def request(self, kind, summary, detail, now, expires_at, key, approvers=None):
         for r in self.rows.values():
@@ -92,6 +94,10 @@ class MemoryApprovalStore:
 
     def get(self, approval_id):
         return self.rows.get(approval_id)
+
+    def pending(self, now):
+        return sorted((r for r in self.rows.values() if r.status == "pending" and r.expires_at > now),
+                      key=lambda r: r.id)
 
     def pinged(self, approval_id, now):
         self.rows[approval_id].pinged_at = now
@@ -124,26 +130,29 @@ class MemoryApprovalStore:
             r.message_id = None
 
     def decide(self, approval_id, approve, by, now):
-        r = self.rows.get(approval_id)
-        if r is None or r.status != "pending" or r.expires_at <= now:
-            return None
-        r.status, r.decided_at, r.decided_by = ("approved" if approve else "declined"), now, str(by)
-        return r
+        with self._decision_lock:
+            r = self.rows.get(approval_id)
+            if r is None or r.status != "pending" or r.expires_at <= now:
+                return None
+            r.status, r.decided_at, r.decided_by = ("approved" if approve else "declined"), now, str(by)
+            return r
 
     def withdraw(self, approval_id, now):
-        r = self.rows.get(approval_id)
-        if r is None or r.status != "pending":
-            return False
-        r.status, r.decided_at = "withdrawn", now
-        return True
+        with self._decision_lock:
+            r = self.rows.get(approval_id)
+            if r is None or r.status != "pending" or r.expires_at <= now:
+                return False
+            r.status, r.decided_at = "withdrawn", now
+            return True
 
     def expire(self, now):
-        out = []
-        for r in sorted(self.rows.values(), key=lambda r: r.id):
-            if r.status == "pending" and r.expires_at <= now:
-                r.status, r.decided_at = "expired", now
-                out.append(r)
-        return out
+        with self._decision_lock:
+            out = []
+            for r in sorted(self.rows.values(), key=lambda r: r.id):
+                if r.status == "pending" and r.expires_at <= now:
+                    r.status, r.decided_at = "expired", now
+                    out.append(r)
+            return out
 
     def unshown(self, since):
         return sorted((r for r in self.rows.values() if r.status != "pending" and r.message_id and r.channel_id
@@ -228,6 +237,10 @@ class PostgresApprovalStore:
         row = self._one(f"SELECT {self.COLUMNS} FROM v2_approvals WHERE id = %s", (approval_id,))
         return self._row(row) if row else None
 
+    def pending(self, now):
+        return self._all(f"SELECT {self.COLUMNS} FROM v2_approvals WHERE status = 'pending' "
+                         "AND expires_at > %s ORDER BY id", (now,))
+
     def pinged(self, approval_id, now):
         self._one("UPDATE v2_approvals SET pinged_at = %s WHERE id = %s RETURNING id", (now, approval_id))
 
@@ -263,7 +276,8 @@ class PostgresApprovalStore:
 
     def withdraw(self, approval_id, now):
         return self._one("UPDATE v2_approvals SET status = 'withdrawn', decided_at = %s "
-                         "WHERE id = %s AND status = 'pending' RETURNING id", (now, approval_id)) is not None
+                         "WHERE id = %s AND status = 'pending' AND expires_at > %s RETURNING id",
+                         (now, approval_id, now)) is not None
 
     def expire(self, now):
         return self._all("UPDATE v2_approvals SET status = 'expired', decided_at = %s "
