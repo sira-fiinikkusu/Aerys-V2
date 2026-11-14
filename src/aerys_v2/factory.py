@@ -465,6 +465,13 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                 redirect.say(device_id, text)
             return
         if device_id and device_id in satellite_map:
+            from .speaker_redirect import held
+
+            if held(device_id):
+                # 11/14: he stopped her there after this turn began (the button, or "stop" heard by
+                # the satellite itself): what this turn still had to say stays unsaid.
+                log.info("follow-up: hushed on %s since this turn began; not announcing it", device_id)
+                return
             # Questions can open the mic; all other speech keeps the announce path.
             # preannounce=False preserves the existing no-chime behavior.
             r = httpx.post(

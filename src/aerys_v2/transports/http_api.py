@@ -164,6 +164,14 @@ class HushRequest(BaseModel):
     device_id: str = Field(min_length=1, max_length=128)
 
 
+class StoppedRequest(BaseModel):
+    """HA, when a satellite hears a wake word (11/14). Its firmware already cut her off itself if she
+    was talking; talking is HA's read of the satellite at that moment."""
+    device_id: str = Field(min_length=1, max_length=128)
+    wake_word: str = Field(default="", max_length=64)
+    talking: bool = False
+
+
 def _open_mic(settings, satellite: str) -> None:
     """Open a satellite's mic as if he'd said her name (the keep-listening reopen, on demand)."""
     import httpx
@@ -217,7 +225,7 @@ class KaelTicketUpdate(BaseModel):
 
 def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
               gaps_fn=None, health_probe=None, kael_note_fn=None,
-              a2a_memory_fn=None, settings=None, speaker_redirect=None,
+              a2a_memory_fn=None, settings=None, speaker_redirect=None, satellite_voice=None,
               kael_tickets=None, home_notice_fn=None, home_webhook_token: str | None = None,
               guest_clock=None) -> FastAPI:
     """App factory — ask_fn injected like every other transport (testable with fakes).
@@ -609,13 +617,22 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         from aerys_v2.speaker_redirect import hush
 
         device = body.device_id
-        if (speaker_redirect is not None and speaker_redirect.handles(device)
-                and speaker_redirect.playing(device)):
+        redirected = speaker_redirect is not None and speaker_redirect.handles(device)
+        if redirected and speaker_redirect.playing(device):
             hushed = hush(device)               # first: nothing on its way starts her up again
             if not speaker_redirect.stop(device, hush_at=hushed):
                 log.warning("voice: the button pressed on %s, but the speaker didn't confirm the stop", device)
                 return {"did": "nothing", "why": "the speaker didn't stop"}
             log.info("voice: the button hushed her on %s", device)
+            return {"did": "hushed"}
+        # 11/14 (the Pebble): her voice back on the satellite's own speaker; the satellite stops her there.
+        if (not redirected and satellite_voice is not None and satellite_voice.handles(device)
+                and satellite_voice.talking(device)):
+            hush(device)                        # first: nothing on its way starts her up again
+            if not satellite_voice.stop(device):
+                log.warning("voice: the button pressed on %s, but the satellite didn't stop", device)
+                return {"did": "nothing", "why": "the satellite didn't stop"}
+            log.info("voice: the button hushed her on %s (the satellite)", device)
             return {"did": "hushed"}
         from aerys_v2.factory import satellite_map_from
 
@@ -630,6 +647,24 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         mark_opened(device)
         log.info("voice: the button opened the mic on %s", device)
         return {"did": "listening"}
+
+    @app.post("/voice/stopped")
+    def voice_stopped(body: StoppedRequest, _: None = Depends(require_token)) -> dict:
+        """11/14: a satellite heard a wake word. While she talks there, its firmware cuts her off itself
+        ("stop", or her name) and starts no new turn, so the brain never hears it; HA passes it on and
+        this holds what that turn still had to say. "stop" is only armed while she talks; her name
+        counts when HA read the satellite as talking. A desk-redirected satellite stays the door's job."""
+        from aerys_v2.speaker_redirect import hush
+
+        device = body.device_id
+        if speaker_redirect is not None and speaker_redirect.handles(device):
+            return {"did": "nothing", "why": "that satellite speaks through the desk"}
+        if body.wake_word.strip().lower() != "stop" and not body.talking:
+            return {"did": "nothing"}           # she was quiet: a new ask, its own turn
+        hush(device)
+        log.info("voice: the satellite on %s stopped her (%s); what's on its way is held",
+                 device, body.wake_word.strip() or "a wake word")
+        return {"did": "held"}
 
     @app.post("/kael-note", response_model=KaelNoteReply)
     def kael_note_route(

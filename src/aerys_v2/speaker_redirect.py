@@ -65,6 +65,11 @@ def _since() -> float:
     return turn if turn is not None else time.time()
 
 
+def held(device_id: str | None) -> bool:
+    """Was this speaker hushed after the current turn began? (11/14: the satellite path asks too.)"""
+    return hushed_at(device_id) > _since()
+
+
 #: 11/13: what she said lately on each speaker, shared by every redirect in this process (the /ask door
 #: and the follow-up router), so the door can tell her own voice coming back through the mic from his.
 RECENT_SAID_S = 180
