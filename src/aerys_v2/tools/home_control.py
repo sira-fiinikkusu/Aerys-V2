@@ -363,9 +363,19 @@ HISTORY_POINTS = 48
 #: HA's own entity-id grammar. Anything else ("sensor.a/../sensor.b") is refused before any check or
 #: URL: a path segment must never walk past the private-reading prefixes (Codex 11/14 blocker).
 ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
-#: attribute keys that carry a position, whatever their value looks like (gps_latitude, address, …)
-_PLACE_KEY = re.compile(r"lat|lon|lng|gps|coord|address|street|postal|zip|locality|thoroughfare|geo|"
-                        r"location|altitude|accuracy|course|heading|place|city|country|region|zone", re.I)
+#: attribute keys that carry a position, whatever their value looks like (gps_latitude, address, …),
+#: matched by whole word parts so health keys stay (sleep_latency, platelet_count; Codex 11/14)
+_PLACE_WORDS = frozenset({"lat", "latitude", "lon", "lng", "long", "longitude", "gps", "coord", "coords",
+                          "coordinates", "address", "street", "postal", "zip", "zipcode", "locality",
+                          "thoroughfare", "geo", "geocoded", "location", "altitude", "accuracy", "course",
+                          "heading", "place", "city", "country", "region", "zone", "position"})
+
+
+def _place_key(key: str) -> bool:
+    words = re.split(r"[^a-z0-9]+", re.sub(r"([a-z])([A-Z])", r"\1_\2", key).lower())
+    return any(w in _PLACE_WORDS for w in words)
+
+
 PRECISE_PLACE = ("That's his precise location. It's only read through where_is_chris_nearby, when he asks "
                  "for something near him.")
 
@@ -405,7 +415,7 @@ def reading_details(entity_id: str, data: dict) -> dict:
     size = 0
     for key, value in attrs.items():
         key = str(key)
-        if key in _DETAIL_SKIP or key in out or key.endswith("_list") or _PLACE_KEY.search(key):
+        if key in _DETAIL_SKIP or key in out or key.endswith("_list") or _place_key(key):
             continue
         # the whole value is checked before any clipping, so a position can't hide past the cut
         if location_shaped(f"{key}: {value}") or location_shaped(str(value)):
@@ -427,16 +437,27 @@ def reading_details(entity_id: str, data: dict) -> dict:
     return out
 
 
+class PositionHistory(Exception):
+    """A history whose readings are positions: refused whole (where he's been is never a trail)."""
+
+
 def history_points(rows: list, now: datetime) -> list[list[str]]:
     """HA history rows -> [[local time, state], ...]: dead and repeated states dropped, thinned evenly to
     HISTORY_POINTS (the first and last kept)."""
     from aerys_v2.hands_gate import EASTERN
 
-    points: list[list[str]] = []
-    last = None
+    from aerys_v2.services.location_guard import location_shaped
+
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError(f"a history row isn't an object: {str(row)[:40]!r}")
+        if row.get("state") is None:
+            raise ValueError("a history row has no state")
+        if location_shaped(str(row["state"])):
+            raise PositionHistory()
+    points: list[list[str]] = []
+    last = None
+    for row in rows:
         state = _clip(str(row.get("state")), 120)
         if state in DEAD_STATES or state == last:
             continue
@@ -645,12 +666,10 @@ def build_home_control_tool(
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
         try:
             points = history_points(rows, now)
+        except PositionHistory:
+            return f"No history for {entity}: its readings are positions, and where he's been is never a trail."
         except (ValueError, TypeError, AttributeError) as e:
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
-        from aerys_v2.services.location_guard import location_shaped
-
-        if any(location_shaped(state) for _, state in points):
-            return f"No history for {entity}: its readings are positions, and where he's been is never a trail."
         out = {"entity_id": entity, "hours": span, "changes": points}
         if isinstance(current, dict):
             for key in ("friendly_name", "unit_of_measurement", "device_class"):

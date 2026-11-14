@@ -230,7 +230,7 @@ def places_tool(history=None):
 
 def test_positions_never_ride_along_by_key_state_or_history():
     r = read(places_tool(), "sensor.phone_battery")
-    assert r["attributes"] == {"charger": "usb"}                         # gps_*, address and the like dropped
+    assert r["attributes"] == {"charger": "usb", "timezone": "x"}       # gps_*, address and the like dropped
     assert "where_is_chris_nearby" in read(places_tool(), "sensor.position")["state"]
     assert "where_is_chris_nearby" in read(places_tool(), "sensor.phone_geocoded_location")
     trail = [[{"state": "26.951234, -82.351234", "last_changed": "2026-01-10T03:00:00Z"}]]
@@ -256,3 +256,30 @@ def test_every_field_and_the_whole_answer_are_capped():
 @pytest.mark.parametrize("hours,span", [(None, 24), (0, 1), (-5, 1), (3, 3), (5000, 168)])
 def test_history_hours_are_bounded_and_zero_means_one(hours, span):
     assert read(tool(), "sensor.office_temperature", op="history", hours=hours)["hours"] == span
+
+
+# --- Codex 11/14 (pass 2) repros ---------------------------------------------------------------------
+
+
+def test_health_keys_stay_and_place_keys_go_by_word_not_by_letters():
+    from aerys_v2.tools.home_control import reading_details
+    attrs = {"sleep_latency": 18, "platelet_count": 250, "latest_sample": 64, "duration": 420,
+             "gps_latitude": 1, "latitude": 2, "homeAddress": "x", "Location Name": "y", "geocoded": "z"}
+    assert reading_details("sensor.sleep", {"attributes": attrs})["attributes"] == {
+        "sleep_latency": 18, "platelet_count": 250, "latest_sample": 64, "duration": 420}
+
+
+def test_a_position_past_the_clip_or_the_thinning_still_refuses_the_whole_history():
+    long_state = "x " * 54 + "26.951234, -82.351234"
+    trail = [[{"state": long_state, "last_changed": "2026-01-10T03:00:00Z"}]]
+    assert "never a trail" in read(places_tool(trail), "sensor.phone_battery", op="history")
+    rows = [{"state": str(n), "last_changed": f"2026-01-10T{n // 60:02d}:{n % 60:02d}:00Z"} for n in range(300)]
+    rows[151] = {"state": "26.951234, -82.351234", "last_changed": "2026-01-10T02:31:00Z"}   # thinned away
+    assert "never a trail" in read(places_tool([rows]), "sensor.phone_battery", op="history")
+
+
+@pytest.mark.parametrize("row", [{"last_changed": "2026-01-10T03:00:00Z"},
+                                 {"state": None, "last_changed": "2026-01-10T03:00:00Z"}])
+def test_a_missing_history_state_is_unreadable_not_none(row):
+    out = read(places_tool([[row]]), "sensor.phone_battery", op="history")
+    assert isinstance(out, str) and "unreadable history" in out
