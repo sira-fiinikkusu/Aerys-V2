@@ -189,3 +189,70 @@ def test_the_factory_hands_both_tools_his_private_prefixes(monkeypatch):
     for name in ("control", "search"):
         assert seen[name]["private_entities"] == ("sensor.phone_", "sensor.watch_")
         assert seen[name]["owner_person_id"] == OWNER
+
+
+# --- Codex 11/14 (pass 1) repros ---------------------------------------------------------------------
+
+
+def test_a_path_shaped_id_never_walks_past_the_private_prefixes():
+    calls = []
+    guild = {**HIS_DM, "privacy_context": "public", "channel_kind": "guild"}
+    for runtime_identity in (guild, None):
+        t = tool(calls)
+        out = (t.func(operation="get_state", entity_id="sensor.other/../sensor.watch_heart_rate")
+               if runtime_identity is None else
+               read(t, "sensor.other/../sensor.watch_heart_rate", runtime_identity, "guild:x"))
+        assert isinstance(out, str) and "isn't an entity id" in out
+    assert calls == []                                                   # refused before any HA call
+    assert "isn't an entity id" in read(tool(), "sensor.Watch_Heart_Rate?x=1", op="history")
+
+
+PLACES = {
+    "sensor.phone_battery": {"entity_id": "sensor.phone_battery", "state": "80", "attributes": {
+        "gps_latitude": 26.95, "gps_longitude": -82.35, "address": "1 Example St", "timezone": "x", "charger": "usb"}},
+    "sensor.position": {"entity_id": "sensor.position", "state": "26.951234, -82.351234", "attributes": {}},
+    "sensor.phone_geocoded_location": {"entity_id": "sensor.phone_geocoded_location", "state": "1 Example St",
+                                       "attributes": {}},
+}
+
+
+def places_tool(history=None):
+    def handle(request):
+        path = request.url.path
+        if path.startswith("/api/history/period/"):
+            return httpx.Response(200, json=history)
+        entity = path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json=PLACES[entity]) if entity in PLACES else httpx.Response(404)
+    return build_home_control_tool(base_url="http://ha", token="t", canary_entities=frozenset(),
+                                   client=httpx.Client(transport=httpx.MockTransport(handle)),
+                                   private_entities=PRIVATE, owner_person_id=OWNER, clock=lambda: NOW)
+
+
+def test_positions_never_ride_along_by_key_state_or_history():
+    r = read(places_tool(), "sensor.phone_battery")
+    assert r["attributes"] == {"charger": "usb"}                         # gps_*, address and the like dropped
+    assert "where_is_chris_nearby" in read(places_tool(), "sensor.position")["state"]
+    assert "where_is_chris_nearby" in read(places_tool(), "sensor.phone_geocoded_location")
+    trail = [[{"state": "26.951234, -82.351234", "last_changed": "2026-01-10T03:00:00Z"}]]
+    assert "never a trail" in read(places_tool(trail), "sensor.position", op="history")
+
+
+@pytest.mark.parametrize("body", [[[None]], [["a string row"]], "not a list", {"rows": []}, [{"state": "1"}],
+                                  [[{"state": "1", "last_changed": "not a time"}]]])
+def test_an_odd_history_is_an_honest_line_not_a_crash(body):
+    out = read(places_tool(body), "sensor.phone_battery", op="history")
+    assert isinstance(out, str) and "unreadable history" in out
+
+
+def test_every_field_and_the_whole_answer_are_capped():
+    from aerys_v2.tools.home_control import READ_MAX, reading_details
+    d = reading_details("sensor.x", {"attributes": {"unit_of_measurement": "u" * 100000}, "last_updated": "t" * 9999})
+    assert len(d["unit_of_measurement"]) == 64 and len(d["last_updated"]) == 64
+    many = ",".join("sensor.office_temperature" for _ in range(200))
+    raw = tool().func(operation="get_state", entity_id=many, runtime=rt(HIS_DM))
+    assert len(raw) <= READ_MAX + 60 and raw.endswith("ask for fewer things at once)")
+
+
+@pytest.mark.parametrize("hours,span", [(None, 24), (0, 1), (-5, 1), (3, 3), (5000, 168)])
+def test_history_hours_are_bounded_and_zero_means_one(hours, span):
+    assert read(tool(), "sensor.office_temperature", op="history", hours=hours)["hours"] == span

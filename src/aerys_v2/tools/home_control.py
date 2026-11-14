@@ -103,7 +103,7 @@ CLASS_SYNONYMS: dict[str, frozenset[str]] = {
 # Hardware that is down or removed reads PERMANENTLY OPEN. Home Assistant holds the one
 # authoritative list (configuration.yaml), so this tool reads it rather than keeping a
 # second copy that would drift. Absent group = no exclusions, behaviour unchanged.
-# The class map above only reaches things Home Assistant has CLASSIFIED. Chris's three
+# The class map above only reaches things Home Assistant has CLASSIFIED. The owner's three
 # sliding doors carry device_class None — they are named "Kitchen Slider" and nothing
 # else — so a class-only fix still could not find them. (I shipped exactly that half-fix
 # first, because my test invented a slider WITH device_class="door" instead of using the
@@ -355,13 +355,32 @@ _DETAIL_SKIP = frozenset({"friendly_name", "icon", "entity_picture", "supported_
                           "rgb_color", "hs_color", "xy_color", "brightness", "color_mode", "attribution",
                           "restored", "editable", "id", "options", "effect"})
 DETAIL_MAX = 1500                 # characters of attributes per entity
+FIELD_MAX = 64                    # unit, class, timestamps: short by nature, clipped anyway (Codex 11/14)
+READ_MAX = 12000                  # one get_state/history answer, all targets together
 _WHEREABOUTS_DOMAINS = ("device_tracker.", "person.", "zone.")
 HISTORY_MAX_HOURS = 168
 HISTORY_POINTS = 48
+#: HA's own entity-id grammar. Anything else ("sensor.a/../sensor.b") is refused before any check or
+#: URL: a path segment must never walk past the private-reading prefixes (Codex 11/14 blocker).
+ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
+#: attribute keys that carry a position, whatever their value looks like (gps_latitude, address, …)
+_PLACE_KEY = re.compile(r"lat|lon|lng|gps|coord|address|street|postal|zip|locality|thoroughfare|geo|"
+                        r"location|altitude|accuracy|course|heading|place|city|country|region|zone", re.I)
+PRECISE_PLACE = ("That's his precise location. It's only read through where_is_chris_nearby, when he asks "
+                 "for something near him.")
 
 
 def whereabouts(entity_id: str) -> bool:
     return entity_id.startswith(_WHEREABOUTS_DOMAINS) or "geocoded" in entity_id or "location" in entity_id
+
+
+def precise_place(entity_id: str) -> bool:
+    """A sensor whose state IS a street address or position (the phone's geocoded location)."""
+    return not entity_id.startswith(_WHEREABOUTS_DOMAINS) and whereabouts(entity_id)
+
+
+def _clip(value, limit: int = FIELD_MAX):
+    return value[:limit] if isinstance(value, str) else value
 
 
 def private_entity(entity_id: str, prefixes: tuple[str, ...]) -> bool:
@@ -372,19 +391,24 @@ def private_entity(entity_id: str, prefixes: tuple[str, ...]) -> bool:
 def reading_details(entity_id: str, data: dict) -> dict:
     from aerys_v2.services.location_guard import location_shaped
 
-    attrs = data.get("attributes") or {}
+    attrs = data.get("attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
     out: dict = {}
     for key in ("unit_of_measurement", "device_class", "state_class"):
         if attrs.get(key) is not None:
-            out[key] = attrs[key]
+            out[key] = _clip(attrs[key] if isinstance(attrs[key], str) else str(attrs[key]))
     if data.get("last_updated"):
-        out["last_updated"] = data["last_updated"]
+        out["last_updated"] = _clip(str(data["last_updated"]))
     if whereabouts(entity_id):
         return out
     extra: dict = {}
     size = 0
     for key, value in attrs.items():
-        if key in _DETAIL_SKIP or key in out or key.endswith("_list"):
+        key = str(key)
+        if key in _DETAIL_SKIP or key in out or key.endswith("_list") or _PLACE_KEY.search(key):
+            continue
+        # the whole value is checked before any clipping, so a position can't hide past the cut
+        if location_shaped(f"{key}: {value}") or location_shaped(str(value)):
             continue
         if isinstance(value, (list, tuple)):
             value = list(value)[:10]
@@ -392,9 +416,8 @@ def reading_details(entity_id: str, data: dict) -> dict:
             value = str(value)[:200]
         elif isinstance(value, str):
             value = value[:200]
-        if location_shaped(f"{key}: {value}") or location_shaped(str(value)):
-            continue
-        size += len(str(key)) + len(str(value))
+        key = key[:FIELD_MAX]
+        size += len(key) + len(str(value))
         if size > DETAIL_MAX:
             extra["more"] = "further attributes left out (size)"
             break
@@ -412,7 +435,9 @@ def history_points(rows: list, now: datetime) -> list[list[str]]:
     points: list[list[str]] = []
     last = None
     for row in rows:
-        state = str(row.get("state"))
+        if not isinstance(row, dict):
+            raise ValueError(f"a history row isn't an object: {str(row)[:40]!r}")
+        state = _clip(str(row.get("state")), 120)
         if state in DEAD_STATES or state == last:
             continue
         at = datetime.fromisoformat(str(row.get("last_changed")).replace("Z", "+00:00")).astimezone(EASTERN)
@@ -565,10 +590,16 @@ def build_home_control_tool(
                 out["rgb_color"] = list(attrs["rgb_color"])
             if full:
                 out.update(reading_details(entity, data))
+                from aerys_v2.services.location_guard import location_shaped
+
+                if location_shaped(str(out.get("state"))):
+                    out["state"] = "(a position: read only through where_is_chris_nearby)"
+                else:
+                    out["state"] = _clip(out.get("state"), 255)
             return out
         except httpx.HTTPError as e:
             return f"Home Assistant is unreachable right now ({e})."
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, AttributeError) as e:
             # Malformed JSON / odd attribute types: honest string, never a raise.
             return f"Home Assistant returned an unreadable reply for {entity} ({e})."
 
@@ -595,7 +626,7 @@ def build_home_control_tool(
         """How a reading moved over the last few hours: changes only, in his clock, thinned to a page."""
         if whereabouts(entity):
             return f"No history for {entity}: where he's been is never read back as a trail."
-        span = max(1, min(int(hours or 24), HISTORY_MAX_HOURS))
+        span = max(1, min(int(24 if hours is None else hours), HISTORY_MAX_HOURS))
         now = (clock or (lambda: datetime.now(timezone.utc)))()
         start = quote((now - timedelta(hours=span)).isoformat())
         try:
@@ -604,7 +635,9 @@ def build_home_control_tool(
                       "&minimal_response&no_attributes&significant_changes_only", headers)
             r.raise_for_status()
             body = r.json()
-            rows = body[0] if isinstance(body, list) and body and isinstance(body[0], list) else []
+            if not isinstance(body, list) or (body and not isinstance(body[0], list)):
+                return f"Home Assistant returned an unreadable history for {entity}."
+            rows = body[0] if body else []
             current = _read_state(entity, full=True)
         except httpx.HTTPError as e:
             return f"Home Assistant is unreachable right now ({e})."
@@ -612,8 +645,12 @@ def build_home_control_tool(
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
         try:
             points = history_points(rows, now)
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, AttributeError) as e:
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
+        from aerys_v2.services.location_guard import location_shaped
+
+        if any(location_shaped(state) for _, state in points):
+            return f"No history for {entity}: its readings are positions, and where he's been is never a trail."
         out = {"entity_id": entity, "hours": span, "changes": points}
         if isinstance(current, dict):
             for key in ("friendly_name", "unit_of_measurement", "device_class"):
@@ -743,19 +780,21 @@ def build_home_control_tool(
 
         # ---- reads: anything, except his own phone/watch readings outside his own rooms (D47) ----
         if op in ("get_state", "history"):
+            bad = [e for e in targets if not ENTITY_ID.match(e)]
+            if bad:
+                return f"'{', '.join(b[:80] for b in bad)}' isn't an entity id (like sensor.office_temperature)."
             refusal = _private_refusal(targets, runtime)
             if refusal:
                 return refusal
-        if op == "get_state":
-            results = [_read_state(e, full=True) for e in targets]
-            if len(results) == 1:
-                return results[0] if isinstance(results[0], str) else json.dumps(results[0])
-            return json.dumps(results)
-        if op == "history":
-            results = [_history(e, hours) for e in targets]
-            if len(results) == 1:
-                return results[0] if isinstance(results[0], str) else json.dumps(results[0])
-            return json.dumps(results)
+            if any(precise_place(e) for e in targets):
+                return PRECISE_PLACE
+        if op in ("get_state", "history"):
+            results = [_read_state(e, full=True) if op == "get_state" else _history(e, hours) for e in targets]
+            text = (results[0] if isinstance(results[0], str) else json.dumps(results[0])) if len(results) == 1 \
+                else json.dumps(results)
+            if len(text) > READ_MAX:
+                return text[:READ_MAX] + " … (cut: ask for fewer things at once)"
+            return text
 
         if op not in WRITE_OPS:
             return (
