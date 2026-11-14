@@ -321,3 +321,18 @@ def test_native_d28_write_waits_then_approval_executes():
     row = SimpleNamespace(thread_id=args[2], args=args[3])
     assert action_executor([], skill_middleware=layers)(row)[0]
     assert backend_for(store).download_files([PATH])[0].content.decode() == CONTENT
+
+
+@pytest.mark.parametrize('path', ['/home/owner/.bashrc', '/.hidden/x', '/skills/.hidden/SKILL.md', '/skills/ok/../x',
+                                  '/skills/Bad_Slug/SKILL.md', '/skills/', 'skills/ok/SKILL.md'])
+def test_our_fence_holds_where_upstreams_misses_dotfiles(path):
+    # upstream's "/**" deny rule let "/home/x/.bashrc" through as a store key (Gemini 11/14)
+    from types import SimpleNamespace
+    from aerys_v2.skills import OUTSIDE, approved_write, skills_middleware
+    store = InMemoryStore()
+    middleware = skills_middleware(store, OWNER)
+    ident = {'user_id': OWNER, 'platform': 'discord', 'privacy_context': 'private', 'channel_kind': 'dm'}
+    row = SimpleNamespace(thread_id='person:owner', args={'tool': 'write_file', 'identity': ident,
+                          'tool_args': {'file_path': path, 'content': CONTENT}})
+    assert approved_write(middleware, row).content == OUTSIDE
+    assert list(store.search(('aerys', 'skills'))) == []

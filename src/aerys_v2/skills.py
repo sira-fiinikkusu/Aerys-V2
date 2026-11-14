@@ -21,6 +21,10 @@ from aerys_v2.rooms import his_private_read, runtime_identity
 NAMESPACE = ("aerys", "skills")
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 REFUSAL = "Not saved: I only write my skills when it's you, in a room that's just us."
+OUTSIDE = "Not saved: my skills live only under /skills/<name>/."
+#: our own fence, on every write and every approved write: upstream's "/**" deny rule misses dot-files
+#: ("/home/x/.bashrc" got through as a store key; Gemini review 11/14)
+SKILL_FILE = re.compile(r"^/skills/[a-z0-9]+(?:-[a-z0-9]+)*/(?:[A-Za-z0-9][A-Za-z0-9_-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*$")
 FILES_PROMPT = """I may write and improve my own skills at /skills/<slug>/SKILL.md, with YAML
 name: and description: front matter. A description is one plain line: never ids,
 numbers about him or other personal values. Those belong in the body, read on demand."""
@@ -75,11 +79,15 @@ class OwnerSkillWrites(AgentMiddleware):
         self.owner = owner
 
     def refusal(self, request):
-        if request.tool_call['name'] in WRITE_TOOLS:
-            identity, thread = runtime_identity(request.runtime)
-            if his_private_read(identity, thread, self.owner) is not None:
-                return ToolMessage(content=REFUSAL, name=request.tool_call['name'],
-                                   tool_call_id=request.tool_call['id'])
+        if request.tool_call['name'] not in WRITE_TOOLS:
+            return None
+        name, call_id = request.tool_call['name'], request.tool_call['id']
+        identity, thread = runtime_identity(request.runtime)
+        if his_private_read(identity, thread, self.owner) is not None:
+            return ToolMessage(content=REFUSAL, name=name, tool_call_id=call_id, status='error')
+        path = str((request.tool_call.get('args') or {}).get('file_path') or '')
+        if not SKILL_FILE.match(path) or '..' in path:
+            return ToolMessage(content=OUTSIDE, name=name, tool_call_id=call_id, status='error')
         return None
 
     def wrap_tool_call(self, request, handler):
@@ -119,7 +127,8 @@ def approved_write(middleware, row):
     config = {'configurable': {'identity': row.args.get('identity') or {}, 'thread_id': row.thread_id}}
     runtime = ToolRuntime(state={}, context=None, config=config, stream_writer=lambda _: None,
                           tool_call_id='approved-skill', store=None)
-    request = SimpleNamespace(tool_call={'name': name, 'id': 'approved-skill'}, runtime=runtime)
+    request = SimpleNamespace(tool_call={'name': name, 'id': 'approved-skill', 'args': row.args['tool_args']},
+                              runtime=runtime)
     tool = next(t for t in middleware[0].tools if t.name == name)
     return middleware[-1].wrap_tool_call(
         request, lambda _: tool.invoke({**row.args['tool_args'], 'runtime': runtime}, config=config))
