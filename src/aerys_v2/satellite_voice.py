@@ -16,6 +16,7 @@ satellite without that action (the Voice PE) fails the stop, and the caller says
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 import httpx
@@ -23,6 +24,12 @@ import httpx
 log = logging.getLogger(__name__)
 
 _PREFIX, _SUFFIX = "assist_satellite.", "_assist_satellite"
+#: states that mean she isn't speaking there; anything else but "responding" is unknown (Codex 11/14)
+QUIET = frozenset({"idle", "listening", "processing"})
+#: a follow-up that passed its hush check just before the stop can still reach HA a moment after it
+#: (Codex 11/14); for this long after a stop, a satellite that starts talking again for no newer turn
+#: is stopped again. HA reads "responding" ~0.3 s after an announce is sent.
+GUARD_S = 3.0
 
 
 def stop_action(entity_id: str) -> str | None:
@@ -35,28 +42,33 @@ def stop_action(entity_id: str) -> str | None:
 
 class SatelliteVoice:
     def __init__(self, *, ha_base_url: str, ha_token: str, satellites: dict[str, str],
-                 client: httpx.Client | None = None, settle_s: float = 1.5):
+                 client: httpx.Client | None = None, settle_s: float = 1.5, guard_s: float = GUARD_S,
+                 async_guard: bool = True):
         self._ha = ha_base_url.rstrip("/")
         self._headers = {"Authorization": f"Bearer {ha_token}"}
         self._satellites = dict(satellites)
         self._client = client or httpx.Client(timeout=5.0)
-        self._settle_s = settle_s
+        self._settle_s, self._guard_s, self._async_guard = settle_s, guard_s, async_guard
 
     def handles(self, device_id: str | None) -> bool:
         return bool(device_id) and device_id in self._satellites
 
-    def talking(self, device_id: str | None, timeout: float = 1.5) -> bool:
-        """Best-effort: is she answering or announcing there? Failures read as quiet (harmless)."""
+    def talking(self, device_id: str | None, timeout: float = 1.5) -> bool | None:
+        """Is she answering or announcing there? True, False, or None when HA can't say (a failed
+        read, or the satellite unavailable): never guessed as quiet."""
         if not self.handles(device_id):
             return False
         try:
             r = self._client.get(f"{self._ha}/api/states/{self._satellites[device_id]}",
                                  headers=self._headers, timeout=timeout)
             r.raise_for_status()
-            return r.json().get("state") == "responding"
+            state = r.json().get("state")
         except Exception:
-            log.debug("satellite talking check failed (harmless)", exc_info=True)
-            return False
+            log.debug("satellite talking check failed", exc_info=True)
+            return None
+        if state == "responding":
+            return True
+        return False if state in QUIET else None
 
     def stop(self, device_id: str | None) -> bool:
         """Stop her there; True only once the satellite reads quiet again."""
@@ -74,11 +86,34 @@ class SatelliteVoice:
             return False
         deadline = time.monotonic() + self._settle_s
         while True:
-            if not self.talking(device_id, timeout=0.5):
+            if self.talking(device_id, timeout=0.5) is False:
                 return True
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.15)
+
+    def guard(self, device_id: str | None, hushed: float) -> None:
+        """For a few seconds after a stop, stop her again if she starts talking there for no turn
+        that began after it (a follow-up already on its way to HA when he stopped her)."""
+        if not self.handles(device_id):
+            return
+        if self._async_guard:
+            threading.Thread(target=self._guard, args=(device_id, hushed), daemon=True).start()
+        else:
+            self._guard(device_id, hushed)
+
+    def _guard(self, device_id: str, hushed: float) -> None:
+        from .speaker_redirect import last_turn
+
+        deadline = time.monotonic() + self._guard_s
+        while time.monotonic() < deadline:
+            time.sleep(0.3)
+            if last_turn(device_id) > hushed:
+                return                          # his new ask: its answer is his
+            if self.talking(device_id, timeout=0.5) is True:
+                log.info("voice: %s started talking again after the stop, for nothing newer; stopped", device_id)
+                self.stop(device_id)
+                return
 
 
 def satellite_voice_for(settings) -> SatelliteVoice | None:

@@ -166,10 +166,16 @@ class HushRequest(BaseModel):
 
 class StoppedRequest(BaseModel):
     """HA, when a satellite hears a wake word (11/14). Its firmware already cut her off itself if she
-    was talking; talking is HA's read of the satellite at that moment."""
+    was talking. state is HA's read of that satellite then, and changed_s how long ago it changed:
+    the firmware's own stop can flip "responding" to "idle" before HA reads it (Codex 11/14)."""
     device_id: str = Field(min_length=1, max_length=128)
     wake_word: str = Field(default="", max_length=64)
-    talking: bool = False
+    state: str = Field(default="", max_length=32)
+    changed_s: float | None = Field(default=None, ge=0)
+
+
+#: an idle satellite that changed this recently was talking a moment ago: her name then was a stop
+JUST_STOPPED_S = 3.0
 
 
 def _open_mic(settings, satellite: str) -> None:
@@ -626,12 +632,20 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             log.info("voice: the button hushed her on %s", device)
             return {"did": "hushed"}
         # 11/14 (the Pebble): her voice back on the satellite's own speaker; the satellite stops her there.
-        if (not redirected and satellite_voice is not None and satellite_voice.handles(device)
-                and satellite_voice.talking(device)):
-            hush(device)                        # first: nothing on its way starts her up again
+        if not redirected and satellite_voice is not None and satellite_voice.handles(device):
+            talking = satellite_voice.talking(device)
+            if talking is None:                 # HA can't say: neither a stop nor an open mic is a guess
+                log.warning("voice: the button pressed on %s, but HA couldn't say whether she's talking", device)
+                return {"did": "nothing", "why": "couldn't tell whether she's talking"}
+        else:
+            talking = False
+        if talking:
+            hushed = hush(device)               # first: nothing on its way starts her up again
             if not satellite_voice.stop(device):
+                # The hush stays: he pressed to quiet her, so what's still coming stays unsaid.
                 log.warning("voice: the button pressed on %s, but the satellite didn't stop", device)
                 return {"did": "nothing", "why": "the satellite didn't stop"}
+            satellite_voice.guard(device, hushed)
             log.info("voice: the button hushed her on %s (the satellite)", device)
             return {"did": "hushed"}
         from aerys_v2.factory import satellite_map_from
@@ -657,11 +671,16 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         from aerys_v2.speaker_redirect import hush
 
         device = body.device_id
+        if satellite_voice is None or not satellite_voice.handles(device):
+            return {"did": "nothing", "why": "not a satellite of hers"}
         if speaker_redirect is not None and speaker_redirect.handles(device):
             return {"did": "nothing", "why": "that satellite speaks through the desk"}
-        if body.wake_word.strip().lower() != "stop" and not body.talking:
+        state = body.state.strip().lower()
+        talking = state == "responding" or (
+            state == "idle" and body.changed_s is not None and body.changed_s <= JUST_STOPPED_S)
+        if body.wake_word.strip().lower() != "stop" and not talking:
             return {"did": "nothing"}           # she was quiet: a new ask, its own turn
-        hush(device)
+        satellite_voice.guard(device, hush(device))
         log.info("voice: the satellite on %s stopped her (%s); what's on its way is held",
                  device, body.wake_word.strip() or "a wake word")
         return {"did": "held"}

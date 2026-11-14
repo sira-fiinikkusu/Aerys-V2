@@ -21,6 +21,7 @@ ENTITY = "assist_satellite.office_satellite_assist_satellite"
 @pytest.fixture(autouse=True)
 def fresh_hushes(monkeypatch):
     monkeypatch.setattr(sr, "_HUSH_AT", {})
+    monkeypatch.setattr(sr, "_TURN_AT", {})
     t = {"now": 1_000.0}
 
     def now():
@@ -30,10 +31,12 @@ def fresh_hushes(monkeypatch):
 
 
 class HA:
-    """HA's side: the satellite's state, and its stop action (which quiets it unless told otherwise)."""
+    """HA's side: the satellite's state, and its stop action (which quiets it unless told otherwise).
+    after_stop: what reads return after the first stop, in order (a 500 for "fail"), then the state."""
 
-    def __init__(self, state="responding", stops=True, fail=False):
+    def __init__(self, state="responding", stops=True, fail=False, after_stop=()):
         self.state, self.stops, self.fail, self.calls = state, stops, fail, []
+        self.after_stop, self.stopped = list(after_stop), 0
 
     def client(self):
         ha = self
@@ -43,16 +46,23 @@ class HA:
             if ha.fail:
                 return httpx.Response(500)
             if request.method == "POST":
+                ha.stopped += 1
+                if ha.stopped > 1:
+                    ha.after_stop = []
                 if ha.stops:
                     ha.state = "idle"
                 return httpx.Response(200, json=[])
+            if ha.stopped and ha.after_stop:
+                state = ha.after_stop.pop(0)
+                return httpx.Response(500) if state == "fail" else httpx.Response(200, json={"state": state})
             return httpx.Response(200, json={"state": ha.state})
         return httpx.Client(transport=httpx.MockTransport(handle))
 
 
 def satellite(ha, **kw):
     return SatelliteVoice(ha_base_url="http://ha", ha_token="t", satellites={"office": ENTITY},
-                          client=ha.client(), settle_s=kw.get("settle_s", 0.3))
+                          client=ha.client(), settle_s=kw.get("settle_s", 0.3), guard_s=kw.get("guard_s", 0.35),
+                          async_guard=False)
 
 
 def test_the_stop_action_is_named_for_the_node():
@@ -60,11 +70,12 @@ def test_the_stop_action_is_named_for_the_node():
     assert stop_action("media_player.office") is None and stop_action("assist_satellite._assist_satellite") is None
 
 
-def test_responding_is_talking_and_anything_else_or_a_failure_is_quiet():
+def test_responding_is_talking_quiet_states_are_quiet_and_the_rest_is_unknown():
     assert satellite(HA("responding")).talking("office") is True
     assert satellite(HA("idle")).talking("office") is False
     assert satellite(HA("listening")).talking("office") is False
-    assert satellite(HA(fail=True)).talking("office") is False
+    assert satellite(HA("unavailable")).talking("office") is None      # never guessed as quiet (Codex)
+    assert satellite(HA(fail=True)).talking("office") is None
     assert satellite(HA("responding")).talking("garage") is False
 
 
@@ -77,6 +88,8 @@ def test_stop_calls_the_satellites_own_action_and_waits_for_quiet():
 def test_a_stop_that_leaves_her_talking_or_fails_is_not_a_stop():
     assert satellite(HA("responding", stops=False)).stop("office") is False
     assert satellite(HA(fail=True)).stop("office") is False
+    # the stop went through but HA can't confirm she's quiet: not called a stop (Codex 11/14)
+    assert satellite(HA("responding", after_stop=["fail"] * 20)).stop("office") is False
     odd = SatelliteVoice(ha_base_url="http://ha", ha_token="t", satellites={"office": "media_player.x"},
                          client=HA().client())
     assert odd.stop("office") is False
@@ -141,6 +154,30 @@ def test_a_satellite_that_wont_stop_is_not_called_hushed(monkeypatch):
     assert r.json()["did"] == "nothing" and opened == []
 
 
+def test_when_ha_cant_say_the_button_neither_stops_nor_opens_the_mic(monkeypatch):
+    for ha in (HA(fail=True), HA("unavailable")):
+        c, opened = door(monkeypatch, satellite(ha))
+        r = c.post("/voice/hush-or-listen", json={"device_id": "office"}, headers=AUTH)
+        assert r.json()["did"] == "nothing" and opened == [] and sr.hushed_at("office") == 0
+
+
+def test_a_follow_up_already_on_its_way_when_he_pressed_is_stopped_again(monkeypatch):
+    # its hush check passed a moment before the press; HA starts it right after the stop (Codex 11/14)
+    ha = HA("responding", after_stop=["idle", "responding"])
+    c, _ = door(monkeypatch, satellite(ha))
+    r = c.post("/voice/hush-or-listen", json={"device_id": "office"}, headers=AUTH)
+    assert r.json() == {"did": "hushed"} and ha.stopped == 2
+
+
+def test_the_second_stop_spares_the_answer_to_his_new_ask():
+    ha = HA("responding")
+    sv = satellite(ha)
+    hushed = sr.hush("office")
+    sr.turn_started("office")                                    # he asked something new after the stop
+    sv.guard("office", hushed)
+    assert ha.stopped == 0
+
+
 def test_when_the_satellite_is_quiet_the_button_still_opens_the_mic(monkeypatch):
     ha = HA("idle")
     c, opened = door(monkeypatch, satellite(ha))
@@ -157,16 +194,30 @@ def test_while_the_office_speaks_through_the_desk_the_satellite_is_never_asked(m
     assert r.json() == {"did": "listening"} and ha.calls == []
 
 
-@pytest.mark.parametrize("word,talking,did", [
-    ("stop", False, "held"),             # only armed while she talks
-    ("hey Aerys", True, "held"),         # her name over her voice: the satellite cut her off
-    ("hey Aerys", False, "nothing"),     # she was quiet: a new ask, its own turn
+@pytest.mark.parametrize("word,state,changed_s,did", [
+    ("stop", "idle", 40.0, "held"),               # only armed while she talks
+    ("hey Aerys", "responding", 2.0, "held"),     # her name over her voice: the satellite cut her off
+    ("hey Aerys", "idle", 0.4, "held"),           # ...and its own stop beat HA's read (Codex 11/14)
+    ("hey Aerys", "idle", 40.0, "nothing"),       # she was quiet: a new ask, its own turn
+    ("hey Aerys", "listening", 0.4, "nothing"),
+    ("hey Aerys", "", None, "nothing"),
 ])
-def test_a_stop_the_satellite_heard_itself_holds_what_is_on_its_way(monkeypatch, word, talking, did):
+def test_a_stop_the_satellite_heard_itself_holds_what_is_on_its_way(monkeypatch, word, state, changed_s, did):
     c, _ = door(monkeypatch, satellite(HA("idle")))
-    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": word, "talking": talking}, headers=AUTH)
+    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": word, "state": state,
+                                       "changed_s": changed_s}, headers=AUTH)
     assert r.json()["did"] == did
     assert (sr.hushed_at("office") > 0) is (did == "held")
+
+
+def test_the_stopped_door_only_holds_her_own_satellites(monkeypatch):
+    # any authed caller could otherwise grow the hush table without end (Codex 11/14)
+    c, _ = door(monkeypatch, satellite(HA("idle")))
+    for n in range(5):
+        c.post("/voice/stopped", json={"device_id": f"made-up-{n}", "wake_word": "stop"}, headers=AUTH)
+    c, _ = door(monkeypatch, None)
+    c.post("/voice/stopped", json={"device_id": "office", "wake_word": "stop"}, headers=AUTH)
+    assert sr._HUSH_AT == {}
 
 
 def test_the_stopped_door_leaves_a_desk_redirected_satellite_alone_and_needs_the_token(monkeypatch):
@@ -206,6 +257,24 @@ def test_a_follow_up_from_a_turn_he_stopped_is_never_announced(monkeypatch):
     old = turn()
     sr.hush("office")
     old.run(route, "the flight search finished", "office")
+    assert posts == []
+
+
+def test_the_real_follow_up_thread_carries_the_turn_it_came_from(monkeypatch):
+    # service.py hands a turn's follow-up to a thread through _in_ctx: the hush must still see that turn
+    import threading
+
+    from aerys_v2.service import _in_ctx
+
+    route, posts = router(monkeypatch)
+
+    def follow_up_of_an_old_turn():
+        sr.turn_started("office")
+        sr.hush("office")
+        t = threading.Thread(target=_in_ctx(route, "the flight search finished", "office"))
+        t.start()
+        t.join()
+    contextvars.copy_context().run(follow_up_of_an_old_turn)
     assert posts == []
 
 

@@ -55,9 +55,22 @@ def hushed_at(device_id: str | None) -> float:
         return _HUSH_AT.get(str(device_id or ""), 0.0)
 
 
+#: when the latest voice turn began on each device (11/14: a satellite's second stop must spare his new ask)
+_TURN_AT: dict[str, float] = {}
+
+
 def turn_started(device_id: str | None = None) -> None:
     """A voice turn began now: whatever it says later, on any speaker, is from this turn."""
-    _TURN.set(time.time())
+    now = time.time()
+    _TURN.set(now)
+    if device_id:
+        with _HUSH_LOCK:
+            _TURN_AT[str(device_id)] = now
+
+
+def last_turn(device_id: str | None) -> float:
+    with _HUSH_LOCK:
+        return _TURN_AT.get(str(device_id or ""), 0.0)
 
 
 def _since() -> float:
