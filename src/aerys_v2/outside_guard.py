@@ -1,8 +1,10 @@
 """D27/D28: outside text can inform a turn, but cannot authorize a reach-out.
 
-Only completed reader receipts in the current model input count. Sibling calls share
+Completed reader receipts in the current input count for all reach-outs.
+Prior outside-read AI replies also count, for skill writes only. Sibling calls share
 that input: finishing a read never races a sibling send into a different verdict.
-The mutable config holder is audit-only, never a source of tool-read taint.
+The mutable holder records audit and history provenance, never a source for
+the current tool call’s guard verdict.
 """
 from __future__ import annotations
 
@@ -97,6 +99,13 @@ def _decide(request, gate):
     holder = conf.get('outside_text')
     name = request.tool_call['name']
     args = dict(request.tool_call.get('args') or {})
+    if name in ('write_file', 'edit_file') and any(
+        isinstance(m, AIMessage) and m.additional_kwargs.get('outside_read')
+        for m in request.state['messages']
+    ):
+        sources = (*sources, 'earlier outside text')
+    if holder is not None and name in READERS:
+        holder['outside_read'] = True
     if holder is not None and (sources or name in READERS):
         holder['untrusted_read'] = True
     reaches = name in REACH_OUT or (name == 'kael_tickets' and

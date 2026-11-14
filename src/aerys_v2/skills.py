@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import yaml
 from deepagents.backends import StoreBackend
+from deepagents.backends.utils import perform_string_replacement
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents.middleware.skills import SkillsMiddleware
 from langchain.agents.middleware import AgentMiddleware
@@ -75,8 +76,9 @@ class FreshSkillsMiddleware(SkillsMiddleware):
 
 
 class OwnerSkillWrites(AgentMiddleware):
-    def __init__(self, owner):
+    def __init__(self, owner, backend):
         self.owner = owner
+        self.backend = backend
 
     def refusal(self, request):
         if request.tool_call['name'] not in WRITE_TOOLS:
@@ -88,6 +90,24 @@ class OwnerSkillWrites(AgentMiddleware):
         path = str((request.tool_call.get('args') or {}).get('file_path') or '')
         if not SKILL_FILE.match(path) or '..' in path:
             return ToolMessage(content=OUTSIDE, name=name, tool_call_id=call_id, status='error')
+        if path.endswith('/SKILL.md'):
+            args = request.tool_call.get('args') or {}
+            try:
+                content = args.get('content', '')
+                if name == 'edit_file':
+                    current = self.backend.download_files([path])[0]
+                    if current.error:
+                        raise ValueError('Skill file could not be read; nothing changed.')
+                    edited = perform_string_replacement(
+                        current.content.decode('utf-8'), args.get('old_string', ''),
+                        args.get('new_string', ''), args.get('replace_all', False))
+                    if isinstance(edited, str):
+                        raise ValueError(edited)
+                    content = edited[0]
+                validate_skill(path.split('/')[-2], content)
+            except (ValueError, UnicodeError) as exc:
+                return ToolMessage(content=f'Not saved: {exc}', name=name,
+                                   tool_call_id=call_id, status='error')
         return None
 
     def wrap_tool_call(self, request, handler):
@@ -111,7 +131,7 @@ def skills_middleware(store, owner_person_id):
             ], system_prompt=FILES_PROMPT,
         ),
         FreshSkillsMiddleware(backend=backend, sources=["/skills/"], system_prompt=SKILLS_PROMPT),
-        OwnerSkillWrites(owner_person_id),
+        OwnerSkillWrites(owner_person_id, backend),
     ]
 
 
@@ -151,6 +171,8 @@ def validate_skill(slug, content):
         raise ValueError('Invalid skill front matter.') from None
     if not isinstance(metadata, dict) or metadata.get('name') != slug:
         raise ValueError('Skill name must match its slug.')
+    if set(metadata) - {'name', 'description'}:
+        raise ValueError('Skill front matter may contain only name and description.')
     description = metadata.get('description')
     if not isinstance(description, str) or not description.strip() or len(description) > 1024:
         raise ValueError('Skill needs a plain description of at most 1024 characters.')

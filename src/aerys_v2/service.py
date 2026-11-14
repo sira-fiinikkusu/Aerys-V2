@@ -1940,6 +1940,24 @@ def _message_text(m: HumanMessage) -> str:
     return " ".join(parts) or str(c)
 
 
+def _action_reply(content, config, messages=(), *, id=None):
+    """Keep outside provenance when the stateless action result lands in chat history.
+
+    Marked only when THIS turn read outside text (a reader receipt, or the per-turn holder,
+    which also covers failures after a reader). Never inherited from earlier marked replies in
+    the seed: each new reply would inherit, and one web read would hold her skill writes forever.
+    So the hold lasts while the reply that read the page is in her context (Kael, 11/14).
+    """
+    from aerys_v2.outside_guard import READERS
+
+    outside = (config.get('configurable') or {}).get('outside_text') or {}
+    marked = outside.get('outside_read') or any(
+        isinstance(m, ToolMessage) and m.name in READERS for m in messages
+    )
+    return AIMessage(content=content, id=id,
+                     additional_kwargs={'outside_read': True} if marked else {})
+
+
 def _action_turn(
     action_graph: object,
     graph: object,
@@ -2022,11 +2040,7 @@ def _action_turn(
         _log_empty_reply(
             "action", config["configurable"].get("thread_id"), result_messages[-1],
         )
-    landed = (
-        AIMessage(content=final, id=replace_message_id)
-        if replace_message_id is not None
-        else AIMessage(content=final)
-    )
+    landed = _action_reply(final, config, result_messages, id=replace_message_id)
     messages: list = [landed]
     if add_human:
         # The tagged, stable-id human turn (so the async judge can retag it) — the
@@ -2361,7 +2375,7 @@ def _voice_parallel_start(
             # human turn already landed at ack time; only the outcome appends.
             graph.update_state(
                 {"configurable": real_configurable},
-                {"messages": [AIMessage(content=final)]},
+                {"messages": [_action_reply(final, action_config, result_messages)]},
                 as_node="chat",
             )
             _reclassify_if_needed(
@@ -2510,7 +2524,7 @@ def _voice_parallel_start(
             {"messages": [_human_turn(text, human_privacy, human_id,
                                        sealed_room=_sealed_room({"configurable": real_configurable}),
                                        owner_assumed=_owner_assumed({"configurable": real_configurable})),
-                          AIMessage(content=honest)]},
+                          _action_reply(honest, config)]},
             as_node="chat",
         )
         _face(face_push, "speaking", honest)
@@ -2524,7 +2538,7 @@ def _voice_parallel_start(
         {"messages": [_human_turn(text, human_privacy, human_id,
                                    sealed_room=_sealed_room({"configurable": real_configurable}),
                                    owner_assumed=_owner_assumed({"configurable": real_configurable})),
-                      AIMessage(content=reply)]},
+                      _action_reply(reply, config, result_messages)]},
         as_node="chat",
     )
 
