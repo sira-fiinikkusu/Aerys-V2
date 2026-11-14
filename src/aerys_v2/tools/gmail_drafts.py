@@ -292,10 +292,14 @@ def gmail_drafts_for(settings):
 #: the one listening, so it's refused, like her rule to keep his messages off an unsure speaker.
 UNSURE_READER = ("Couldn't read his email: I read your mail only when I'm sure it's you. Type it to me, or "
                  "ask again when I know your voice.")
+#: D47 (11/14): "i dont need that accidentally landing in a public space (voice is an exception)". His typed
+#: words in a guild, a group or a sealed room are him, but her answer would be read by the room.
+SHARED_READER = "Couldn't read his email here: others can read this room. Ask me in a DM, or by voice."
 
 
 def build_gmail_read_tools(client: GmailDrafts, *, owner_person_id: str):
-    from aerys_v2.hands_gate import OWNER_TEXT, OWNER_VOICE, asker
+    from aerys_v2.hands_gate import OWNER_ASK, OWNER_TEXT, OWNER_VOICE, asker
+    from aerys_v2.rooms import on_his_face, shared_room
 
     def allowed(runtime):
         try:
@@ -305,12 +309,18 @@ def build_gmail_read_tools(client: GmailDrafts, *, owner_person_id: str):
             if (not owner_person_id or str(identity.get('user_id') or '') != str(owner_person_id)
                     or thread.startswith('kael:')):
                 return False
-            return asker(identity, thread, owner_person_id) in (OWNER_TEXT, OWNER_VOICE) or UNSURE_READER
+            if shared_room(identity):
+                return SHARED_READER
+            who = asker(identity, thread, owner_person_id)
+            # D47: his G2 glasses are his own screen, the same view as his DMs.
+            return who in (OWNER_TEXT, OWNER_VOICE) or (who == OWNER_ASK and on_his_face(identity)) or UNSURE_READER
         except Exception:
             return False
 
     def refused(verdict):
-        return UNSURE_READER if verdict == UNSURE_READER else "Couldn't read his email: only the owner can ask about his Gmail."
+        if verdict in (UNSURE_READER, SHARED_READER):
+            return verdict
+        return "Couldn't read his email: only the owner can ask about his Gmail."
 
     @tool
     def search_his_email(query: str, runtime: ToolRuntime, max_results: int = 5) -> str:

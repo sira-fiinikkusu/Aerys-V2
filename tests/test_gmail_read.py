@@ -205,7 +205,7 @@ def test_actual_engine_read_then_draft_and_send(reader):
           for i, (name, args) in enumerate(calls)], AIMessage(content='done')]))
     graph = build_action_graph(model, 'test', [*reads, draft, send_email])
     result = graph.invoke({'messages': [HumanMessage(content='Read my mail and draft a reply')]},
-                          {'configurable': {'identity': {'user_id': OWNER, 'platform': 'discord'}, 'thread_id': 'owner:test', 'outside_text': {}}})
+                          {'configurable': {'identity': {'user_id': OWNER, 'platform': 'discord', 'privacy_context': 'private', 'channel_kind': 'dm'}, 'thread_id': 'owner:test', 'outside_text': {}}})
     receipts = [m.content for m in result['messages'] if isinstance(m, ToolMessage)]
     assert any(r.startswith(gmail.DATA_HEADER) for r in receipts)
     assert any(r.startswith('Drafted:') for r in receipts)
@@ -262,19 +262,36 @@ def test_exchange_missing_scope_rejected():
             open_url=lambda *a, **kw: io.BytesIO(json.dumps({'refresh_token': 'placeholder'}).encode()))
 
 
-@pytest.mark.parametrize('identity,thread,ok', [
-    ({'user_id': OWNER, 'platform': 'discord'}, 'person:owner', True),                    # his typed line
-    ({'user_id': OWNER, 'voice': True, 'speaker': {'id': 'owner-voice'}}, 'voice:office', True),   # his voice, sure
-    ({'user_id': OWNER, 'voice': True, 'speaker': {'id': 'owner-voice', 'unsure': True}}, 'voice:office', False),
-    ({'user_id': OWNER, 'voice': True, 'voice_owner_assumed': True}, 'voice:office', False),    # assumed, not heard
-    ({'user_id': OWNER}, 'owner:panel', False),                                            # a shared surface's /ask
+DM = {'privacy_context': 'private', 'channel_kind': 'dm'}
+PRIVATE = {'privacy_context': 'private'}           # voice and /ask lines: http_api marks them private
+
+
+@pytest.mark.parametrize('identity,thread,refusal', [
+    ({'user_id': OWNER, 'platform': 'discord', **DM}, 'person:owner', None),                  # his typed line
+    ({'user_id': OWNER, 'voice': True, 'speaker': {'id': 'owner-voice'}, **PRIVATE}, 'voice:office', None),
+    ({'user_id': OWNER, 'voice': True, 'speaker': {'id': 'owner-voice', 'unsure': True}, **PRIVATE}, 'voice:office',
+     'unsure'),
+    ({'user_id': OWNER, 'voice': True, 'voice_owner_assumed': True, **PRIVATE}, 'voice:office', 'unsure'),
+    ({'user_id': OWNER, **PRIVATE}, 'owner:panel', 'unsure'),                                 # a shared surface's /ask
+    # D47 (11/14): his G2 glasses are his own screen, the same view as his DMs
+    ({'user_id': OWNER, 'surface': 'lens', **PRIVATE}, 'glasses:abc', None),
+    # D47: his own words in a room others read never bring his mail into it
+    ({'user_id': OWNER, 'platform': 'discord', 'privacy_context': 'public', 'channel_kind': 'guild'}, 'guild:x', 'shared'),
+    ({'user_id': OWNER, 'platform': 'telegram', 'privacy_context': 'public', 'channel_kind': 'group'}, 'tg:x', 'shared'),
+    ({'user_id': OWNER, 'platform': 'discord', **DM, 'sealed_room': 'family'}, 'sealed:x', 'shared'),
+    ({'user_id': OWNER, 'platform': 'discord'}, 'person:owner', 'shared'),                   # unsaid = not private
+    ({'user_id': OWNER, 'surface': 'lens', 'privacy_context': 'public', 'channel_kind': 'guild'}, 'guild:x', 'shared'),
+    ({'user_id': OWNER, 'platform': 'discord', **DM, 'channel_kind': 'guild'}, 'guild:x', 'shared'),   # a guild, whatever it claims
+    # the lens lifts only his typed-or-asked line, never an unsure voice
+    ({'user_id': OWNER, 'surface': 'lens', 'voice': True, 'voice_owner_assumed': True, **PRIVATE}, 'voice:x', 'unsure'),
 ])
-def test_his_mail_is_read_only_to_him(identity, thread, ok):
+def test_his_mail_is_read_only_to_him_and_never_in_a_shared_room(identity, thread, refusal):
     client, requests = setup()
     search, read = gmail.build_gmail_read_tools(client, owner_person_id=OWNER)
     runtime = SimpleNamespace(config={'configurable': {'identity': identity, 'thread_id': thread}})
     said = read.func(message_id='abc123', runtime=runtime)
-    if ok:
+    if refusal is None:
         assert requests and not said.startswith("Couldn't read")
     else:
-        assert said == gmail.UNSURE_READER and requests == []
+        expected = gmail.UNSURE_READER if refusal == 'unsure' else gmail.SHARED_READER
+        assert said == expected and requests == []
