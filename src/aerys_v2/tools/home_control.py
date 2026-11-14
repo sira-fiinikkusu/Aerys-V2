@@ -658,9 +658,12 @@ def build_home_control_tool(
         span = max(1, min(int(24 if hours is None else hours), HISTORY_MAX_HOURS))
         now = (clock or (lambda: datetime.now(timezone.utc)))()
         start = quote((now - timedelta(hours=span)).isoformat())
+        # HA's history window ends one day after its start unless told otherwise: without end_time a
+        # week-long ask returned only its oldest day (found 11/14, live on his sensors).
+        end = quote(now.isoformat())
         try:
             r = _get_with_retry(
-                http, f"{base}/api/history/period/{start}?filter_entity_id={quote(entity)}"
+                http, f"{base}/api/history/period/{start}?filter_entity_id={quote(entity)}&end_time={end}"
                       "&minimal_response&no_attributes&significant_changes_only", headers)
             r.raise_for_status()
             body = r.json()

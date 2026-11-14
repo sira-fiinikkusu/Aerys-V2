@@ -126,6 +126,7 @@ def test_history_shows_how_a_reading_moved_in_his_clock():
     assert h["unit_of_measurement"] == "bpm" and h["hours"] == 12
     url = next(c for c in calls if "/api/history/period/" in c)
     assert "%2B00%3A00" in url and "filter_entity_id=sensor.watch_heart_rate" in url    # quoted, not a space
+    assert "end_time=2026-01-10T13%3A00%3A00%2B00%3A00" in url        # HA's window would stop a day after the start
 
 
 def test_history_is_thinned_to_a_page_and_hours_are_bounded():
