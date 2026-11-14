@@ -685,10 +685,13 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
             state == "idle" and body.changed_s is not None and body.changed_s <= JUST_STOPPED_S)
         if body.wake_word.strip().lower() != "stop" and not talking:
             return {"did": "nothing"}           # she was quiet: a new ask, its own turn
+        hushed = hush(device, at=body.at)       # dated when heard: turns he began after it are spared
         if body.at is not None and body.at < time.time() - STOPPED_STALE_S:
-            log.warning("voice: a stale stop notice for %s (%.0f s old); ignored", device, time.time() - body.at)
-            return {"did": "nothing", "why": "stale"}
-        satellite_voice.guard(device, hush(device, at=body.at))
+            # Late: still hold what that turn had to say, but a second stop now could hit a newer answer.
+            log.warning("voice: a late stop notice for %s (%.0f s old); held, no second stop",
+                        device, time.time() - body.at)
+            return {"did": "held", "why": "late notice: no second stop"}
+        satellite_voice.guard(device, hushed)
         log.info("voice: the satellite on %s stopped her (%s); what's on its way is held",
                  device, body.wake_word.strip() or "a wake word")
         return {"did": "held"}

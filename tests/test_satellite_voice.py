@@ -252,11 +252,19 @@ def test_the_hold_dates_from_when_the_satellite_heard_it(monkeypatch):
     assert [k["json"]["message"] for _, k in posts] == ["the answer to his new ask"]
 
 
-def test_a_stale_stop_notice_is_dropped(monkeypatch):
-    c, _ = door(monkeypatch, satellite(HA("idle")))
-    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": "stop", "at": sr.time.time() - 60},
-               headers=AUTH)
-    assert r.json()["did"] == "nothing" and sr.hushed_at("office") == 0
+def test_a_late_stop_notice_still_holds_that_turn_but_starts_no_second_stop(monkeypatch):
+    # the research he stopped still finishes later: its follow-up must stay unsaid (Codex 11/14)
+    route, posts = router(monkeypatch)
+    research = turn()
+    heard = sr.time.time()                                      # he said stop while it was still running
+    for _ in range(20):
+        sr.time.time()                                          # ...and the notice took 20 s to land
+    ha = HA("responding")
+    c, _ = door(monkeypatch, satellite(ha))
+    r = c.post("/voice/stopped", json={"device_id": "office", "wake_word": "stop", "at": heard}, headers=AUTH)
+    assert r.json()["did"] == "held" and ha.calls == []           # no guard reading HA, no second stop
+    research.run(route, "the research finished", "office")
+    assert posts == []
 
 
 def test_the_turn_table_stays_bounded():
