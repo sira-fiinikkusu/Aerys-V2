@@ -90,7 +90,7 @@ from difflib import SequenceMatcher
 from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
-from ..services.location_guard import location_shaped
+from ..services.location_guard import address_shaped, location_shaped
 from ..test_bodies import DEFAULT_PATTERNS as DEFAULT_TEST_BODY_PATTERNS
 from ..services.memory import Embedder, embedding_to_pgvector
 
@@ -662,7 +662,7 @@ def triage_memory(
         "key_label: " row in its place. An observation that says nothing
         must never be allowed to overwrite one that does.
     """
-    if any(location_shaped(v) for v in (key_label, value_text, content, context, source_text, event_date)):
+    if any(location_shaped(v) or address_shaped(v) for v in (key_label, value_text, content, context, source_text, event_date)):
         return "skipped"
     if key_label is None or not key_label.strip():
         return "skipped"
@@ -928,7 +928,7 @@ def parse_observations(text: str) -> list[dict] | None:
         if not isinstance(obs, dict):
             continue
         # Inspect decoded fields so escaped newlines cannot bypass the guard.
-        if any(location_shaped(v) for v in obs.values() if isinstance(v, str)):
+        if any(location_shaped(v) or address_shaped(v) for v in obs.values() if isinstance(v, str)):
             log.warning("memory skipped: location-shaped observation")
             continue
         if any(question_shaped(obs.get(k)) for k in ("value_text", "source_text", "context")):

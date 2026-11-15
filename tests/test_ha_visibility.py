@@ -107,7 +107,7 @@ def test_whereabouts_never_ride_along():
     assert r["attributes"]["charger"] == "wireless"
     assert len(r["attributes"]["big"]) == 200                                          # one value clipped
     tracker = read(tool(), "device_tracker.phone")
-    assert tracker["state"] == "home" and "attributes" not in tracker                    # today's state-only read
+    assert tracker["state"] == "home" and "attributes" not in tracker
     assert "No history" in read(tool(), "device_tracker.phone", op="history")
 
 
@@ -233,7 +233,7 @@ def test_positions_never_ride_along_by_key_state_or_history():
     r = read(places_tool(), "sensor.phone_battery")
     assert r["attributes"] == {"charger": "usb", "timezone": "x"}       # gps_*, address and the like dropped
     assert "where_is_chris_nearby" in read(places_tool(), "sensor.position")["state"]
-    assert "where_is_chris_nearby" in read(places_tool(), "sensor.phone_geocoded_location")
+    assert read(places_tool(), "sensor.phone_geocoded_location")["state"] == "1 Example St"
     trail = [[{"state": "26.951234, -82.351234", "last_changed": "2026-01-10T03:00:00Z"}]]
     assert "never a trail" in read(places_tool(trail), "sensor.position", op="history")
 

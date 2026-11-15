@@ -15,7 +15,7 @@ ATTRS = dict(CITY, thoroughfare="Example Street", sub_locality="Example Quarter"
              location="FORBIDDEN_LOCATION", postal_code="FORBIDDEN_POSTAL",
              premises="FORBIDDEN_PREMISES", phone="FORBIDDEN_PHONE", url="FORBIDDEN_URL",
              iso_country_code="FORBIDDEN_ISO", sub_administrative_area="FORBIDDEN_COUNTY")
-PRIVATE = {"user_id": OWNER, "privacy_context": "private"}
+PRIVATE = {"user_id": OWNER, "privacy_context": "private", "platform": "discord", "channel_kind": "dm"}
 
 
 @pytest.fixture(autouse=True)

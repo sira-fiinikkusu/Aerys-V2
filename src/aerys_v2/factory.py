@@ -2308,6 +2308,11 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                 canary_entities=canary_set(settings.ha_canary_entities),
                 conn_factory=conn_factory,
                 aliases=_room_aliases(settings.ha_room_aliases),
+                his_places=frozenset(e.strip() for e in (
+                    settings.presence_person_entity,
+                    settings.presence_geocoded_entity,
+                    settings.presence_coords_entity,
+                ) if e.strip()),
                 private_entities=private_entities,
                 owner_person_id=str(settings.owner_person_id or ""),
             )
@@ -2316,6 +2321,11 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             build_search_entities_tool(
                 base_url=settings.ha_base_url,
                 token=settings.ha_token.get_secret_value(),
+                his_places=frozenset(e.strip() for e in (
+                    settings.presence_person_entity,
+                    settings.presence_geocoded_entity,
+                    settings.presence_coords_entity,
+                ) if e.strip()),
                 private_entities=private_entities,
                 owner_person_id=str(settings.owner_person_id or ""),
             )

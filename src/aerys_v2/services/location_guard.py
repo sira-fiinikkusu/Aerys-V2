@@ -20,7 +20,12 @@ def mark_location_turn(values: Iterable[str] = (), *, person_id: str | None = No
     marker = LOCATION_TURN.get()
     if marker is not None:
         marker.add("location")
-        marker.update("place:" + v.strip() for v in values if isinstance(v, str) and v.strip())
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                value = value.strip()
+                marker.add("place:" + value)
+                if address_shaped(value):
+                    marker.add("street:" + re.sub(r"^\d+\s+", "", value))   # never excused by a date
     # Call sites pass the identity only after their owner authorization gate.
     if person_id:
         RECENT_LOCATION_TURNS[person_id] = time.monotonic()
@@ -54,17 +59,46 @@ _MONTH = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul
 _END_DATE = re.compile(rf"\b(?:{_MONTH}\s+\d{{1,2}}\s*[-–]\s*\d{{1,2}},?\s+\d{{4}}|until\s+{_MONTH}\s+\d{{1,2}},?\s+\d{{4}})\b", re.I)
 
 
+#: A street suffix as an address writes it (capitalized). The short forms that are also everyday words
+#: or titles ("Dr Smith", "St Pete", "on the way") count only where an address ends them: at the end or
+#: before punctuation (Kael 11/15: "2 appointments with Dr Smith" must stay a memory).
+def _cased(words: str) -> str:
+    """Each suffix as an address writes it: Capitalized, or ALL CAPS (some geocoders), never lowercase."""
+    return "|".join(f"{w}|{w.upper()}" for w in words.split())
+
+
+_STREET_WORD = (r"(?:" + _cased("Street Avenue Ave Road Rd Boulevard Blvd Drive Lane Ln Court Place Highway Hwy "
+                                "Parkway Pkwy Circle Terrace Trail Trl") + r")\b")
+#: ...unless a Capitalized name follows (St Pete, Dr. Smith); a unit after the street still counts, and so
+#: does a new sentence ("1 Example St. He enjoyed it": Codex 11/15), told by its usual first words.
+_STARTERS = ("He|She|It|They|We|I|You|The|A|An|This|That|These|Those|Then|There|Here|His|Her|Their|Our|My|"
+             "And|But|So|After|Before|Later|Today|Tonight|Yesterday|Tomorrow|Also|Afterward|Afterwards")
+_STREET_SHORT = (r"(?:" + _cased("St Dr Pl Ct Ter Cir Way") + r")\b"
+                 r"(?!\.?\s+(?!(?:Apt|Apartment|Suite|Ste|Unit|APT|SUITE|STE|UNIT|" + _STARTERS + r")\b)[A-Z])")
+_ADDRESS = re.compile(r"\b\d+\s+(?:[\w'’-]+\s+){1,4}(?:" + _STREET_WORD + "|" + _STREET_SHORT + ")")
+
+
+def address_shaped(text: str | None) -> bool:
+    """Recognize a numbered US street address, without blocking place names."""
+    return isinstance(text, str) and bool(_ADDRESS.search(text))
+
+
 def location_memory_blocked(text: str | None) -> bool:
     """Shape checks always apply; dated trips exempt only place provenance."""
     if location_shaped(text):
         return True
-    if not isinstance(text, str) or _END_DATE.search(text):
+    if not isinstance(text, str):
         return False
     marker = LOCATION_TURN.get()
     if not marker or "location" not in marker:
         return False
-    return any(re.search(r"(?<!\w)" + re.escape(v[6:]) + r"(?!\w)", text, re.I)
-               for v in tuple(marker) if v.startswith("place:"))
+    def said(value: str) -> bool:
+        return bool(re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text, re.I))
+
+    dated = bool(_END_DATE.search(text))
+    return any(said(v[6:]) for v in tuple(marker) if v.startswith("place:")
+               and (not dated or any(c.isdigit() for c in v[6:]))) \
+        or any(said(v[7:]) for v in tuple(marker) if v.startswith("street:"))
 
 
 def location_shaped(text: str | None) -> bool:

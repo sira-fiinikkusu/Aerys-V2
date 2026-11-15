@@ -34,9 +34,16 @@ def build_whereabouts_tool(*, base_url: str, token: str, person_entity: str,
         never repeat coordinates back unless he asks, never tell anyone else.
         """
         identity = identity_from_config(config)
-        if (not owner_person_id or identity.get("user_id") != owner_person_id
-                or identity.get("privacy_context") != "private"):
-            return "Location request refused: only the owner on a private turn may use this tool."
+        from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read
+
+        thread = str((config.get("configurable") or {}).get("thread_id") or "")
+        why = his_private_read(identity, thread, owner_person_id)
+        if why == NOT_HIM:
+            return "Location request refused: I can only tell him where he is."
+        if why == SHARED:
+            return "Location request refused: others can read this room; ask me in a DM or by voice."
+        if why is not None:
+            return "Location request refused: I'm not sure it's him; type it to me or ask when I know your voice."
         if not person_entity or not geocoded_entity:
             return "Current location is unavailable. Never guess."
         def locate(http):

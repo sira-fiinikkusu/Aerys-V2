@@ -348,9 +348,8 @@ def device_target_choices(canary_entities: frozenset[str], *, limit: int = 250,
 
 #: D47 (11/14): her read of a sensor is the whole reading, the way Kael reads it: units, class and the
 #: attributes, not just the bare state ("172" with no "min" was all she got). Light/display noise and
-#: oversized values stay out; whereabouts never come along (the 11/02 location ruling: precise position
-#: only when he asks for something nearby): trackers, people, zones and geocoded sensors keep today's
-#: state-only read, and any other attribute shaped like a location is dropped.
+#: oversized values stay out. D57: authorized whereabouts reads bypass this filtering; other readings
+#: still drop attributes shaped like locations, so position data never rides along accidentally.
 _DETAIL_SKIP = frozenset({"friendly_name", "icon", "entity_picture", "supported_features", "supported_color_modes",
                           "rgb_color", "hs_color", "xy_color", "brightness", "color_mode", "attribution",
                           "restored", "editable", "id", "options", "effect"})
@@ -360,6 +359,7 @@ READ_MAX = 12000                  # one get_state/history answer, all targets to
 _WHEREABOUTS_DOMAINS = ("device_tracker.", "person.", "zone.")
 HISTORY_MAX_HOURS = 168
 HISTORY_POINTS = 48
+WHEREABOUTS_POINTS = 200
 #: HA's own entity-id grammar. Anything else ("sensor.a/../sensor.b") is refused before any check or
 #: URL: a path segment must never walk past the private-reading prefixes (Codex 11/14 blocker).
 ENTITY_ID = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
@@ -386,6 +386,9 @@ def _place_key(key: str) -> bool:
 
 PRECISE_PLACE = ("That's his precise location. It's only read through where_is_chris_nearby, when he asks "
                  "for something near him.")
+
+HIS_LOCATION_REFUSAL = ("Where he is or has been is his to ask: I can only tell him "
+                 "(typed, or a voice I'm sure is his).")
 
 
 def whereabouts(entity_id: str) -> bool:
@@ -481,6 +484,90 @@ def history_points(rows: list, now: datetime) -> list[list[str]]:
     return points
 
 
+class TooManyLocationStops(ValueError):
+    """The history cannot fit without dropping distinct stops."""
+
+
+def whereabouts_points(rows: list, now: datetime) -> list[list[str]]:
+    """Keep all state transitions; sample only redundant same-state GPS updates."""
+    from aerys_v2.hands_gate import EASTERN
+
+    points = []
+    required = set()
+    previous = None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("state") is None:
+            raise ValueError("a history row has no state")
+        state = str(row["state"])
+        attrs = row.get("attributes") or {}
+        coords = []
+        if attrs.get("latitude") is not None and attrs.get("longitude") is not None:
+            coords = [f"{float(attrs['latitude']):.4f}, {float(attrs['longitude']):.4f}"]
+        at = datetime.fromisoformat(str(row.get("last_updated") or row.get("last_changed"))
+                                   .replace("Z", "+00:00")).astimezone(EASTERN)
+        label = at.strftime("%I:%M %p").lstrip("0")
+        if at.date() != now.astimezone(EASTERN).date():
+            label = f"{at.strftime('%a')} {label}"
+        if state != previous:
+            required.add(len(points))
+        elif not coords:
+            continue
+        points.append([label, state, *coords])
+        previous = state
+    if len(required) > WHEREABOUTS_POINTS:
+        raise TooManyLocationStops()
+    if len(points) > WHEREABOUTS_POINTS:
+        optional = [i for i in range(len(points)) if i not in required]
+        slots = WHEREABOUTS_POINTS - len(required)
+        # Include the latest GPS point when space permits.
+        chosen = {optional[round((i + 1) * len(optional) / slots) - 1] for i in range(slots)}
+        points = [points[i] for i in sorted(required | chosen)]
+    return points
+
+
+def _mark_location_read(data, owner: str | None) -> None:
+    """Mark only place values; generic states and sensor metadata are not places."""
+    from aerys_v2.services.location_guard import mark_location_turn
+
+    def place(value, *, state=False):
+        if value is None or isinstance(value, bool):
+            return []
+        text = str(value).strip()
+        if len(text) < 3 or (state and text.lower() in {
+                "home", "not_home", "away", "unknown", "unavailable"}):
+            return []
+        numeric = re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", text)
+        if numeric and (state or len(text) < 4):
+            return []
+        return [text]
+
+    def attributes(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(child, (dict, list, tuple)):
+                    yield from attributes(child)
+                elif _place_key(str(key)):
+                    yield from place(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                yield from attributes(child)
+
+    places = []
+    rows = data if isinstance(data, list) else [data]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        places.extend(place(row.get("state"), state=True))
+        attrs = row.get("attributes") or {}
+        places.extend(attributes(attrs))
+        if isinstance(attrs, dict) and attrs.get("latitude") is not None and attrs.get("longitude") is not None:
+            try:
+                places.append(f"{float(attrs['latitude']):.4f}, {float(attrs['longitude']):.4f}")
+            except (ValueError, TypeError):
+                pass
+    mark_location_turn(values=places, person_id=owner)
+
+
 def build_home_control_tool(
     *,
     base_url: str,
@@ -490,6 +577,7 @@ def build_home_control_tool(
     conn_factory: ConnFactory | None = None,
     aliases: dict[str, tuple[str, ...]] | None = None,
     private_entities: tuple[str, ...] = (),
+    his_places: frozenset[str] = frozenset(),
     owner_person_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ):
@@ -503,6 +591,9 @@ def build_home_control_tool(
     base = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     http = client or httpx.Client(timeout=10.0)
+
+    def _his_location(entity: str) -> bool:
+        return entity in his_places or (private_entity(entity, private_entities) and whereabouts(entity))
 
     def _outbox_open(payload: dict) -> int | None:
         """INSERT the write-ahead intent row; returns its id (None = outbox off/failed).
@@ -619,6 +710,11 @@ def build_home_control_tool(
                 out["rgb_color"] = list(attrs["rgb_color"])
             if full:
                 out.update(reading_details(entity, data))
+                if _his_location(entity):
+                    _mark_location_read(data, owner_person_id)
+                    out["state"] = data.get("state")
+                    out["attributes"] = attrs
+                    return out
                 from aerys_v2.services.location_guard import location_shaped
 
                 if location_shaped(str(out.get("state"))):
@@ -627,22 +723,34 @@ def build_home_control_tool(
                     out["state"] = _clip(out.get("state"), 255)
             return out
         except httpx.HTTPError as e:
+            if _his_location(entity):
+                return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant is unreachable right now ({e})."
         except (ValueError, TypeError, AttributeError) as e:
             # Malformed JSON / odd attribute types: honest string, never a raise.
+            if _his_location(entity):
+                return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant returned an unreadable reply for {entity} ({e})."
 
     def _private_refusal(targets: list[str], runtime) -> str | None:
         """D47: his own phone and watch readings only come to him: his DM or typed line, a voice she's
         sure is his, his glasses or his own wake-up, never a room others read."""
-        if not any(private_entity(e, private_entities) for e in targets):
+        location = any(_his_location(e) for e in targets)
+        if not location and not any(private_entity(e, private_entities) for e in targets):
             return None
         from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read, runtime_identity
 
         identity, thread = runtime_identity(runtime)
+        # A second household voice joins this gate once it is enrolled (Stage 5).
         why = his_private_read(identity, thread, owner_person_id)
         if why is None:
             return None
+        if location:
+            if why == SHARED:
+                return "Where he is or has been is private: others can read this room, so ask me in a DM or by voice."
+            if why == NOT_HIM:
+                return HIS_LOCATION_REFUSAL
+            return "Where he is or has been is private: I'm not sure it's him, so type it to me or ask when I know your voice."
         if why == SHARED:
             return ("Couldn't read that here: it's one of his own phone or watch readings, and others can read "
                     "this room. Ask me in a DM, or by voice.")
@@ -653,33 +761,45 @@ def build_home_control_tool(
 
     def _history(entity: str, hours: int | None) -> dict | str:
         """How a reading moved over the last few hours: changes only, in his clock, thinned to a page."""
-        if whereabouts(entity):
-            return f"No history for {entity}: where he's been is never read back as a trail."
+        location = _his_location(entity)
+        if whereabouts(entity) and not location:
+            return f"No history for {entity}: where someone's been is never read back as a trail."
         span = max(1, min(int(24 if hours is None else hours), HISTORY_MAX_HOURS))
         now = (clock or (lambda: datetime.now(timezone.utc)))()
         start = quote((now - timedelta(hours=span)).isoformat())
         # HA's history window ends one day after its start unless told otherwise: without end_time a
         # week-long ask returned only its oldest day (found 11/14, live on his sensors).
         end = quote(now.isoformat())
+        flags = "" if location else "&minimal_response&no_attributes&significant_changes_only"
         try:
             r = _get_with_retry(
                 http, f"{base}/api/history/period/{start}?filter_entity_id={quote(entity)}&end_time={end}"
-                      "&minimal_response&no_attributes&significant_changes_only", headers)
+                      f"{flags}", headers)
             r.raise_for_status()
             body = r.json()
             if not isinstance(body, list) or (body and not isinstance(body[0], list)):
                 return f"Home Assistant returned an unreadable history for {entity}."
             rows = body[0] if body else []
+            if location:
+                _mark_location_read(rows, owner_person_id)
             current = _read_state(entity, full=True)
         except httpx.HTTPError as e:
+            if _his_location(entity):
+                return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant is unreachable right now ({e})."
         except (ValueError, TypeError, IndexError) as e:
+            if location:
+                return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
         try:
-            points = history_points(rows, now)
+            points = whereabouts_points(rows, now) if location else history_points(rows, now)
+        except TooManyLocationStops:
+            return "Too many state changes: ask for a shorter history span."
         except PositionHistory:
             return f"No history for {entity}: its readings are positions, and where he's been is never a trail."
         except (ValueError, TypeError, AttributeError) as e:
+            if location:
+                return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant returned an unreadable history for {entity} ({e})."
         out = {"entity_id": entity, "hours": span, "changes": points}
         if isinstance(current, dict):
@@ -796,6 +916,11 @@ def build_home_control_tool(
         turn_on also accepts color (and brightness_pct) in the same call. A
         white-only bulb refuses honestly; get_state shows color_capable.
 
+        For him, get_state/history on his phone's location entities returns where he is
+        and where he's been: history is his stops through the day, with times.
+        An address can be looked up with search_web to see what's there.
+        These readings are live only, never save whereabouts to memory.
+
         get_state works on any entity. Writes only work on lights and switches
         on the beta allowlist — if the tool refuses, tell the user honestly and
         exactly why; NEVER claim a device changed state unless this tool said
@@ -816,13 +941,15 @@ def build_home_control_tool(
             refusal = _private_refusal(targets, runtime)
             if refusal:
                 return refusal
-            if any(precise_place(e) for e in targets):
+            if any(precise_place(e) and not _his_location(e) for e in targets):
                 return PRECISE_PLACE
         if op in ("get_state", "history"):
             results = [_read_state(e, full=True) if op == "get_state" else _history(e, hours) for e in targets]
             text = (results[0] if isinstance(results[0], str) else json.dumps(results[0])) if len(results) == 1 \
                 else json.dumps(results)
             if len(text) > READ_MAX:
+                if any(_his_location(e) for e in targets):
+                    return "Location reading is too large: ask for a shorter history span or fewer entities."
                 return text[:READ_MAX] + " … (cut: ask for fewer things at once)"
             return text
 
@@ -1032,6 +1159,7 @@ def build_search_entities_tool(
     base_url: str,
     token: str,
     client: httpx.Client | None = None,
+    his_places: frozenset[str] = frozenset(),
     private_entities: tuple[str, ...] = (),
     owner_person_id: str | None = None,
 ):
@@ -1151,14 +1279,21 @@ def build_search_entities_tool(
 
         # D47: his own phone/watch readings show their names (she still needs the id) but not their
         # values outside his own rooms; get_state says why.
-        hide = False
-        if private_entities and any(private_entity(e, private_entities) for _, e, _, _ in picked):
-            from aerys_v2.rooms import his_private_read, runtime_identity
+        from aerys_v2.rooms import his_private_read, runtime_identity
 
-            identity, thread = runtime_identity(runtime)
-            hide = his_private_read(identity, thread, owner_person_id) is not None
+        identity, thread = runtime_identity(runtime)
+        hide = his_private_read(identity, thread, owner_person_id) is not None
         lines = []
         for _, entity, friendly, item in picked:
+            his_location = entity in his_places or (private_entity(entity, private_entities) and whereabouts(entity))
+            if his_location:
+                if hide:
+                    lines.append(f"{entity} | {friendly or '(no name)'} | (his location: not here)")
+                    continue
+                _mark_location_read(item, owner_person_id)
+            elif precise_place(entity):
+                lines.append(f"{entity} | {friendly or '(no name)'} | (a place: not shown)")
+                continue
             if hide and private_entity(entity, private_entities):
                 lines.append(f"{entity} | {friendly or '(no name)'} | (his own reading: not here)")
                 continue
