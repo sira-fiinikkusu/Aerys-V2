@@ -183,6 +183,7 @@ def build_music_tool(
     default_player: str | None = None,
     client: httpx.Client | None = None,
     owner_person_id: str | None = None,
+    dj_store=None,
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -237,6 +238,16 @@ def build_music_tool(
     def _saved(media_type: str) -> list[dict]:
         # ~2,200 saved songs live: five 0.2 s pages, so a longer cache than playlists.
         return _library(media_type, _SAVED_PAGE_SIZE, _SAVED_TTL)
+
+    if dj_store is not None:
+        dj_store.saved_tracks = lambda: _saved("track")
+
+    def _mark_command(player):
+        if dj_store is not None:
+            try:
+                dj_store.put("command:" + player, time.time())
+            except Exception:
+                log.warning("DJ command activity unavailable")
 
     def _library_read_refusal(config: RunnableConfig) -> str | None:
         from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read
@@ -312,6 +323,7 @@ def build_music_tool(
         play: his own library first (playlists, then saved songs and artists,
             forgiving of misheard words), then Spotify search. Pass just the name;
             drop "from my list" / "from my liked songs".
+        dj: query on|off; owner only. Off lasts until 06:00 local.
         my_playlists: list library playlist names; optional query filters names.
         my_taste: read his library at a glance (top saved artists, playlists).
         play_next: resolve query like play and queue it next, without interrupting.
@@ -344,6 +356,22 @@ def build_music_tool(
         the tool reply confirms it.
         """
         op = operation.strip().lower().replace(" ", "_")
+
+        if op == "dj":
+            refusal = _library_read_refusal(config)
+            if refusal:
+                return refusal
+            if identity_from_config(config).get("unattended"):
+                return "Not done: DJ controls need the owner present."
+            if query.strip().lower() not in {"on", "off"}:
+                return "Use query on or off for DJ breaks."
+            if dj_store is None:
+                return "DJ controls are unavailable."
+            from aerys_v2.dj import set_enabled
+            try:
+                return set_enabled(dj_store, query.strip().lower() == "on")
+            except Exception:
+                return "DJ control failed; the setting was not confirmed."
 
         if op in ("my_playlists", "my_taste"):
             refusal = _library_read_refusal(config)
@@ -382,6 +410,8 @@ def build_music_tool(
         # ---- transport controls (plain media_player services) ----------------
         if op in _TRANSPORT_OPS:
             service = _TRANSPORT_OPS[op]
+            if op in {"next", "previous", "resume"}:
+                _mark_command(player)
             try:
                 r = http.post(
                     f"{base}/api/services/media_player/{service}",
@@ -391,6 +421,8 @@ def build_music_tool(
                 r.raise_for_status()
             except httpx.HTTPError as e:
                 return f"The {op} on {_friendly(player)} FAILED — Home Assistant said: {e}."
+            if op in {"next", "previous", "resume"}:
+                _mark_command(player)
             return f"{WRITE_OK_PREFIX} {op} sent to {_friendly(player)}."
 
         if op == "volume":
@@ -483,7 +515,7 @@ def build_music_tool(
             return (
                 f"Unknown operation '{operation}'. Valid operations: play, pause, "
                 "resume, stop, next, previous, volume, now_playing, my_playlists, "
-                "my_taste, play_next, add_to_queue, up_next, shuffle, repeat, more_like_this."
+                "my_taste, play_next, add_to_queue, up_next, shuffle, repeat, more_like_this, dj."
             )
 
         # ---- play: search Music Assistant, then queue the top hit ------------
@@ -574,6 +606,8 @@ def build_music_tool(
                 # to shuffle), then its radio after it, below.
                 attempts[0]["enqueue"] = "replace"
             for payload in attempts:
+                if op == "play":
+                    _mark_command(player)
                 try:
                     r = http.post(
                         f"{base}/api/services/music_assistant/play_media",
@@ -585,6 +619,8 @@ def build_music_tool(
                     last_error = str(e)
                     tried.append(f"{name} ({chosen_type}{', radio' if payload.get('radio_mode') else ''})")
                     continue
+                if op == "play":
+                    _mark_command(player)
                 note = ""
                 if one_song:
                     # Owner call (2026-07-18): asking for ONE song means "start music", not "play 3:44

@@ -408,6 +408,10 @@ class Settings(BaseSettings):
     ha_timer_fallback_entity: str | None = None
 
     # ---- MUSIC (Music Assistant + Spotify, the 07-01 Play Music rebirth) -----
+    # Natural track-change commentary; spoken volume defaults to the player setting.
+    dj_breaks: bool = True
+    dj_cooldown_s: float = Field(default=900, ge=0)
+    dj_announce_volume: int | None = Field(default=None, ge=1, le=100)
     # The Music Assistant CONFIG ENTRY id in HA (Settings → Devices & Services →
     # Music Assistant) — music_assistant.search requires it. Empty = the music
     # tool doesn't exist this boot, same arming pattern as every optional half.

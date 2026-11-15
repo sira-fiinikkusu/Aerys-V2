@@ -1572,6 +1572,7 @@ TIMER_OVERLAY = (
 # the originating device itself. Tool name MUST match tools/music.py's @tool
 # function name — `music` (the V1 toolWorkflow name-mismatch bug, kept dead).
 MUSIC_OVERLAY = (
+    "For no DJ talk tonight or DJ back on, call music operation=dj with query=off or on. "
     "You can play Spotify music on the house speakers with the music tool. Call "
     "music IMMEDIATELY whenever the user asks to play a song, artist, album, or "
     "playlist ('play some daft punk', 'put on my focus playlist'), or to "
@@ -2430,12 +2431,14 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             # the origin-device default reuses the HA_SATELLITE_MAP csv parser —
             # one format for every device_id=entity map.
             from aerys_v2.tools.music import build_music_tool
+            from aerys_v2.dj import store_for
 
             tools.append(
                 build_music_tool(
                     base_url=settings.ha_base_url,
                     token=settings.ha_token.get_secret_value(),
                     config_entry_id=settings.ha_music_config_entry,
+                    dj_store=store_for(settings.database_url),
                     players=satellite_map_from(settings.ha_music_players),
                     default_player=settings.ha_music_default_player,
                     owner_person_id=str(settings.owner_person_id or "") or None,
@@ -2784,6 +2787,9 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         context_trailing=settings.prompt_context_trailing,
         **extra,
     )
+    from aerys_v2.dj import store_for
+
+    action_graph.dj_store = store_for(settings.database_url)
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else

@@ -1239,6 +1239,8 @@ def ask(
     if action_graph is not None:
         specialists["action"] = action_graph
     action_graph = specialists.get("action")
+    from aerys_v2.dj import note_voice
+    note_voice(getattr(action_graph, "dj_store", None), identity)
 
     # Gate the action stack BEFORE anything else can arm it. A caller outside the
     # allowlist never reaches home_control / search_entities / get_state — closing

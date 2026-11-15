@@ -380,6 +380,9 @@ def main() -> None:
                 from aerys_v2.transports.http_api import serve_once
 
                 sys.exit(serve_once(app, ask_once, settings.api_token.get_secret_value()))
+            from aerys_v2.dj import start_dj
+
+            start_dj(settings, graph, action_graph, tier_models["fast"], soul)
             # Her circadian rhythm: ONE watcher, in --serve only (the other
             # transports must not fight over her eyelids). Daemon thread;
             # None unless panel + HA + occupancy entity are all configured.
