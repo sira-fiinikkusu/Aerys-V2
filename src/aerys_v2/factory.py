@@ -447,7 +447,8 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     def route(text: str, device_id: str | None) -> None:
         from .spoken import spoken
 
-        # 11/13: what's SPOKEN is short plain speech; a display gets the whole text (Codex 11/13).
+        # What's SPOKEN is plain speech (D55: never cut by length; brevity is taught); a display gets
+        # the whole text as written (Codex 11/13).
         read, text = text, spoken(text)
         open_mic = bool(device_id and device_id in satellite_map
                         and text.strip().endswith("?") and toggle.enabled())
@@ -1702,9 +1703,9 @@ VOICE_ACK_OVERLAY = (
     "('I think you said flights: ...'); if nothing fits, say you couldn't find it. "
     "Only if the command is truly unexecutable or "
     "unsafe, call no_action with the problem stated in one plain sentence. "
-    "Your answer is SPOKEN aloud after that acknowledgment: keep it to two or three "
-    "sentences, the answer first, as plain speech; never lists, headings, links or "
-    "markdown. If there is more worth knowing, say so in one short line and stop. "
+    "Your answer is SPOKEN aloud after that acknowledgment: as plain speech, the answer first, "
+    "never lists, headings, links or markdown. Say less rather than more: two or three sentences "
+    "is usually right, and you may go longer when the answer truly needs it. "
     + VOICE_RECIPIENT_RULE
 )
 

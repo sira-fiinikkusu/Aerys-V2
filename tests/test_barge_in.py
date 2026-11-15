@@ -4,7 +4,7 @@ which the whole-phrase check missed; "On it." then queued behind the answer. Now
 redirected speaker, anything said there cuts her off (with a hush, so what's on its way stays quiet). A
 stop at the END of what the mic heard, or her own voice coming back, ends it with no model call; anything
 else is answered. Codex 11/13 kept the ordinary questions safe ("why is the office so quiet?", "were those
-bright lights moving around?"). What's SPOKEN after an ack is short plain speech; a display still gets it
+bright lights moving around?"). What's SPOKEN after an ack is plain speech, never cut (D55); a display gets it
 all. Placeholder ids and text only."""
 
 from __future__ import annotations
@@ -157,25 +157,28 @@ def test_the_shared_record_of_what_she_said_is_what_the_echo_check_reads():
     assert "Executive Jet Flight 146" in recent_said("office")
 
 
-def test_what_she_says_after_an_ack_is_short_plain_speech():
+def test_what_she_says_after_an_ack_is_plain_speech_and_never_cut():
+    # D55 (11/15): "its taught not coded". The markup comes off; nothing is cut and no line is added.
     from aerys_v2.factory import VOICE_ACK_OVERLAY
-    from aerys_v2.spoken import SPOKEN_MAX, SPOKEN_MORE, spoken
+    from aerys_v2.spoken import spoken
     long = ("I couldn't find a story about the FAA grounding lights, Chris. Two searches turned up nothing that "
             "matches.\n\nHere's what did come up:\n- **Unusual lights, Nov 1:** Executive Jet Flight 146 reported "
             "bright lights moving around and randomly appearing and disappearing, and air traffic control logged "
             "it, and the FAA said it would look into it.\n- **Drones:** several airports paused departures, "
             "[details](https://example.com/x).\n\nYour message to Megan is waiting on your tap.")
     out = spoken(long)
-    assert out.endswith(SPOKEN_MORE) and out.startswith("I couldn't find")
+    assert out.startswith("I couldn't find") and out.endswith("Your message to Megan is waiting on your tap.")
     assert "**" not in out and "- " not in out and "http" not in out
-    assert "waiting on your tap" in out                         # a status line is never the part cut
-    assert len(out) <= SPOKEN_MAX + 200 + len(SPOKEN_MORE) + 2
+    assert "Executive Jet Flight 146" in out and "the FAA said it would look into it" in out   # the middle stays
+    assert "more if you want" not in out.lower()
     assert spoken("[warmly] Done, Chris.") == "[warmly] Done, Chris."
     assert "SPOKEN aloud" in VOICE_ACK_OVERLAY and "markdown" in VOICE_ACK_OVERLAY
+    assert "go longer when the answer truly needs it" in VOICE_ACK_OVERLAY        # brevity is taught
+    assert "say so in one short line" not in VOICE_ACK_OVERLAY
 
 
-def test_speakers_get_the_short_version_and_a_display_gets_it_all(monkeypatch):
-    # Codex 11/13: the first cut also shortened the ink panel's text
+def test_speakers_get_plain_speech_and_a_display_gets_it_as_written(monkeypatch):
+    # Codex 11/13: the ink panel gets the text as written; D55: a speaker gets all of it, minus markup
     from aerys_v2.config import Settings
     from aerys_v2.factory import followup_router_for
     from aerys_v2.spoken import spoken
@@ -191,13 +194,13 @@ def test_speakers_get_the_short_version_and_a_display_gets_it_all(monkeypatch):
     settings = Settings(_env_file=None, anthropic_api_key="x", ha_token="t", ha_base_url="http://ha.example",
                         ha_satellite_map="sat=assist_satellite.example",
                         ha_display_followups="display=esphome.example_show")
-    long = "First sentence here. " * 30
+    long = "**First** sentence here. " * 30
     route = followup_router_for(settings)
     route(long, "sat")
     route(long, "display")
     sat = next(b for u, b in posts if u.endswith("/announce"))
     ink = next(b for u, b in posts if u.endswith("/example_show"))
-    assert sat["message"] == spoken(long) and len(sat["message"]) < len(long)
+    assert sat["message"] == spoken(long) == ("First sentence here. " * 30).strip()
     assert ink["message"] == long
 
 
@@ -209,15 +212,15 @@ def test_the_echo_check_is_bounded():
     assert time.monotonic() - t < 1.0
 
 
-def test_shortening_keeps_the_words_the_status_and_a_closing_question():
-    from aerys_v2.spoken import SPOKEN_MORE, spoken
+def test_a_long_answer_is_said_whole_with_its_tag_status_and_question():
+    from aerys_v2.spoken import spoken
     tagged = spoken("[warmly]\n" + "explanation " * 40)
-    assert tagged.startswith("[warmly] explanation") and "explanation" in tagged
-    failed = spoken("I tried to send the message to Megan on Discord " + "while the connection kept dropping " * 9
-                    + "and nothing was sent. Then I stopped.")
-    assert "Nothing was sent." in failed and failed.endswith(SPOKEN_MORE)
-    asked = spoken("Here is a long answer. " * 20 + "Want me to keep going?")
-    assert asked.endswith("Want me to keep going?")
+    assert tagged == "[warmly] " + ("explanation " * 40).strip()
+    said = ("I tried to send the message to Megan on Discord " + "while the connection kept dropping " * 9
+            + "and nothing was sent. Then I stopped.")
+    assert spoken(said) == said
+    asked = "Here is a long answer. " * 20 + "Want me to keep going?"
+    assert spoken(asked) == asked
 
 
 def test_the_last_edges_codex_found():
@@ -231,7 +234,7 @@ def test_the_last_edges_codex_found():
     assert _is_echo(her_q, her_q) and not _ends_with_stop(her_q, her_q)
     her_stop = "The voice command you need is please stop talking"
     assert _is_echo(her_stop, her_stop) and not _ends_with_stop(her_stop, her_stop)
-    both = spoken("Here is a long answer. " * 20 + "The message was not sent and will need approval.")
-    assert "The message was not sent." in both and "Will need approval." in both
+    both = "Here is a long answer. " * 20 + "The message was not sent and will need approval."
+    assert spoken(both) == both
     asked = spoken("Here is a long answer. " * 20 + "Would you approve the request?")
     assert asked.count("Would you approve the request?") == 1 and "?." not in asked
