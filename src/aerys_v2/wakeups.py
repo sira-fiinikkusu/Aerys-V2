@@ -1094,12 +1094,15 @@ def house_key_of(w) -> str:
 
 def attach_house_record(thread: str) -> dict:
     """The record a turn's config carries: the one its owner opened, even if the owner has already closed
-    it (a turn that starts late finds its run over and can't write; Codex 11/15). With no owner (a direct
-    call), a record of its own."""
+    it (a turn that starts late finds its run over and can't write; Codex 11/15). Only an owner opens a
+    record, so none at all (never opened, or long since closed and dropped) is a closed one: never a
+    fresh record nobody will close."""
     with _HOUSE_LOCK:
         record = _HOUSE_RECORDS.get(thread)
-        if record is None:
-            record = _HOUSE_RECORDS[thread] = _new_record()
+    if record is None:
+        log.warning("house record %s: no owner's record (closed long ago?); its writes are refused", thread)
+        record = _new_record()
+        record["closed"] = True
     return record
 
 

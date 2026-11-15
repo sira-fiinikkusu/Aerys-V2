@@ -780,7 +780,8 @@ def test_d54_the_wrapped_tool_enforces_the_blocklist_too():
 def test_d54_the_run_record_keeps_every_write_and_a_closed_run_writes_nothing():
     # Codex 11/15: reporting read "Done:" lines off a finished run, so a partial write, or a run that
     # failed or timed out afterwards, went unreported, and a timed-out turn kept its hands on the house.
-    from aerys_v2.wakeups import TIME_UP, _house_line, close_house_record, house_receipt, wake_config, wake_tools
+    from aerys_v2.wakeups import (TIME_UP, _house_line, close_house_record, house_receipt, open_house_record,
+                                  wake_config, wake_tools)
     ran = []
 
     @tool("home_control")
@@ -794,6 +795,7 @@ def test_d54_the_run_record_keeps_every_write_and_a_closed_run_writes_nothing():
         return f"Done: {entity_id} turned {operation.removeprefix('turn_')}."
 
     wrapped = wake_tools([home_control])[0]
+    open_house_record("wake:record-test")                            # the run's owner opens it
     config = wake_config(7, OWNER, house_key="wake:record-test")
     wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"}, config=config)
     wrapped.invoke({"operation": "turn_on", "entity_id": "light.a,light.b"}, config=config)
@@ -1071,7 +1073,7 @@ def test_d54_a_run_with_no_house_action_is_unchanged():
 def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_reported():
     # Codex 11/15 round 2: check, invoke and record weren't one step with the close, so a write still
     # running at the timeout (or one that raised after it went) vanished from the report.
-    from aerys_v2.wakeups import close_house_record, wake_config
+    from aerys_v2.wakeups import close_house_record, open_house_record, wake_config
     started, release = threading.Event(), threading.Event()
 
     @tool("home_control")
@@ -1084,6 +1086,7 @@ def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_repor
         return f"Done: {entity_id} turned off."
 
     wrapped = wake_tools([home_control])[0]
+    open_house_record("wake:inflight-test")
     config = wake_config(8, OWNER, house_key="wake:inflight-test")
     worker = threading.Thread(target=lambda: wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"},
                                                             config=config))
@@ -1093,6 +1096,7 @@ def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_repor
         "home_control turn_off light.office (started; how it ended isn't known)"]
     release.set()
     worker.join(5)
+    open_house_record("wake:raise-test")
     config = wake_config(9, OWNER, house_key="wake:raise-test")
     with pytest.raises(Exception):
         wrapped.invoke({"operation": "turn_off", "entity_id": "light.boom"}, config=config)
@@ -1156,6 +1160,10 @@ def test_d54_a_turn_that_starts_after_its_run_closed_cannot_write():
     assert ran == []
     fresh = open_house_record("wake:late-test")                      # the next run's owner: a new record
     assert not fresh["closed"] and wake_config(11, OWNER, house_key="wake:late-test")["configurable"]["house_sink"] is fresh
+    # A key with no owner's record at all (never opened, or dropped long after it closed): closed, never fresh.
+    from aerys_v2.wakeups import attach_house_record
+    assert attach_house_record("wake:never-opened")["closed"]
+    assert wake_config(12, OWNER)["configurable"]["house_sink"]["closed"] is False   # a direct call: its own
 
 
 def test_d54_a_real_wake_turn_writes_into_its_owners_record():
