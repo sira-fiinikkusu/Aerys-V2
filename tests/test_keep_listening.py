@@ -101,7 +101,7 @@ def test_office_redirect(rig, monkeypatch, text, enabled):
         redirect.say.assert_called_once()
         redirect.say.call_args.kwargs["then"]()
         assert posts[0] == ("http://ha.example/api/services/assist_satellite/start_conversation",
-                            {"entity_id": "assist_satellite.example", "start_message": "Mm?", "preannounce": False})
+                            {"entity_id": "assist_satellite.example", "start_message": "", "preannounce": False})
         assert "sat" in kl.opened_mic
     else:
         redirect.say.assert_called_once_with("sat", text)
@@ -274,7 +274,7 @@ def test_redirect_playback_gates_mic(rig, monkeypatch, delivery, text, state, pl
     assert all(isinstance(body.get("since"), float) for body, _ in plays)
     if waiting and played is True:
         assert posts == [("http://ha.example/api/services/assist_satellite/start_conversation",
-                          {"entity_id": "assist_satellite.example", "start_message": "Mm?", "preannounce": False})]
+                          {"entity_id": "assist_satellite.example", "start_message": "", "preannounce": False})]
         assert "sat" in kl.opened_mic
     else:
         assert not posts and not kl.opened_mic

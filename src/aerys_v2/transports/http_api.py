@@ -187,10 +187,12 @@ def _open_mic(settings, satellite: str) -> None:
     """Open a satellite's mic as if he'd said her name (the keep-listening reopen, on demand)."""
     import httpx
 
+    from aerys_v2.factory import OPEN_MIC_MESSAGE
+
     r = httpx.post(
         f"{settings.ha_base_url.rstrip('/')}/api/services/assist_satellite/start_conversation",
         headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
-        json={"entity_id": satellite, "start_message": "Mm?", "preannounce": False},
+        json={"entity_id": satellite, "start_message": OPEN_MIC_MESSAGE, "preannounce": False},
         timeout=15.0,
     )
     r.raise_for_status()
@@ -587,7 +589,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
         # is gone is also spoken on the redirect target (Leviathan's desk speakers).
         if identity.get("voice") and speaker_redirect is not None:
             if keep_listening and speaker_redirect.handles(body.device_id):
-                from aerys_v2.factory import satellite_map_from
+                from aerys_v2.factory import OPEN_MIC_MESSAGE, satellite_map_from
                 import httpx
 
                 # The dead speaker finishes immediately. Only the redirect's
@@ -599,7 +601,7 @@ def build_app(ask_fn, api_token: str | None, owner_person_id: str | None = None,
                         r = httpx.post(
                             f"{settings.ha_base_url.rstrip('/')}/api/services/assist_satellite/start_conversation",
                             headers={"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"},
-                            json={"entity_id": satellite, "start_message": "Mm?", "preannounce": False},
+                            json={"entity_id": satellite, "start_message": OPEN_MIC_MESSAGE, "preannounce": False},
                             timeout=15.0,
                         )
                         r.raise_for_status()

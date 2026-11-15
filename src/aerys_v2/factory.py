@@ -44,6 +44,12 @@ log = logging.getLogger(__name__)
 #: silently reads None on some threads is a fence that does not hold.
 _OWNER_ID: str | None = None
 
+#: What a satellite says when we open its mic ourselves (the office button, keep-listening reopens).
+#: HA's start_conversation needs a message; an empty one opens the mic in silence, and the office
+#: panel chime (it fires on "listening") is the cue. The owner, 11/14 19:37: "lets just do the chime.
+#: the Mm? is cute but i have a bit of uncanny valley right now" ("Mm?" may come back later).
+OPEN_MIC_MESSAGE = ""
+
 
 def set_owner_id(owner_person_id: str | None) -> None:
     global _OWNER_ID
@@ -454,7 +460,7 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                         f"{base}/api/services/assist_satellite/start_conversation",
                         headers=headers,
                         json={"entity_id": satellite_map[device_id],
-                              "start_message": "Mm?", "preannounce": False},
+                              "start_message": OPEN_MIC_MESSAGE, "preannounce": False},
                         timeout=15.0,
                     )
                     r.raise_for_status()
