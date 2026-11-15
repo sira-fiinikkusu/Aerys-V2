@@ -1065,3 +1065,71 @@ def test_d54_a_run_with_no_house_action_is_unchanged():
     life = Life(replies=["QUIET"])
     assert life.add(note="Check.", cron="*/30 * * * *").startswith("Set:")
     assert life.tick_at(NOW + timedelta(minutes=30))["told"] == 0 and not life.desk.store.rows
+
+
+def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_reported():
+    # Codex 11/15 round 2: check, invoke and record weren't one step with the close, so a write still
+    # running at the timeout (or one that raised after it went) vanished from the report.
+    from aerys_v2.wakeups import close_house_record, wake_config
+    started, release = threading.Event(), threading.Event()
+
+    @tool("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
+        """House."""
+        if entity_id == "light.boom":
+            raise RuntimeError("HA answered garbage after the write went")
+        started.set()
+        release.wait(5)
+        return f"Done: {entity_id} turned off."
+
+    wrapped = wake_tools([home_control])[0]
+    config = wake_config(8, OWNER, thread="wake:inflight-test")
+    worker = threading.Thread(target=lambda: wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"},
+                                                            config=config))
+    worker.start()
+    assert started.wait(5)
+    assert close_house_record("wake:inflight-test") == [
+        "home_control turn_off light.office (started; how it ended isn't known)"]
+    release.set()
+    worker.join(5)
+    config = wake_config(9, OWNER, thread="wake:raise-test")
+    with pytest.raises(Exception):
+        wrapped.invoke({"operation": "turn_off", "entity_id": "light.boom"}, config=config)
+    assert close_house_record("wake:raise-test") == [
+        "home_control turn_off light.boom (started; how it ended isn't known)"]
+
+
+def test_d54_the_runs_owner_closes_its_record_not_the_turn():
+    # Codex 11/15 round 2: the turn emptied the record as it finished, so an owner whose timeout won the
+    # race found nothing. The turn only reads it; the owner closes it.
+    from aerys_v2.wakeups import _one_turn, close_house_record, open_house_record, wake_config, wake_middleware
+
+    @tool("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
+        """House."""
+        return f"Done: {entity_id} turned off."
+
+    script = [call("home_control", {"operation": "turn_off", "entity_id": "light.porch"}, "w"),
+              AIMessage(content="QUIET")]
+    graph = build_action_graph(GenericFakeChatModel(messages=iter(script)), "test", wake_tools([home_control]),
+                               outside_gate=WakeGate(gate_box().gate), guard_owner=OWNER,
+                               extra_middleware=wake_middleware([]))
+    record = open_house_record("wake:owner-test")
+    result = _one_turn(graph, wake_config(10, OWNER, thread="wake:owner-test"), "seed")
+    assert result.house == ["light.porch turned off."] and not record["closed"]
+    assert close_house_record("wake:owner-test") == ["light.porch turned off."] and record["closed"]
+
+
+def test_d54_the_house_line_always_fits_the_headline():
+    from aerys_v2.wakeups import HEADLINE_CHARS, _house_line
+    line = _house_line(["light.office_lamp_number_%d turned off after a very long description of it all" % i
+                        + "x" * 60 for i in range(12)])
+    assert len(line) < HEADLINE_CHARS - 100 and line.endswith(" more.")
+    life = Life()
+    life.turn = lambda w, seed: TurnResult("QUIET", ["home_control"], ["light.n%d turned off. " % i + "y" * 90
+                                                                        for i in range(12)])
+    life.runner.run_turn = life.turn
+    assert life.add(note="Lights.", cron="*/30 * * * *").startswith("Set:")
+    life.tick_at(NOW + timedelta(minutes=30))
+    headline = life.desk.store.rows[1].headline
+    assert len(headline) <= HEADLINE_CHARS and headline.endswith(" more.")

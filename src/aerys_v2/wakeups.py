@@ -875,16 +875,21 @@ def _house_guarded(t):
         if why is not None:
             log.info("wake-up: a %s write refused (autonomy blocklist)", t.name)
             return why
-        write = house_write(t.name, kwargs)
         sink = ((config or {}).get("configurable") or {}).get("house_sink")
-        if write and isinstance(sink, dict) and sink.get("closed"):
-            log.info("wake-up: a %s write after its run closed; refused", t.name)
-            return TIME_UP
+        slot = None
+        if house_write(t.name, kwargs) and isinstance(sink, dict):
+            # Written BEFORE the write starts (Codex 11/15): a run closed while it's in flight, or a write
+            # that raises after it went, still reports that it was started.
+            with sink["lock"]:
+                if sink["closed"]:
+                    log.info("wake-up: a %s write after its run closed; refused", t.name)
+                    return TIME_UP
+                sink["did"].append(_clip(f"{_asked(t.name, kwargs)} (started; how it ended isn't known)", 160))
+                slot = len(sink["did"]) - 1
         out = t.invoke(kwargs, config=config)
-        if write and isinstance(sink, dict):
-            receipt = house_receipt(t.name, kwargs, out)
-            if receipt:
-                sink["did"].append(receipt)
+        if slot is not None:
+            with sink["lock"]:
+                sink["did"][slot] = house_receipt(t.name, kwargs, out)   # "" for a refusal: nothing happened
         return out
 
     wrapped = StructuredTool(name=t.name, description=t.description, args_schema=t.args_schema, func=run)
@@ -1065,20 +1070,38 @@ HOUSE_LINE_ITEMS = 8
 
 
 def open_house_record(thread: str) -> dict:
-    record = {"did": [], "closed": False}
+    """The run's house record, opened by whoever owns the run (before its worker starts, so a run that
+    never got going is closed too); a turn's own config picks up the one already open."""
     with _HOUSE_LOCK:
-        _HOUSE_RECORDS[thread] = record
+        record = _HOUSE_RECORDS.get(thread)
+        if record is None or record["closed"]:
+            record = _HOUSE_RECORDS[thread] = {"did": [], "closed": False, "lock": threading.Lock()}
     return record
 
 
+def house_snapshot(record) -> list[str]:
+    if not isinstance(record, dict):
+        return []
+    with record["lock"]:
+        return [d for d in record["did"] if d]
+
+
 def close_house_record(thread: str) -> list[str]:
-    """What the run on `thread` did in the house; the run is over, so its later writes are refused."""
+    """What the run on `thread` did in the house; the run is over, so its later writes are refused. Only
+    the run's owner closes it (the wake runner, a brief's composer), whatever the turn's outcome."""
     with _HOUSE_LOCK:
         record = _HOUSE_RECORDS.pop(thread, None)
     if record is None:
         return []
-    record["closed"] = True
-    return list(record["did"])
+    with record["lock"]:
+        record["closed"] = True
+        return [d for d in record["did"] if d]
+
+
+def _asked(name: str, args) -> str:
+    args = args if isinstance(args, dict) else {}
+    return " ".join([name, *(str(args.get(k)) for k in ("operation", "action", "entity_id", "target", "query")
+                             if args.get(k))])
 
 
 def house_receipt(name: str, args, out) -> str:
@@ -1091,17 +1114,21 @@ def house_receipt(name: str, args, out) -> str:
         return ""
     if text.startswith(WRITE_OK_PREFIX):
         return _clip(text[len(WRITE_OK_PREFIX):].split(" Keep the spoken")[0].strip(), 160)
-    args = args if isinstance(args, dict) else {}
-    asked = " ".join(str(args.get(k)) for k in ("operation", "action", "entity_id", "target", "query") if args.get(k))
-    return _clip(f"{name} {asked} ({text})", 160)
+    return _clip(f"{_asked(name, args)} ({text})", 160)
 
 
-def _house_line(did: list[str], lead: str = "From the wake-up, in the house: ") -> str:
-    """D54: the one line that tells him what a run did in the house (items carry their own periods). All
-    of it: past HOUSE_LINE_ITEMS the rest are counted, never silently dropped."""
-    shown = "; ".join(_clip(d, 100).rstrip(". ") for d in did[:HOUSE_LINE_ITEMS])
-    more = len(did) - HOUSE_LINE_ITEMS
-    return lead + shown + (f"; and {more} more (in her thread)" if more > 0 else "") + "."
+def _house_line(did: list[str], lead: str = "From the wake-up, in the house: ", budget: int = 420) -> str:
+    """D54: the one line that tells him what a run did in the house (items carry their own periods). It
+    fits inside a headline (HEADLINE_CHARS) with room to spare; what doesn't fit is counted, never
+    silently dropped."""
+    shown: list[str] = []
+    for d in did[:HOUSE_LINE_ITEMS]:
+        item = _clip(d, 100).rstrip(". ")
+        if shown and len("; ".join([*shown, item])) > budget:
+            break
+        shown.append(item)
+    more = len(did) - len(shown)
+    return lead + "; ".join(shown) + (f"; and {more} more" if more > 0 else "") + "."
 
 
 def _one_turn(graph, config: dict, seed: str) -> TurnResult:
@@ -1125,8 +1152,9 @@ def _one_turn(graph, config: dict, seed: str) -> TurnResult:
     last = messages[-1] if messages else None
     # Her words are her LAST message, and only when it's hers and finished (not a tool call left open).
     said = _reply_text(last) if isinstance(last, AIMessage) and not getattr(last, "tool_calls", None) else ""
-    # What it did in the house is the run's record (every write as it ran), not a read of the messages.
-    did = close_house_record(config["configurable"]["thread_id"])
+    # What it did in the house is the run's record (every write as it ran), not a read of the messages. The
+    # run's owner closes the record; this is what it held when the turn finished.
+    did = house_snapshot(config["configurable"].get("house_sink"))
     return TurnResult(said, [c.get("name") for c in extract_tool_calls(messages) if c.get("name")], did)
 
 
@@ -1291,6 +1319,7 @@ class WakeUps:
             except Exception as e:
                 box["err"] = type(e).__name__
 
+        open_house_record(f"wake:{w.id}")        # opened before the turn starts; _run closes it, whatever happens
         worker = threading.Thread(target=work, daemon=True, name=f"wake-up-{w.id}")
         worker.start()
         worker.join(self.rails.timeout.total_seconds())
@@ -1323,8 +1352,10 @@ class WakeUps:
         result, error = self._timed(w, seed_for(w, started, run))
         now = self.clock()
         answer = parse_answer(result.text) if result is not None else Answer("fail")
-        # A run that failed or timed out still reports what it did; closing it refuses its later writes.
-        did = list(result.house) if result is not None else close_house_record(f"wake:{w.id}")
+        # The run's record is the account of what it did, whatever its outcome (a run that failed or timed
+        # out included); closing it refuses a still-running turn's later writes.
+        recorded = close_house_record(f"wake:{w.id}")
+        did = recorded or (list(result.house) if result is not None else [])
         if did:
             # D54: every house action a wake-up takes reaches him, even when she'd have stayed quiet.
             line = _house_line(did)

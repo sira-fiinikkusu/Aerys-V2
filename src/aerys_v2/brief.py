@@ -623,21 +623,23 @@ def composer_for(settings, *, model=None, prompt: str | None = None,
             except Exception as e:
                 box["err"] = e
 
-        from aerys_v2.wakeups import close_house_record
+        from aerys_v2.wakeups import close_house_record, open_house_record
 
+        open_house_record(thread)               # before the turn starts: closed below, whatever happens
         worker = threading.Thread(target=work, daemon=True, name=f"{kind}-turn")
         worker.start()
         worker.join(wall_s)
+        # The record is the account of what it did (and closing it refuses a still-running turn's writes).
+        recorded = close_house_record(thread)
         if worker.is_alive():
-            # What it did so far is still reported, and closing its record refuses its later writes.
-            compose.house = close_house_record(thread)
+            compose.house = recorded
             log.warning("%s: her own turn passed %ds; the plain version goes", kind, int(wall_s))
             return ""
         if "err" in box:
-            compose.house = close_house_record(thread)
+            compose.house = recorded
             raise box["err"]
         out = box["out"]
-        compose.house = list(out.house or [])
+        compose.house = recorded or list(out.house or [])
         return (out.text or "").strip()
 
     compose.house = []
