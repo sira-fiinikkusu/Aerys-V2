@@ -74,7 +74,7 @@ def test_a_house_change_she_makes_while_composing_reaches_his_text_copy():
     assert h.brief.tick() == "sent"
     assert h.world.spoken == [("Morning! I turned the lamp off for you.", "dev-office")]
     assert ran == [("turn_off", "light.example_lamp")]
-    assert any("While I put this together, in the house: light.example_lamp turned off." in body
+    assert any("While I put that together, in the house: light.example_lamp turned off." in body
                for _, body, *_ in h.world.texts)
 
 
@@ -94,6 +94,20 @@ def test_a_turn_that_fails_or_overstays_gives_way_to_the_plain_version():
     t = time.monotonic()
     assert compose(Facts()) == "" and compose.house == []                 # he isn't kept waiting
     assert time.monotonic() - t < 0.9
+
+    from aerys_v2.wakeups import open_house_record
+    records = []
+
+    def wrote_then_stalled(thread, seed):
+        records.append(open_house_record(thread))                         # as wake_config opens it
+        records[0]["did"].append("light.example_lamp turned off.")
+        time.sleep(1.0)
+        return TurnResult("too late", [], [])
+
+    compose = composer_for(settings(), turn=wrote_then_stalled, wall_s=0.2)
+    assert compose(Facts()) == ""
+    assert compose.house == ["light.example_lamp turned off."]            # what it did before the clock ran out
+    assert records[0]["closed"]                                            # and nothing more on its own
 
 
 def test_notes_carry_the_time_they_happened_in_every_brief_like_moment():
@@ -126,7 +140,7 @@ def test_the_evening_heads_up_and_a_welcome_home_report_house_changes_too():
         return TurnResult("Heads-up for tomorrow, and I switched the lamp off.", ["home_control"],
                           ["light.example_lamp turned off."])
 
-    line = "While I put this together, in the house: light.example_lamp turned off."
+    line = "While I put that together, in the house: light.example_lamp turned off."
     e = Evening()
     e.heads_up.compose = composer_for(settings(), turn=lamp, kind="evening")
     assert e.heads_up.tick() == "sent" and any(line in body for _, body, *_ in e.world.texts)

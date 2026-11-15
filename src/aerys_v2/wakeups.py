@@ -109,12 +109,36 @@ def house_write(name: object, args) -> bool:
     return str(((args or {}) if isinstance(args, dict) else {}).get(arg) or "").strip().lower() not in reads
 
 
-def wake_house_refusal(name: object, args, *, read_outside: bool = False) -> str | None:
-    """Why a wake-up's house call may not run, or None (D54)."""
+TIME_UP = "Not done: this run's time ran out, so a house change waits for him; tell him instead."
+#: The tool's own resolver rides on the tool object under this name (home_control: a room or device name
+#: becomes the entities it reaches), so the blocklist is checked on what a call RESOLVES to.
+RESOLVER_ATTR = "_aerys_resolve_targets"
+
+
+def autonomous(identity) -> bool:
+    """A run he isn't in (a wake-up, her own brief turn): D54's blocklist applies."""
+    identity = identity if isinstance(identity, dict) else {}
+    return bool(identity.get("unattended")) or identity.get("platform") == "wake"
+
+
+def wake_house_refusal(name: object, args, *, read_outside: bool = False, resolve=None) -> str | None:
+    """Why a wake-up's house call may not run, or None (D54). `resolve` is the tool's own target resolver:
+    a room or alias ("entry") can reach a blocked device (Codex 11/15), so every entity it resolves to is
+    checked, and a name that can't be resolved here isn't hers to try on her own."""
     if not house_write(name, args):
         return None
-    if name == "control_alarm" or (name == "home_control" and autonomy_blocked((args or {}).get("entity_id"))):
+    if name == "control_alarm":
         return NOT_ON_ITS_OWN
+    if name == "home_control":
+        raw = str((args or {}).get("entity_id") or "")
+        targets = [raw]
+        if resolve is not None:
+            try:
+                targets += list(resolve(raw, str((args or {}).get("operation") or "").strip().lower())[0] or [])
+            except Exception:
+                return NOT_ON_ITS_OWN
+        if any(autonomy_blocked(t) for t in targets):
+            return NOT_ON_ITS_OWN
     if read_outside:
         return AFTER_OUTSIDE
     return None
@@ -839,17 +863,34 @@ def build_wake_me_tool(store, *, rails: WakeRails = WakeRails(), owner_person_id
 
 def _house_guarded(t):
     """The same house tool with the autonomy blocklist enforced in the tool itself too (the wake graph's
-    copy; the fence middleware also holds the outside-text rule, which needs the run's messages)."""
+    copy; the fence middleware also holds the outside-text rule, which needs the run's messages). Every
+    write that runs is recorded in the run's house record (house_sink), whatever it returned, so a run
+    that fails or times out afterwards still reports it; once the run is closed, no write runs."""
     from langchain_core.tools import StructuredTool
 
+    resolve = getattr(t, RESOLVER_ATTR, None)
+
     def run(config: RunnableConfig = None, **kwargs):
-        why = wake_house_refusal(t.name, kwargs)
+        why = wake_house_refusal(t.name, kwargs, resolve=resolve)
         if why is not None:
             log.info("wake-up: a %s write refused (autonomy blocklist)", t.name)
             return why
-        return t.invoke(kwargs, config=config)
+        write = house_write(t.name, kwargs)
+        sink = ((config or {}).get("configurable") or {}).get("house_sink")
+        if write and isinstance(sink, dict) and sink.get("closed"):
+            log.info("wake-up: a %s write after its run closed; refused", t.name)
+            return TIME_UP
+        out = t.invoke(kwargs, config=config)
+        if write and isinstance(sink, dict):
+            receipt = house_receipt(t.name, kwargs, out)
+            if receipt:
+                sink["did"].append(receipt)
+        return out
 
-    return StructuredTool(name=t.name, description=t.description, args_schema=t.args_schema, func=run)
+    wrapped = StructuredTool(name=t.name, description=t.description, args_schema=t.args_schema, func=run)
+    if resolve is not None:
+        object.__setattr__(wrapped, RESOLVER_ATTR, resolve)       # the fence checks resolved names too
+    return wrapped
 
 
 def wake_tools(tools: list) -> list:
@@ -907,7 +948,8 @@ def wake_fence_middleware():
         name = call.get("name") or ""
         why = NOT_FROM_WAKE if fenced(name, call.get("args")) else None
         if why is None and name in HOUSE_WRITES:
-            why = wake_house_refusal(name, call.get("args") or {}, read_outside=read_outside(request))
+            why = wake_house_refusal(name, call.get("args") or {}, read_outside=read_outside(request),
+                                     resolve=getattr(getattr(request, "tool", None), RESOLVER_ATTR, None))
         if why is None:
             return None
         log.info("wake-up: %s refused by the fence", name)
@@ -1009,35 +1051,57 @@ def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = 
     identity = wake_identity(owner)
     if occurrence:
         identity["wake_occurrence"] = str(occurrence)     # set by the runner, never by her
-    return {"configurable": {"thread_id": thread or f"wake:{wake_id}", "identity": identity,
+    thread = thread or f"wake:{wake_id}"
+    return {"configurable": {"thread_id": thread, "identity": identity, "house_sink": open_house_record(thread),
                              "outside_text": {}, "room_sink": {}, "specialist": True, "tier": "standard"},
             "recursion_limit": int(steps)}
 
 
-def _house_line(did: list[str]) -> str:
-    """D54: the one line that tells him what a wake-up did in the house (items carry their own periods)."""
-    return "From the wake-up, in the house: " + "; ".join(_clip(d, 100).rstrip(". ") for d in did[:5]) + "."
+#: A run's house record by thread: what its house writes did, and whether the run is over (a closed run's
+#: writes are refused: a timed-out turn can't keep changing the house unreported; Codex 11/15).
+_HOUSE_RECORDS: dict[str, dict] = {}
+_HOUSE_LOCK = threading.Lock()
+HOUSE_LINE_ITEMS = 8
 
 
-def house_done(messages: list) -> list[str]:
-    """The house writes this run actually made (D54: every one is reported): each house tool's own
-    "Done: ..." line, for calls whose arguments make them writes."""
+def open_house_record(thread: str) -> dict:
+    record = {"did": [], "closed": False}
+    with _HOUSE_LOCK:
+        _HOUSE_RECORDS[thread] = record
+    return record
+
+
+def close_house_record(thread: str) -> list[str]:
+    """What the run on `thread` did in the house; the run is over, so its later writes are refused."""
+    with _HOUSE_LOCK:
+        record = _HOUSE_RECORDS.pop(thread, None)
+    if record is None:
+        return []
+    record["closed"] = True
+    return list(record["did"])
+
+
+def house_receipt(name: str, args, out) -> str:
+    """One house write as he reads it: the tool's own "Done: ..." line, else what was asked and what the
+    tool said (a partial or failed write is still a write he should hear about); a refusal is nothing."""
     from aerys_v2.tools.home_control import WRITE_OK_PREFIX
 
-    calls = {}
-    for m in messages:
-        for tc in (getattr(m, "tool_calls", None) or []):
-            if isinstance(tc, dict) and tc.get("id"):
-                calls[tc["id"]] = tc
-    done = []
-    for m in messages:
-        if getattr(m, "type", "") != "tool" or getattr(m, "name", "") not in HOUSE_WRITES:
-            continue
-        call = calls.get(getattr(m, "tool_call_id", "")) or {}
-        text = str(getattr(m, "content", "") or "")
-        if house_write(m.name, call.get("args") or {}) and text.startswith(WRITE_OK_PREFIX):
-            done.append(_clip(text[len(WRITE_OK_PREFIX):].split(" Keep the spoken")[0].strip(), 160))
-    return done
+    text = " ".join(str(getattr(out, "content", out) or "").split())
+    if not text or text.startswith("Not done") or text.startswith("Not here"):
+        return ""
+    if text.startswith(WRITE_OK_PREFIX):
+        return _clip(text[len(WRITE_OK_PREFIX):].split(" Keep the spoken")[0].strip(), 160)
+    args = args if isinstance(args, dict) else {}
+    asked = " ".join(str(args.get(k)) for k in ("operation", "action", "entity_id", "target", "query") if args.get(k))
+    return _clip(f"{name} {asked} ({text})", 160)
+
+
+def _house_line(did: list[str], lead: str = "From the wake-up, in the house: ") -> str:
+    """D54: the one line that tells him what a run did in the house (items carry their own periods). All
+    of it: past HOUSE_LINE_ITEMS the rest are counted, never silently dropped."""
+    shown = "; ".join(_clip(d, 100).rstrip(". ") for d in did[:HOUSE_LINE_ITEMS])
+    more = len(did) - HOUSE_LINE_ITEMS
+    return lead + shown + (f"; and {more} more (in her thread)" if more > 0 else "") + "."
 
 
 def _one_turn(graph, config: dict, seed: str) -> TurnResult:
@@ -1061,8 +1125,9 @@ def _one_turn(graph, config: dict, seed: str) -> TurnResult:
     last = messages[-1] if messages else None
     # Her words are her LAST message, and only when it's hers and finished (not a tool call left open).
     said = _reply_text(last) if isinstance(last, AIMessage) and not getattr(last, "tool_calls", None) else ""
-    return TurnResult(said, [c.get("name") for c in extract_tool_calls(messages) if c.get("name")],
-                      house_done(messages))
+    # What it did in the house is the run's record (every write as it ran), not a read of the messages.
+    did = close_house_record(config["configurable"]["thread_id"])
+    return TurnResult(said, [c.get("name") for c in extract_tool_calls(messages) if c.get("name")], did)
 
 
 def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, str], TurnResult]:
@@ -1258,7 +1323,8 @@ class WakeUps:
         result, error = self._timed(w, seed_for(w, started, run))
         now = self.clock()
         answer = parse_answer(result.text) if result is not None else Answer("fail")
-        did = list(result.house) if result is not None else []
+        # A run that failed or timed out still reports what it did; closing it refuses its later writes.
+        did = list(result.house) if result is not None else close_house_record(f"wake:{w.id}")
         if did:
             # D54: every house action a wake-up takes reaches him, even when she'd have stayed quiet.
             line = _house_line(did)

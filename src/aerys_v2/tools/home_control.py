@@ -1019,6 +1019,11 @@ def build_home_control_tool(
         extra = f" {', '.join(already)} already {_desired_phrase(op, brightness_pct)}." if already else ""
         return f"{WRITE_OK_PREFIX} {did} sent to {', '.join(done)} (HA responded 200).{extra}{note}"
 
+    # D54 (Codex 11/15): the autonomy blocklist is checked on what a call RESOLVES to (a room or alias can
+    # reach a blocked device), so the resolver rides on the tool for wakeups.wake_house_refusal.
+    from aerys_v2.wakeups import RESOLVER_ATTR
+
+    object.__setattr__(home_control, RESOLVER_ATTR, _resolve_targets)
     return home_control
 
 

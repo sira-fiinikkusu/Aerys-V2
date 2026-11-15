@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
-from aerys_v2.brief import Facts, _at, _csv, _ha, _loop, held_detail, plain_brief, stamped, with_house
+from aerys_v2.brief import Facts, _at, _csv, _ha, _loop, held_detail, plain_brief, report_house, stamped
 from aerys_v2.followups import (CHECK_IN_TOPICS, CHECKIN_FOR, CHECKIN_LOCK, DATA_ONLY, HELLO_KEPT, Appointment,
                                 appointment_key)
 from aerys_v2.followups import SOURCE as FOLLOWUP_SOURCE
@@ -521,9 +521,9 @@ class WelcomeHome:
         if not text:
             text = plain_welcome(facts)
         folds = tuple(h.id for h in held) + ((marker.id,) if marker is not None else ())
+        report_house(self.desk, getattr(self.compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
         outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE, topic=TOPIC, headline=text, room=room, brief=True,
-            detail=with_house(held_detail(held), getattr(self.compose, "house", None)),
+            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=room, brief=True,
             folds=folds, dedupe_key=key, expires_at=expires))
         for v in visits:
             if v.claim is None or outcome in ("queued", "duplicate"):   # queued: settled by _reconcile

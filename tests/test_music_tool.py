@@ -316,3 +316,24 @@ def test_every_candidate_failing_is_one_honest_line_with_what_was_tried():
     out = make_tool_with(ha).invoke({"operation": "play", "query": "one more time", "device_id": OFFICE_DEV})
     assert out.startswith("Starting music on") and "FAILED" in out and "Tried:" in out
     assert "One More Time" in out and "Daft Punk" in out
+
+
+def test_d54_a_run_he_isnt_in_never_changes_a_speaker_on_his_blocklist():
+    # Codex 11/15: the blocklist was checked on the raw target only, so music was never checked at
+    # all. Now it's checked on the speaker the target RESOLVED to, named or picked as the one playing.
+    from aerys_v2 import wakeups as wk
+
+    ha = FakeHA()
+    tool = make_tool(ha)
+    wake = {"configurable": {"identity": {"user_id": "person-1", "platform": "wake", "unattended": True}}}
+    try:
+        wk.set_autonomy_blocked("office satellite")
+        assert tool.invoke({"operation": "pause", "target": "office"}, config=wake) == wk.NOT_ON_ITS_OWN
+        assert tool.invoke({"operation": "volume", "target": "office satellite", "query": "20"},
+                           config=wake) == wk.NOT_ON_ITS_OWN
+        assert not any(p.startswith("/api/services/media_player/") and "office" in str(b.get("entity_id"))
+                       for p, b in ha.calls)
+        assert tool.invoke({"operation": "now_playing", "target": "office"}, config=wake).find("One More Time") >= 0
+        assert tool.invoke({"operation": "pause", "target": "office"}, config=cfg()).startswith(WRITE_OK_PREFIX)
+    finally:
+        wk.set_autonomy_blocked("")

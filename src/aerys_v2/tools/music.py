@@ -576,6 +576,13 @@ def build_music_tool(
         player = _resolve_target(target, config, quieting=op in ("pause", "stop"))
         if not player.startswith("media_player."):
             return player  # honest resolution error, relayed as-is
+        # D54 (Codex 11/15): a run he isn't in never changes a speaker on his autonomy blocklist, checked on
+        # the speaker the target RESOLVED to (named, or picked because it was the one playing).
+        from aerys_v2.wakeups import NOT_ON_ITS_OWN, autonomous, autonomy_blocked, house_write
+
+        if (autonomous(identity_from_config(config)) and house_write("music", {"operation": op})
+                and (autonomy_blocked(player) or autonomy_blocked(_friendly(player)))):
+            return NOT_ON_ITS_OWN
 
         if op in ("like", "add_to_library", "add_to_playlist"):
             from aerys_v2.tools.music_mcp import MusicAssistantError

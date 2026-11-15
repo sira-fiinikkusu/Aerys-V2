@@ -136,15 +136,20 @@ def facts_text(facts: Facts) -> str:
     return "\n".join(lines)
 
 
-def with_house(detail: str, did: list) -> str:
-    """D54 on her own turns: a house change she made while composing goes in the text copy."""
+def report_house(desk, did: list | None, *, source: str, topic: str, key: str) -> None:
+    """D54 on her own turns: what she changed in the house while composing reaches him as its own owed
+    text, never tied to that moment's room or window (a brief that expires unsaid can't lose it; Codex
+    11/15)."""
     if not did:
-        return detail
-    from aerys_v2.wakeups import _clip
+        return
+    from aerys_v2.wakeups import _house_line
 
-    line = ("While I put this together, in the house: "
-            + "; ".join(_clip(d, 100).rstrip(". ") for d in did[:5]) + ".")
-    return f"{detail}\n\n{line}" if detail else line
+    try:
+        desk.reach_out(ReachEvent(source=source, topic=topic, owed=True, text_only=True,
+                                  headline=_house_line(list(did), "While I put that together, in the house: "),
+                                  dedupe_key=f"{key}:house"))
+    except Exception:
+        log.warning("%s: couldn't report the house changes she made", source, exc_info=True)
 
 
 def held_detail(held: list) -> str:
@@ -255,9 +260,9 @@ class MorningBrief:
             log.warning("brief: her words failed; the plain version goes", exc_info=True)
         if not text:
             text = plain_brief(facts)
+        report_house(self.desk, getattr(self.compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
         outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE, topic=TOPIC, headline=text, room=self.room,
-            detail=with_house(held_detail(held), getattr(self.compose, "house", None)),
+            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=self.room,
             brief=True, folds=tuple(r.id for r in held), dedupe_key=key, expires_at=cutoff))
         self.done = day        # whatever the desk said, once a day: never a model call a minute
         log.info("brief %s: %s (%d held, %d quiet)", day, outcome, len(held), len(quiet))
@@ -392,9 +397,11 @@ class EveningHeadsUp:
             log.warning("evening: her words failed; the plain version goes", exc_info=True)
         if not text:
             text = plain_evening(facts)
+        report_house(self.desk, getattr(self.compose, "house", None), source=EVENING_SOURCE, topic=EVENING_TOPIC,
+                     key=key)
         outcome = self.desk.reach_out(ReachEvent(
             source=EVENING_SOURCE, topic=EVENING_TOPIC, headline=text, room=reading.room, brief=True,
-            detail=with_house("", getattr(self.compose, "house", None)), dedupe_key=key, expires_at=cutoff))
+            dedupe_key=key, expires_at=cutoff))
         self.done = day
         log.info("evening %s: %s", day, outcome)
         return outcome
@@ -586,9 +593,9 @@ def composer_for(settings, *, model=None, prompt: str | None = None,
                  wall_s: float = TURN_WALL_S) -> Callable[[Facts], str]:
     """Her words for a brief-like moment. With `turn` (wakeups.her_turn_for, D56) they come from her own
     turn, tools in hand, on a thread of its own (<kind>:<time>); the house changes it made are left on
-    compose.house for the caller's text copy. A turn past wall_s gives way to the plain version (it may
-    still finish in the background; a house change it makes then isn't in that copy). Without `turn`,
-    one tool-free call over the facts."""
+    compose.house for the caller to report (report_house), also when the turn failed or ran past wall_s,
+    which closes it (its later house writes are refused) and gives way to the plain version. Without
+    `turn`, one tool-free call over the facts."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
     def compose(facts: Facts) -> str:
@@ -616,13 +623,18 @@ def composer_for(settings, *, model=None, prompt: str | None = None,
             except Exception as e:
                 box["err"] = e
 
+        from aerys_v2.wakeups import close_house_record
+
         worker = threading.Thread(target=work, daemon=True, name=f"{kind}-turn")
         worker.start()
         worker.join(wall_s)
         if worker.is_alive():
+            # What it did so far is still reported, and closing its record refuses its later writes.
+            compose.house = close_house_record(thread)
             log.warning("%s: her own turn passed %ds; the plain version goes", kind, int(wall_s))
             return ""
         if "err" in box:
+            compose.house = close_house_record(thread)
             raise box["err"]
         out = box["out"]
         compose.house = list(out.house or [])
