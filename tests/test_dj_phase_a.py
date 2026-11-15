@@ -514,3 +514,32 @@ def test_a_failed_exact_play_still_falls_back_to_his_saved_song():
                                     client=httpx.Client(transport=httpx.MockTransport(fake))))
     out = tool.invoke({'operation': 'play', 'query': 'Example Track'})
     assert out.startswith('Done:') and ha.plays()[-1]['media_id'] == 'library://track/near'
+
+
+# --- 11/14 20:31: shuffle left on buried a named song under its own radio --------------------------------
+def test_a_named_song_turns_shuffle_off_first():
+    ha = saved_ha(); ha.state = {'state': 'idle', 'attributes': {'shuffle': True}}
+    out = ha.tool().invoke({'operation': 'play', 'query': 'Beneath the Copper Lantern'})
+    ops = [op for op, _ in ha.calls]
+    assert ops.index('shuffle_set') < ops.index('play_media')
+    assert ('shuffle_set', {'entity_id': PLAYER, 'shuffle': False}) in ha.calls
+    assert ha.plays()[0]['media_id'] == 'library://track/10' and 'Shuffle was on' in out
+
+
+@pytest.mark.parametrize('attrs', [{'shuffle': False}, {}])
+def test_shuffle_left_alone_when_off_or_unknown(attrs):
+    ha = saved_ha(); ha.state = {'state': 'idle', 'attributes': attrs}
+    out = ha.tool().invoke({'operation': 'play', 'query': 'Beneath the Copper Lantern'})
+    assert 'shuffle_set' not in [op for op, _ in ha.calls] and 'Shuffle' not in out
+
+
+def test_a_playlist_keeps_his_shuffle():
+    ha = saved_ha(); ha.state = {'state': 'playing', 'attributes': {'shuffle': True}}
+    ha.tool().invoke({'operation': 'play', 'query': 'my liked songs'})
+    assert 'shuffle_set' not in [op for op, _ in ha.calls]
+
+
+def test_a_failed_shuffle_read_still_plays():
+    ha = saved_ha(); ha.fail = 'media_player.example'       # the GET of the player's state
+    ha.tool().invoke({'operation': 'play', 'query': 'Beneath the Copper Lantern'})
+    assert ha.plays()[0]['media_id'] == 'library://track/10'
