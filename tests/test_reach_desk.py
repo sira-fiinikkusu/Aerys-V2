@@ -540,3 +540,39 @@ def test_awake_clears_it_and_the_length_is_bounded():
     tool.invoke({"action": "nap", "minutes": 30})
     tool.invoke({"action": "less"})                                      # other changes keep the hold
     assert store.prefs(3).hold_until == DAY + timedelta(minutes=30)
+
+
+def test_a_speaker_call_that_outlives_its_timeout_is_said_once_and_texted(monkeypatch):
+    # 11/15 10:10: HA's announce answers only once she's done talking; the call timed out mid-brief,
+    # the desk counted it failed, and the brief was said three times. Through the REAL speak leg
+    # (kael_line's wrapper around the follow-up router) with a real httpx.ReadTimeout.
+    import httpx
+
+    from aerys_v2.config import Settings
+
+    settings = Settings(_env_file=None, anthropic_api_key="x", ha_token="t", ha_base_url="http://ha.example",
+                        ha_satellite_map="dev=assist_satellite.example", discord_bot_token="dc",
+                        owner_person_id="00000000-0000-0000-0000-000000000001",
+                        database_url="postgresql://u:p@localhost:1/aerys_v2")
+    speak = reach_desk_for(settings, None).deliverer.speak
+    announced = []
+
+    def post(url, **kw):
+        if url.endswith("/announce"):
+            announced.append(kw["json"]["message"])
+        raise httpx.ReadTimeout("still talking", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", post)
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200, json={"state": "idle"},
+                                                                      request=httpx.Request("GET", "http://x")))
+    texts, clock = [], {"now": DAY}
+    store = MemoryReachStore()
+    desk = ReachDesk(store, Deliverer(locate=lambda: Where("room", "dev", "office"), speak=speak,
+                                      text=lambda *a: texts.append(a)), clock=lambda: clock["now"])
+    store.add(ev(headline="Morning. Here is a long brief."), DAY, status="queued", reason="", not_before=None)
+    for minutes in (0, 1, 3, 8, 18, 48):                   # past every retry the old path would have made
+        clock["now"] = DAY + timedelta(minutes=minutes)
+        desk.tick()
+    assert announced == ["Morning. Here is a long brief."]  # said once, never again
+    assert store.rows[1].status == "sent" and store.rows[1].spoken_at is not None
+    assert len(texts) == 1 and "Here is a long brief." in texts[0][1]   # the text copy, not instead of

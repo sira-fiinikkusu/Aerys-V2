@@ -967,12 +967,18 @@ def reach_desk_for(settings, graph):
         return Where(text_surface)
 
     def speak(text: str, device_id: str) -> None:
+        import httpx
+
         from aerys_v2.factory import followup_router_for
+        from aerys_v2.reach import AmbiguousDelivery
 
         route = followup_router_for(settings)
         if route is None:
             raise RuntimeError("followup router unarmed (no ha_token)")
-        route(text, device_id)
+        try:
+            route(text, device_id)
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError) as e:
+            raise AmbiguousDelivery(type(e).__name__) from e       # HA took it and is (likely) speaking it
 
     def text(surface: str, body: str, silent: bool) -> None:
         chat_id = _owner_platform_id(settings, surface)

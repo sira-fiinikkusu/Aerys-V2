@@ -700,7 +700,7 @@ class Deliverer:
                     return Delivery("sent", "notify")        # it reached him; the text didn't (no dm_at)
                 log.warning("reach: delivery via %s failed (%s)", self.text_surface, type(e).__name__)
                 return Delivery("failed", self.text_surface)
-        spoken = where.kind in ("room", "device")
+        spoken, ambiguous = where.kind in ("room", "device"), False
         if spoken and decision.voice == "wait":
             return Delivery("wait")
         if spoken and decision.voice == "reroute":
@@ -715,7 +715,15 @@ class Deliverer:
                     return self._text_now(body, decision)
                 if not decision.breaks_through and not self.may_speak(row):   # the night or a meeting began just now
                     return Delivery("recheck")
-                self.speak(row.headline, where.device_id)
+                try:
+                    self.speak(row.headline, where.device_id)
+                except AmbiguousDelivery as e:
+                    # 11/15: the speaker call outlived its timeout while she was still talking, the
+                    # desk counted it failed, and the brief was said three times. A call that went
+                    # but didn't answer counts as said: never spoken twice. The text copy goes too
+                    # (not instead of), in case the speaker took it and never played it.
+                    log.warning("reach: the speaker didn't answer in time (%s); counted as said, never repeated", e)
+                    ambiguous = True
             else:
                 self.text(where.kind, body, decision.silent)
                 return Delivery("sent", where.kind, texted=True)
@@ -727,7 +735,7 @@ class Deliverer:
         # Spoken. The detail goes as text; if THAT fails the message still reached him (it is
         # never spoken twice): the watcher's follow-through sends the detail later.
         surface = f"{where.kind}:{where.label or where.device_id}"
-        if not row.detail:
+        if not row.detail and not ambiguous:
             return Delivery("sent", surface, spoken=True)
         try:
             self.text(self.text_surface, body, decision.silent)

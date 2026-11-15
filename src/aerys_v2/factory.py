@@ -488,7 +488,9 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                 json={"entity_id": satellite_map[device_id],
                       ("start_message" if open_mic else "message"): text,
                       "preannounce": False},
-                timeout=15.0,
+                # HA answers only once she has finished speaking; with no length cut (D55) a long
+                # answer outlasts 15 s. This runs off the turn's thread, so waiting costs nothing.
+                timeout=httpx.Timeout(90.0, connect=5.0),
             )
         elif device_id and device_id in display_map:
             # Speakerless display (e-ink Sticky) -> WRITE the follow-up to its
