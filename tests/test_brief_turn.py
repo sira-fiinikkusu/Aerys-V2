@@ -95,11 +95,11 @@ def test_a_turn_that_fails_or_overstays_gives_way_to_the_plain_version():
     assert compose(Facts()) == "" and compose.house == []                 # he isn't kept waiting
     assert time.monotonic() - t < 0.9
 
-    from aerys_v2.wakeups import open_house_record
+    from aerys_v2.wakeups import attach_house_record
     records = []
 
     def wrote_then_stalled(thread, seed):
-        records.append(open_house_record(thread))                         # as wake_config opens it
+        records.append(attach_house_record(thread))                       # as wake_config attaches
         records[0]["did"].append("light.example_lamp turned off.")
         time.sleep(1.0)
         return TurnResult("too late", [], [])
@@ -148,3 +148,32 @@ def test_the_evening_heads_up_and_a_welcome_home_report_house_changes_too():
     h.hello.compose = composer_for(settings(), prompt=WELCOME_PROMPT, text_of=welcome_facts_text, turn=lamp,
                                    kind="welcome")                  # as welcome_home_for wires it
     assert h.hello.tick() == "sent" and any(line in body for _, body, *_ in h.world.texts)
+
+
+def test_her_real_turn_that_stalls_mid_write_reports_what_it_did_and_can_do_no_more():
+    import threading
+
+    release, ran = threading.Event(), []
+
+    @tool("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
+        """House."""
+        ran.append(entity_id)
+        if entity_id == "light.b":
+            release.wait(3)                               # a write that hangs past the brief's clock
+        return f"Done: {entity_id} turned off."
+
+    script = [call("home_control", {"operation": "turn_off", "entity_id": "light.a"}, "a"),
+              call("home_control", {"operation": "turn_off", "entity_id": "light.b"}, "b"),
+              call("home_control", {"operation": "turn_off", "entity_id": "light.c"}, "c"),
+              AIMessage(content="Morning!")]
+    graph = build_action_graph(GenericFakeChatModel(messages=iter(script)), "test", wake_tools([home_control]),
+                               outside_gate=WakeGate(gate_box().gate), guard_owner=OWNER,
+                               extra_middleware=wake_middleware([]))
+    compose = composer_for(settings(), turn=her_turn_for(settings(), SimpleNamespace(wake_graph=graph)), wall_s=0.5)
+    assert compose(Facts()) == ""                                          # the plain version goes
+    assert compose.house == ["light.a turned off.",
+                             "home_control turn_off light.b (started; how it ended isn't known)"]
+    release.set()
+    time.sleep(0.5)
+    assert "light.c" not in ran                                            # the closed run wrote nothing more

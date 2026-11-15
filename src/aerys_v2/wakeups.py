@@ -1050,14 +1050,16 @@ def occurrence_of(w: Wakeup) -> str:
 
 
 def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = "",
-                thread: str | None = None) -> dict:
+                thread: str | None = None, house_key: str | None = None) -> dict:
     # outside_text and room_sink are made here, by the caller, like ask() does: LangGraph copies
     # configurable shallowly, so the guard's holder is the same dict for the model and the tools.
     identity = wake_identity(owner)
     if occurrence:
         identity["wake_occurrence"] = str(occurrence)     # set by the runner, never by her
     thread = thread or f"wake:{wake_id}"
-    return {"configurable": {"thread_id": thread, "identity": identity, "house_sink": open_house_record(thread),
+    # The run's house record: its owner's (by the run's key), or one of its own for a direct call.
+    sink = attach_house_record(house_key) if house_key else _new_record()
+    return {"configurable": {"thread_id": thread, "identity": identity, "house_sink": sink,
                              "outside_text": {}, "room_sink": {}, "specialist": True, "tier": "standard"},
             "recursion_limit": int(steps)}
 
@@ -1069,13 +1071,35 @@ _HOUSE_LOCK = threading.Lock()
 HOUSE_LINE_ITEMS = 8
 
 
+_CLOSED_KEPT = 64
+
+
+def _new_record() -> dict:
+    return {"did": [], "closed": False, "lock": threading.Lock()}
+
+
 def open_house_record(thread: str) -> dict:
-    """The run's house record, opened by whoever owns the run (before its worker starts, so a run that
-    never got going is closed too); a turn's own config picks up the one already open."""
+    """A NEW house record for a run on `thread`, opened by whoever owns the run, before its worker starts
+    (so a run that never got going is closed too)."""
+    record = _new_record()
+    with _HOUSE_LOCK:
+        _HOUSE_RECORDS[thread] = record
+    return record
+
+
+def house_key_of(w) -> str:
+    """One run of a wake-up: its id and this run's claim (a thread id is shared by every run)."""
+    return f"wake:{w.id}:{getattr(w, 'claim_token', None)}"
+
+
+def attach_house_record(thread: str) -> dict:
+    """The record a turn's config carries: the one its owner opened, even if the owner has already closed
+    it (a turn that starts late finds its run over and can't write; Codex 11/15). With no owner (a direct
+    call), a record of its own."""
     with _HOUSE_LOCK:
         record = _HOUSE_RECORDS.get(thread)
-        if record is None or record["closed"]:
-            record = _HOUSE_RECORDS[thread] = {"did": [], "closed": False, "lock": threading.Lock()}
+        if record is None:
+            record = _HOUSE_RECORDS[thread] = _new_record()
     return record
 
 
@@ -1090,9 +1114,13 @@ def close_house_record(thread: str) -> list[str]:
     """What the run on `thread` did in the house; the run is over, so its later writes are refused. Only
     the run's owner closes it (the wake runner, a brief's composer), whatever the turn's outcome."""
     with _HOUSE_LOCK:
-        record = _HOUSE_RECORDS.pop(thread, None)
-    if record is None:
-        return []
+        record = _HOUSE_RECORDS.get(thread)
+        if record is None:
+            return []
+        # Kept (closed) so a late turn attaching to it can't write; only the newest few are kept.
+        closed = [k for k, r in _HOUSE_RECORDS.items() if r["closed"] and k != thread]
+        for k in closed[:max(0, len(closed) - _CLOSED_KEPT)]:
+            del _HOUSE_RECORDS[k]
     with record["lock"]:
         record["closed"] = True
         return [d for d in record["did"] if d]
@@ -1162,7 +1190,8 @@ def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, st
     """ONE action turn on thread wake:<id> (_one_turn)."""
 
     def run(w: Wakeup, seed: str) -> TurnResult:
-        return _one_turn(graph, wake_config(w.id, owner, steps=steps, occurrence=occurrence_of(w)), seed)
+        return _one_turn(graph, wake_config(w.id, owner, steps=steps, occurrence=occurrence_of(w),
+                                            house_key=house_key_of(w)), seed)
 
     return run
 
@@ -1181,7 +1210,7 @@ def her_turn_for(settings, action_graph=None) -> Callable[[str, str], TurnResult
     steps = WakeRails.from_settings(settings).steps
 
     def run(thread: str, seed: str) -> TurnResult:
-        return _one_turn(graph, wake_config(0, str(owner), steps=steps, thread=thread), seed)
+        return _one_turn(graph, wake_config(0, str(owner), steps=steps, thread=thread, house_key=thread), seed)
 
     return run
 
@@ -1319,7 +1348,7 @@ class WakeUps:
             except Exception as e:
                 box["err"] = type(e).__name__
 
-        open_house_record(f"wake:{w.id}")        # opened before the turn starts; _run closes it, whatever happens
+        open_house_record(house_key_of(w))       # opened before the turn starts; _run closes it, whatever happens
         worker = threading.Thread(target=work, daemon=True, name=f"wake-up-{w.id}")
         worker.start()
         worker.join(self.rails.timeout.total_seconds())
@@ -1354,7 +1383,7 @@ class WakeUps:
         answer = parse_answer(result.text) if result is not None else Answer("fail")
         # The run's record is the account of what it did, whatever its outcome (a run that failed or timed
         # out included); closing it refuses a still-running turn's later writes.
-        recorded = close_house_record(f"wake:{w.id}")
+        recorded = close_house_record(house_key_of(w))
         did = recorded or (list(result.house) if result is not None else [])
         if did:
             # D54: every house action a wake-up takes reaches him, even when she'd have stayed quiet.

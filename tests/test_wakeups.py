@@ -6,6 +6,7 @@ write to the house or her memory, and can't set new wake-ups. Placeholder ids an
 from __future__ import annotations
 
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -793,7 +794,7 @@ def test_d54_the_run_record_keeps_every_write_and_a_closed_run_writes_nothing():
         return f"Done: {entity_id} turned {operation.removeprefix('turn_')}."
 
     wrapped = wake_tools([home_control])[0]
-    config = wake_config(7, OWNER, thread="wake:record-test")
+    config = wake_config(7, OWNER, house_key="wake:record-test")
     wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"}, config=config)
     wrapped.invoke({"operation": "turn_on", "entity_id": "light.a,light.b"}, config=config)
     wrapped.invoke({"operation": "get_state", "entity_id": "light.office"}, config=config)
@@ -1047,10 +1048,10 @@ def test_d54_a_failed_run_that_changed_the_house_reports_that_much():
 
 def test_d54_a_run_that_crashes_after_changing_the_house_still_reports_it():
     # Codex 11/15: the report read the finished run, so a crash after a write lost it.
-    from aerys_v2.wakeups import open_house_record
+    from aerys_v2.wakeups import attach_house_record, house_key_of
 
     def boom(w, seed):
-        open_house_record(f"wake:{w.id}")["did"].append("fan switched off.")    # as wake_config opens it
+        attach_house_record(house_key_of(w))["did"].append("fan switched off.")   # as wake_config attaches
         raise RuntimeError("model down")
 
     life = Life()
@@ -1083,7 +1084,7 @@ def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_repor
         return f"Done: {entity_id} turned off."
 
     wrapped = wake_tools([home_control])[0]
-    config = wake_config(8, OWNER, thread="wake:inflight-test")
+    config = wake_config(8, OWNER, house_key="wake:inflight-test")
     worker = threading.Thread(target=lambda: wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"},
                                                             config=config))
     worker.start()
@@ -1092,7 +1093,7 @@ def test_d54_a_write_in_flight_when_the_run_closes_or_that_raises_is_still_repor
         "home_control turn_off light.office (started; how it ended isn't known)"]
     release.set()
     worker.join(5)
-    config = wake_config(9, OWNER, thread="wake:raise-test")
+    config = wake_config(9, OWNER, house_key="wake:raise-test")
     with pytest.raises(Exception):
         wrapped.invoke({"operation": "turn_off", "entity_id": "light.boom"}, config=config)
     assert close_house_record("wake:raise-test") == [
@@ -1115,7 +1116,7 @@ def test_d54_the_runs_owner_closes_its_record_not_the_turn():
                                outside_gate=WakeGate(gate_box().gate), guard_owner=OWNER,
                                extra_middleware=wake_middleware([]))
     record = open_house_record("wake:owner-test")
-    result = _one_turn(graph, wake_config(10, OWNER, thread="wake:owner-test"), "seed")
+    result = _one_turn(graph, wake_config(10, OWNER, house_key="wake:owner-test"), "seed")
     assert result.house == ["light.porch turned off."] and not record["closed"]
     assert close_house_record("wake:owner-test") == ["light.porch turned off."] and record["closed"]
 
@@ -1133,3 +1134,64 @@ def test_d54_the_house_line_always_fits_the_headline():
     life.tick_at(NOW + timedelta(minutes=30))
     headline = life.desk.store.rows[1].headline
     assert len(headline) <= HEADLINE_CHARS and headline.endswith(" more.")
+
+
+def test_d54_a_turn_that_starts_after_its_run_closed_cannot_write():
+    # Codex 11/15 round 3: a worker reaching wake_config after its owner closed the run opened a fresh,
+    # unclosed record, so its writes ran unreported. It now attaches to the owner's (closed) record.
+    from aerys_v2.wakeups import TIME_UP, close_house_record, open_house_record, wake_config
+    ran = []
+
+    @tool("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
+        """House."""
+        ran.append(entity_id)
+        return f"Done: {entity_id} turned off."
+
+    open_house_record("wake:late-test")
+    assert close_house_record("wake:late-test") == []               # the owner's clock ran out first
+    late = wake_config(11, OWNER, house_key="wake:late-test")           # the turn gets going only now
+    assert wake_tools([home_control])[0].invoke({"operation": "turn_off", "entity_id": "light.x"},
+                                                config=late) == TIME_UP
+    assert ran == []
+    fresh = open_house_record("wake:late-test")                      # the next run's owner: a new record
+    assert not fresh["closed"] and wake_config(11, OWNER, house_key="wake:late-test")["configurable"]["house_sink"] is fresh
+
+
+def test_d54_a_real_wake_turn_writes_into_its_owners_record():
+    from aerys_v2.wakeups import close_house_record, house_key_of, open_house_record, wake_middleware
+
+    @tool("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
+        """House."""
+        return f"Done: {entity_id} turned off."
+
+    script = [call("home_control", {"operation": "turn_off", "entity_id": "light.porch"}, "w"),
+              AIMessage(content="QUIET")]
+    graph = build_action_graph(GenericFakeChatModel(messages=iter(script)), "test", wake_tools([home_control]),
+                               outside_gate=WakeGate(gate_box().gate), guard_owner=OWNER,
+                               extra_middleware=wake_middleware([]))
+    w = SimpleNamespace(id=12, claim_token="run-a", kind="once", next_run_at=None)
+    open_house_record(house_key_of(w))
+    wake_turn_for(graph, OWNER)(w, "seed")
+    assert close_house_record(house_key_of(w)) == ["light.porch turned off."]
+
+
+def test_d54_a_wake_turn_that_starts_after_its_timeout_cannot_write():
+    # The runner opens the run's record before its worker starts: a turn that only gets going after the
+    # run timed out finds it closed (Codex 11/15 round 3).
+    from aerys_v2.wakeups import TIME_UP, attach_house_record, house_key_of
+    tried = []
+
+    def late(w, seed):
+        time.sleep(0.4)                                   # past the run's limit before it touches anything
+        record = attach_house_record(house_key_of(w))
+        tried.append(record["closed"])
+        return TurnResult("QUIET", [], [])
+
+    life = Life(rails=WakeRails(timeout=timedelta(seconds=0.1)))
+    life.runner.run_turn = late
+    assert life.add(note="Lights.", cron="*/30 * * * *").startswith("Set:")
+    life.tick_at(NOW + timedelta(minutes=30))
+    time.sleep(0.6)
+    assert tried == [True] and TIME_UP
