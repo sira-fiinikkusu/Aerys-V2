@@ -323,7 +323,21 @@ def test_an_idle_players_leftover_title_is_never_liked():
     assert "Nothing is playing" in out and ma.calls == []
 
 
-def test_concurrent_first_calls_start_exactly_one_loop():
+def test_concurrent_first_calls_start_exactly_one_loop(monkeypatch):
+    import asyncio
+    import time as _t
+    real_new = asyncio.new_event_loop
+
+    def slow_new():                 # Codex's repro: a loop that takes 150 ms to start running
+        loop = real_new()
+        run = loop.run_forever
+
+        def delayed():
+            _t.sleep(0.15)
+            run()
+        loop.run_forever = delayed
+        return loop
+    monkeypatch.setattr(asyncio, "new_event_loop", slow_new)
     calls = []
     ma = bridge(calls)
     before = {t.ident for t in threading.enumerate() if t.name == "ma-mcp"}
