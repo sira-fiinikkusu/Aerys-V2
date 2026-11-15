@@ -165,9 +165,9 @@ def test_what_she_says_after_an_ack_is_plain_speech_and_never_cut():
             "matches.\n\nHere's what did come up:\n- **Unusual lights, Nov 1:** Executive Jet Flight 146 reported "
             "bright lights moving around and randomly appearing and disappearing, and air traffic control logged "
             "it, and the FAA said it would look into it.\n- **Drones:** several airports paused departures, "
-            "[details](https://example.com/x).\n\nYour message to Megan is waiting on your tap.")
+            "[details](https://example.com/x).\n\nYour message to Sam is waiting on your tap.")
     out = spoken(long)
-    assert out.startswith("I couldn't find") and out.endswith("Your message to Megan is waiting on your tap.")
+    assert out.startswith("I couldn't find") and out.endswith("Your message to Sam is waiting on your tap.")
     assert "**" not in out and "- " not in out and "http" not in out
     assert "Executive Jet Flight 146" in out and "the FAA said it would look into it" in out   # the middle stays
     assert "more if you want" not in out.lower()
@@ -216,7 +216,7 @@ def test_a_long_answer_is_said_whole_with_its_tag_status_and_question():
     from aerys_v2.spoken import spoken
     tagged = spoken("[warmly]\n" + "explanation " * 40)
     assert tagged == "[warmly] " + ("explanation " * 40).strip()
-    said = ("I tried to send the message to Megan on Discord " + "while the connection kept dropping " * 9
+    said = ("I tried to send the message to Sam on Discord " + "while the connection kept dropping " * 9
             + "and nothing was sent. Then I stopped.")
     assert spoken(said) == said
     asked = "Here is a long answer. " * 20 + "Want me to keep going?"
