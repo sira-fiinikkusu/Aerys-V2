@@ -184,6 +184,7 @@ def build_music_tool(
     client: httpx.Client | None = None,
     owner_person_id: str | None = None,
     dj_store=None,
+    ma=None,
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -264,6 +265,92 @@ def build_music_tool(
             return "His library is his: only he can ask me what's in it."
         return "I'm not sure it's him asking, so his library stays private. Ask again, or in a DM."
 
+    def _his_write_refusal(config: RunnableConfig) -> str | None:
+        """D53 writes (likes, library, playlists) are his alone; a shared room is fine (a like reveals nothing)."""
+        from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read
+
+        conf = (config or {}).get("configurable") or {}
+        verdict = his_private_read(conf.get("identity") or {}, str(conf.get("thread_id") or ""),
+                                   owner_person_id)
+        if verdict in (None, SHARED):
+            return None
+        if verdict == NOT_HIM:
+            return "Only he can change his music library."
+        return "I'm not sure it's him asking, so I didn't change his library. Ask again."
+
+    ma_players: dict[str, str] = {}
+
+    def _ma_player_id(player: str) -> str | None:
+        """Music Assistant's id for one of her allowed speakers (MA and HA share the display name)."""
+        if player in ma_players:
+            return ma_players[player]
+        from aerys_v2.tools.music_mcp import parse
+
+        r = http.get(f"{base}/api/states/{player}", headers=headers)
+        r.raise_for_status()
+        want = _name_key(str((r.json().get("attributes") or {}).get("friendly_name") or ""))
+        found = [p for p in parse(ma.call("players_list_players")) or []
+                 if isinstance(p, dict) and _name_key(str(p.get("name") or "")) == want and want]
+        if len(found) != 1:
+            return None
+        ma_players[player] = str(found[0].get("player_id") or "")
+        return ma_players[player] or None
+
+    def _song_line(item: dict) -> str:
+        artists = item.get("artists") or []
+        names = [a if isinstance(a, str) else str((a or {}).get("name") or "") for a in artists]
+        names = [n for n in names if n]
+        return f"{item.get('name') or '?'}" + (f" by {', '.join(names)}" if names else "")
+
+    def _track(query: str, player: str | None) -> tuple[str, str] | str:
+        """(uri, "Title by Artist") for the song he named, else the one playing now; or a plain refusal.
+        Exact only: a title (or title + artist) that matches one song. Never a near guess, never a like on
+        the wrong song."""
+        from aerys_v2.tools.music_mcp import parse
+
+        title, artist = query.strip(), ""
+        if " by " in title.lower():                          # "Example Song by Example Band"
+            cut = title.lower().rindex(" by ")
+            title, artist = title[:cut].strip(), title[cut + 4:].strip()
+        if not title:
+            if player is None:
+                return "Tell me which song."
+            r = http.get(f"{base}/api/states/{player}", headers=headers)
+            r.raise_for_status()
+            state = r.json()
+            attrs = state.get("attributes") or {}
+            title, artist = str(attrs.get("media_title") or ""), str(attrs.get("media_artist") or "")
+            uri = str(attrs.get("media_content_id") or "")
+            if not title:
+                return f"Nothing is playing on {_friendly(player)}, so tell me which song."
+            if "://" in uri and not uri.startswith("spotify_connect://") and state.get("state") == "playing":
+                return uri, f"{title}" + (f" by {artist}" if artist else "")
+        hits = [h for h in parse(ma.call("library_search_tracks", query=f"{title} {artist}".strip(), limit=10)) or []
+                if isinstance(h, dict) and h.get("uri") and str(h.get("uri")).count("://") == 1
+                and "/track/" in str(h.get("uri"))]
+        want = _play_norm(title)
+        same_title = [h for h in hits if _play_norm(h.get("name")) == want]
+        if artist:
+            # Known artist: it must match. Never fall back to another artist's song with the same title.
+            same_title = [h for h in same_title
+                          if _play_norm(artist) in {_play_norm(a) for a in h.get("artists") or []}]
+        if not same_title:
+            who = f" by {artist}" if artist else ""
+            return f"I couldn't find exactly \"{title}\"{who}" + ("." if artist else "; tell me the artist too.")
+        if len({tuple(sorted(_play_norm(a) for a in h.get("artists") or [])) for h in same_title}) > 1:
+            return f"There's more than one \"{title}\"; which artist?"
+        return str(same_title[0]["uri"]), _song_line(same_title[0])
+
+    def _queue_brief(player: str, items: int) -> dict | None:
+        from aerys_v2.tools.music_mcp import parse
+
+        pid = _ma_player_id(player)
+        if not pid:
+            from aerys_v2.tools.music_mcp import MusicAssistantError
+            raise MusicAssistantError(f"couldn't match {_friendly(player)} to a Music Assistant player")
+        brief = parse(ma.call("queue_get_active_queue", player_id=pid, include_items=items, items_from_current=True))
+        return brief if isinstance(brief, dict) else None
+
     def _friendly(entity: str) -> str:
         # 'media_player.office_satellite' -> 'office satellite' — good enough for
         # speech, no extra HTTP round-trip on the hot path.
@@ -311,6 +398,7 @@ def build_music_tool(
         query: str = "",
         media_type: str = "",
         target: str = "",
+        playlist: str = "",
         config: RunnableConfig = None,
     ) -> str:
         """Play and control music on the speaker that heard the request.
@@ -324,6 +412,12 @@ def build_music_tool(
             forgiving of misheard words), then Spotify search. Pass just the name;
             drop "from my list" / "from my liked songs".
         dj: query on|off; owner only. Off lasts until 06:00 local.
+        like: save a song to his favorites (query = the song; empty = the one playing).
+        add_to_library: save a song to his library (same as like for which song).
+        recently_played: what he's played lately (his private rooms only).
+        queue: the songs coming up on this speaker (Music Assistant's queue).
+        new_playlist: make a playlist; query is its name.
+        add_to_playlist: add a song (query; empty = the one playing) to the playlist named in playlist.
         my_playlists: list library playlist names; optional query filters names.
         my_taste: read his library at a glance (top saved artists, playlists).
         play_next: resolve query like play and queue it next, without interrupting.
@@ -373,10 +467,39 @@ def build_music_tool(
             except Exception:
                 return "DJ control failed; the setting was not confirmed."
 
-        if op in ("my_playlists", "my_taste"):
+        if op in ("my_playlists", "my_taste", "recently_played", "queue"):
             refusal = _library_read_refusal(config)
             if refusal:
                 return refusal
+
+        if op in ("like", "add_to_library", "recently_played", "queue", "new_playlist", "add_to_playlist") and ma is None:
+            return "That needs Music Assistant's connection, which isn't set up."
+
+        if op in ("like", "add_to_library", "new_playlist", "add_to_playlist"):
+            refusal = _his_write_refusal(config)
+            if refusal:
+                return refusal
+
+        if op == "recently_played":
+            from aerys_v2.tools.music_mcp import MusicAssistantError, parse
+            try:
+                items = parse(ma.call("metadata_recently_played", limit=10)) or []
+            except MusicAssistantError as e:
+                return f"Couldn't read what he's played lately ({e})."
+            lines = [_song_line(i) for i in items if isinstance(i, dict) and "/track/" in str(i.get("uri") or "")]
+            return "Recently played:\n" + "\n".join(lines) if lines else "Nothing played recently."
+
+        if op == "new_playlist":
+            from aerys_v2.tools.music_mcp import MusicAssistantError
+            name = query.strip()
+            if not name:
+                return "Tell me what to call the playlist."
+            try:
+                ma.call("playlists_create_playlist", name=name)
+            except MusicAssistantError as e:
+                return f"Making the playlist FAILED ({e})."
+            library_cache.pop("playlist", None)          # so add_to_playlist finds it right away
+            return f"{WRITE_OK_PREFIX} made the playlist {name}."
 
         if op == "my_playlists":
             try:
@@ -406,6 +529,37 @@ def build_music_tool(
         player = _resolve_target(target, config)
         if not player.startswith("media_player."):
             return player  # honest resolution error, relayed as-is
+
+        if op in ("like", "add_to_library", "add_to_playlist"):
+            from aerys_v2.tools.music_mcp import MusicAssistantError
+            try:
+                found = _track(query, player)
+                if isinstance(found, str):
+                    return found
+                uri, song = found
+                if op == "add_to_playlist":
+                    target_list = _library_match(playlist, _playlists()) if playlist.strip() else None
+                    if not target_list:
+                        return f"I couldn't find a playlist called \"{playlist}\" exactly."
+                    ma.call("playlists_add_track", playlist_id=str(target_list["uri"]), track_uri=uri)
+                    return f"{WRITE_OK_PREFIX} added {song} to {target_list.get('name')}."
+                ma.call("media_add_to_favorites" if op == "like" else "media_add_to_library", uri=uri)
+            except (MusicAssistantError, httpx.HTTPError, ValueError) as e:
+                return f"That didn't save ({e})."
+            return f"{WRITE_OK_PREFIX} {'liked' if op == 'like' else 'added to his library:'} {song}."
+
+        if op == "queue":
+            from aerys_v2.tools.music_mcp import MusicAssistantError
+            try:
+                brief = _queue_brief(player, 10)
+            except (MusicAssistantError, httpx.HTTPError, ValueError) as e:
+                return f"Couldn't read the queue ({e})."
+            items = (brief or {}).get("items") or []
+            names = [_song_line(i.get("media_item") or i) if isinstance(i, dict) else str(i) for i in items]
+            if not names:
+                return (f"Nothing is queued on {_friendly(player)} through Music Assistant "
+                        "(music from the Spotify app plays outside her queue).")
+            return f"Queue on {_friendly(player)}:\n" + "\n".join(names)
 
         # ---- transport controls (plain media_player services) ----------------
         if op in _TRANSPORT_OPS:
@@ -451,6 +605,22 @@ def build_music_tool(
             valid = {"on", "off"} if op == "shuffle" else {"off", "one", "all"}
             if value not in valid:
                 return f"For {op}, query must be {'|'.join(sorted(valid))}."
+            if ma is not None:
+                # 11/14: HA refuses media_player.shuffle_set on the office player; Music Assistant's own
+                # queue control works. No queue (the Spotify app is playing) is said plainly.
+                from aerys_v2.tools.music_mcp import MusicAssistantError
+                try:
+                    brief = _queue_brief(player, 0)
+                    if not brief or not brief.get("queue_id"):
+                        return (f"Nothing is playing through Music Assistant on {_friendly(player)}; "
+                                f"if it's the Spotify app, {op} is in the app.")
+                    if op == "shuffle":
+                        ma.call("queue_set_shuffle", queue_id=str(brief["queue_id"]), enabled=value == "on")
+                    else:
+                        ma.call("queue_set_repeat", queue_id=str(brief["queue_id"]), repeat_mode=value)
+                except (MusicAssistantError, httpx.HTTPError, ValueError) as e:
+                    return f"Setting {op} FAILED ({e})."
+                return f"{WRITE_OK_PREFIX} {op} set to {value} on {_friendly(player)}."
             try:
                 r = http.post(f"{base}/api/services/media_player/{op}_set", headers=headers,
                               json={"entity_id": player, op: value == "on" if op == "shuffle" else value})
@@ -515,7 +685,8 @@ def build_music_tool(
             return (
                 f"Unknown operation '{operation}'. Valid operations: play, pause, "
                 "resume, stop, next, previous, volume, now_playing, my_playlists, "
-                "my_taste, play_next, add_to_queue, up_next, shuffle, repeat, more_like_this, dj."
+                "my_taste, play_next, add_to_queue, up_next, shuffle, repeat, more_like_this, dj, "
+                "like, add_to_library, recently_played, queue, new_playlist, add_to_playlist."
             )
 
         # ---- play: search Music Assistant, then queue the top hit ------------

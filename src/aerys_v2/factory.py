@@ -2431,6 +2431,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             # the origin-device default reuses the HA_SATELLITE_MAP csv parser —
             # one format for every device_id=entity map.
             from aerys_v2.tools.music import build_music_tool
+            from aerys_v2.tools.music_mcp import ma_for
             from aerys_v2.dj import store_for
 
             tools.append(
@@ -2442,6 +2443,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     players=satellite_map_from(settings.ha_music_players),
                     default_player=settings.ha_music_default_player,
                     owner_person_id=str(settings.owner_person_id or "") or None,
+                    ma=ma_for(settings),       # D53: likes, library, playlists, the real queue
                 )
             )
 

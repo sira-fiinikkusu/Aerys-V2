@@ -410,6 +410,11 @@ class Settings(BaseSettings):
     # ---- MUSIC (Music Assistant + Spotify, the 07-01 Play Music rebirth) -----
     # Natural track-change commentary; spoken volume defaults to the player setting.
     dj_breaks: bool = True
+    # D53 (11/14): Music Assistant's own MCP server (http://<MA host>:8095/mcp/v1) and its per-client
+    # token, minted in MA and revocable there. Empty = no likes/library/playlists/queue reads; the
+    # music tool's Home Assistant half works either way.
+    ma_mcp_url: str = ""
+    ma_mcp_token: SecretStr | None = None
     dj_cooldown_s: float = Field(default=900, ge=0)
     dj_announce_volume: int | None = Field(default=None, ge=1, le=100)
     # The Music Assistant CONFIG ENTRY id in HA (Settings → Devices & Services →

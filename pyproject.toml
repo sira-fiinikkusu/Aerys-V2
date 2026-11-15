@@ -17,7 +17,7 @@ dependencies = [
     "discord-py>=2.4",
     "fastapi>=0.115",
     "deepagents==0.7.34",
-    "langchain>=1.4.9,<2",
+    "langchain[mcp]>=1.4.9,<2",   # langchain.mcp (beta, built on FastMCP): her Music Assistant MCP reach (D53)
     "langchain-anthropic>=1.7.10",
     "langchain-core>=1.7.6",
     "langchain-claude-cli==1.2.1",
