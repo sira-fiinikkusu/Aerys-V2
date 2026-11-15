@@ -73,10 +73,56 @@ def test_owner_live_and_history(identity, thread, entity, prefix):
 @pytest.mark.parametrize("entity", [ENTITY, "person.owner", "device_tracker.example_phone", "sensor.owner_location_coords"])
 @pytest.mark.parametrize("prefix", [False, True])
 def test_refuses_before_ha(identity, thread, reason, op, entity, prefix):
+    if op == "get_state" and entity.startswith(("person.", "device_tracker.")):
+        pytest.skip("his home/away is anyone's (D57 follow-up): test_anyone_hears_home_or_away_and_nothing_finer")
     calls = []
     out = make_tool(calls, prefix=prefix).func(operation=op, entity_id=entity, runtime=rt(identity, thread))
     assert reason in out
     assert calls == []
+
+
+@pytest.mark.parametrize("identity,thread", [
+    ({**HIS_DM, "user_id": "guest"}, "person:guest"),
+    ({**HIS_DM, "voice": True, "voice_owner_assumed": True}, "voice:example"),
+    ({**HIS_DM, "privacy_context": "public", "channel_kind": "guild"}, "guild:example"),
+    ({}, ""),
+])
+@pytest.mark.parametrize("entity", ["person.owner", "device_tracker.example_phone"])
+@pytest.mark.parametrize("ha_state,heard", [("home", "home"), ("not_home", "away"), ("Work", "away"),
+                                            ("unavailable", "unknown")])
+def test_anyone_hears_home_or_away_and_nothing_finer(identity, thread, entity, ha_state, heard):
+    # His word 11/15 17:28: anyone she'd answer (family: "is he home yet?") gets home or away; a zone name,
+    # coordinates, attributes and when it changed stay his. The trail stays his (history is refused above).
+    import httpx
+
+    from aerys_v2.tools.home_control import build_home_control_tool, build_search_entities_tool
+
+    def ha(request):
+        return httpx.Response(200, json={"state": ha_state, "last_changed": "2026-01-10T12:00:00Z",
+                                         "attributes": {**ATTRS, "friendly_name": "Owner at 1 Example St"}})
+
+    tool = build_home_control_tool(base_url="http://ha.example", token="t", canary_entities=frozenset(),
+                                   his_places=frozenset({"person.owner", "device_tracker.example_phone"}),
+                                   owner_person_id=OWNER, client=httpx.Client(transport=httpx.MockTransport(ha)))
+    out = json.loads(tool.func(operation="get_state", entity_id=entity, runtime=rt(identity, thread)))
+    assert out == {"entity_id": entity, "state": heard}         # no name either: a label can carry a place
+    assert "latitude" not in json.dumps(out) and ADDRESS not in json.dumps(out) and "Work" not in json.dumps(out)
+
+
+def test_search_shows_others_his_home_or_away_only():
+    import httpx
+
+    from aerys_v2.tools.home_control import build_search_entities_tool
+
+    states = [{"entity_id": "person.owner", "state": "Work", "attributes": {"friendly_name": "Owner at 1 Example St"}},
+              {"entity_id": ENTITY, "state": ADDRESS, "attributes": {"friendly_name": "Owner location 1 Example St"}}]
+    search = build_search_entities_tool(base_url="http://ha.example", token="t", owner_person_id=OWNER,
+                                        his_places=frozenset({"person.owner", ENTITY}),
+                                        client=httpx.Client(transport=httpx.MockTransport(
+                                            lambda r: httpx.Response(200, json=states))))
+    out = search.func(query="owner", runtime=rt({**HIS_DM, "user_id": "guest"}, "person:guest"))
+    assert "person.owner | (his presence) | away" in out and "Work" not in out
+    assert "(his location: not here)" in out and ADDRESS not in out
 
 
 def test_thinning_preserves_stops_and_uses_gps_update_times():

@@ -595,6 +595,17 @@ def build_home_control_tool(
     def _his_location(entity: str) -> bool:
         return entity in his_places or (private_entity(entity, private_entities) and whereabouts(entity))
 
+    def _his_presence(entity: str) -> bool:
+        """His home/away entities (his person, his phone's tracker). D57 follow-up (his word 11/15 17:28): anyone
+        she'd answer may hear HOME or AWAY from these (family asking "is he home yet?"), nothing finer."""
+        return _his_location(entity) and entity.startswith(("person.", "device_tracker."))
+
+    def _him(runtime) -> bool:
+        from aerys_v2.rooms import his_private_read, runtime_identity
+
+        identity, thread = runtime_identity(runtime)
+        return his_private_read(identity, thread, owner_person_id) is None
+
     def _outbox_open(payload: dict) -> int | None:
         """INSERT the write-ahead intent row; returns its id (None = outbox off/failed).
 
@@ -668,7 +679,7 @@ def build_home_control_tool(
     def _resolve_targets(raw: str, op: str) -> tuple[list[str], str | None]:
         return resolve_targets(raw, op, canary_entities, aliases)
 
-    def _read_state(entity: str, full: bool = False) -> dict | str:
+    def _read_state(entity: str, full: bool = False, him: bool = False) -> dict | str:
         """GET one entity's state: a dict, or an honest error STRING. full: the whole reading (her own
         get_state, D47); the write path's read-backs only need the state."""
         try:
@@ -711,6 +722,10 @@ def build_home_control_tool(
             if full:
                 out.update(reading_details(entity, data))
                 if _his_location(entity):
+                    if not him:          # only _his_presence gets here for someone else: home or away, no more
+                        state = str(data.get("state") or "")
+                        coarse = "unknown" if not state or state in DEAD_STATES else ("home" if state == "home" else "away")
+                        return {"entity_id": entity, "state": coarse}          # no name: a label can carry a place
                     _mark_location_read(data, owner_person_id)
                     out["state"] = data.get("state")
                     out["attributes"] = attrs
@@ -732,11 +747,13 @@ def build_home_control_tool(
                 return f"Home Assistant returned an unreadable history for {entity}."
             return f"Home Assistant returned an unreadable reply for {entity} ({e})."
 
-    def _private_refusal(targets: list[str], runtime) -> str | None:
+    def _private_refusal(targets: list[str], runtime, op: str = "get_state") -> str | None:
         """D47: his own phone and watch readings only come to him: his DM or typed line, a voice she's
-        sure is his, his glasses or his own wake-up, never a room others read."""
-        location = any(_his_location(e) for e in targets)
-        if not location and not any(private_entity(e, private_entities) for e in targets):
+        sure is his, his glasses or his own wake-up, never a room others read. D57: his home/away state
+        (get_state on _his_presence) is anyone's; his coordinates, address and trail are his."""
+        gated = [e for e in targets if not (op == "get_state" and _his_presence(e))]
+        location = any(_his_location(e) for e in gated)
+        if not location and not any(private_entity(e, private_entities) for e in gated):
             return None
         from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read, runtime_identity
 
@@ -938,13 +955,14 @@ def build_home_control_tool(
             bad = [e for e in targets if not ENTITY_ID.match(e)]
             if bad:
                 return f"'{', '.join(b[:80] for b in bad)}' isn't an entity id (like sensor.office_temperature)."
-            refusal = _private_refusal(targets, runtime)
+            refusal = _private_refusal(targets, runtime, op)
             if refusal:
                 return refusal
             if any(precise_place(e) and not _his_location(e) for e in targets):
                 return PRECISE_PLACE
         if op in ("get_state", "history"):
-            results = [_read_state(e, full=True) if op == "get_state" else _history(e, hours) for e in targets]
+            him = _him(runtime)
+            results = [_read_state(e, full=True, him=him) if op == "get_state" else _history(e, hours) for e in targets]
             text = (results[0] if isinstance(results[0], str) else json.dumps(results[0])) if len(results) == 1 \
                 else json.dumps(results)
             if len(text) > READ_MAX:
@@ -1288,7 +1306,12 @@ def build_search_entities_tool(
             his_location = entity in his_places or (private_entity(entity, private_entities) and whereabouts(entity))
             if his_location:
                 if hide:
-                    lines.append(f"{entity} | {friendly or '(no name)'} | (his location: not here)")
+                    if entity.startswith(("person.", "device_tracker.")):     # D57: home or away is anyone's
+                        st = str(item.get("state") or "")
+                        coarse = "unknown" if not st or st in DEAD_STATES else ("home" if st == "home" else "away")
+                        lines.append(f"{entity} | (his presence) | {coarse}")     # a label can carry a place
+                    else:
+                        lines.append(f"{entity} | (his location) | (his location: not here)")
                     continue
                 _mark_location_read(item, owner_person_id)
             elif precise_place(entity):
