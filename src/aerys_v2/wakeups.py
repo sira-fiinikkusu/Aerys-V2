@@ -68,10 +68,14 @@ NOT_FROM_WAKE = "Not done: not from a wake-up; tell him instead."
 #: (nobody is there to hear or to have asked); and any way to him but the desk (a file straight to
 #: his DMs would skip quiet hours: TELL is how he hears from a wake-up). Kael's review, 11/12.
 #: Timers and lists stay: small, his to see, and what a check-in often wants to leave behind.
-WAKE_DROPPED = frozenset({"remember", "save_contact_email", "music", "keep_listening", "send_file_to_chris"})
-HOUSE_WRITES = frozenset({"home_control", "control_alarm"})
-#: The only reads those two house tools have; everything else they do is a write.
-HOUSE_READS = {"home_control": ("operation", "get_state"), "control_alarm": ("action", "status")}
+WAKE_DROPPED = frozenset({"remember", "save_contact_email", "keep_listening", "send_file_to_chris"})
+HOUSE_WRITES = frozenset({"home_control", "control_alarm", "music"})
+#: What those house tools may still do from a wake-up: their reads, and for music the quieting
+#: actions. 11/15: he asked her to stop the music in two hours; the wake-up fired but had no music
+#: tool, and the playlist ran all night. Stopping only narrows (like withdrawing a request), so a
+#: wake-up may pause or stop music, and still never start it, change it or touch another device.
+HOUSE_READS = {"home_control": ("operation", ("get_state",)), "control_alarm": ("action", ("status",)),
+               "music": ("operation", ("pause", "stop", "now_playing"))}
 
 
 @dataclass(frozen=True)
@@ -794,10 +798,10 @@ def _house_reads_only(t):
     """The same house tool, its reads direct and its writes refused (the wake graph's copy)."""
     from langchain_core.tools import StructuredTool
 
-    arg, read = HOUSE_READS[t.name]
+    arg, allowed = HOUSE_READS[t.name]
 
     def run(config: RunnableConfig = None, **kwargs):
-        if str(kwargs.get(arg) or "").strip().lower() != read:
+        if str(kwargs.get(arg) or "").strip().lower() not in allowed:
             log.info("wake-up: a %s write refused", t.name)
             return NOT_FROM_WAKE
         return t.invoke(kwargs, config=config)
@@ -830,6 +834,7 @@ WAKE_FENCE: dict[str, tuple[str, tuple[str, ...]] | None] = {
     "reach_prefs": ("action", ("show",)),            # his delivery settings: read, never change
     "home_control": ("operation", ("get_state",)),
     "control_alarm": ("action", ("status",)),
+    "music": ("operation", ("pause", "stop", "now_playing")),   # quieting only (11/15)
 }
 
 
@@ -884,8 +889,8 @@ def refused_in_wake(payload) -> str | None:
     if tool in WAKE_DROPPED:
         return NOT_FROM_WAKE
     if tool in HOUSE_WRITES:
-        arg, read = HOUSE_READS[tool]
-        if str(((payload or {}).get("tool_args") or {}).get(arg) or "").strip().lower() != read:
+        arg, allowed = HOUSE_READS[tool]
+        if str(((payload or {}).get("tool_args") or {}).get(arg) or "").strip().lower() not in allowed:
             return NOT_FROM_WAKE
     return None
 

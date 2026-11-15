@@ -564,3 +564,32 @@ def test_a_saved_artist_that_sounds_like_what_he_said_beats_an_exact_spelling_el
     ha.calls.clear()
     tool.invoke({"operation": "play", "query": "Charlie Example"})       # TYPED: the spelling is deliberate
     assert ha.plays()[0]["media_id"] == "spotify://artist/someone-else"
+
+
+
+# --- 11/15: "stop it in two hours" from a wake-up (no device) must stop the speaker actually playing ---------
+def test_a_stop_with_no_room_stops_the_one_speaker_playing():
+    ha = HA()
+    states = {"media_player.bedroom": {"state": "playing"}, PLAYER: {"state": "idle"}}
+    real = ha.__call__
+
+    def fake(req):
+        name = req.url.path.rsplit("/", 1)[-1]
+        if req.method == "GET" and name in states:
+            ha.calls.append(("state", name))
+            return httpx.Response(200, json=states[name])
+        return real(req)
+    def tool():
+        return build_music_tool(base_url="http://ha.test", token="example", config_entry_id="example",
+                                players={"example": PLAYER, "bedroom-device": "media_player.bedroom"},
+                                default_player=PLAYER, owner_person_id=OWNER,
+                                client=httpx.Client(transport=httpx.MockTransport(fake)))
+    wake = {"configurable": {"thread_id": "wake:9", "identity": {"user_id": OWNER, "platform": "wake", "unattended": True}}}
+    assert tool().invoke({"operation": "stop"}, config=wake) == "Done: stop sent to bedroom."
+    states[PLAYER] = {"state": "playing"}
+    assert "more than one speaker" in tool().invoke({"operation": "pause"}, config=wake)
+    states["media_player.bedroom"] = {"state": "idle"}; states[PLAYER] = {"state": "idle"}
+    assert tool().invoke({"operation": "stop"}, config=wake) == "Done: stop sent to example."   # nothing playing: default
+    ha.calls.clear()
+    assert tool().invoke({"operation": "next"}, config=wake).startswith("Done: next sent to example")
+    assert not any(c[0] == "state" for c in ha.calls)         # only pause/stop look for the playing speaker

@@ -387,7 +387,7 @@ def build_music_tool(
         # speech, no extra HTTP round-trip on the hot path.
         return entity.split(".", 1)[-1].replace("_", " ")
 
-    def _resolve_target(target: str, config: RunnableConfig) -> str:
+    def _resolve_target(target: str, config: RunnableConfig, quieting: bool = False) -> str:
         """Player entity for this turn, or an honest error string (callers
         distinguish by the 'media_player.' prefix)."""
         want = target.strip().lower()
@@ -415,6 +415,22 @@ def build_music_tool(
         device_id = identity_from_config(config).get("device_id")
         if device_id and device_id in players:
             return players[device_id]
+        if quieting:
+            # No room to go by (a wake-up, a typed message): stop the one allowed speaker that is
+            # actually playing. 11/15: the stop was meant for the bedroom satellite, not the default.
+            playing = []
+            for entity in allowed:
+                try:
+                    r = http.get(f"{base}/api/states/{entity}", headers=headers)
+                    if r.status_code == 200 and r.json().get("state") == "playing":
+                        playing.append(entity)
+                except (httpx.HTTPError, ValueError):
+                    continue
+            if len(playing) == 1:
+                return playing[0]
+            if len(playing) > 1:
+                return ("Music is playing on more than one speaker "
+                        f"({', '.join(_friendly(e) for e in playing)}); which one?")
         if default_player:
             return default_player
         options = ", ".join(_friendly(e) for e in allowed) or "(none configured)"
@@ -557,7 +573,7 @@ def build_music_tool(
                     "Playlists: " + (", ".join(str(p.get("name")) for p in playlists[:_TASTE_PLAYLISTS]) or "none")
                     + (" …" if len(playlists) > _TASTE_PLAYLISTS else "") + ".")
 
-        player = _resolve_target(target, config)
+        player = _resolve_target(target, config, quieting=op in ("pause", "stop"))
         if not player.startswith("media_player."):
             return player  # honest resolution error, relayed as-is
 

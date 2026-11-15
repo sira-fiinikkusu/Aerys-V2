@@ -657,7 +657,29 @@ def test_wake_turns_drop_sound_mic_and_side_channels_but_keep_timers_and_lists()
 
     names = ["music", "keep_listening", "send_file_to_chris", "timer", "manage_list", "search_web"]
     kept = {t.name for t in wake_tools([named(n) for n in names])}
-    assert kept == {"timer", "manage_list", "search_web"}
+    # music stays, fenced to quieting only (11/15: "stop it in two hours" must be able to happen)
+    assert kept == {"timer", "manage_list", "search_web", "music"}
+
+
+@pytest.mark.parametrize("op,ok", [("stop", True), ("pause", True), ("now_playing", True),
+                                   ("play", False), ("volume", False), ("next", False), ("like", False),
+                                   ("new_playlist", False), ("shuffle", False), ("resume", False)])
+def test_a_wake_up_may_only_quiet_the_music(op, ok):
+    from langchain_core.tools import tool as _t
+    from aerys_v2.wakeups import NOT_FROM_WAKE, fenced, refused_in_wake, wake_tools
+
+    ran = []
+
+    @_t("music")
+    def music(operation: str, query: str = "") -> str:
+        """placeholder"""
+        ran.append(operation)
+        return "Done: " + operation
+    wrapped = next(x for x in wake_tools([music]) if x.name == "music")
+    out = wrapped.invoke({"operation": op})
+    assert (out == "Done: " + op) is ok and (ran == [op]) is ok
+    assert fenced("music", {"operation": op}) is (not ok)
+    assert (refused_in_wake({"tool": "music", "tool_args": {"operation": op}}) == NOT_FROM_WAKE) is (not ok)
 
 
 def test_cart_link_never_dms_from_a_wake_turn():
