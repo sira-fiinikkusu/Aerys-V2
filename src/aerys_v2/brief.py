@@ -50,9 +50,26 @@ BRIEF_PROMPT = (
     "first person, your own voice, the most useful thing first. Use ONLY the facts below and "
     "never add any: no weather, plans or news that aren't listed. Say times the way people say "
     "them (\"ten thirty\"). Work meetings: how many and when, never what they're about. If "
-    "something came in overnight, say so in a few words; the details are in his messages. "
+    "something came in overnight, say so in a few words; the details are in his messages. Each "
+    "overnight note carries the time it happened: it is how things stood THEN, so say it as what "
+    "happened, never as how things are now. "
     "Nothing to read off a screen: no lists, no markdown, no emoji. Reply with ONLY what to say."
 )
+
+#: D56 (11/15): when her words come from her own turn (wakeups.her_turn_for), she has her tools and
+#: decides what to look at before she speaks. His words: "she needs to be able to DECIDE to look at HA
+#: or what have you at the time she plans to do the daily call ... we need to stop treating her like
+#: a child." Nothing here names a device: what to check is hers.
+TURN_TEACHING = (
+    "\n\nThis is your own turn, with your usual tools in hand. The facts below were gathered a moment "
+    "ago; what came in earlier carries the time it happened and may have changed since. Before you say "
+    "how anything stands now, check it if you can, the way you would if he'd asked you (your house "
+    "reads, your connections, a search). What you check yourself counts as a fact. Don't narrate the "
+    "checks. If you change anything in the house while you're at it, he'll get a line about it in "
+    "writing; say it too if it matters."
+)
+#: How long he waits for her own turn before the plain version goes (he's standing in the room).
+TURN_WALL_S = 90.0
 
 
 @dataclass
@@ -98,17 +115,36 @@ def plain_brief(facts: Facts) -> str:
     return " ".join(parts)
 
 
+def stamped(row) -> str:
+    """A held note as she reads it: when it happened, then what it said (D56: a note is how things
+    stood then)."""
+    at = getattr(row, "created_at", None)
+    when = f"({at.astimezone(EASTERN).strftime('%-I:%M %p')}) " if isinstance(at, datetime) else ""
+    return when + str(row.headline)
+
+
 def facts_text(facts: Facts) -> str:
     """The facts as the model reads them."""
     lines = [f"Weather today: {facts.weather or 'unknown (say nothing about it)'}"]
     lines.append("Left on today's calendar:" if facts.events else "Left on today's calendar: nothing")
     lines += [f"- {e}" for e in facts.events]
     if facts.held or facts.quiet:
-        lines.append("Came in overnight (the details are in his messages):")
-        lines += [f"- {r.headline}" for r in [*facts.held, *facts.quiet]]
+        lines.append("Came in overnight, each with the time it happened (the details are in his messages):")
+        lines += [f"- {stamped(r)}" for r in [*facts.held, *facts.quiet]]
     else:
         lines.append("Came in overnight: nothing")
     return "\n".join(lines)
+
+
+def with_house(detail: str, did: list) -> str:
+    """D54 on her own turns: a house change she made while composing goes in the text copy."""
+    if not did:
+        return detail
+    from aerys_v2.wakeups import _clip
+
+    line = ("While I put this together, in the house: "
+            + "; ".join(_clip(d, 100).rstrip(". ") for d in did[:5]) + ".")
+    return f"{detail}\n\n{line}" if detail else line
 
 
 def held_detail(held: list) -> str:
@@ -220,7 +256,8 @@ class MorningBrief:
         if not text:
             text = plain_brief(facts)
         outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=self.room,
+            source=SOURCE, topic=TOPIC, headline=text, room=self.room,
+            detail=with_house(held_detail(held), getattr(self.compose, "house", None)),
             brief=True, folds=tuple(r.id for r in held), dedupe_key=key, expires_at=cutoff))
         self.done = day        # whatever the desk said, once a day: never a model call a minute
         log.info("brief %s: %s (%d held, %d quiet)", day, outcome, len(held), len(quiet))
@@ -357,7 +394,7 @@ class EveningHeadsUp:
             text = plain_evening(facts)
         outcome = self.desk.reach_out(ReachEvent(
             source=EVENING_SOURCE, topic=EVENING_TOPIC, headline=text, room=reading.room, brief=True,
-            dedupe_key=key, expires_at=cutoff))
+            detail=with_house("", getattr(self.compose, "house", None)), dedupe_key=key, expires_at=cutoff))
         self.done = day
         log.info("evening %s: %s", day, outcome)
         return outcome
@@ -545,10 +582,19 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
 
 
 def composer_for(settings, *, model=None, prompt: str | None = None,
-                 text_of: Callable[[Facts], str] | None = None) -> Callable[[Facts], str]:
+                 text_of: Callable[[Facts], str] | None = None, turn=None, kind: str = "brief",
+                 wall_s: float = TURN_WALL_S) -> Callable[[Facts], str]:
+    """Her words for a brief-like moment. With `turn` (wakeups.her_turn_for, D56) they come from her own
+    turn, tools in hand, on a thread of its own (<kind>:<time>); the house changes it made are left on
+    compose.house for the caller's text copy. A turn past wall_s gives way to the plain version (it may
+    still finish in the background; a house change it makes then isn't in that copy). Without `turn`,
+    one tool-free call over the facts."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
     def compose(facts: Facts) -> str:
+        compose.house = []
+        if turn is not None:
+            return _her_turn(facts)
         from aerys_v2.factory import build_model, load_soul
         from aerys_v2.service import _reply_text
 
@@ -559,10 +605,34 @@ def composer_for(settings, *, model=None, prompt: str | None = None,
         ])
         return _reply_text(reply).strip()
 
+    def _her_turn(facts: Facts) -> str:
+        seed = (prompt or BRIEF_PROMPT).strip() + TURN_TEACHING + "\n\n" + (text_of or facts_text)(facts)
+        thread = f"{kind}:{datetime.now(EASTERN):%Y-%m-%dT%H:%M:%S}"     # a clean thread each time
+        box: dict = {}
+
+        def work():
+            try:
+                box["out"] = turn(thread, seed)
+            except Exception as e:
+                box["err"] = e
+
+        worker = threading.Thread(target=work, daemon=True, name=f"{kind}-turn")
+        worker.start()
+        worker.join(wall_s)
+        if worker.is_alive():
+            log.warning("%s: her own turn passed %ds; the plain version goes", kind, int(wall_s))
+            return ""
+        if "err" in box:
+            raise box["err"]
+        out = box["out"]
+        compose.house = list(out.house or [])
+        return (out.text or "").strip()
+
+    compose.house = []
     return compose
 
 
-def evening_heads_up_for(settings, desk) -> EveningHeadsUp | None:
+def evening_heads_up_for(settings, desk, *, action_graph=None) -> EveningHeadsUp | None:
     """None unless armed: evening_heads_up on, a desk, HA, and a speaker in one of its rooms."""
     if not getattr(settings, "evening_heads_up", False) or desk is None or getattr(settings, "ha_token", None) is None:
         return None
@@ -574,14 +644,19 @@ def evening_heads_up_for(settings, desk) -> EveningHeadsUp | None:
     if not rooms:
         log.warning("evening heads-up: no speaker in any of its rooms; not armed")
         return None
+    from aerys_v2.wakeups import her_turn_for
+
+    turn = her_turn_for(settings, action_graph)
+    log.info("evening heads-up armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return EveningHeadsUp(
         desk, read=reader_for(settings), gather=gatherer_for(settings),
-        compose=composer_for(settings, prompt=EVENING_PROMPT, text_of=evening_facts_text), rooms=rooms,
+        compose=composer_for(settings, prompt=EVENING_PROMPT, text_of=evening_facts_text, turn=turn,
+                             kind="evening"), rooms=rooms,
         start_hour=int(getattr(settings, "evening_start_hour", 19)),
         quiet_start_hour=int(getattr(settings, "owner_quiet_start_hour", 21)))
 
 
-def morning_brief_for(settings, desk, *, replied_since=None) -> MorningBrief | None:
+def morning_brief_for(settings, desk, *, replied_since=None, action_graph=None) -> MorningBrief | None:
     """None unless armed: morning_brief on, a desk, HA, and a speaker in the brief's room."""
     if not getattr(settings, "morning_brief", False) or desk is None or getattr(settings, "ha_token", None) is None:
         return None
@@ -591,8 +666,13 @@ def morning_brief_for(settings, desk, *, replied_since=None) -> MorningBrief | N
     if room not in parse_room_devices(getattr(settings, "reach_room_devices", "")):
         log.warning("morning brief: no speaker configured for the %s; not armed", room)
         return None
+    from aerys_v2.wakeups import her_turn_for
+
+    turn = her_turn_for(settings, action_graph)
+    log.info("morning brief armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return MorningBrief(
-        desk, read=reader_for(settings), gather=gatherer_for(settings), compose=composer_for(settings),
+        desk, read=reader_for(settings), gather=gatherer_for(settings),
+        compose=composer_for(settings, turn=turn, kind="brief"),
         replied_since=replied_since or getattr(desk, "replied_since", None), room=room,
         start_hour=int(getattr(settings, "brief_start_hour", 5)),
         solo_hour=int(getattr(settings, "brief_solo_hour", 8)),

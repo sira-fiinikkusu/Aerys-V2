@@ -1002,13 +1002,14 @@ def occurrence_of(w: Wakeup) -> str:
     return w.next_run_at.isoformat() if w.next_run_at is not None else ""
 
 
-def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = "") -> dict:
+def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = "",
+                thread: str | None = None) -> dict:
     # outside_text and room_sink are made here, by the caller, like ask() does: LangGraph copies
     # configurable shallowly, so the guard's holder is the same dict for the model and the tools.
     identity = wake_identity(owner)
     if occurrence:
         identity["wake_occurrence"] = str(occurrence)     # set by the runner, never by her
-    return {"configurable": {"thread_id": f"wake:{wake_id}", "identity": identity,
+    return {"configurable": {"thread_id": thread or f"wake:{wake_id}", "identity": identity,
                              "outside_text": {}, "room_sink": {}, "specialist": True, "tier": "standard"},
             "recursion_limit": int(steps)}
 
@@ -1039,30 +1040,55 @@ def house_done(messages: list) -> list[str]:
     return done
 
 
+def _one_turn(graph, config: dict, seed: str) -> TurnResult:
+    """ONE action turn on the config's thread: the action graph's call and honesty gate from ask()'s
+    action path (service._run_action_gated), without his thread's history and without a v2_turns record
+    (its words can carry page text, and the plan miner reads his turns as his words)."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from aerys_v2.service import _reply_text, _run_action_gated
+    from aerys_v2.services.location_guard import LOCATION_TURN
+    from aerys_v2.services.presence import TRAVEL_ZONE
+    from aerys_v2.tools.remember import CURRENT_TURN_TEXT
+    from aerys_v2.turns import extract_tool_calls
+
+    # The per-turn markers ask() sets: none of his words in this turn, a fresh location fence.
+    CURRENT_TURN_TEXT.set("")
+    LOCATION_TURN.set(set())
+    TRAVEL_ZONE.set({})
+    result, _ = _run_action_gated(graph, [HumanMessage(content=seed)], config)
+    messages = result["messages"]
+    last = messages[-1] if messages else None
+    # Her words are her LAST message, and only when it's hers and finished (not a tool call left open).
+    said = _reply_text(last) if isinstance(last, AIMessage) and not getattr(last, "tool_calls", None) else ""
+    return TurnResult(said, [c.get("name") for c in extract_tool_calls(messages) if c.get("name")],
+                      house_done(messages))
+
+
 def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, str], TurnResult]:
-    """ONE action turn on thread wake:<id>: the action graph's call and honesty gate from ask()'s action
-    path (service._run_action_gated), without his thread's history and without a v2_turns record (a
-    wake turn's words can carry page text, and the plan miner reads his turns as his words)."""
+    """ONE action turn on thread wake:<id> (_one_turn)."""
 
     def run(w: Wakeup, seed: str) -> TurnResult:
-        from langchain_core.messages import HumanMessage
+        return _one_turn(graph, wake_config(w.id, owner, steps=steps, occurrence=occurrence_of(w)), seed)
 
-        from aerys_v2.service import _reply_text, _run_action_gated
-        from aerys_v2.services.location_guard import LOCATION_TURN
-        from aerys_v2.services.presence import TRAVEL_ZONE
-        from aerys_v2.tools.remember import CURRENT_TURN_TEXT
-        from aerys_v2.turns import extract_tool_calls
+    return run
 
-        # The per-turn markers ask() sets: none of his words in this turn, a fresh location fence.
-        CURRENT_TURN_TEXT.set("")
-        LOCATION_TURN.set(set())
-        TRAVEL_ZONE.set({})
-        config = wake_config(w.id, owner, steps=steps, occurrence=occurrence_of(w))
-        result, _ = _run_action_gated(graph, [HumanMessage(content=seed)], config)
-        messages = result["messages"]
-        return TurnResult(_reply_text(messages[-1]) if messages else "",
-                          [c.get("name") for c in extract_tool_calls(messages) if c.get("name")],
-                          house_done(messages))
+
+def her_turn_for(settings, action_graph=None) -> Callable[[str, str], TurnResult] | None:
+    """D56 (11/15): one of her own turns outside a wake-up (her morning brief, the evening heads-up, a
+    welcome home), so what she says there is hers to check first: "she needs to be able to DECIDE to
+    look at HA or what have you ... its her reading HA and her MCPs as a resource." The wake graph's
+    rails (D54 house rules, the outside guard, her memory out) on a thread the caller names. None
+    without the wake graph (WAKEUPS off) or an owner: the caller keeps its tool-free words."""
+    graph = getattr(action_graph, "wake_graph", None)
+    owner = getattr(settings, "owner_person_id", None)
+    if graph is None or owner is None:
+        return None
+    set_autonomy_blocked(getattr(settings, "autonomy_blocked", ""))   # his list, whatever arms first
+    steps = WakeRails.from_settings(settings).steps
+
+    def run(thread: str, seed: str) -> TurnResult:
+        return _one_turn(graph, wake_config(0, str(owner), steps=steps, thread=thread), seed)
 
     return run
 

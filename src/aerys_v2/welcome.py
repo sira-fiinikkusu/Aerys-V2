@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
-from aerys_v2.brief import Facts, _at, _csv, _ha, _loop, held_detail, plain_brief
+from aerys_v2.brief import Facts, _at, _csv, _ha, _loop, held_detail, plain_brief, stamped, with_house
 from aerys_v2.followups import (CHECK_IN_TOPICS, CHECKIN_FOR, CHECKIN_LOCK, DATA_ONLY, HELLO_KEPT, Appointment,
                                 appointment_key)
 from aerys_v2.followups import SOURCE as FOLLOWUP_SOURCE
@@ -158,14 +158,15 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
         lines.append("On his calendar while he was out: nothing")
     if facts.held:
         lines.append("Came in while he was out (the details are in his messages):")
-        lines += [f"- {r.headline}" for r in facts.held]
+        lines += [f"- {stamped(r)}" for r in facts.held]
     b = facts.brief
     if b is not None:
         lines.append("His morning brief (still due today):")
         lines.append(f"- Weather today: {b.weather or 'unknown (say nothing about it)'}")
         lines.append("- Left on today's calendar: " + ("; ".join(b.events) if b.events else "nothing"))
         overnight = [*b.held, *b.quiet]
-        lines.append("- Came in overnight: " + ("; ".join(r.headline for r in overnight) if overnight else "nothing"))
+        lines.append("- Came in overnight, each with the time it happened: "
+                     + ("; ".join(stamped(r) for r in overnight) if overnight else "nothing"))
     return DATA_ONLY + "\n".join(lines)
 
 
@@ -521,7 +522,8 @@ class WelcomeHome:
             text = plain_welcome(facts)
         folds = tuple(h.id for h in held) + ((marker.id,) if marker is not None else ())
         outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=room, brief=True,
+            source=SOURCE, topic=TOPIC, headline=text, room=room, brief=True,
+            detail=with_house(held_detail(held), getattr(self.compose, "house", None)),
             folds=folds, dedupe_key=key, expires_at=expires))
         for v in visits:
             if v.claim is None or outcome in ("queued", "duplicate"):   # queued: settled by _reconcile
@@ -656,7 +658,7 @@ def visits_for(settings, *, get=None) -> Callable[[datetime, datetime], list]:
     return read
 
 
-def welcome_home_for(settings, desk, *, brief=None) -> WelcomeHome | None:
+def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> WelcomeHome | None:
     """None unless armed: welcome_home on, its entity, a desk, HA, and a speaker in one of its rooms."""
     entity = str(getattr(settings, "welcome_home_entity", "") or "").strip()
     if (not getattr(settings, "welcome_home", False) or not entity or desk is None
@@ -664,6 +666,7 @@ def welcome_home_for(settings, desk, *, brief=None) -> WelcomeHome | None:
         return None
     from aerys_v2.brief import composer_for
     from aerys_v2.kael_line import parse_room_devices
+    from aerys_v2.wakeups import her_turn_for
 
     speakers = parse_room_devices(getattr(settings, "reach_room_devices", ""))
     wanted = _csv(getattr(settings, "welcome_home_rooms", ""))
@@ -679,9 +682,12 @@ def welcome_home_for(settings, desk, *, brief=None) -> WelcomeHome | None:
         from aerys_v2.followups import PostgresFollowupStore
 
         followups = PostgresFollowupStore(settings.database_url)
+    turn = her_turn_for(settings, action_graph)
+    log.info("welcome home armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return WelcomeHome(
         desk, read=home_reader_for(settings), away_since=away_since_for(settings),
-        compose=composer_for(settings, prompt=WELCOME_PROMPT, text_of=welcome_facts_text),
+        compose=composer_for(settings, prompt=WELCOME_PROMPT, text_of=welcome_facts_text, turn=turn,
+                             kind="welcome"),
         visits=visits_for(settings), rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
         settle_minutes=int(getattr(settings, "welcome_home_settle_minutes", 20)),
