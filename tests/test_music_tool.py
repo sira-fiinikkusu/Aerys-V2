@@ -151,11 +151,12 @@ def test_play_prefers_tracks_and_reports_resolved_name():
     ha = FakeHA()
     tool = make_tool(ha)
     tool.invoke({"operation": "play", "query": "one more time"}, config=cfg(OFFICE_DEV))
-    play = next(b for p, b in ha.calls if p.endswith("/play_media"))
-    assert play["media_id"] == "spotify://track/t1"
-    assert play["media_type"] == "track"
-    # single-track asks keep the music going (owner call, 2026-07-18)
-    assert play["radio_mode"] is True
+    plays = [b for p, b in ha.calls if p.endswith("/play_media")]
+    # the song alone first (11/14: shuffle can't bury it), then its radio after it, so a single-track
+    # ask keeps the music going (owner call, 2026-07-18)
+    assert plays[0] == {"entity_id": "media_player.office_satellite", "media_id": "spotify://track/t1",
+                        "media_type": "track", "enqueue": "replace"}
+    assert plays[1] == {**plays[0], "enqueue": "add", "radio_mode": True}
 
 
 def test_playlist_play_keeps_natural_scope_no_radio_mode():
@@ -304,8 +305,9 @@ def test_failed_radio_mode_retries_the_plain_track_then_the_next_candidate():
     ha = RadioDead()
     out = make_tool_with(ha).invoke({"operation": "play", "query": "one more time", "device_id": OFFICE_DEV})
     plays = [b for p, b in ha.calls if p.endswith("/play_media")]
-    assert plays[0].get("radio_mode") is True and plays[1] == {
-        "entity_id": "media_player.office_satellite", "media_id": "spotify://track/t1", "media_type": "track"}
+    assert plays[0] == {"entity_id": "media_player.office_satellite", "media_id": "spotify://track/t1",
+                        "media_type": "track", "enqueue": "replace"}
+    assert plays[1].get("radio_mode") is True and len(plays) == 2      # radio failed: the song still plays
     assert out.startswith(WRITE_OK_PREFIX) and "just the song" in out
 
 

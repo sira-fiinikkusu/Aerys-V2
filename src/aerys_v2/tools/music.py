@@ -253,22 +253,6 @@ def build_music_tool(
             return "His library is his: only he can ask me what's in it."
         return "I'm not sure it's him asking, so his library stays private. Ask again, or in a DM."
 
-    def _unshuffle(player: str) -> str:
-        """A song he named plays first. 11/14: shuffle was left on, so her radio for "Call for Fire"
-        (the song + similar ones) was shuffled and a radio pick played instead. Best effort: a failed
-        read or write leaves the play as it was."""
-        try:
-            r = http.get(f"{base}/api/states/{player}", headers=headers)
-            r.raise_for_status()
-            if (r.json().get("attributes") or {}).get("shuffle") is not True:
-                return ""
-            r = http.post(f"{base}/api/services/media_player/shuffle_set", headers=headers,
-                          json={"entity_id": player, "shuffle": False})
-            r.raise_for_status()
-        except (httpx.HTTPError, ValueError, AttributeError):
-            return ""
-        return " Shuffle was on; it's off now so this song plays first."
-
     def _friendly(entity: str) -> str:
         # 'media_player.office_satellite' -> 'office satellite' — good enough for
         # speech, no extra HTTP round-trip on the hot path.
@@ -575,7 +559,6 @@ def build_music_tool(
             return f"I couldn't find anything matching '{what}' on Spotify."
         tried: list[str] = []
         last_error = ""
-        unshuffled: str | None = None
         for item, chosen_type in candidates[:4]:
             name, uri = _item_line(item)
             if not uri:
@@ -583,15 +566,13 @@ def build_music_tool(
             attempts = [{"entity_id": player, "media_id": uri, "media_type": chosen_type}]
             if op != "play":
                 attempts[0]["enqueue"] = "next" if op == "play_next" else "add"
-            if chosen_type == "track" and op == "play" and unshuffled is None:
-                unshuffled = _unshuffle(player)
-            if chosen_type == "track" and op == "play":
-                # Owner call (2026-07-18): asking for ONE song means "start music",
-                # not "play 3:44 then silence" — radio mode keeps similar tracks
-                # coming after the requested one. Albums/playlists/artists keep
-                # their natural scope and end; "stop" works anytime. If the
-                # provider cannot build the radio, the plain track still plays.
-                attempts.insert(0, {**attempts[0], "radio_mode": True})
+            one_song = chosen_type == "track" and op == "play"
+            if one_song:
+                # 11/14: a radio queue (the song + similar ones) is shuffled when the player's shuffle is
+                # on, and this player can't turn shuffle off (HA refuses shuffle_set), so a radio pick
+                # played instead of the song he named. The song goes in ALONE first (replace: nothing
+                # to shuffle), then its radio after it, below.
+                attempts[0]["enqueue"] = "replace"
             for payload in attempts:
                 try:
                     r = http.post(
@@ -604,9 +585,19 @@ def build_music_tool(
                     last_error = str(e)
                     tried.append(f"{name} ({chosen_type}{', radio' if payload.get('radio_mode') else ''})")
                     continue
-                note = "" if op != "play" or payload.get("radio_mode") or chosen_type != "track" else " (just the song — similar-tracks radio wasn't available)"
+                note = ""
+                if one_song:
+                    # Owner call (2026-07-18): asking for ONE song means "start music", not "play 3:44
+                    # then silence": similar tracks follow it. If the provider can't build the radio,
+                    # the song still plays.
+                    try:
+                        r = http.post(f"{base}/api/services/music_assistant/play_media", headers=headers,
+                                      json={**payload, "enqueue": "add", "radio_mode": True})
+                        r.raise_for_status()
+                    except httpx.HTTPError:
+                        note = " (just the song — similar-tracks radio wasn't available)"
                 verb = "playing" if op == "play" else "queued next" if op == "play_next" else "queued"
-                return (f"{WRITE_OK_PREFIX} {verb} {name} on {_friendly(player)}.{note}{unshuffled or ''} "
+                return (f"{WRITE_OK_PREFIX} {verb} {name} on {_friendly(player)}.{note} "
                         "Keep the spoken confirmation to a few words; no explanation, offers or questions.")
         return (
             f"Starting music on {_friendly(player)} FAILED — Home Assistant said: {last_error}. "
