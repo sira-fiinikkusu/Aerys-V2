@@ -535,9 +535,9 @@ def test_a_playlist_is_not_split_and_keeps_his_shuffle():
     assert 'shuffle_set' not in [op for op, _ in ha.calls]
 
 
-# --- 11/14 21:51: "Charlie Morgan" went to a different Spotify artist spelled exactly that ---------------
+# --- 11/14 21:51: a saved artist lost to a Spotify artist spelled the common way -----------------------
 @pytest.mark.parametrize("a,b,same", [
-    ("Charlie Morgan", "Charli Morgan", True), ("before the full and the lily", "before the foal and the lily", True),
+    ("Charlie Example", "Charli Example", True), ("a full example", "a foal example", True),
     ("Imagine", "Imagined", False), ("Example Track", "Example Tracks", False), ("Song 2", "Song 3", False),
 ])
 def test_sound_key(a, b, same):

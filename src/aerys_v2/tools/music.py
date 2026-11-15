@@ -128,8 +128,8 @@ def _play_norm(t: object) -> str:
 def _sound_key(value: object) -> str:
     """Roughly how a name SOUNDS: each word's first letter plus its consonants, repeats collapsed.
     Speech-to-text can't hear spelling: "Charlie"/"Charli" and "full"/"foal" share a key, while
-    "Imagine"/"Imagined" don't (the d is heard). 11/14: "play some Charlie Morgan" went to a
-    different Spotify artist spelled exactly that, not his saved Charli Morgan."""
+    "Imagine"/"Imagined" don't (the d is heard). 11/14: a saved artist, asked for by voice, went to a
+    different Spotify artist whose name is spelled the common way."""
     words = []
     for word in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
         if word.isdigit():
