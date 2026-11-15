@@ -2078,6 +2078,63 @@ def _action_turn(
     return final
 
 
+_TITLE_ABBREVIATIONS = frozenset({"mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vol.", "no.",
+                                  "feat.", "ft.", "vs.", "pt.", "op."})
+
+
+#: what an offer or a question sounds like once the music has started (D52: no offers, no questions)
+_MUSIC_OFFER = re.compile(r"\b(want me|would you like|do you want|if you'?d like|if you like|i can|"
+                          r"let me know|should i|tell me|just say|say the word)\b", re.IGNORECASE)
+#: the plain line for a music write whose own words broke that rule, from the tool's Done note
+_MUSIC_DONE = (
+    (re.compile(r"^Done: playing (.+?) on [^.]+\."), "Playing {}."),
+    (re.compile(r"^Done: queued next (.+?) on [^.]+\."), "{} is up next."),
+    (re.compile(r"^Done: queued (.+?) on [^.]+\."), "Added {} to the queue."),
+    (re.compile(r"^Done: similar-track radio started"), "More like this, coming up."),
+)
+
+
+def _quiet_music_reply(text: str, result_messages: list) -> str:
+    """Voice-only caller: music writes get one sentence, at most 12 words, and no offer or question
+    (D52, 11/14: "a dissertation about music and playlists for the first 45 seconds")."""
+    from aerys_v2.tools.home_control import WRITE_OK_PREFIX
+
+    notes = [m for m in result_messages if isinstance(m, ToolMessage)]
+    if not notes or not all(m.name == "music" and isinstance(m.content, str)
+                            and m.content.startswith(WRITE_OK_PREFIX) for m in notes):
+        return text
+    # Song titles carry dots ("Mr. Blue Sky", "P.S. I Love You", "Vol. 2"): a sentence ends at a word
+    # closing in . ! ? … that isn't an abbreviation or initials, at a ; or — clause, or at a line break.
+    words: list[str] = []
+    for line in text.strip().splitlines() or [""]:
+        words = line.split()
+        if words:
+            break
+    for i, word in enumerate(words):
+        bare = word.rstrip("\"'”’)")
+        if bare in ("—", "–") or bare[-1:] in (";", "—"):
+            words = words[:i] if bare in ("—", "–") else words[:i] + [bare.rstrip(";—") + "."]
+            break
+        if bare[-1:] in (".", "!", "?", "…") and not (bare[-1] == "." and not bare.endswith("...") and (
+                bare.lower() in _TITLE_ABBREVIATIONS or re.fullmatch(r"(?:\w\.)+", bare))):
+            words = words[:i + 1]
+            break
+    sentence = " ".join(words)
+    # judge the whole sentence before shortening it: a cut must never hide a question or an offer
+    if not sentence or "?" in sentence or _MUSIC_OFFER.search(sentence):
+        note = str(notes[-1].content)
+        sentence = next((said.format(*hit.groups()) for pattern, said in _MUSIC_DONE
+                         if (hit := pattern.match(note))), "Done.")
+    return _at_most_twelve_words(sentence)
+
+
+def _at_most_twelve_words(sentence: str) -> str:
+    words = sentence.split()
+    if len(words) <= 12:
+        return sentence
+    return " ".join(words[:11] + [words[11].rstrip(",;:—-") + "."])
+
+
 def _needs_spoken_followup(
     result_messages: list, elapsed_s: float, skip_s: float, confirm_writes: bool = False
 ) -> bool:
@@ -2361,6 +2418,9 @@ def _voice_parallel_start(
                     result_messages[-1] if result_messages else None,
                 )
 
+            if not failed and not blank:
+                final = _quiet_music_reply(final, result_messages)
+
             # Spoken follow-up: failures ALWAYS speak; with confirm_writes
             # (owner ruling 2026-10-01) every outcome speaks; otherwise the
             # silent-success rule decides (fast clean write = say nothing).
@@ -2534,6 +2594,8 @@ def _voice_parallel_start(
         )
         _face(face_push, "speaking", honest)
         return honest
+
+    reply = _quiet_music_reply(reply, result_messages)
 
     # The action graph has no checkpointer — the turn lands on the REAL thread
     # here, exactly one human + one assistant message (cross-review history

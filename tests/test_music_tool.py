@@ -255,7 +255,7 @@ def test_now_playing_reads_without_ok_prefix():
 def test_unknown_operation_lists_valid_ones():
     ha = FakeHA()
     tool = make_tool(ha)
-    out = tool.invoke({"operation": "shuffle"}, config=cfg(OFFICE_DEV))
+    out = tool.invoke({"operation": "unknown_example"}, config=cfg(OFFICE_DEV))
     assert "Unknown operation" in out and "now_playing" in out
 
 

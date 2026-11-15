@@ -2438,6 +2438,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     config_entry_id=settings.ha_music_config_entry,
                     players=satellite_map_from(settings.ha_music_players),
                     default_player=settings.ha_music_default_player,
+                    owner_person_id=str(settings.owner_person_id or "") or None,
                 )
             )
 
