@@ -308,3 +308,18 @@ def test_explicit_on_overrides_disabled_default():
     states["media_player.room"] = state("b")
     w.tick()
     model.assert_called_once()
+
+
+def test_voice_marks_use_one_worker_even_when_the_database_hangs():
+    from aerys_v2.dj import note_voice
+    import threading, time as _t
+    gate = threading.Event()
+
+    class Hung(MemoryDJStore):
+        def put(self, key, value):
+            gate.wait(2)
+    before = threading.active_count()
+    for n in range(20):
+        note_voice(Hung(), {"voice": True, "device_id": f"device{n}"})
+    assert threading.active_count() - before <= 1     # at most the one worker, never one per turn
+    gate.set()

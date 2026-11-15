@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import queue
 import threading
 import time
 from datetime import datetime, timedelta
@@ -70,20 +71,36 @@ def set_enabled(store, enabled, *, now=None):
     return "DJ breaks are back on." if enabled else "DJ breaks are off until 06:00."
 
 
-def note_voice(store, identity):
-    """Mark a voice turn on that device, off the voice hot path: a fresh NAS connection per voice turn
-    would sit in front of every spoken reply, so the write runs on a short daemon thread."""
-    if store is None or not identity.get("voice") or not identity.get("device_id"):
-        return
-    key, at = "voice:" + identity["device_id"], time.time()
+_VOICE_MARKS: "queue.Queue[tuple]" = queue.Queue(maxsize=64)
+_voice_worker: threading.Thread | None = None
+_voice_worker_lock = threading.Lock()
 
-    def write():
+
+def _write_voice_marks():
+    while True:
+        store, key, at = _VOICE_MARKS.get()
         try:
             store.put(key, at)
         except Exception:
             # A normal conversation must remain usable during a database outage.
             log.warning("DJ voice activity unavailable")
-    threading.Thread(target=write, daemon=True, name="dj-voice-mark").start()
+
+
+def note_voice(store, identity):
+    """Mark a voice turn on that device, off the voice hot path: a fresh NAS connection per voice turn
+    would sit in front of every spoken reply. One worker drains a bounded queue, so a database outage
+    can't pile up threads; a full queue drops the mark (and an outage silences DJ breaks anyway)."""
+    global _voice_worker
+    if store is None or not identity.get("voice") or not identity.get("device_id"):
+        return
+    with _voice_worker_lock:
+        if _voice_worker is None or not _voice_worker.is_alive():
+            _voice_worker = threading.Thread(target=_write_voice_marks, daemon=True, name="dj-voice-marks")
+            _voice_worker.start()
+    try:
+        _VOICE_MARKS.put_nowait((store, "voice:" + identity["device_id"], time.time()))
+    except queue.Full:
+        log.warning("DJ voice marks backed up; one dropped")
 
 
 def track(state):
