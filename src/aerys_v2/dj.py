@@ -298,4 +298,6 @@ def start_dj(settings, graph, action_graph, model, soul):
                         enabled=settings.dj_breaks, cooldown=settings.dj_cooldown_s)
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="dj-breaks")
     thread.start()
+    log.info("DJ breaks armed | players=%d cooldown=%ss default=%s", len(set(players.values())),
+             int(settings.dj_cooldown_s), "on" if settings.dj_breaks else "off")
     return thread
