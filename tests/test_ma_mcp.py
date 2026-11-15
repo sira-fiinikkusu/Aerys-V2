@@ -291,3 +291,45 @@ def test_an_unmatched_speaker_says_so_instead_of_nothing_playing():
     ha.state["attributes"]["friendly_name"] = "A Room Music Assistant Doesn't Know"
     out = music(ha, ma).invoke({"operation": "shuffle", "query": "on"})
     assert "couldn't match" in out and "Spotify app" not in out
+
+
+
+# ---- Codex 11/15 review fixes --------------------------------------------------------------------------------
+def test_writes_check_who_asks_before_the_room():
+    ha, ma = ha_playing(), MA()
+    unknown_voice_public = {"configurable": {"thread_id": f"person:{OWNER}", "identity": {
+        "user_id": OWNER, "voice": True, "speaker": {"id": "unknown"}, "privacy_context": "public"}}}
+    out = music(ha, ma).invoke({"operation": "new_playlist", "query": "X"}, config=unknown_voice_public)
+    assert "not sure it's him" in out and ma.calls == []
+
+
+def test_a_write_matches_every_word_the_is_not_optional():
+    ha, ma = ha_playing(), MA()
+    ma.search = [{"uri": "library://track/1", "name": "The Example", "artists": ["Example Band"]}]
+    out = music(ha, ma).invoke({"operation": "like", "query": "Example by Example Band"})
+    assert "couldn't find exactly" in out and not any(c[0] == "media_add_to_favorites" for c in ma.calls)
+
+
+def test_a_playlist_write_needs_one_exact_name():
+    ha, ma = ha_playing(), MA()
+    out = music(ha, ma).invoke({"operation": "add_to_playlist", "query": "Example Song", "playlist": "Example Mixes"})
+    assert "couldn't find a playlist" in out and not any(c[0] == "playlists_add_track" for c in ma.calls)
+
+
+def test_an_idle_players_leftover_title_is_never_liked():
+    ha, ma = ha_playing(), MA()
+    ha.state["state"] = "idle"
+    out = music(ha, ma).invoke({"operation": "like"})
+    assert "Nothing is playing" in out and ma.calls == []
+
+
+def test_concurrent_first_calls_start_exactly_one_loop():
+    calls = []
+    ma = bridge(calls)
+    before = {t.ident for t in threading.enumerate() if t.name == "ma-mcp"}
+    threads = [threading.Thread(target=ma.call, args=("media_add_to_favorites",), kwargs={"uri": f"u{n}"})
+               for n in range(8)]
+    [t.start() for t in threads]
+    [t.join(20) for t in threads]
+    after = {t.ident for t in threading.enumerate() if t.name == "ma-mcp"} - before
+    assert len(after) == 1 and len([c for c in calls if c[0] == "favorite"]) == 8

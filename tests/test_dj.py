@@ -7,6 +7,15 @@ import pytest
 from aerys_v2.dj import DJWatcher, MemoryDJStore
 
 
+@pytest.fixture(autouse=True)
+def _fresh_local_voice():
+    """The in-process voice marks are module state: each test starts and ends without any."""
+    from aerys_v2 import dj
+    dj._LOCAL_VOICE.clear()
+    yield
+    dj._LOCAL_VOICE.clear()
+
+
 def state(track="a", status="playing"):
     return {"state": status, "attributes": {"media_content_id": track,
             "media_title": "Song " + track, "media_artist": "Example Artist"}}
@@ -359,3 +368,16 @@ def test_spotify_connect_skip_during_the_model_is_stale():
     states["media_player.room"] = connect("Song Two"); w.tick()
     announce.assert_not_called()
     assert s.get("break", {}).get("at") is None      # nothing reserved: the next song may still earn a line
+
+
+
+def test_a_local_voice_turn_blocks_a_break_even_before_its_database_mark_lands():
+    from aerys_v2 import dj
+    w, s, now, states, model, announce, _ = rig()
+    dj._LOCAL_VOICE["device"] = now[0] - 5           # this process heard him; the store hasn't yet
+    try:
+        states["media_player.room"] = state("b")
+        w.tick()
+        model.assert_not_called()
+    finally:
+        dj._LOCAL_VOICE.pop("device", None)

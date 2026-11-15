@@ -330,9 +330,8 @@ def test_saved_song_beats_spotify_even_misheard(query):
     ha = saved_ha()
     ha.tool().invoke({'operation': 'play', 'query': query})
     assert ha.plays()[0]['media_id'] == 'library://track/10'
-    # exact spelling, or a slip that SOUNDS the same (cooper/copper): no Spotify detour (11/14 21:51)
-    exact = query in ('Beneath the Copper Lantern', 'Beneath the Copper Lantern Example Band',
-                      'beneath the cooper lantern')
+    # exact spelling: no Spotify detour; a typed slip (even one that sounds the same) still checks Spotify
+    exact = query in ('Beneath the Copper Lantern', 'Beneath the Copper Lantern Example Band')
     assert ('search' in [op for op, _ in ha.calls]) is not exact     # only a near name asks Spotify too
 
 
@@ -537,8 +536,9 @@ def test_a_playlist_is_not_split_and_keeps_his_shuffle():
 
 # --- 11/14 21:51: a saved artist lost to a Spotify artist spelled the common way -----------------------
 @pytest.mark.parametrize("a,b,same", [
-    ("Charlie Example", "Charli Example", True), ("a full example", "a foal example", True),
+    ("Charlie Example", "Charli Example", True), ("Carly", "Carlie", True), ("cooper lantern", "copper lantern", True),
     ("Imagine", "Imagined", False), ("Example Track", "Example Tracks", False), ("Song 2", "Song 3", False),
+    ("Burning Heart", "Burning Hurt", False), ("Sweet Dreams", "Sweet Drums", False),   # Codex 11/15
 ])
 def test_sound_key(a, b, same):
     from aerys_v2.tools.music import _sound_key
@@ -557,6 +557,10 @@ def test_a_saved_artist_that_sounds_like_what_he_said_beats_an_exact_spelling_el
     tool = Private(build_music_tool(base_url="http://ha.test", token="example", config_entry_id="example",
                                     players={"example": PLAYER}, default_player=PLAYER, owner_person_id=OWNER,
                                     client=httpx.Client(transport=httpx.MockTransport(fake))))
-    tool.invoke({"operation": "play", "query": "Charlie Example"})
+    voice = {"configurable": {"thread_id": f"person:{OWNER}", "identity": {"user_id": OWNER, "voice": True}}}
+    tool.invoke({"operation": "play", "query": "Charlie Example"}, config=voice)
     assert ha.plays()[0]["media_id"] == "library://artist/644"
-    assert "search" not in [op for op, _ in ha.calls]          # it sounds like his: no Spotify detour
+    assert "search" not in [op for op, _ in ha.calls]          # said aloud, it sounds like his: no detour
+    ha.calls.clear()
+    tool.invoke({"operation": "play", "query": "Charlie Example"})       # TYPED: the spelling is deliberate
+    assert ha.plays()[0]["media_id"] == "spotify://artist/someone-else"

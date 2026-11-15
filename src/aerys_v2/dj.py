@@ -86,12 +86,25 @@ def _write_voice_marks():
             log.warning("DJ voice activity unavailable")
 
 
+#: device -> time of its latest voice turn in THIS process. Voice turns arrive through --serve, the
+#: same process as the DJ watcher, so this needs no database (Codex 11/15: a pending or dropped
+#: database mark left the recent-voice gate blind).
+_LOCAL_VOICE: dict[str, float] = {}
+
+
+def recent_local_voice(device: str) -> float | None:
+    return _LOCAL_VOICE.get(device)
+
+
 def note_voice(store, identity):
     """Mark a voice turn on that device, off the voice hot path: a fresh NAS connection per voice turn
     would sit in front of every spoken reply. One worker drains a bounded queue, so a database outage
     can't pile up threads; a full queue drops the mark (and an outage silences DJ breaks anyway)."""
     global _voice_worker
-    if store is None or not identity.get("voice") or not identity.get("device_id"):
+    if not identity.get("voice") or not identity.get("device_id"):
+        return
+    _LOCAL_VOICE[identity["device_id"]] = time.time()
+    if store is None:
         return
     with _voice_worker_lock:
         if _voice_worker is None or not _voice_worker.is_alive():
@@ -181,8 +194,8 @@ class DJWatcher:
             return "consecutive"
         devices = [d for d, p in self.players.items() if p == player]
         for device in devices:
-            voice = self.store.get("voice:" + device)
-            if voice is not None and now - voice < 60:
+            marks = [m for m in (self.store.get("voice:" + device), recent_local_voice(device)) if m is not None]
+            if marks and now - max(marks) < 60:
                 return "voice"
             satellite = self.satellites.get(device)
             if not satellite:

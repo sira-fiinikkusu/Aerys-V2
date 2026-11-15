@@ -59,6 +59,7 @@ class MusicAssistantMCP:
         self._token = token
         self._client_factory = client_factory or self._client
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._tools: dict[str, Any] | None = None
 
@@ -70,9 +71,20 @@ class MusicAssistantMCP:
 
     def _run(self, coro):
         with self._lock:
-            if self._loop is None or not self._loop.is_running():
-                self._loop = asyncio.new_event_loop()
-                threading.Thread(target=self._loop.run_forever, daemon=True, name="ma-mcp").start()
+            # One loop, published only once it is running (Codex 11/15: checking is_running() right after
+            # Thread.start() raced, and concurrent first calls left a second loop behind).
+            if self._loop is None or self._thread is None or not self._thread.is_alive():
+                loop, ready = asyncio.new_event_loop(), threading.Event()
+
+                def serve():
+                    asyncio.set_event_loop(loop)
+                    loop.call_soon(ready.set)
+                    loop.run_forever()
+                thread = threading.Thread(target=serve, daemon=True, name="ma-mcp")
+                thread.start()
+                if not ready.wait(5):
+                    raise MusicAssistantError("Music Assistant's connection didn't start")
+                self._loop, self._thread = loop, thread
             loop = self._loop
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         try:

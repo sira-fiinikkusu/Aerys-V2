@@ -35,7 +35,7 @@ import httpx
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from aerys_v2.state import identity_from_config
+from aerys_v2.state import identity_from_config, is_voice_turn
 from aerys_v2.tools.home_control import WRITE_OK_PREFIX
 
 log = logging.getLogger(__name__)
@@ -126,16 +126,20 @@ def _play_norm(t: object) -> str:
 
 
 def _sound_key(value: object) -> str:
-    """Roughly how a name SOUNDS: each word's first letter plus its consonants, repeats collapsed.
-    Speech-to-text can't hear spelling: "Charlie"/"Charli" and "full"/"foal" share a key, while
-    "Imagine"/"Imagined" don't (the d is heard). 11/14: a saved artist, asked for by voice, went to a
-    different Spotify artist whose name is spelled the common way."""
+    """A name with only its SPELLING variants folded (ie/y/ey/ee/ea -> i, ph -> f, ck -> k, doubled
+    letters, a silent final e). Vowels stay, so different-sounding words stay apart: "Heart"/"Hurt",
+    "Dreams"/"Drums", "Imagine"/"Imagined". 11/14: a saved artist, asked for by VOICE, went to a different
+    Spotify artist spelled the common way ("Charlie"/"Charli"); speech-to-text can't hear spelling.
+    Codex 11/15: an earlier consonants-only key was too loose."""
     words = []
     for word in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
-        if word.isdigit():
-            words.append(word)
-            continue
-        words.append(re.sub(r"(.)\1+", r"\1", word[0] + re.sub(r"[aeiouy]", "", word[1:])))
+        if not word.isdigit():
+            word = re.sub(r"(ie|ey|y)$", "i", word)
+            word = word.replace("ph", "f").replace("ck", "k").replace("ee", "i").replace("ea", "i")
+            word = re.sub(r"(.)\1+", r"\1", word)
+            if len(word) > 3 and word.endswith("e"):
+                word = word[:-1]
+        words.append(word)
     return " ".join(words)
 
 
@@ -146,8 +150,9 @@ def _saved_keys(item: dict) -> list[str]:
     return [_name_key(name)] + ([_name_key(f"{name} {artists}")] if artists else [])
 
 
-def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[dict, str, bool] | None:
-    """(item, kind, exact) from his saved songs and artists, or None. 11/14: a saved song whose title
+def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[dict, str, str] | None:
+    """(item, kind, how) from his saved songs and artists, or None; how is "exact", "sounds" (a near
+    match spelled differently but sounding the same; only a VOICE ask may trust it) or "near". 11/14: a saved song whose title
     speech-to-text misheard (one word swapped for a near-sound, twice) lost to a Spotify-wide search
     both times. Same exact-then-fuzzy rule as playlists. A recording is its title AND artists: two saved copies of one song (single +
     album) are one choice; two different artists' songs with one title are rivals, never a guess."""
@@ -161,11 +166,11 @@ def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[d
     exact = [c for c in pool if want in _saved_keys(c[0])]
     if exact:
         if len({(kind, recording(item)) for item, kind in exact}) == 1:
-            return exact[0][0], exact[0][1], True
+            return exact[0][0], exact[0][1], "exact"
         songs = {recording(item) for item, kind in exact if kind == "track"}
         if len(songs) == 1:        # "X" is both an artist and one of his songs: the song he named
             item, kind = next(c for c in exact if c[1] == "track")
-            return item, kind, True
+            return item, kind, "exact"
         return None
     ranked = sorted(((max(_close(want, key) for key in _saved_keys(item)), n)
                      for n, (item, _) in enumerate(pool)), key=lambda r: (-r[0], r[1]))
@@ -176,9 +181,9 @@ def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[d
                   if (pool[n][1], recording(pool[n][0])) != (best[1], recording(best[0]))), 0.0)
     if ranked[0][0] - rival < _MATCH_MARGIN:
         return None
-    # A near match that sounds the same as what he said IS what he said: speech can't spell.
+    # A near match that sounds the same as what he said, only spelled differently.
     sounds_same = any(_sound_key(want) == _sound_key(key) for key in _saved_keys(best[0]))
-    return best[0], best[1], sounds_same
+    return best[0], best[1], "sounds" if sounds_same else "near"
 
 
 def _item_line(item: dict) -> tuple[str, str]:
@@ -284,16 +289,22 @@ def build_music_tool(
         return "I'm not sure it's him asking, so his library stays private. Ask again, or in a DM."
 
     def _his_write_refusal(config: RunnableConfig) -> str | None:
-        """D53 writes (likes, library, playlists) are his alone; a shared room is fine (a like reveals nothing)."""
-        from aerys_v2.rooms import NOT_HIM, SHARED, his_private_read
+        """D53 writes (likes, library, playlists, shuffle) are his alone. WHO asks is checked first and
+        on its own; a shared room is fine for a write (a like reveals nothing). Codex 11/15: checking the
+        room first let his id with an unknown voice through wherever the room wasn't private."""
+        from aerys_v2.hands_gate import OWNER_ASK, OWNER_TEXT, OWNER_VOICE, asker
+        from aerys_v2.rooms import on_his_face
 
         conf = (config or {}).get("configurable") or {}
-        verdict = his_private_read(conf.get("identity") or {}, str(conf.get("thread_id") or ""),
-                                   owner_person_id)
-        if verdict in (None, SHARED):
-            return None
-        if verdict == NOT_HIM:
+        ident = conf.get("identity") or {}
+        thread = str(conf.get("thread_id") or "")
+        if (not owner_person_id or str(ident.get("user_id") or "") != str(owner_person_id)
+                or thread.startswith("kael:")):
             return "Only he can change his music library."
+        who = asker(ident, thread, owner_person_id)
+        if who in (OWNER_TEXT, OWNER_VOICE) or (who == OWNER_ASK and (
+                on_his_face(ident) or str(ident.get("platform") or "") == "wake")):
+            return None
         return "I'm not sure it's him asking, so I didn't change his library. Ask again."
 
     ma_players: dict[str, str] = {}
@@ -339,23 +350,25 @@ def build_music_tool(
             attrs = state.get("attributes") or {}
             title, artist = str(attrs.get("media_title") or ""), str(attrs.get("media_artist") or "")
             uri = str(attrs.get("media_content_id") or "")
-            if not title:
+            if not title or state.get("state") not in ("playing", "paused"):
+                # Codex 11/15: an idle player keeps its last title; "like this" must not like a leftover.
                 return f"Nothing is playing on {_friendly(player)}, so tell me which song."
             if "://" in uri and not uri.startswith("spotify_connect://") and state.get("state") == "playing":
                 return uri, f"{title}" + (f" by {artist}" if artist else "")
         hits = [h for h in parse(ma.call("library_search_tracks", query=f"{title} {artist}".strip(), limit=10)) or []
                 if isinstance(h, dict) and h.get("uri") and str(h.get("uri")).count("://") == 1
                 and "/track/" in str(h.get("uri"))]
-        want = _play_norm(title)
-        same_title = [h for h in hits if _play_norm(h.get("name")) == want]
+        # Writes match every word (Codex 11/15: "River" is not "The River"), unlike play's looser rule.
+        want = _name_key(title)
+        same_title = [h for h in hits if _name_key(str(h.get("name") or "")) == want]
         if artist:
             # Known artist: it must match. Never fall back to another artist's song with the same title.
             same_title = [h for h in same_title
-                          if _play_norm(artist) in {_play_norm(a) for a in h.get("artists") or []}]
+                          if _name_key(artist) in {_name_key(str(a)) for a in h.get("artists") or []}]
         if not same_title:
             who = f" by {artist}" if artist else ""
             return f"I couldn't find exactly \"{title}\"{who}" + ("." if artist else "; tell me the artist too.")
-        if len({tuple(sorted(_play_norm(a) for a in h.get("artists") or [])) for h in same_title}) > 1:
+        if len({tuple(sorted(_name_key(str(a)) for a in h.get("artists") or [])) for h in same_title}) > 1:
             return f"There's more than one \"{title}\"; which artist?"
         return str(same_title[0]["uri"]), _song_line(same_title[0])
 
@@ -556,7 +569,11 @@ def build_music_tool(
                     return found
                 uri, song = found
                 if op == "add_to_playlist":
-                    target_list = _library_match(playlist, _playlists()) if playlist.strip() else None
+                    # A write needs one EXACT playlist name (Codex 11/15: "Road Trip 2026" must never land
+                    # in "Road Trip 2025"); play's forgiving match is for listening, not for changing.
+                    named = [p for p in _playlists() if p.get("uri") and playlist.strip()
+                             and _name_key(str(p.get("name") or "")) == _name_key(playlist)]
+                    target_list = named[0] if len(named) == 1 else None
                     if not target_list:
                         return f"I couldn't find a playlist called \"{playlist}\" exactly."
                     ma.call("playlists_add_track", playlist_id=str(target_list["uri"]), track_uri=uri)
@@ -724,6 +741,13 @@ def build_music_tool(
                                      _saved("artist") if wanted != "track" else [])
         except (httpx.HTTPError, ValueError):
             results = saved = None
+        if saved:
+            # Exact spelling is his; "sounds the same" is his only when he SAID it (voice can't spell).
+            # A typed ask keeps its spelling: a near saved name still yields to an exact catalog one.
+            conf = (config or {}).get("configurable") or {}
+            voice = is_voice_turn(identity_from_config(config), conf.get("thread_id", ""))
+            trusted = saved[2] == "exact" or (saved[2] == "sounds" and voice)
+            saved = (saved[0], saved[1], trusted)
         if results is None and saved and saved[2]:
             results = {_TYPE_TO_CATEGORY[saved[1]]: [saved[0]]}
         if results is None:
