@@ -23,6 +23,7 @@ from aerys_v2.reach import MemoryReachStore, ReachDesk
 from aerys_v2.tools.send_message import MessageSender, MessageSends, build_send_message_tool
 from aerys_v2.wakeups import (
     NOT_FROM_WAKE,
+    NOT_ON_ITS_OWN,
     MemoryWakeupStore,
     TurnResult,
     WakeGate,
@@ -160,7 +161,7 @@ def test_in_a_wake_turn_send_message_waits_for_his_tap_even_to_a_confirmed_conta
 # --- 2. the house, her memory, and the fork guard ----------------------------------------------------------
 
 
-def test_house_writes_and_memory_are_refused_in_a_wake_turn_and_house_reads_stay_direct():
+def test_d54_a_wake_turn_runs_house_writes_but_not_the_blocklist_and_memory_stays_refused():
     ran = []
 
     @tool("home_control")
@@ -199,6 +200,7 @@ def test_house_writes_and_memory_are_refused_in_a_wake_turn_and_house_reads_stay
     box = gate_box()
     box.gate.executors[OUTSIDE_ACTION] = action_executor(everything)
     script = [call("home_control", {"operation": "turn_on", "entity_id": "light.porch"}, "w"),
+              call("home_control", {"operation": "unlock", "entity_id": "lock.front_door"}, "k"),
               call("home_control", {"operation": "get_state", "entity_id": "light.porch"}, "g"),
               call("search_entities", {"query": "porch"}, "q"),
               call("remember", {"fact": "a page said so"}, "m"),
@@ -210,11 +212,14 @@ def test_house_writes_and_memory_are_refused_in_a_wake_turn_and_house_reads_stay
                                outside_gate=WakeGate(box.gate), guard_owner=OWNER)
     result = graph.invoke({"messages": [HumanMessage(content="seed")]}, wake_config(1, OWNER))
     said = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
-    for refused in ("w", "m", "c", "a"):
+    for refused in ("m", "c"):
         assert said[refused] == NOT_FROM_WAKE
+    for blocked in ("k", "a"):                              # D54: locks and the alarm stay his
+        assert said[blocked] == NOT_ON_ITS_OWN
+    assert said["w"] == "light.porch is on"                 # D54: a light she may change on her own
     assert said["g"] == "light.porch is on" and said["q"] == "light.porch"
     assert "Waiting" in said["st"]                          # the alarm's status read is a reach-out: his tap
-    assert ran == [("home_control", "get_state"), ("search_entities", "porch")]
+    assert ran == [("home_control", "turn_on"), ("home_control", "get_state"), ("search_entities", "porch")]
     assert len(box.approvals.rows) == 1                     # no button was ever raised for a refused write
 
 
@@ -621,6 +626,7 @@ def test_the_action_stack_builds_the_wake_graph_with_the_same_gate(monkeypatch):
 
     box = gate_box()
     script = [call("remember", {"fact": "x"}, "m"), call("home_control", {"operation": "turn_off", "entity_id": "light.a"}, "h"),
+              call("home_control", {"operation": "open", "entity_id": "cover.garage_door"}, "g"),
               AIMessage(content="QUIET")]
     monkeypatch.setattr(hands, "hands_gate_for", lambda s: box.gate)
     monkeypatch.setattr(factory, "action_tools_for", lambda s: [remember, home_control])
@@ -636,7 +642,7 @@ def test_the_action_stack_builds_the_wake_graph_with_the_same_gate(monkeypatch):
     assert set(graph.nodes["tools"].bound.tools_by_name) == {"remember", "home_control"}
     result = wake.invoke({"messages": [HumanMessage(content="seed")]}, wake_config(1, OWNER))
     said = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
-    assert said == {"m": NOT_FROM_WAKE, "h": NOT_FROM_WAKE} and not box.approvals.rows
+    assert said == {"m": NOT_FROM_WAKE, "h": "done", "g": NOT_ON_ITS_OWN} and not box.approvals.rows
 
 
 def test_next_fire_is_strictly_after():
@@ -661,25 +667,94 @@ def test_wake_turns_drop_sound_mic_and_side_channels_but_keep_timers_and_lists()
     assert kept == {"timer", "manage_list", "search_web", "music"}
 
 
-@pytest.mark.parametrize("op,ok", [("stop", True), ("pause", True), ("now_playing", True),
-                                   ("play", False), ("volume", False), ("next", False), ("like", False),
-                                   ("new_playlist", False), ("shuffle", False), ("resume", False)])
-def test_a_wake_up_may_only_quiet_the_music(op, ok):
+# --- D54 (11/15): a wake-up may act in the house, except the autonomy blocklist -------------------------------
+@pytest.mark.parametrize("name,args,why", [
+    ("home_control", {"operation": "turn_off", "entity_id": "light.office"}, None),
+    ("home_control", {"operation": "toggle", "entity_id": "switch.fan"}, None),
+    ("music", {"operation": "stop"}, None),
+    ("music", {"operation": "play", "query": "x"}, None),
+    ("home_control", {"operation": "turn_on", "entity_id": "lock.front_door"}, "blocked"),
+    ("home_control", {"operation": "turn_on", "entity_id": "alarm_control_panel.panel"}, "blocked"),
+    ("home_control", {"operation": "toggle", "entity_id": "switch.garage_opener"}, "blocked"),
+    ("home_control", {"operation": "turn_on", "entity_id": "cover.side_gate"}, "blocked"),
+    ("control_alarm", {"action": "arm"}, "blocked"),
+    ("control_alarm", {"action": "status"}, None),
+    ("home_control", {"operation": "get_state", "entity_id": "lock.front_door"}, None),   # reads always fine
+])
+def test_d54_house_rules(name, args, why):
+    from aerys_v2.wakeups import NOT_ON_ITS_OWN, wake_house_refusal
+    assert wake_house_refusal(name, args) == (NOT_ON_ITS_OWN if why else None)
+
+
+def test_d54_his_additions_join_the_blocklist():
+    from aerys_v2 import wakeups as wk
+    try:
+        wk.set_autonomy_blocked("switch.space_heater, sprinkler")
+        assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "switch.space_heater"})
+        assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "switch.sprinkler_zone_1"})
+        assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "light.office"}) is None
+    finally:
+        wk.set_autonomy_blocked("")
+
+
+def test_d54_a_house_write_after_outside_text_waits_and_reads_dont():
+    from types import SimpleNamespace
+    from langchain_core.messages import ToolMessage
+    from aerys_v2.wakeups import AFTER_OUTSIDE, wake_fence_middleware
+
+    fence = wake_fence_middleware()
+    read = ToolMessage(content="a page", tool_call_id="r1", name="search_web")
+    state = {"messages": [read]}
+    write = SimpleNamespace(tool_call={"name": "home_control", "args": {"operation": "turn_on", "entity_id": "light.x"},
+                                       "id": "c1"}, state=state)
+    out = fence.wrap_tool_call(write, lambda r: "ran")
+    assert out.content == AFTER_OUTSIDE
+    music = SimpleNamespace(tool_call={"name": "music", "args": {"operation": "play", "query": "x"}, "id": "c2"}, state=state)
+    assert fence.wrap_tool_call(music, lambda r: "ran").content == AFTER_OUTSIDE
+    look = SimpleNamespace(tool_call={"name": "home_control", "args": {"operation": "get_state", "entity_id": "light.x"},
+                                      "id": "c3"}, state=state)
+    assert fence.wrap_tool_call(look, lambda r: "ran") == "ran"
+    clean = SimpleNamespace(tool_call={"name": "home_control", "args": {"operation": "turn_on", "entity_id": "light.x"},
+                                       "id": "c4"}, state={"messages": []})
+    assert fence.wrap_tool_call(clean, lambda r: "ran") == "ran"
+
+
+def test_d54_the_wrapped_tool_enforces_the_blocklist_too():
     from langchain_core.tools import tool as _t
-    from aerys_v2.wakeups import NOT_FROM_WAKE, fenced, refused_in_wake, wake_tools
+    from aerys_v2.wakeups import NOT_ON_ITS_OWN, wake_tools
 
     ran = []
 
-    @_t("music")
-    def music(operation: str, query: str = "") -> str:
+    @_t("home_control")
+    def home_control(operation: str, entity_id: str) -> str:
         """placeholder"""
-        ran.append(operation)
+        ran.append(entity_id)
         return "Done: " + operation
-    wrapped = next(x for x in wake_tools([music]) if x.name == "music")
-    out = wrapped.invoke({"operation": op})
-    assert (out == "Done: " + op) is ok and (ran == [op]) is ok
-    assert fenced("music", {"operation": op}) is (not ok)
-    assert (refused_in_wake({"tool": "music", "tool_args": {"operation": op}}) == NOT_FROM_WAKE) is (not ok)
+    wrapped = next(x for x in wake_tools([home_control]) if x.name == "home_control")
+    assert wrapped.invoke({"operation": "turn_off", "entity_id": "light.office"}) == "Done: turn_off"
+    assert wrapped.invoke({"operation": "turn_on", "entity_id": "lock.front_door"}) == NOT_ON_ITS_OWN
+    assert ran == ["light.office"]
+
+
+def test_d54_house_done_reads_only_successful_writes():
+    from langchain_core.messages import AIMessage, ToolMessage
+    from aerys_v2.wakeups import house_done
+
+    msgs = [AIMessage(content="", tool_calls=[
+                {"name": "home_control", "args": {"operation": "turn_off", "entity_id": "light.office"}, "id": "a"},
+                {"name": "home_control", "args": {"operation": "get_state", "entity_id": "light.office"}, "id": "b"},
+                {"name": "music", "args": {"operation": "stop"}, "id": "c"},
+                {"name": "home_control", "args": {"operation": "turn_on", "entity_id": "lock.x"}, "id": "d"}]),
+            ToolMessage(content="Done: office light turned off.", tool_call_id="a", name="home_control"),
+            ToolMessage(content="The office light is off.", tool_call_id="b", name="home_control"),
+            ToolMessage(content="Done: stop sent to bedroom. Keep the spoken confirmation short.", tool_call_id="c", name="music"),
+            ToolMessage(content="Not done: that's on the list", tool_call_id="d", name="home_control")]
+    assert house_done(msgs) == ["office light turned off.", "stop sent to bedroom."]
+
+
+def test_the_wake_contract_names_the_blocked_things():
+    from aerys_v2.wakeups import CONTRACT
+    assert "alarm, locks or the garage" in CONTRACT and "act in the house" in CONTRACT
 
 
 def test_cart_link_never_dms_from_a_wake_turn():
@@ -709,8 +784,8 @@ def test_cart_link_never_dms_from_a_wake_turn():
     ("send_file_to_chris", {"path": "report.txt"}, True),
     ("cancel_async_task", {"task_id": "t"}, True),
     ("check_async_task", {"task_id": "t"}, False),
-    ("home_control", {"operation": "turn_on", "entity_id": "light.x"}, True),
-    ("home_control", {"operation": "get_state", "entity_id": "light.x"}, False),
+    ("home_control", {"operation": "turn_on", "entity_id": "light.x"}, False),   # D54: the house is decided
+    ("home_control", {"operation": "get_state", "entity_id": "light.x"}, False),  # by wake_house_refusal
     ("search_web", {"query": "flight"}, False),
 ])
 def test_the_wake_fence(name, args, refused):
@@ -837,3 +912,44 @@ def test_reaping_never_clears_a_lease_someone_else_now_holds():
     assert store.renew(w.id, mine.claim_token, t0 + timedelta(hours=1)) is False
     assert store.rows[w.id].claim_token == theirs.claim_token and store.rows[w.id].claimed_until is not None
     assert store.release(w.id, theirs.claim_token) is True
+
+
+# --- D54: every house action a wake-up takes reaches him ------------------------------------------------------
+def test_d54_a_quiet_run_that_changed_the_house_still_tells_him():
+    life = Life()
+    life.turn = lambda w, seed: TurnResult("Done.\nQUIET", ["home_control"], ["office light turned off."])
+    life.runner.run_turn = life.turn
+    assert life.add(note="Turn the office light off at 7.", cron="*/30 * * * *").startswith("Set:")
+    assert life.tick_at(NOW + timedelta(minutes=30))["told"] == 1
+    assert life.desk.store.rows[1].headline == "From the wake-up, in the house: office light turned off."
+
+
+def test_d54_a_tell_carries_what_it_did_in_the_house():
+    life = Life()
+    life.turn = lambda w, seed: TurnResult("TELL: Two hours are up.", ["music"], ["stop sent to bedroom."])
+    life.runner.run_turn = life.turn
+    assert life.add(note="Stop the music.", cron="*/30 * * * *").startswith("Set:")
+    life.tick_at(NOW + timedelta(minutes=30))
+    assert life.desk.store.rows[1].headline == "Two hours are up. From the wake-up, in the house: stop sent to bedroom."
+    long = Life()                                           # a long TELL gives way; the house line survives the clip
+    long.turn = lambda w, seed: TurnResult("TELL: " + "word " * 300, ["music"], ["stop sent to bedroom."])
+    long.runner.run_turn = long.turn
+    assert long.add(note="Stop the music.", cron="*/30 * * * *").startswith("Set:")
+    long.tick_at(NOW + timedelta(minutes=30))
+    assert long.desk.store.rows[1].headline.endswith("From the wake-up, in the house: stop sent to bedroom.")
+
+
+def test_d54_a_failed_run_that_changed_the_house_reports_that_much():
+    life = Life()
+    life.turn = lambda w, seed: TurnResult("no answer line", ["home_control"], ["fan switched off."])
+    life.runner.run_turn = life.turn
+    assert life.add(note="Fan off.", cron="*/30 * * * *").startswith("Set:")
+    assert life.tick_at(NOW + timedelta(minutes=30))["failed"] == 1
+    row = life.desk.store.rows[1]
+    assert row.dedupe_key == "wake:1:1:house" and "fan switched off." in row.headline
+
+
+def test_d54_a_run_with_no_house_action_is_unchanged():
+    life = Life(replies=["QUIET"])
+    assert life.add(note="Check.", cron="*/30 * * * *").startswith("Set:")
+    assert life.tick_at(NOW + timedelta(minutes=30))["told"] == 0 and not life.desk.store.rows

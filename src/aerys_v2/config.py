@@ -415,6 +415,9 @@ class Settings(BaseSettings):
     # music tool's Home Assistant half works either way.
     ma_mcp_url: str = ""
     ma_mcp_token: SecretStr | None = None
+    # D54 (11/15): his additions to what a wake-up never touches on its own (entity ids or words,
+    # comma-separated), on top of the alarm, locks and the garage.
+    autonomy_blocked: str = ""
     dj_cooldown_s: float = Field(default=900, ge=0)
     dj_announce_volume: int | None = Field(default=None, ge=1, le=100)
     # The Music Assistant CONFIG ENTRY id in HA (Settings → Devices & Services →

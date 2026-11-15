@@ -69,13 +69,57 @@ NOT_FROM_WAKE = "Not done: not from a wake-up; tell him instead."
 #: his DMs would skip quiet hours: TELL is how he hears from a wake-up). Kael's review, 11/12.
 #: Timers and lists stay: small, his to see, and what a check-in often wants to leave behind.
 WAKE_DROPPED = frozenset({"remember", "save_contact_email", "keep_listening", "send_file_to_chris"})
+#: D54 (11/15): a wake-up may act in the house on its own. 11/14 he asked her to stop the music in two
+#: hours; the wake-up fired but the house was fenced off (Kael's 11/12 default, never his ruling), and the
+#: playlist ran all night. His word: "alarm, locks, garage are pretty good to block her from on autonomous
+#: actions for a start", with a list he can add to. So a wake-up's house WRITES pass unless they touch the
+#: autonomy blocklist below, or the run already read outside text (D28); every one is reported to him.
 HOUSE_WRITES = frozenset({"home_control", "control_alarm", "music"})
-#: What those house tools may still do from a wake-up: their reads, and for music the quieting
-#: actions. 11/15: he asked her to stop the music in two hours; the wake-up fired but had no music
-#: tool, and the playlist ran all night. Stopping only narrows (like withdrawing a request), so a
-#: wake-up may pause or stop music, and still never start it, change it or touch another device.
-HOUSE_READS = {"home_control": ("operation", ("get_state",)), "control_alarm": ("action", ("status",)),
-               "music": ("operation", ("pause", "stop", "now_playing"))}
+#: The reads of those house tools (always fine from a wake-up); anything else they do is a write.
+HOUSE_READS = {"home_control": ("operation", ("get_state", "history")), "control_alarm": ("action", ("status",)),
+               "music": ("operation", ("now_playing", "up_next", "my_playlists", "my_taste", "queue",
+                                       "recently_played"))}
+#: What a wake-up never touches on its own (D54): the alarm (control_alarm writes), and any house entity
+#: in these domains or with these words in its id. AUTONOMY_BLOCKED adds entity ids or words.
+AUTONOMY_BLOCKED_DOMAINS = frozenset({"alarm_control_panel", "lock"})
+AUTONOMY_BLOCKED_WORDS = ("garage", "gate", "lock", "alarm")
+_autonomy_extra: tuple[str, ...] = ()
+NOT_ON_ITS_OWN = ("Not done: that's on the list of things I don't touch on my own (the alarm, locks, the "
+                  "garage, and what he's added); tell him instead.")
+AFTER_OUTSIDE = ("Not done: I read outside text in this run, so a house change waits for him; tell him "
+                 "instead.")
+
+
+def set_autonomy_blocked(extra: str | None) -> None:
+    """His additions to the autonomy blocklist (settings.autonomy_blocked, comma-separated)."""
+    global _autonomy_extra
+    _autonomy_extra = tuple(w.strip().lower() for w in str(extra or "").split(",") if w.strip())
+
+
+def autonomy_blocked(entity_id: object) -> bool:
+    entity = str(entity_id or "").strip().lower()
+    if entity.split(".", 1)[0] in AUTONOMY_BLOCKED_DOMAINS:
+        return True
+    return any(word in entity for word in (*AUTONOMY_BLOCKED_WORDS, *_autonomy_extra))
+
+
+def house_write(name: object, args) -> bool:
+    rule = HOUSE_READS.get(str(name or ""))
+    if rule is None:
+        return False
+    arg, reads = rule
+    return str(((args or {}) if isinstance(args, dict) else {}).get(arg) or "").strip().lower() not in reads
+
+
+def wake_house_refusal(name: object, args, *, read_outside: bool = False) -> str | None:
+    """Why a wake-up's house call may not run, or None (D54)."""
+    if not house_write(name, args):
+        return None
+    if name == "control_alarm" or (name == "home_control" and autonomy_blocked((args or {}).get("entity_id"))):
+        return NOT_ON_ITS_OWN
+    if read_outside:
+        return AFTER_OUTSIDE
+    return None
 
 
 @dataclass(frozen=True)
@@ -129,6 +173,7 @@ class Wakeup:
 class TurnResult:
     text: str
     tools: list = field(default_factory=list)
+    house: list = field(default_factory=list)      # D54: what it did in the house ("Done: ..." lines)
 
 
 def _clip(text, n: int) -> str:
@@ -794,31 +839,31 @@ def build_wake_me_tool(store, *, rails: WakeRails = WakeRails(), owner_person_id
 # --- the wake turn's tools and gate -----------------------------------------------------------------
 
 
-def _house_reads_only(t):
-    """The same house tool, its reads direct and its writes refused (the wake graph's copy)."""
+def _house_guarded(t):
+    """The same house tool with the autonomy blocklist enforced in the tool itself too (the wake graph's
+    copy; the fence middleware also holds the outside-text rule, which needs the run's messages)."""
     from langchain_core.tools import StructuredTool
 
-    arg, allowed = HOUSE_READS[t.name]
-
     def run(config: RunnableConfig = None, **kwargs):
-        if str(kwargs.get(arg) or "").strip().lower() not in allowed:
-            log.info("wake-up: a %s write refused", t.name)
-            return NOT_FROM_WAKE
+        why = wake_house_refusal(t.name, kwargs)
+        if why is not None:
+            log.info("wake-up: a %s write refused (autonomy blocklist)", t.name)
+            return why
         return t.invoke(kwargs, config=config)
 
     return StructuredTool(name=t.name, description=t.description, args_schema=t.args_schema, func=run)
 
 
 def wake_tools(tools: list) -> list:
-    """Her tools for a wake turn: her memory taken out, and the house tools' writes refused (reads
-    stay direct). Everything else is hers as usual, under the outside guard: a wake turn is always
-    outside text, so whatever reaches anyone waits for his tap."""
+    """Her tools for a wake turn: her memory taken out, and the house tools guarded by the D54 autonomy
+    blocklist. Everything else is hers as usual, under the outside guard: a wake turn is always outside
+    text, so whatever reaches anyone waits for his tap."""
     out = []
     for t in tools:
         name = getattr(t, "name", "")
         if name in WAKE_DROPPED:
             continue
-        out.append(_house_reads_only(t) if name in HOUSE_WRITES else t)
+        out.append(_house_guarded(t) if name in HOUSE_WRITES else t)
     return out
 
 
@@ -832,9 +877,7 @@ WAKE_FENCE: dict[str, tuple[str, tuple[str, ...]] | None] = {
     "cancel_async_task": None,                       # stopping his home job is his call
     "manage_list": ("action", ("show",)),            # the family's lists: read, never change
     "reach_prefs": ("action", ("show",)),            # his delivery settings: read, never change
-    "home_control": ("operation", ("get_state",)),
-    "control_alarm": ("action", ("status",)),
-    "music": ("operation", ("pause", "stop", "now_playing")),   # quieting only (11/15)
+    # the house tools aren't here: D54's wake_house_refusal decides them (blocklist + outside text)
 }
 
 
@@ -855,13 +898,22 @@ def wake_fence_middleware():
     from langchain.agents.middleware import AgentMiddleware
     from langchain_core.messages import ToolMessage
 
+    def read_outside(request) -> bool:
+        from aerys_v2.outside_guard import READERS
+
+        messages = (getattr(request, "state", None) or {}).get("messages") or []
+        return any(getattr(m, "type", "") == "tool" and getattr(m, "name", "") in READERS for m in messages)
+
     def refusal(request):
         call = getattr(request, "tool_call", None) or {}
         name = call.get("name") or ""
-        if not fenced(name, call.get("args")):
+        why = NOT_FROM_WAKE if fenced(name, call.get("args")) else None
+        if why is None and name in HOUSE_WRITES:
+            why = wake_house_refusal(name, call.get("args") or {}, read_outside=read_outside(request))
+        if why is None:
             return None
         log.info("wake-up: %s refused by the fence", name)
-        return ToolMessage(content=NOT_FROM_WAKE, tool_call_id=call.get("id") or "", name=name)
+        return ToolMessage(content=why, tool_call_id=call.get("id") or "", name=name)
 
     class WakeFence(AgentMiddleware):
         def wrap_tool_call(self, request, handler):
@@ -889,9 +941,9 @@ def refused_in_wake(payload) -> str | None:
     if tool in WAKE_DROPPED:
         return NOT_FROM_WAKE
     if tool in HOUSE_WRITES:
-        arg, allowed = HOUSE_READS[tool]
-        if str(((payload or {}).get("tool_args") or {}).get(arg) or "").strip().lower() not in allowed:
-            return NOT_FROM_WAKE
+        why = wake_house_refusal(tool, (payload or {}).get("tool_args") or {})
+        if why is not None:
+            return why
     return None
 
 
@@ -963,6 +1015,32 @@ def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = 
             "recursion_limit": int(steps)}
 
 
+def _house_line(did: list[str]) -> str:
+    """D54: the one line that tells him what a wake-up did in the house (items carry their own periods)."""
+    return "From the wake-up, in the house: " + "; ".join(_clip(d, 100).rstrip(". ") for d in did[:5]) + "."
+
+
+def house_done(messages: list) -> list[str]:
+    """The house writes this run actually made (D54: every one is reported): each house tool's own
+    "Done: ..." line, for calls whose arguments make them writes."""
+    from aerys_v2.tools.home_control import WRITE_OK_PREFIX
+
+    calls = {}
+    for m in messages:
+        for tc in (getattr(m, "tool_calls", None) or []):
+            if isinstance(tc, dict) and tc.get("id"):
+                calls[tc["id"]] = tc
+    done = []
+    for m in messages:
+        if getattr(m, "type", "") != "tool" or getattr(m, "name", "") not in HOUSE_WRITES:
+            continue
+        call = calls.get(getattr(m, "tool_call_id", "")) or {}
+        text = str(getattr(m, "content", "") or "")
+        if house_write(m.name, call.get("args") or {}) and text.startswith(WRITE_OK_PREFIX):
+            done.append(_clip(text[len(WRITE_OK_PREFIX):].split(" Keep the spoken")[0].strip(), 160))
+    return done
+
+
 def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, str], TurnResult]:
     """ONE action turn on thread wake:<id>: the action graph's call and honesty gate from ask()'s action
     path (service._run_action_gated), without his thread's history and without a v2_turns record (a
@@ -985,7 +1063,8 @@ def wake_turn_for(graph, owner: str, *, steps: int = 40) -> Callable[[Wakeup, st
         result, _ = _run_action_gated(graph, [HumanMessage(content=seed)], config)
         messages = result["messages"]
         return TurnResult(_reply_text(messages[-1]) if messages else "",
-                          [c.get("name") for c in extract_tool_calls(messages) if c.get("name")])
+                          [c.get("name") for c in extract_tool_calls(messages) if c.get("name")],
+                          house_done(messages))
 
     return run
 
@@ -1000,8 +1079,10 @@ CONTRACT = (
     "QUIET  (nothing worth telling him yet)\n"
     "END: <what to tell him, or nothing>  (the job is done or no longer makes sense; this ends the wake-up)\n"
     "Nobody is waiting on this turn, so don't ask questions, and don't message Chris any other way: TELL is "
-    "how he hears from you. From a wake-up you can't change the house or the alarm, keep memories, or set "
-    "new wake-ups; put what he should know in TELL. Anything that would reach someone else waits for his tap, "
+    "how he hears from you. From a wake-up you may act in the house (lights, switches, music) when the job calls "
+    "for it, and he hears about every change; never the alarm, locks or the garage (those wait for him), and no "
+    "house change after you read outside text in this run. You can't keep memories or set new wake-ups; put "
+    "what he should know in TELL. Anything that would reach someone else waits for his tap, "
     "except a message he asked for when this was set (shown above, when there is one). "
     "To change when this one runs next, call wake_me with action \"update\" and id {id} (a new cron, at or "
     "until); a one-off you don't move is done after this run."
@@ -1153,7 +1234,23 @@ class WakeUps:
         result, error = self._timed(w, seed_for(w, started, run))
         now = self.clock()
         answer = parse_answer(result.text) if result is not None else Answer("fail")
+        did = list(result.house) if result is not None else []
+        if did:
+            # D54: every house action a wake-up takes reaches him, even when she'd have stayed quiet.
+            line = _house_line(did)
+            if answer.kind == "quiet":
+                answer = Answer("tell", line)
+            elif answer.kind in ("tell", "end"):   # her words give way first: the house line always fits
+                room = max(0, HEADLINE_CHARS - len(line) - 1)
+                answer = Answer(answer.kind, f"{_clip(answer.text, room) if room else ''} {line}".strip())
         outcome = {"tell": "told", "quiet": "quiet", "end": "ended"}.get(answer.kind) or error or "failed (no answer line)"
+        if answer.kind == "fail" and did:
+            try:                       # a failed run that still changed the house: he hears that much
+                self._owed(w, _house_line(did),
+                           f"wake:{w.id}:{run}:house")
+            except Exception as e:
+                log.warning("wake-up %s run %s: couldn't report its house actions (%s)", w.id, run,
+                            type(e).__name__)
         if answer.kind in ("tell", "end") and answer.text:
             try:
                 self._owed(w, _clip(answer.text, HEADLINE_CHARS), f"wake:{w.id}:{run}")
@@ -1307,5 +1404,6 @@ def wakeups_for(settings, desk, *, action_graph=None) -> WakeUps | None:
         log.warning("wake-ups: not armed: a reach desk, a database, an owner and the action stack are needed")
         return None
     rails = WakeRails.from_settings(settings)
+    set_autonomy_blocked(getattr(settings, "autonomy_blocked", ""))
     return WakeUps(desk, PostgresWakeupStore(settings.database_url),
                    run_turn=wake_turn_for(graph, str(owner), steps=rails.steps), rails=rails)
