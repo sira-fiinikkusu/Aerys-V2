@@ -264,6 +264,9 @@ def test_voice_activity_is_recorded_before_guest_graph_swap(monkeypatch):
             break
         _t.sleep(0.01)
     assert s.get("voice:device") is not None
+    import inspect
+    source = inspect.getsource(service.ask)
+    assert source.index("note_voice(") < source.index("action_graph = guest_action_graph")
 
 
 def test_voice_mark_never_blocks_the_turn():
@@ -280,9 +283,6 @@ def test_voice_mark_never_blocks_the_turn():
     note_voice(s, {"voice": True, "device_id": "device"})
     assert _t.monotonic() - started < 0.5      # returned before the slow write finished
     gate.set()
-    import inspect
-    source = inspect.getsource(service.ask)
-    assert source.index("note_voice(") < source.index("action_graph = guest_action_graph")
 
 
 def test_expired_off_allows_model_and_skips_are_logged(caplog):
