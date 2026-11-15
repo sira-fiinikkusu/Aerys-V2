@@ -323,3 +323,39 @@ def test_voice_marks_use_one_worker_even_when_the_database_hangs():
         note_voice(Hung(), {"voice": True, "device_id": f"device{n}"})
     assert threading.active_count() - before <= 1     # at most the one worker, never one per turn
     gate.set()
+
+
+def connect(title, artist="Example Artist", status="playing"):
+    """Spotify Connect: one fixed id for every song (11/14, from the Spotify app)."""
+    return {"state": status, "attributes": {"media_content_id": "spotify_connect://audio_source/example",
+            "media_title": title, "media_artist": artist}}
+
+
+def test_spotify_connect_title_change_is_a_new_song():
+    w, s, now, states, model, announce, _ = rig()
+    model.return_value = "QUIET"                    # the switch into Connect is itself a change: stay quiet
+    states["media_player.room"] = connect("Song One"); w.tick()
+    model.reset_mock(); model.return_value = "TELL: A little change of pace."
+    states["media_player.room"] = connect("Song Two"); w.tick()
+    model.assert_called_once()
+
+
+def test_an_artist_filled_in_late_is_not_a_new_song():
+    w, s, now, states, model, announce, _ = rig()
+    states["media_player.room"] = connect("Song One", artist=""); w.tick()
+    model.reset_mock()
+    states["media_player.room"] = connect("Song One", artist="Example Artist"); w.tick()
+    model.assert_not_called()
+
+
+def test_spotify_connect_skip_during_the_model_is_stale():
+    w, s, now, states, model, announce, _ = rig()
+    model.return_value = "QUIET"
+    states["media_player.room"] = connect("Song One"); w.tick()
+    def skip_while_thinking(seed):
+        states["media_player.room"] = connect("Song Three")
+        return "TELL: A little change of pace."
+    w.turn = skip_while_thinking
+    states["media_player.room"] = connect("Song Two"); w.tick()
+    announce.assert_not_called()
+    assert s.get("break", {}).get("at") is None      # nothing reserved: the next song may still earn a line

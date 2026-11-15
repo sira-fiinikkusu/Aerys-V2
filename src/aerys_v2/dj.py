@@ -110,6 +110,14 @@ def track(state):
             "artist": str(attrs.get("media_artist") or "")[:200]}
 
 
+def same_song(a, b) -> bool:
+    """One song, by id AND title. 11/14: from the Spotify app (Spotify Connect) the player reports one
+    fixed media_content_id for every song, so an id-only check never saw a change. The artist is left
+    out on purpose: Connect can fill it in a moment after the title, which isn't a new song."""
+    from aerys_v2.tools.music import _name_key
+    return a["id"] == b["id"] and _name_key(a["title"]) == _name_key(b["title"])
+
+
 def describe(song, saved):
     from aerys_v2.tools.music import _name_key
     known = any((song["id"] and song["id"] == item.get("uri")) or (
@@ -215,7 +223,7 @@ class DJWatcher:
             current = self.read(player)
             if reason:
                 return
-            if current.get("state") != "playing" or track(current)["id"] != starting["id"]:
+            if current.get("state") != "playing" or not same_song(track(current), starting):
                 reason = "stale_track"
                 return
             lines = last.get("lines", [])[-3:]
@@ -239,7 +247,8 @@ class DJWatcher:
                 song = track(current)
                 old = self.seen.get(player)
                 self.seen[player] = song
-                if (old and old["id"] and song["id"] and old["id"] != song["id"]
+                if (old and (old["id"] or old["title"]) and (song["id"] or song["title"])
+                        and not same_song(old, song)
                         and current.get("state") == "playing"):
                     self.event(player, old, song)
             except Exception:
