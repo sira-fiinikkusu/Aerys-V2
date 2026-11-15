@@ -125,6 +125,20 @@ def _play_norm(t: object) -> str:
     return " ".join(re.findall(r"\w+", str(t or "").casefold().replace("the ", " ")))
 
 
+def _sound_key(value: object) -> str:
+    """Roughly how a name SOUNDS: each word's first letter plus its consonants, repeats collapsed.
+    Speech-to-text can't hear spelling: "Charlie"/"Charli" and "full"/"foal" share a key, while
+    "Imagine"/"Imagined" don't (the d is heard). 11/14: "play some Charlie Morgan" went to a
+    different Spotify artist spelled exactly that, not his saved Charli Morgan."""
+    words = []
+    for word in re.findall(r"[a-z0-9]+", str(value or "").casefold()):
+        if word.isdigit():
+            words.append(word)
+            continue
+        words.append(re.sub(r"(.)\1+", r"\1", word[0] + re.sub(r"[aeiouy]", "", word[1:])))
+    return " ".join(words)
+
+
 def _saved_keys(item: dict) -> list[str]:
     """Names a saved track or artist answers to: its name, and name + artists."""
     name = str(item.get("name") or "")
@@ -160,7 +174,11 @@ def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[d
     best = pool[ranked[0][1]]
     rival = next((score for score, n in ranked[1:]
                   if (pool[n][1], recording(pool[n][0])) != (best[1], recording(best[0]))), 0.0)
-    return (best[0], best[1], False) if ranked[0][0] - rival >= _MATCH_MARGIN else None
+    if ranked[0][0] - rival < _MATCH_MARGIN:
+        return None
+    # A near match that sounds the same as what he said IS what he said: speech can't spell.
+    sounds_same = any(_sound_key(want) == _sound_key(key) for key in _saved_keys(best[0]))
+    return best[0], best[1], sounds_same
 
 
 def _item_line(item: dict) -> tuple[str, str]:

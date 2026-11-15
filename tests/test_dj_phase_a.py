@@ -330,7 +330,9 @@ def test_saved_song_beats_spotify_even_misheard(query):
     ha = saved_ha()
     ha.tool().invoke({'operation': 'play', 'query': query})
     assert ha.plays()[0]['media_id'] == 'library://track/10'
-    exact = query in ('Beneath the Copper Lantern', 'Beneath the Copper Lantern Example Band')
+    # exact spelling, or a slip that SOUNDS the same (cooper/copper): no Spotify detour (11/14 21:51)
+    exact = query in ('Beneath the Copper Lantern', 'Beneath the Copper Lantern Example Band',
+                      'beneath the cooper lantern')
     assert ('search' in [op for op, _ in ha.calls]) is not exact     # only a near name asks Spotify too
 
 
@@ -531,3 +533,30 @@ def test_a_playlist_is_not_split_and_keeps_his_shuffle():
     ha.tool().invoke({'operation': 'play', 'query': 'my liked songs'})
     assert len(ha.plays()) == 1 and 'enqueue' not in ha.plays()[0] and 'radio_mode' not in ha.plays()[0]
     assert 'shuffle_set' not in [op for op, _ in ha.calls]
+
+
+# --- 11/14 21:51: "Charlie Morgan" went to a different Spotify artist spelled exactly that ---------------
+@pytest.mark.parametrize("a,b,same", [
+    ("Charlie Morgan", "Charli Morgan", True), ("before the full and the lily", "before the foal and the lily", True),
+    ("Imagine", "Imagined", False), ("Example Track", "Example Tracks", False), ("Song 2", "Song 3", False),
+])
+def test_sound_key(a, b, same):
+    from aerys_v2.tools.music import _sound_key
+    assert (_sound_key(a) == _sound_key(b)) is same
+
+
+def test_a_saved_artist_that_sounds_like_what_he_said_beats_an_exact_spelling_elsewhere():
+    ha = HA(); ha.artists = [{"name": "Charli Example", "uri": "library://artist/644"}]
+    real = ha.__call__
+    def fake(req):
+        if req.url.path.endswith("/search"):
+            ha.calls.append(("search", {}))
+            return httpx.Response(200, json={"service_response": {"artists": [
+                {"name": "Charlie Example", "uri": "spotify://artist/someone-else"}]}})
+        return real(req)
+    tool = Private(build_music_tool(base_url="http://ha.test", token="example", config_entry_id="example",
+                                    players={"example": PLAYER}, default_player=PLAYER, owner_person_id=OWNER,
+                                    client=httpx.Client(transport=httpx.MockTransport(fake))))
+    tool.invoke({"operation": "play", "query": "Charlie Example"})
+    assert ha.plays()[0]["media_id"] == "library://artist/644"
+    assert "search" not in [op for op, _ in ha.calls]          # it sounds like his: no Spotify detour
