@@ -80,8 +80,8 @@ HOUSE_READS = {"home_control": ("operation", ("get_state", "history")), "control
                "music": ("operation", ("now_playing", "up_next", "my_playlists", "my_taste", "queue",
                                        "recently_played"))}
 #: What a wake-up never touches on its own (D54): the alarm (control_alarm writes), and any house entity
-#: in these domains or with these words in its id. AUTONOMY_BLOCKED adds entity ids or words.
-AUTONOMY_BLOCKED_DOMAINS = frozenset({"alarm_control_panel", "lock"})
+#: with one of these words in its id (so every lock.* and alarm_control_panel.* too). AUTONOMY_BLOCKED adds
+#: entity ids or words.
 AUTONOMY_BLOCKED_WORDS = ("garage", "gate", "lock", "alarm")
 _autonomy_extra: tuple[str, ...] = ()
 NOT_ON_ITS_OWN = ("Not done: that's on the list of things I don't touch on my own (the alarm, locks, the "
@@ -98,8 +98,6 @@ def set_autonomy_blocked(extra: str | None) -> None:
 
 def autonomy_blocked(entity_id: object) -> bool:
     entity = str(entity_id or "").strip().lower()
-    if entity.split(".", 1)[0] in AUTONOMY_BLOCKED_DOMAINS:
-        return True
     return any(word in entity for word in (*AUTONOMY_BLOCKED_WORDS, *_autonomy_extra))
 
 

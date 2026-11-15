@@ -693,6 +693,12 @@ def test_d54_his_additions_join_the_blocklist():
         assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "switch.space_heater"})
         assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "switch.sprinkler_zone_1"})
         assert wk.wake_house_refusal("home_control", {"operation": "turn_on", "entity_id": "light.office"}) is None
+        wk.set_autonomy_blocked("")
+        url = "postgresql://u:p@localhost:1/aerys_v2"         # the armed runner takes his list from settings
+        stack = SimpleNamespace(wake_graph=object())
+        assert wk.wakeups_for(settings(database_url=url, wakeups=True, autonomy_blocked="Sprinkler"), object(),
+                              action_graph=stack) is not None
+        assert wk.autonomy_blocked("switch.sprinkler_zone_1") and not wk.autonomy_blocked("light.office")
     finally:
         wk.set_autonomy_blocked("")
 
@@ -744,11 +750,13 @@ def test_d54_house_done_reads_only_successful_writes():
                 {"name": "home_control", "args": {"operation": "turn_off", "entity_id": "light.office"}, "id": "a"},
                 {"name": "home_control", "args": {"operation": "get_state", "entity_id": "light.office"}, "id": "b"},
                 {"name": "music", "args": {"operation": "stop"}, "id": "c"},
-                {"name": "home_control", "args": {"operation": "turn_on", "entity_id": "lock.x"}, "id": "d"}]),
+                {"name": "home_control", "args": {"operation": "turn_on", "entity_id": "lock.x"}, "id": "d"},
+                {"name": "music", "args": {"operation": "now_playing"}, "id": "e"}]),
             ToolMessage(content="Done: office light turned off.", tool_call_id="a", name="home_control"),
             ToolMessage(content="The office light is off.", tool_call_id="b", name="home_control"),
             ToolMessage(content="Done: stop sent to bedroom. Keep the spoken confirmation short.", tool_call_id="c", name="music"),
-            ToolMessage(content="Not done: that's on the list", tool_call_id="d", name="home_control")]
+            ToolMessage(content="Not done: that's on the list", tool_call_id="d", name="home_control"),
+            ToolMessage(content="Done: nothing to change, a song is playing.", tool_call_id="e", name="music")]  # a read
     assert house_done(msgs) == ["office light turned off.", "stop sent to bedroom."]
 
 
