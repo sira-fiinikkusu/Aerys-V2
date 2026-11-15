@@ -32,6 +32,7 @@ import json
 import logging
 import re
 from collections import deque
+import random
 import threading
 import time
 import uuid
@@ -2267,6 +2268,13 @@ def claims_effect_done(text: str) -> bool:
 
 
 VOICE_EMPTY_REPLY = "Hm — I lost that thought. Ask me again?"
+#: Board #214 (11/15): HA's voice integration waits 15 s for her reply. A banter turn still working at
+#: VOICE_HANDOFF_S says one of these now and its answer follows as a spoken follow-up. A few lines, so
+#: it doesn't sound like the same cue every time (his ear for repeated cues, 11/14).
+VOICE_HANDOFF_S = 9.0
+VOICE_HANDOFF_LINES = ("One sec, let me look.", "Give me a moment, I'm checking.", "Hang on, I'm looking that up.",
+                       "Let me check on that.", "Just a second, I'm on it.")
+VOICE_HANDOFF_MARKER = "voice_handoff"
 
 def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
     """Did a TOOL-LESS chat reply claim it performed an effectful act?
@@ -2542,9 +2550,12 @@ def _voice_parallel_start(
         real_configurable.get("thread_id"),
     )
     _face(face_push, "working")
-    gate_degraded: list[str] = []
     LOCAL_FALLBACK_FIRED.set(False)
-    try:
+
+    def _banter_work() -> tuple[list, str, list[str], bool]:
+        """The banter turn itself: (messages, reply, gate markers, local fallback fired)."""
+        LOCAL_FALLBACK_FIRED.set(False)
+        work_degraded: list[str] = []
         # NO spoken_ack in config: that's the signal (factory.act) to style the
         # reply for voice banter instead of arming the ack-consistency overlay.
         result = _invoke_action_graph(
@@ -2569,7 +2580,95 @@ def _voice_parallel_start(
                     "voice banter effectful-claim gate: STILL claiming with zero "
                     "tools — emitting with the %s marker", NO_TOOL_ACTION_MARKER,
                 )
-                gate_degraded = [NO_TOOL_ACTION_MARKER]
+                work_degraded = [NO_TOOL_ACTION_MARKER]
+        return result_messages, reply, work_degraded, bool(LOCAL_FALLBACK_FIRED.get())
+
+    # 11/15 (board #214): HA's voice integration waits 15 s. A banter turn that runs tools can take
+    # longer ("Aerys is unreachable" while her answer still reached the panel). Past VOICE_HANDOFF_S
+    # she says a short line now and the answer follows as a spoken follow-up, the way action turns
+    # already work. The lock decides who owns the result: the caller (in time) or the worker (late).
+    box: dict = {}
+    lock = threading.Lock()
+
+    def _banter_worker() -> None:
+        try:
+            out = _banter_work()
+        except Exception as e:  # noqa: BLE001 - surfaced to whichever side owns the result
+            out = e
+        # The fallback flag lives in THIS thread's copied context: carry it out either way.
+        fallback = bool(LOCAL_FALLBACK_FIRED.get())
+        with lock:
+            box["out"], box["fallback"] = out, fallback
+            late = box.get("handed_off", False)
+        if late:
+            _finish_handed_off(out, fallback)
+
+    def _finish_handed_off(out, fallback: bool) -> None:
+        failed = isinstance(out, Exception)
+        if failed:
+            log.warning("voice banter turn failed after the handoff", exc_info=out)
+            final = _honest_reply_for_failure(out) or "Sorry, I couldn't finish looking that up."
+            result_messages, work_degraded = [], ["action_failed"]
+        else:
+            result_messages, final, work_degraded, _ = out
+            final = _quiet_music_reply(final, result_messages)
+        _deliver_followup(final, device_id, followup_router, speak_fn, satellite_for)
+        _face(face_push, "speaking", final)
+        graph.update_state(
+            {"configurable": real_configurable},
+            {"messages": [_action_reply(final, config, result_messages)]},
+            as_node="chat",
+        )
+        _reclassify_if_needed(
+            graph, config, human_id, text, final,
+            content_privacy_classifier, human_privacy,
+        )
+        _fire_turn_record(
+            record_turn, config, text, int((time.monotonic() - started) * 1000),
+            reflex=reflex,
+            classifier_intent="chat",
+            tier=DEFAULT_TIER,
+            raw_reply=final,
+            emitted_reply=interim,
+            messages=result_messages,
+            extra_degraded=[*work_degraded, *(["local_model_fallback"] if fallback else []),
+                            *(["wall_clock_exceeded"] if time.monotonic() - started > rails.wall_clock_s else []),
+                            VOICE_HANDOFF_MARKER],
+        )
+
+    device_id = real_configurable.get("identity", {}).get("device_id")
+    interim = random.choice(VOICE_HANDOFF_LINES)
+    threading.Thread(target=_in_ctx(_banter_worker), daemon=True, name="voice-banter").start()
+    deadline = time.monotonic() + VOICE_HANDOFF_S
+    while True:
+        with lock:
+            if "out" in box:
+                out = box["out"]
+                break
+            if time.monotonic() >= deadline:
+                box["handed_off"] = True
+                out = None
+                break
+        time.sleep(0.05)
+    if out is None:
+        log.info("voice banter turn passed %.0fs: a short line now, the answer as a follow-up", VOICE_HANDOFF_S)
+        # His words land now (so a newer turn can't come before them); her answer appends when it lands.
+        graph.update_state(
+            {"configurable": real_configurable},
+            {"messages": [_human_turn(text, human_privacy, human_id,
+                                       sealed_room=_sealed_room({"configurable": real_configurable}),
+                                       owner_assumed=_owner_assumed({"configurable": real_configurable}))]},
+            as_node="chat",
+        )
+        _face(face_push, "speaking", interim)
+        return interim
+
+    gate_degraded: list[str] = []
+    LOCAL_FALLBACK_FIRED.set(bool(box.get("fallback")))     # the worker's flag, success or failure
+    try:
+        if isinstance(out, Exception):
+            raise out
+        result_messages, reply, gate_degraded, _ = out
     except Exception as e:
         # A rate/session-limit cap gets the honest in-voice line (the 2026-07-12
         # empty-glasses fix); anything else records the failure and re-raises.

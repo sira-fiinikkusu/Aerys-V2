@@ -1172,3 +1172,68 @@ def test_voice_action_that_comes_back_blank_logs_what_came_back(caplog):
             time.sleep(0.02)
     lines = [r.getMessage() for r in caplog.records if "reply was empty" in r.getMessage()]
     assert any("voice:blank-log" in m and "stop_reason" in m for m in lines), lines
+
+
+# ---- board #214 (11/15): a slow voice banter turn hands off before HA stops waiting ----------------
+
+class SlowStubActionGraph(StubActionGraph):
+    def __init__(self, final="You were at the fair from noon to three.", delay=0.6, fail=False):
+        super().__init__(final)
+        self.delay, self.fail = delay, fail
+
+    def invoke(self, inp, config):
+        time.sleep(self.delay)
+        if self.fail:
+            raise RuntimeError("search fell over")
+        return super().invoke(inp, config)
+
+
+def _voice_world(monkeypatch, stub, *, handoff_s=0.2):
+    import aerys_v2.service as service
+
+    monkeypatch.setattr(service, "VOICE_HANDOFF_S", handoff_s)
+    graph = build_graph(fake_model("never spoken"), soul="s")
+    followups, turns = [], []
+    identity = {**CHRIS, "device_id": "dev-office", "voice": True}
+    out = ask(graph, "where was I this afternoon?", identity=identity, thread_id="voice:handoff",
+              router=chat_router, action_graph=stub,
+              followup_router=lambda text, device: followups.append((text, device)),
+              record_turn=turns.append)
+    return service, graph, out, followups, turns
+
+
+def wait_until(predicate, timeout_s=3.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_a_slow_banter_turn_says_a_short_line_now_and_the_answer_follows(monkeypatch):
+    service, graph, out, followups, turns = _voice_world(monkeypatch, SlowStubActionGraph())
+    assert out in service.VOICE_HANDOFF_LINES                        # HA hears something before it gives up
+    assert wait_until(lambda: followups)
+    assert followups == [("You were at the fair from noon to three.", "dev-office")]   # said once, to that room
+    msgs = wait_for_messages(graph, "voice:handoff", 2)
+    assert [m.content for m in msgs] == ["where was I this afternoon?", "You were at the fair from noon to three."]
+    assert wait_until(lambda: turns)
+    assert turns[-1]["emitted_reply"] == out and turns[-1]["raw_reply"] == "You were at the fair from noon to three."
+    assert service.VOICE_HANDOFF_MARKER in (turns[-1].get("degraded") or [])
+
+
+def test_a_slow_banter_turn_that_fails_still_answers_honestly(monkeypatch):
+    service, graph, out, followups, turns = _voice_world(monkeypatch, SlowStubActionGraph(fail=True))
+    assert out in service.VOICE_HANDOFF_LINES
+    assert wait_until(lambda: followups)
+    assert len(followups) == 1 and followups[0][1] == "dev-office" and followups[0][0]   # never silence
+    msgs = wait_for_messages(graph, "voice:handoff", 2)
+    assert msgs[0].content == "where was I this afternoon?" and msgs[-1].content == followups[0][0]
+
+
+def test_a_quick_banter_turn_is_unchanged(monkeypatch):
+    service, graph, out, followups, turns = _voice_world(monkeypatch, SlowStubActionGraph(delay=0.0), handoff_s=5.0)
+    assert out == "You were at the fair from noon to three." and followups == []
+    msgs = graph.get_state({"configurable": {"thread_id": "voice:handoff"}}).values["messages"]
+    assert [m.content for m in msgs] == ["where was I this afternoon?", "You were at the fair from noon to three."]
