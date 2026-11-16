@@ -212,31 +212,41 @@ def test_actual_engine_read_then_draft_and_send(reader):
     assert any('Not sent' in r and 'Approve' in r for r in receipts)
 
 
+@pytest.mark.parametrize('to', ['chris_h', 'sam_42'])
 @pytest.mark.parametrize('reader', ['search_his_email', 'read_his_email'])
-def test_actual_engine_message_waits_for_tap(reader):
+def test_actual_engine_message_after_his_mail(reader, to):
     from aerys_v2.factory import build_action_graph
     from aerys_v2.tools.send_message import MessageSender, MessageSends, build_send_message_tool
     from aerys_v2.hands_gate import MESSAGE
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-    from test_hands_gate import Box, OWNER as GATE_OWNER, TEXT, OWNER_THREAD
+    from test_hands_gate import Box, OWNER as GATE_OWNER, SAM, TEXT, OWNER_THREAD
     b = Box()
     delivered = []
-    sender = MessageSender(b.gate, [], MessageSends(), lambda *args: delivered.append(args))
+    sender = MessageSender(b.gate, [SAM], MessageSends(), lambda *args: delivered.append(args))
     b.gate.executors[MESSAGE] = sender.execute
+    if to == 'sam_42':     # a confirmed contact: only the outside text makes it wait
+        b.gate.message(OWNER_THREAD, 'discord', 'sam_42', 'first')
+        b.tap(); b.watcher.tick()
+        delivered.clear()
     client, _ = setup()
     reads = gmail.build_gmail_read_tools(client, owner_person_id=GATE_OWNER)
     model = GenericFakeChatModel(messages=iter([
         AIMessage(content='', tool_calls=[{'name': reader, 'args': {'query': 'test'} if reader.startswith('search')
                                           else {'message_id': 'abc123'}, 'id': 'read'}]),
-        AIMessage(content='', tool_calls=[{'name': 'send_message', 'args': {'to': 'chris_h', 'text': 'Mailbox summary'}, 'id': 'send'}]),
+        AIMessage(content='', tool_calls=[{'name': 'send_message', 'args': {'to': to, 'text': 'Mailbox summary'}, 'id': 'send'}]),
         AIMessage(content='done')]))
     graph = build_action_graph(model, 'test', [*reads, build_send_message_tool(sender)], outside_gate=b.gate,
                                guard_owner=GATE_OWNER)
     result = graph.invoke({'messages': [HumanMessage(content='Read my mail and message me')]},
                           {'configurable': {'identity': TEXT, 'thread_id': OWNER_THREAD, 'outside_text': {}}})
+    if to == 'chris_h':    # D58 (11/15): to him, outside text changes nothing; no card
+        assert len(delivered) == 1 and delivered[0][1] == 'Mailbox summary\n-Aerys'
+        assert any(isinstance(m, ToolMessage) and m.content.startswith('Sent:') for m in result['messages'])
+        return
     assert not delivered
     assert any(isinstance(m, ToolMessage) and 'Waiting' in m.content for m in result['messages'])
+    assert any(reader in r.detail for r in b.approval_store.rows.values())   # the mail is why it waits
     b.watcher.tick()
     assert not delivered
     b.tap()
