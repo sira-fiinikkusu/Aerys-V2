@@ -192,6 +192,18 @@ def test_saved_match_and_inert_seed():
     assert '"liked_songs": "unknown"' in seed
 
 
+def test_the_break_clock_is_hers_and_says_nothing_about_him():
+    # 11/16: "minutes_since_break" (her own last DJ line) read as his hours at the desk ("been running for 14
+    # hours ... step away"). The seed names whose clock it is, and the contract says it isn't his.
+    from aerys_v2.dj import CONTRACT
+    w, _, _, states, model, _, _ = rig()
+    states["media_player.room"] = state("b")
+    w.tick()
+    seed = model.call_args.args[0]
+    assert '"minutes_since_your_last_dj_line"' in seed and "minutes_since_break" not in seed
+    assert "minutes_since_your_last_dj_line" in CONTRACT and "never claim it" in CONTRACT
+
+
 def test_music_off_owner_only_and_commands_mark_shared_store():
     import httpx
     from aerys_v2.tools.music import build_music_tool
