@@ -177,3 +177,16 @@ def test_overlay_teaches_the_tool_by_name_when_armed():
     from aerys_v2.factory import action_overlay_for
     assert "read_web_page" not in action_overlay_for(_settings())
     assert "read_web_page" in action_overlay_for(_settings(firecrawl_api_key="fc-test"))
+
+
+def test_a_page_is_never_older_than_a_few_minutes_and_fresh_reads_it_live():
+    # 11/15: her flight check read a two-day-cacheable FlightAware copy for 90 minutes past landing.
+    from aerys_v2.tools.web_read import PAGE_MAX_AGE_MS
+
+    fake = FakeFirecrawl(ok_payload())
+    tool = make_tool(fake)
+    tool.invoke({"url": "https://example.com/flight"})
+    tool.invoke({"url": "https://example.com/flight", "fresh": True})
+    assert json.loads(fake.requests[0].content)["maxAge"] == PAGE_MAX_AGE_MS <= 10 * 60 * 1000
+    assert json.loads(fake.requests[1].content)["maxAge"] == 0
+    assert "fresh" in tool.args and "minute to minute" in tool.description

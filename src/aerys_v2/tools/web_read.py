@@ -28,6 +28,10 @@ from aerys_v2.channels.media_detect import find_youtube_id
 # Firecrawl's hosted scrape endpoint — the caller's URL is data, never the
 # destination of our HTTP request.
 FIRECRAWL_SCRAPE_URL = "https://api.firecrawl.dev/v2/scrape"
+#: How old a copy of a page Firecrawl may hand back. Its default is two days: 11/15 her flight check read
+#: the same frozen FlightAware page for 90 minutes past landing ("en route", progress never moving). A
+#: page she reads is at most this old; fresh=True asks for a live read.
+PAGE_MAX_AGE_MS = 5 * 60 * 1000
 
 # Keep page text within the action model's context budget. Unlike search
 # snippets, a page must say when it was cut so the model knows what is missing.
@@ -49,7 +53,7 @@ def build_read_web_page_tool(*, api_key: str, client: httpx.Client | None = None
     http = client or httpx.Client(timeout=READ_TIMEOUT_S)
 
     @tool
-    def read_web_page(url: str) -> str:
+    def read_web_page(url: str, fresh: bool = False) -> str:
         """Read the main text of a public web page.
 
         CALL THIS TOOL when someone pastes or mentions a link and wants it read,
@@ -63,6 +67,10 @@ def build_read_web_page_tool(*, api_key: str, client: httpx.Client | None = None
         Use read_document for PDF/DOCX/TXT links and youtube_summary for YouTube.
 
         url: the full http/https link to read (public pages only).
+        fresh: True for anything that changes minute to minute (a flight's status, a live score, a
+        price, a page you're checking again to see if it changed): it reads the page live. Pages are
+        otherwise at most a few minutes old. If a page you keep re-checking never changes when it
+        should have, read it fresh or try another source before trusting it.
 
         Returns: the page title, source URL, and main text, with a notice if cut.
         """
@@ -111,7 +119,8 @@ def build_read_web_page_tool(*, api_key: str, client: httpx.Client | None = None
             response = http.post(
                 FIRECRAWL_SCRAPE_URL,
                 headers={"Authorization": f"Bearer {api_key}"},
-                json={"url": link, "formats": ["markdown"], "onlyMainContent": True},
+                json={"url": link, "formats": ["markdown"], "onlyMainContent": True,
+                      "maxAge": 0 if fresh else PAGE_MAX_AGE_MS},
                 timeout=READ_TIMEOUT_S,
             )
         except httpx.HTTPError:
