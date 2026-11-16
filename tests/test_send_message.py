@@ -24,6 +24,21 @@ def confirm(b, sender):
     b.tap(); b.watcher.tick()
 
 
+@pytest.mark.parametrize('text', [
+    'landed at 6:26. -Aerys', 'landed at 6:26.\n-Aerys', 'landed at 6:26. -Aerys\n-Aerys',
+    'landed at 6:26. \u2014 Aerys', 'landed at 6:26.\n-aerys!  ', 'landed at 6:26.'])
+def test_one_signoff(text):
+    from aerys_v2.tools.send_message import signed
+    assert signed(text) == 'landed at 6:26.\n-Aerys'
+    assert signed(signed(text)) == signed(text)
+
+
+def test_signoff_kept_inside_words():
+    from aerys_v2.tools.send_message import signed
+    assert signed('ask Sira-Aerys') == 'ask Sira-Aerys\n-Aerys'
+    assert signed('-Aerys said hi') == '-Aerys said hi\n-Aerys'
+
+
 def test_first_button_and_watcher_exact_once():
     b, sender, sent, ledger = setup()
     assert 'Waiting' in call(sender)

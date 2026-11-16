@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -19,9 +20,15 @@ log = logging.getLogger(__name__)
 WINDOW = timedelta(minutes=10)
 
 
+# Her own sign-off at the end ("... late. -Aerys"); the code signs, so hers is dropped (11/15: "-Aerys -Aerys").
+OWN_SIGNOFF = re.compile(r'(?:^|\s)[-\u2013\u2014]\s*Aerys[.!]?\s*$', re.IGNORECASE)
+
+
 def signed(text):
     text = str(text or '').rstrip()
-    return text if text.endswith('\n-Aerys') else text + '\n-Aerys'
+    while (bare := OWN_SIGNOFF.sub('', text).rstrip()) != text:
+        text = bare
+    return text + '\n-Aerys'
 
 
 class MessageSends:
