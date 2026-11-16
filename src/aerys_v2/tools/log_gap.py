@@ -90,7 +90,8 @@ def build_log_gap_tool(conn_factory: Callable[[], Any]):
         summary: ONE short sentence naming the gap (e.g. "G2 lens replies get
         cut off mid-render on long messages"). Required — never a placeholder.
         details: optional longer description — what happened, when, what a fix
-        might look like.
+        might look like. When it's one of your own tools that failed, read_my_code
+        first and name the file and line here.
 
         Returns confirmation with the gap's id, or an honest failure — never
         pretend a log succeeded if it didn't.

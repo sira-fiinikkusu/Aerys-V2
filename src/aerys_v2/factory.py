@@ -2523,6 +2523,11 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         approvals = approvals_for(settings)
         if approvals is not None:
             tools.append(build_pending_requests_tool(approvals))
+        # D14 (11/09; built 11/15): she reads her own code, read-only, to point at the line that failed.
+        if settings.owner_person_id is not None:
+            from aerys_v2.tools.my_code import build_read_my_code_tool
+
+            tools.append(build_read_my_code_tool(settings.owner_person_id))
         # REMEMBER (2026-09-06): she keeps a fact on purpose, through the same
         # writer the extractor uses. Owner-side only (a guest must not write
         # into the owner's memory); armed exactly when the writer can be built.

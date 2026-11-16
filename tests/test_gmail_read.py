@@ -145,7 +145,8 @@ def test_owner_only(identity, thread):
 @pytest.mark.parametrize('drafts,reads', [(False, False), (True, False), (False, True), (True, True)])
 def test_independent_switches(drafts, reads, caplog):
     from aerys_v2.factory import action_tools_for
-    baseline = {t.name for t in action_tools_for(settings())}
+    # The owner alone arms owner-side tools (read_my_code, D14); the switches add only their own.
+    baseline = {t.name for t in action_tools_for(settings(owner_person_id=OWNER))}
     configured = settings(**{**VALUES, 'gmail_drafts': drafts, 'gmail_read': reads})
     with caplog.at_level('INFO'):
         names = {t.name for t in action_tools_for(configured)}
