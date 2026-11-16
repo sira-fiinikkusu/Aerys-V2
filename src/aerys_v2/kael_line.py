@@ -903,6 +903,40 @@ def owner_replied_since(settings, when) -> bool:
                             (settings.owner_person_id, when, patterns_for(settings))).fetchone() is not None
 
 
+#: A wake-up's spoken line he didn't answer still reached him in writing (11/15, his Discord 20:25: "this
+#: follow up message is also silly"): during that run a Discord message of hers reached him, or he tapped a
+#: button card she raised in it (the card carries her words). Either way the "In case you missed" copy is noise.
+#: Both bounded to that run: a card raised during it; a message that went during it or soon after its line
+#: (a tapped card sends after the run). Unbounded, a later message made an old line look answered.
+_OWNER_TAPPED_SQL = ("SELECT 1 FROM v2_approvals WHERE decided_by = %s AND decided_at IS NOT NULL "
+                     "AND requested_at > %s AND requested_at <= %s LIMIT 1")
+_OWNER_TEXTED_SQL = ("SELECT 1 FROM v2_message_sends WHERE person_id = %s AND platform = 'discord' "
+                     "AND status = 'ok' AND attempted_at > %s AND attempted_at <= %s LIMIT 1")
+#: How far before a wake-up's line its run could have started (the wake-up time limit, WakeRails.timeout),
+#: and how long after its line a message it raised can still count.
+WAKE_RUN_SPAN = timedelta(minutes=10)
+
+
+def owner_saw_otherwise(settings, row, *, owner_discord=None) -> bool:
+    """True when `row` is a wake-up's line and, during that run, a Discord message of hers reached him or
+    he answered a button card she raised. Anything else: False (the copy decides as before)."""
+    if row.source != "wakeup" or row.created_at is None or row.spoken_at is None:
+        return False
+    import psycopg
+
+    from aerys_v2.approvals import owner_id_for
+
+    run_start = row.created_at - WAKE_RUN_SPAN
+    tapper = (owner_discord or owner_id_for(settings))()
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
+        conn.read_only = True
+        if conn.execute(_OWNER_TEXTED_SQL, (str(settings.owner_person_id), run_start,
+                                            row.spoken_at + WAKE_RUN_SPAN)).fetchone():
+            return True
+        return tapper is not None and conn.execute(
+            _OWNER_TAPPED_SQL, (str(tapper), run_start, row.created_at)).fetchone() is not None
+
+
 def parse_room_devices(csv: str) -> dict:
     """'office=<device_id>,bedroom=<device_id>' -> {'office': '<device_id>', ...} (rooms lowercased)."""
     out = {}
@@ -1036,6 +1070,7 @@ def reach_desk_for(settings, graph):
         morning_hour=morning_h,
         meeting_hold=meeting_hold_fn_for(settings),
         replied_since=replied_since,
+        seen_otherwise=lambda row: owner_saw_otherwise(settings, row),
         said=lambda row, body: _said_to_owner(graph, settings, body, row),
         follow_through_after=timedelta(minutes=int(getattr(settings, "reach_follow_through_min", 5))),
         safety_voice_at_night=bool(getattr(settings, "reach_safety_voice_at_night", False)),

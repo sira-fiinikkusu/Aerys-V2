@@ -450,6 +450,41 @@ def test_a_follow_through_copy_whose_record_fails_is_sent_once():
     assert texts == [f"{MISSED_PREFIX} Hi."] and store.rows[1].dm_at is not None
 
 
+@pytest.mark.parametrize("seen, copies", [(True, []), (False, ["In case you missed what I said: Delta 2130 landed."])])
+def test_a_line_that_reached_him_another_way_gets_no_copy(seen, copies):
+    # 11/15 20:25 "this follow up message is also silly": her Discord note had already reached him.
+    texts, clock, asked = [], {"now": DAY}, []
+    desk = ReachDesk(MemoryReachStore(), Deliverer(locate=lambda: Where("room", "dev"), speak=lambda *a: None,
+                                                   text=lambda s, b, q: texts.append(b)),
+                     replied_since=lambda when: False, seen_otherwise=lambda row: asked.append(row.source) or seen,
+                     clock=lambda: clock["now"])
+    desk.reach_out(ev(source="wakeup", headline="Delta 2130 landed."))
+    clock["now"] += timedelta(minutes=6)
+    desk.tick()
+    desk.tick()
+    assert texts == copies and asked and set(asked) == {"wakeup"}
+    assert desk.store.rows[1].acked_at is not None if seen else desk.store.rows[1].dm_at is not None
+
+
+def test_a_failed_seen_check_sends_no_copy_this_pass():
+    texts, clock = [], {"now": DAY}
+    def boom(row):
+        raise ConnectionError("db down")
+    desk = ReachDesk(MemoryReachStore(), Deliverer(locate=lambda: Where("room", "dev"), speak=lambda *a: None,
+                                                   text=lambda s, b, q: texts.append(b)),
+                     replied_since=lambda when: False, seen_otherwise=boom, clock=lambda: clock["now"])
+    desk.reach_out(ev(source="wakeup", headline="Hi."))
+    clock["now"] += timedelta(minutes=6)
+    desk.tick()
+    assert texts == [] and desk.store.rows[1].dm_at is None
+
+
+def test_only_a_wake_up_line_asks_the_database():
+    from aerys_v2.kael_line import owner_saw_otherwise
+    row = SimpleNamespace(source="kael_note", created_at=DAY, spoken_at=DAY)
+    assert owner_saw_otherwise(SimpleNamespace(database_url="postgresql://nowhere.invalid/x"), row) is False
+
+
 def test_a_safety_warning_speaks_through_the_night_without_looping():
     spoken = []
     store = MemoryReachStore()

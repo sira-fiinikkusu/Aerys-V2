@@ -768,6 +768,7 @@ class ReachDesk:
                  quiet: Callable[[datetime], bool] | None = None, morning_hour: int = 9,
                  meeting_hold: Callable[[], datetime | None] | None = None,
                  replied_since: Callable[[datetime], bool] | None = None,
+                 seen_otherwise: Callable[[Reach], bool] | None = None,
                  said: Callable[[Reach, str], None] | None = None,
                  follow_through_after: timedelta = timedelta(minutes=5),
                  safety_voice_at_night: bool = False,
@@ -778,6 +779,8 @@ class ReachDesk:
         self.quiet = quiet or (lambda now: False)
         self.meeting_hold = meeting_hold
         self.replied_since = replied_since
+        #: 11/15: he heard it some other way (a tap on her button, her own message in writing): no copy.
+        self.seen_otherwise = seen_otherwise
         self.said = said or (lambda row, text: None)
         self.follow_through_after = follow_through_after
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -999,6 +1002,10 @@ class ReachDesk:
                         # A brief is never re-sent as "in case you missed it" (his phone has
                         # Kael's); only its text part, if that didn't land.
                         heard = True if row.brief else self.replied_since(_utc(row.spoken_at))
+                        # "this follow up message is also silly" (11/15 20:25): he tapped her Approve
+                        # after she spoke, and her Discord note had reached him; the copy went anyway.
+                        if not heard and self.seen_otherwise is not None:
+                            heard = bool(self.seen_otherwise(row))
                     except Exception:
                         log.warning("reach: reply check failed; no copy this pass", exc_info=True)
                         continue
