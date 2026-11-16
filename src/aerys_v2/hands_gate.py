@@ -496,7 +496,9 @@ class HandsGate:
                                   "Chris which one he means.")
         (p,) = destinations.values()
         pid = str(p["person_id"])
-        if pid == str(self.owner) and not tainted:
+        # D58 (11/15 20:22): to him, outside text changes nothing; his button would only show him these
+        # same words ("so it protects nothing"). Discord, the one platform the message tool sends on.
+        if pid == str(self.owner) and (not tainted or platform == "discord"):
             return GO
         address = str(p.get("address") or "").strip()
         if not address:

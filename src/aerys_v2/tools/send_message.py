@@ -278,7 +278,8 @@ def build_send_message_tool(sender):
         """Message a listed person as yourself on Discord, signed -Aerys.
 
         First contact waits for the owner's identity-confirmation button. After outside text,
-        even a confirmed contact needs approval. Email uses send_email; Telegram is parked.
+        even a confirmed contact needs approval; a message to the owner himself goes straight.
+        Email uses send_email; Telegram is parked.
         """
         try:
             conf = runtime.config.get('configurable') or {}

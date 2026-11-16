@@ -212,11 +212,16 @@ def test_parallel_direct_calls_send_once():
     assert len(sent) == 2
 
 
-def test_owner_after_outside_text_and_origin_taint():
+def test_owner_goes_straight_after_outside_text_and_origin_taint():
+    # D58 (11/15): to him, outside text changes nothing; the button only showed him the same words.
     b, sender, sent, ledger = setup()
-    b.gate.people = lambda *a: [dict(person_id=OWNER, name='Owner', address='placeholder-id')]
-    assert 'Waiting' in call(sender, to='owner', sources=('room', 'shared surface'))
-    assert not sent
+    sam_row = dict(person_id=SAM, name='Sam', address='100000000000000002', handle='sam_42')
+    b.gate.people = lambda platform, to: ([dict(person_id=OWNER, name='Owner', address='placeholder-id')]
+                                          if to == 'owner' else [sam_row])
+    assert call(sender, to='owner', sources=('room', 'shared surface')).startswith('Sent:')
+    assert sent == [('placeholder-id', 'hello\n-Aerys')] and not b.approval_store.rows
+    sam = call(sender, to='sam', sources=('room', 'shared surface'))
+    assert 'Waiting' in sam and len(sent) == 1
     assert 'room, shared surface' in next(iter(b.approval_store.rows.values())).detail
 
 

@@ -117,13 +117,21 @@ def test_origin_and_room_provenance():
         assert sink['outside'] is expected
 
 
-def test_approved_contact_and_owner_wait_after_outside_text():
+def test_approved_contact_waits_and_owner_goes_after_outside_text():
     b = Box()
     b.gate.message(OWNER_THREAD, 'discord', 'sam_42', 'first')
     b.tap(); b.watcher.tick()
     v = b.gate.message(OWNER_THREAD, 'discord', 'sam_42', 'next', tainted=('read_email',))
     assert not v.go and 'Waiting' in v.text
-    assert not b.gate.message(OWNER_THREAD, 'discord', 'chris_h', 'owner', tainted=True).go
+    # D58: to him, outside text changes nothing (his button would only show him the same words).
+    for src in (True, ('read_web_page', 'unattended wake-up'), ('read_email',)):
+        assert b.gate.message(OWNER_THREAD, 'discord', 'chris_h', 'owner', tainted=src).go
+    # Only Discord, the platform the message tool sends on: his own email address still waits.
+    me = [{'person_id': OWNER, 'name': 'Chris', 'address': 'chris@example.net', 'handle': 'chris@example.net'}]
+    mail = Box(people=lambda platform, to: me if (platform, to) == ('email', 'chris@example.net') else [])
+    assert mail.gate.message(OWNER_THREAD, 'email', 'chris@example.net', 'owner').go
+    v = mail.gate.message(OWNER_THREAD, 'email', 'chris@example.net', 'owner', tainted=True)
+    assert not v.go and 'Waiting' in v.text
 
 
 @pytest.mark.parametrize('same_pass', [False, True])

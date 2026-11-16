@@ -108,7 +108,7 @@ def test_at_its_time_his_message_goes_once_with_no_button():
 
 @pytest.mark.parametrize("kw", [
     {"text": "Your 2 PM reminder: the cat food. Also buy treats."},        # other words
-    {"to": "owner"},                                                         # anyone else
+    {"to": "lee"},                                                           # anyone else
     {"sources": ("search_web", "unattended wake-up")},                      # read outside text first
     {"thread": "wake:2"},                                                    # another wake-up
     {"thread": "person:owner-thread"},                                       # not a wake turn
@@ -117,11 +117,24 @@ def test_at_its_time_his_message_goes_once_with_no_button():
 def test_anything_else_still_waits_for_his_tap(kw):
     b, sender, sent, store, tool = life()
     tool.invoke(ADD, config=owner_turn())
-    if kw.get("to") == "owner":
-        b.gate.people = lambda platform, to: [dict(person_id=OWNER, name="Owner", address="900000000000000009")]
+    if kw.get("to") == "lee":
+        sender.people.add("lee-1")
+        b.gate.people = lambda platform, to: [dict(person_id="lee-1", name="Lee", address="900000000000000008")]
     before = list(sent)
     assert not wake_send(sender, **kw).startswith("Sent:")
     assert sent == before
+    assert store.get(1).pinned_spent is None
+
+
+def test_a_message_to_him_goes_straight_after_outside_text():
+    # D58 (11/15): the flight wake-up read a web page, then told him it landed; his button only showed him
+    # the same words. Not his pin, so the pin stays unspent.
+    b, sender, sent, store, tool = life()
+    tool.invoke(ADD, config=owner_turn())
+    b.gate.people = lambda platform, to: [dict(person_id=OWNER, name="Owner", address="900000000000000009")]
+    assert wake_send(sender, text="Delta 2130 landed. -Aerys", to="owner",
+                     sources=("read_web_page", "unattended wake-up")).startswith("Sent:")
+    assert sent[-1] == ("900000000000000009", "Delta 2130 landed.\n-Aerys")
     assert store.get(1).pinned_spent is None
 
 
