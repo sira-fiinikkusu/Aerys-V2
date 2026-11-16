@@ -217,6 +217,15 @@ def test_by_design_markers_are_not_gaps():
     assert sigs == []
 
 
+def test_receipts_of_the_guard_and_the_voice_carry_are_not_gaps():
+    """11/15 cleanup: untrusted_read (every outside read, D28) and voice_owner_assumed (D43) sat on the gaps
+    board as 'degraded subsystem' rows (#154 x25, #155 x9). They are the features working."""
+    from aerys_v2.state import VOICE_OWNER_ASSUMED_MARKER
+    assert classify_turn(turn(degraded=["untrusted_read", VOICE_OWNER_ASSUMED_MARKER])) == []
+    sigs = classify_turn(turn(degraded=["untrusted_read", "outside_guard_failed"]))
+    assert [s.fingerprint for s in sigs] == ["degraded::outside_guard_failed"]
+
+
 def test_by_design_marker_beside_a_real_one_only_drops_itself():
     sigs = classify_turn(turn(degraded=["escalated_from_chat", "turn_failed"]))
     assert [s.fingerprint for s in sigs] == ["degraded::turn_failed"]

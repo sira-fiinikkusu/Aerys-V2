@@ -74,7 +74,11 @@ EXCERPT_LIMIT = 200       # max chars of a complaint excerpt stored in `summary`
 # They stay in v2_turns for misroute-rate auditing — they just aren't gaps. The two
 # drop receipts (service.DROPPED_UNADDRESSED_MARKER / DROPPED_CANCELLED_MARKER) are the
 # same: a false wake and a withdrawn request ("never mind") are the gate working (#104).
-BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed", "dropped_cancelled"})
+# Two more are receipts, not failures (11/15 cleanup, gaps #154/#155): untrusted_read rides every turn that read
+# outside text (the D28 guard working), and voice_owner_assumed is D43 working (a short clip right after he
+# spoke counts as his). The guard's own failures keep their own markers and are still mined.
+BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_unaddressed", "dropped_cancelled",
+                               "untrusted_read", "voice_owner_assumed"})
 
 # These channels are test rigs whose failures describe the harness, not a
 # missing capability. The skip lives in Python, NOT in the miner's SQL: an
