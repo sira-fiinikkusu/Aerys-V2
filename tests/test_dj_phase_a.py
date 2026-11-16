@@ -566,6 +566,42 @@ def test_a_saved_artist_that_sounds_like_what_he_said_beats_an_exact_spelling_el
     assert ha.plays()[0]["media_id"] == "spotify://artist/someone-else"
 
 
+@pytest.mark.parametrize("query, kw, voiced, want", [
+    ("Charlie Example", {}, True, "library://artist/644"),                         # heard, sounds like her
+    ("Charlie Example", {"media_type": "artist"}, True, "library://artist/644"),
+    ("Charli Example", {}, False, "library://artist/644"),                         # typed, her exact name
+    ("Charlie Example", {}, False, "spotify://artist/someone-else"),               # typed: the spelling is his
+])
+def test_an_artist_he_only_has_saved_songs_of_counts_by_name(query, kw, voiced, want):
+    # 11/16 (ticket T-21): an artist with 25+ saved songs but no saved-artist row was invisible by name, so a
+    # voice ask for her went to a Spotify namesake. Her songs carry her library artist uri.
+    her = {"name": "Charli Example", "uri": "library://artist/644", "media_type": "artist"}
+    ha = HA()
+    ha.tracks = [{"name": "Eagle One", "uri": "library://track/1953", "artists": [her]},
+                 {"name": "Orbital Example", "uri": "library://track/1940", "artists": [her]}]
+    real = ha.__call__
+    def fake(req):
+        if req.url.path.endswith("/search"):
+            ha.calls.append(("search", {}))
+            return httpx.Response(200, json={"service_response": {"artists": [
+                {"name": "Charlie Example", "uri": "spotify://artist/someone-else"}]}})
+        return real(req)
+    tool = Private(build_music_tool(base_url="http://ha.test", token="example", config_entry_id="example",
+                                    players={"example": PLAYER}, default_player=PLAYER, owner_person_id=OWNER,
+                                    client=httpx.Client(transport=httpx.MockTransport(fake))))
+    voice = {"configurable": {"thread_id": f"person:{OWNER}", "identity": {"user_id": OWNER, "voice": True}}}
+    tool.invoke({"operation": "play", "query": query, **kw}, config=voice if voiced else None)
+    assert ha.plays()[0]["media_id"] == want
+
+
+def test_a_saved_artist_is_never_doubled_by_its_songs():
+    from aerys_v2.tools.music import _artists_of
+    her = {"name": "Charli Example", "uri": "library://artist/644"}
+    tracks = [{"name": "A", "artists": [her]}, {"name": "B", "artists": [her, {"name": "Guest", "uri": "x://g"}]}]
+    assert [a["name"] for a in _artists_of(tracks, [])] == ["Charli Example", "Guest"]
+    assert [a["name"] for a in _artists_of(tracks, [her])] == ["Guest"]
+
+
 
 # --- 11/15: "stop it in two hours" from a wake-up (no device) must stop the speaker actually playing ---------
 def test_a_stop_with_no_room_stops_the_one_speaker_playing():

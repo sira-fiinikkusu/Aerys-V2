@@ -186,6 +186,23 @@ def _saved_match(query: str, tracks: list[dict], artists: list[dict]) -> tuple[d
     return best[0], best[1], "sounds" if sounds_same else "near"
 
 
+def _artists_of(tracks: list[dict], artists: list[dict]) -> list[dict]:
+    """The artists of his saved songs, as artist items, minus the ones already saved as artists. 11/16 (ticket
+    T-21): "play Charli Morgan" (heard as "Charlie") found nothing of his, since she has 25+ saved songs but isn't a
+    saved artist, and a Spotify search played a namesake. Her songs carry her library artist uri."""
+    have = {_name_key(str(a.get("name") or "")) for a in artists}
+    out, seen = [], set()
+    for track in tracks:
+        for a in track.get("artists") or []:
+            if not isinstance(a, dict) or not a.get("uri") or not a.get("name"):
+                continue
+            key = _name_key(str(a["name"]))
+            if key and key not in have and key not in seen:
+                seen.add(key)
+                out.append({"name": a["name"], "uri": a["uri"], "media_type": "artist"})
+    return out
+
+
 def _item_line(item: dict) -> tuple[str, str]:
     """(display name, uri) for a search result item — artist appended when known."""
     name = str(item.get("name") or "?")
@@ -760,8 +777,11 @@ def build_music_tool(
                 if hit:
                     results = {"playlists": [hit]}
             if results is None and wanted in {"", "track", "artist"}:
-                saved = _saved_match(what, _saved("track") if wanted != "artist" else [],
-                                     _saved("artist") if wanted != "track" else [])
+                tracks = _saved("track")
+                artists = _saved("artist") if wanted != "track" else []
+                if wanted != "track":                     # an artist he only has songs of counts too (T-21)
+                    artists = artists + _artists_of(tracks, artists)
+                saved = _saved_match(what, tracks if wanted != "artist" else [], artists)
         except (httpx.HTTPError, ValueError):
             results = saved = None
         if saved:
