@@ -622,3 +622,20 @@ def test_a_speaker_call_that_outlives_its_timeout_is_said_once_and_texted(monkey
     assert announced == ["Morning. Here is a long brief."]  # said once, never again
     assert store.rows[1].status == "sent" and store.rows[1].spoken_at is not None
     assert len(texts) == 1 and "Here is a long brief." in texts[0][1]   # the text copy, not instead of
+
+
+# --- Codex review of D66 (11/18): a nap keeps its rule under a longer meeting; a room-pinned item texts ---
+
+@pytest.mark.parametrize("nap_min,meeting_min", [(20, 60), (60, 20)])
+def test_a_nap_keeps_its_own_rule_whichever_hold_ends_later(nap_min, meeting_min):
+    world = World()
+    desk, _ = desk_for(world, now=DAY, meeting=DAY + timedelta(minutes=meeting_min))
+    desk.store._prefs = Prefs(hold_until=DAY + timedelta(minutes=nap_min))
+    assert desk.reach_out(ev()) == "queued" and world.texts == [] and world.spoken == []
+
+
+def test_in_a_meeting_an_item_pinned_to_another_room_is_texted_now():
+    world = World()                                                     # he's in the office
+    desk, _ = desk_for(world, now=DAY, meeting=DAY + timedelta(minutes=30))
+    assert desk.reach_out(ev(room="bedroom", owed=True)) == "sent"
+    assert world.spoken == [] and len(world.texts) == 1 and world.texts[0][2] is True

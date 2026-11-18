@@ -175,6 +175,7 @@ class Decision:
     silent: bool = False
     voice: str = "ok"                 # ok | reroute (text instead) | notify (a quiet HA notification) | wait
     breaks_through: bool = False      # safety: may speak at night or over a meeting (D4)
+    anywhere: bool = False            # D66: in a meeting it goes as text now, even if pinned to a room he isn't in
 
 
 _bad_mute_entries: set[str] = set()
@@ -286,7 +287,8 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
             if (event.source != "relay" and not event.owed and event.urgency != "timely"
                     and sent_today >= prefs.budget):
                 return Decision("drop", f"over today's budget ({prefs.budget})")
-            return Decision("send", "meeting: as quiet text, never spoken", silent=True, voice="reroute")
+            return Decision("send", "meeting: as quiet text, never spoken", silent=True, voice="reroute",
+                            anywhere=True)
         if event.urgency == "timely":
             return Decision("send", f"{hold}: as quiet text", silent=True, voice="reroute")
         if event.owed:
@@ -688,8 +690,8 @@ class Deliverer:
         except Exception as e:      # can't place him: text (a pinned brief then waits for its room)
             log.warning("reach: couldn't place him (%s); texting", type(e).__name__)
             where = Where(self.text_surface)
-        if row.room and not (where.kind == "room" and where.label == row.room):
-            return Delivery("away")        # pinned to a room he isn't in: it waits for him there
+        if row.room and not (where.kind == "room" and where.label == row.room) and not decision.anywhere:
+            return Delivery("away")        # pinned to a room he isn't in: it waits for him there (not in a meeting: D66)
         body = text_copy(row.headline, row.detail)
         # A notification on his phone, watch and glasses, AS WELL AS the text (the owner, 11/08: "and
         # not instead of, she can discord me too"): in company (never aloud) and when he's away ("if im
@@ -840,7 +842,9 @@ class ReachDesk:
         prefs = self.store.prefs(self.budget_default)
         company = prefs.company_until is not None and _utc(prefs.company_until) > now
         meeting, nap = self._meeting(), self._nap(prefs, now)
-        hold = "nap" if nap is not None and (meeting is None or nap >= _utc(meeting)) else "meeting"
+        # A nap keeps its own rule whenever one is on, even under a meeting that ends later (Codex
+        # 11/18 on D66: the meeting's text-now rule must not slip a routine item through a nap).
+        hold = "nap" if nap is not None else "meeting"
         until = max(t for t in (_utc(meeting), nap) if t is not None) if (meeting or nap) else None
         return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
                       duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,

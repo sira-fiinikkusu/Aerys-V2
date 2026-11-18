@@ -637,6 +637,10 @@ STILL_GOING_1050 = ("Good, then it's covered and I'll leave it alone. I won't re
     "The job is still running, I'll tell you when it's done.",
     "It’s still running on my home machine.",                  # curly
     "Today's Wordle run is underway.",
+    # Codex 11/18: named jobs, progress words, and a "No worries." sentence before the claim
+    "MapTap is still running.",
+    "The MapTap run is still chugging along.",
+    "No worries. The MapTap run is still going.",
 ])
 def test_status_gate_sends_a_still_going_down_the_path_that_can_look(reply):
     graph = build_graph(fake_model(reply), soul="s")
@@ -656,6 +660,11 @@ def test_status_gate_sends_a_still_going_down_the_path_that_can_look(reply):
     "Your job is still going well, I hope.",                        # his work, not her home job
     "The dishwasher is still running.",
     "I'm still running low on ideas.",
+    # Codex 11/18: his work, a condition, a reported question, her own question
+    "Your new job is going well.",
+    "If the job is running, wait for it to finish.",
+    "You asked whether the job is running.",
+    "Is the MapTap run still going?",
 ])
 def test_status_gate_leaves_other_talk_alone(reply):
     graph = build_graph(fake_model(reply), soul="s")

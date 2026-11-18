@@ -2418,24 +2418,37 @@ def _promises_effect_without_doing_it(user_text: str, reply: str) -> bool:
         or _CONSENT_RE.fullmatch(user_text)))
 
 
-#: D65: her reply says a home job is running or underway. The nouns are her jobs' own (run, job, task);
-#: "your job" / "his job" is his work, not hers.
-_JOB_STATUS_PATTERNS = (
-    re.compile(r"(?<!your )(?<!his )\b(?:run|job|task)\b[^.!?\n]{0,40}?\b(?:is|'s)\s+(?:still\s+)?"
-               r"(?:going|running|in progress|underway|working)\b", re.I),
-    re.compile(r"\b(?:is|'s|are)\s+(?:still\s+)?(?:running|going|underway|in progress)\s+on my home "
-               r"(?:machine|body|computer)\b", re.I),
-)
+#: D65: her reply says a home job is running or underway, as a plain statement. Judged one clause at a
+#: time (Codex 11/18: a "No worries." sentence before the claim read as negating it): the clause needs a
+#: status phrase AND a job cue, with no negation, condition or reported question before the phrase, and
+#: the sentence isn't a question. "your job" / "his job" / "your new job" is his work, not hers.
+_JOB_STATUS_RE = re.compile(
+    r"\b(?:still\s+(?:going|running|in progress|underway|chugging along|working|playing)"
+    r"|(?:is|'s|are)\s+(?:running|underway|in progress))\b(?!\s+(?:low|late|out|short|behind|well)\b)", re.I)
+_JOB_CUE_RE = re.compile(
+    r"(?<!your )(?<!his )(?<!their )(?<!her )(?<!new )\b(?:run|job|task|session|maptap|wordle|browser|"
+    r"home (?:machine|body|computer))\b", re.I)
+_NOT_A_CLAIM_RE = re.compile(
+    r"\b(?:if|whether|when|once|until|unless|in case|asked|ask|wondering|wonder|checking if|see if)\b", re.I)
+_CLAUSE_SPLIT = re.compile(r"[,;:\u2014]|\s-\s|\bbut\b", re.I)
+_STATUS_NEGATION_RE = re.compile(r"\b(?:isn'?t|aren'?t|wasn'?t|weren'?t|no longer)\b", re.I)
 
 
 def claims_job_running(text: str) -> bool:
     """D65: does this reply say, in its own voice, that a home job is running right now?"""
     text = _plain_quotes(text)
-    for pattern in _JOB_STATUS_PATTERNS:
-        for m in pattern.finditer(text or ""):
-            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
-            if not _NEGATION_RE.search(window) and not _NEGATION_RE.search(m.group(0)):
-                return True
+    for sentence in re.split(r"(?<=[.!?\n])\s+", text or ""):
+        if sentence.rstrip().endswith("?"):
+            continue                       # her own question, not a claim
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            m = _JOB_STATUS_RE.search(clause)
+            if not m or not _JOB_CUE_RE.search(clause):
+                continue
+            before = clause[: m.start()]
+            if (_NEGATION_RE.search(before) or _STATUS_NEGATION_RE.search(before)
+                    or _NEGATION_RE.search(m.group(0)) or _NOT_A_CLAIM_RE.search(before)):
+                continue
+            return True
     return False
 
 
