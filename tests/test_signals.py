@@ -369,3 +369,21 @@ def test_a_test_body_memory_held_at_the_door_is_expected_and_never_overdue():
     assert not signals.held_review_is_current(held, now=now).failed
     owed = [{'id': 'j1', 'reason': 'judge:unclear', 'observed_at': (now - timedelta(days=3)).isoformat()}]
     assert signals.held_review_is_current(owed + held, now=now).failed      # a real hold still nags
+
+
+def test_her_offer_to_file_her_own_ticket_is_not_a_courier_slip():
+    """11/17 17:18 and 17:41: she offered to send Kael her own problem as a ticket, twice, and the
+    check read both as carrying his words. A ticket to Kael is her own report, like a gap report."""
+    from aerys_v2.workers.signals import answers_not_relays
+    turns = [
+        dict(id=9, channel='discord_dm', input_text='how did you send it to Kael?',
+             emitted_reply="I can't confirm it reached Kael. I can send Kael the WebGL problem now, so it's a "
+                           "tracked ticket. Want me to send it?"),
+        dict(id=10, channel='discord_dm', input_text='no uh its because you handed me the session',
+             emitted_reply='That corrects my read. Want me to send Kael this as a new ticket?'),
+    ]
+    result = answers_not_relays(turns)
+    assert not result.failed and result.checked == 2
+    carried = [dict(id=11, channel='discord_dm', input_text='she wrote back: see you soon',
+                    emitted_reply='Want me to pass that along to Kael?')]
+    assert answers_not_relays(carried).failed, 'carrying someone else\'s words still fails'
