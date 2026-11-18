@@ -15,8 +15,8 @@ So one desk, with its checks in code, in this order (decide() below):
   3. topics he muted are dropped (an answer he asked for never is);
   4. the night: an answer he asked for, or anything timely, goes as quiet text; the rest
      waits for the morning;
-  5. his meetings: timely things go as quiet text; an answer he asked for goes as quiet
-     text, or waits for the window if she would have SAID it; the rest waits;
+  5. his meetings: everything goes as quiet text, never spoken (D66, 11/18); only her brief
+     waits for the window (a nap keeps the older rule: timely and owed go quiet, the rest waits);
   6. the daily budget (his, in v2_reach_prefs): over it, routine things are dropped and
      timely ones still go.
 Then delivery, where he is: the room the house places him in (his phone's Bluetooth plus
@@ -277,6 +277,16 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
         # what it holds is looked at again every couple of minutes instead of at its end.
         if hold == "nap":
             meeting_until = min(meeting_until, now + NAP_RECHECK)
+        elif not event.brief:
+            # D66 (Chris 11/18 11:42): "she can message me in discord during meetings, i just dont want
+            # her voice coming through". In a meeting everything goes as quiet text, never aloud, and
+            # nothing waits for the window (11:30 her MapTap result, a job he asked for, waited 40 minutes
+            # because she would have said it in his room). The daily budget still holds for routine
+            # things; her brief, made to be said, still waits; a nap keeps its own rule below.
+            if (event.source != "relay" and not event.owed and event.urgency != "timely"
+                    and sent_today >= prefs.budget):
+                return Decision("drop", f"over today's budget ({prefs.budget})")
+            return Decision("send", "meeting: as quiet text, never spoken", silent=True, voice="reroute")
         if event.urgency == "timely":
             return Decision("send", f"{hold}: as quiet text", silent=True, voice="reroute")
         if event.owed:

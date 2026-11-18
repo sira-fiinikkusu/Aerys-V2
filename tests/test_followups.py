@@ -160,12 +160,20 @@ def test_muting_appointments_or_all_follow_ups_stops_them_before_any_words():
         assert life.runner.tick()["raised"] == 0 and life.calls == [] and life.world.spoken == []
 
 
+def nap_until(desk, until):
+    """D66 (11/18): a meeting no longer holds anything that can go as text, so the tests below that
+    need the desk to hold a check-in use a nap, which still does."""
+    from dataclasses import replace
+    from aerys_v2.reach import Prefs
+    desk.store._prefs = replace(desk.store._prefs or Prefs(), hold_since=None, hold_until=until)
+
+
 def test_an_unasked_check_in_that_cant_go_soon_is_dropped_not_aged():
     life = Life(datetime(2026, 11, 10, 20, 50, tzinfo=ET))
     life.appts = [appt(ended=datetime(2026, 11, 10, 20, 0, tzinfo=ET))]
-    life.desk.meeting_hold = lambda: datetime(2026, 11, 11, 2, 0, tzinfo=ET)        # held for hours
+    nap_until(life.desk, datetime(2026, 11, 11, 2, 0, tzinfo=ET))        # held for hours
     assert life.runner.tick()["raised"] == 1 and life.world.spoken == []
-    life.desk.meeting_hold = None
+    nap_until(life.desk, None)
     life.at(datetime(2026, 11, 11, 13, 1, tzinfo=ET))
     life.desk.tick()
     assert life.desk.store.rows[1].status == "dropped" and life.world.spoken == []
@@ -314,11 +322,11 @@ def test_outside_text_reaches_her_framed_as_data_and_clipped():
 
 def test_muting_all_follow_ups_also_stops_a_check_in_already_queued():
     life = Life()
-    life.desk.meeting_hold = lambda: DAY + timedelta(minutes=30)          # in a meeting: it queues
+    nap_until(life.desk, DAY + timedelta(minutes=30))          # held: it queues
     life.appts = [appt()]
     assert life.runner.tick()["raised"] == 1 and life.world.spoken == []
     life.prefs.invoke({"action": "mute", "topic": "follow-ups", "his_words": "stop checking up on me"})
-    life.desk.meeting_hold = None
+    nap_until(life.desk, None)
     life.at(DAY + timedelta(minutes=45))
     life.desk.tick()
     assert life.world.spoken == [] and life.desk.store.rows[1].status == "dropped"
@@ -437,7 +445,7 @@ def test_a_check_back_on_its_way_can_still_be_listed_and_called_off():
     life = Life(datetime(2026, 11, 10, 9, 0, tzinfo=ET))
     life.tool = build_check_back_tool(life.store, clock=lambda: life.clock["now"], withdraw=life.desk.store.withdraw)
     life.tool.invoke({"action": "add", "when": "2026-11-10T10:00", "about": "the vet"})
-    life.desk.meeting_hold = lambda: datetime(2026, 11, 10, 11, 0, tzinfo=ET)   # it'll queue at the desk
+    nap_until(life.desk, datetime(2026, 11, 10, 11, 0, tzinfo=ET))   # it'll queue at the desk
     life.at(datetime(2026, 11, 10, 10, 1, tzinfo=ET))
     real_mark = life.store.mark
 
@@ -452,7 +460,7 @@ def test_a_check_back_on_its_way_can_still_be_listed_and_called_off():
     assert "#1 the vet" in life.tool.invoke({"action": "list"})
     life.store.mark = real_mark
     assert life.tool.invoke({"action": "cancel", "id": 1}).startswith("Canceled")
-    life.desk.meeting_hold = None
+    nap_until(life.desk, None)
     life.at(datetime(2026, 11, 10, 11, 15, tzinfo=ET))
     life.desk.tick()
     life.runner.tick()

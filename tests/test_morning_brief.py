@@ -384,13 +384,16 @@ def test_the_moment_of_speech_checks_the_cutoff_too():
 
 
 def test_what_it_carries_cant_also_go_on_its_own_while_she_composes():
+    from dataclasses import replace
+    from aerys_v2.reach import Prefs
     h = House(datetime(2026, 11, 10, 9, 30, tzinfo=ET))
-    h.meeting = datetime(2026, 11, 10, 9, 40, tzinfo=ET)
+    # held by a nap (D66, 11/18: a meeting no longer holds a text, so it can't hold this one)
+    h.desk.store._prefs = replace(h.desk.store._prefs or Prefs(), hold_until=datetime(2026, 11, 10, 9, 40, tzinfo=ET))
     assert h.desk.reach_out(ReachEvent(source="kael_note", topic="kael", headline="Kael finished.")) == "queued"
-    h.meeting = None
+    h.desk.store._prefs = replace(h.desk.store._prefs, hold_until=None)
 
     def compose(facts):
-        h.clock["now"] = datetime(2026, 11, 10, 9, 45, tzinfo=ET)   # the meeting's window opened meanwhile
+        h.clock["now"] = datetime(2026, 11, 10, 9, 45, tzinfo=ET)   # the nap's window opened meanwhile
         assert h.desk.tick()["sent"] == 0                             # reserved: the watcher leaves it
         return "Morning!"
 

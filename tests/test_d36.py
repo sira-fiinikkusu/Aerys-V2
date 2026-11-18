@@ -37,16 +37,13 @@ def test_status_scoped_and_honest():
     assert 'not delivered (you muted messages)' in relay.status(CONTACT, '')
 
 
-def test_relay_meeting_wait():
+def test_a_relay_in_a_meeting_goes_as_quiet_text_never_spoken():
+    """D66 (11/18): "she can message me in discord during meetings, i just dont want her voice
+    coming through". A message relayed to him no longer waits out the meeting."""
     world = World()
-    meeting = {'until': DAY + timedelta(minutes=20)}
-    desk, clock = desk_for(world, now=DAY, meeting=meeting)
-    assert desk.reach_out(ev(source='relay', topic='messages')) == 'queued'
-    assert not world.spoken
-    clock['now'] = meeting['until']
-    meeting['until'] = None
-    desk.tick()
-    assert len(world.spoken) == 1
+    desk, clock = desk_for(world, now=DAY, meeting={'until': DAY + timedelta(minutes=20)})
+    assert desk.reach_out(ev(source='relay', topic='messages')) == 'sent'
+    assert not world.spoken and len(world.texts) == 1 and world.texts[0][2] is True
 
 
 def test_lens_is_personal_sticky_shared_unsure_unchanged():
@@ -99,13 +96,18 @@ def test_same_clipped_words_distinct_full_messages_and_people():
     assert len(desk.store.rows) == 3
 
 
-def test_status_meeting_quiet_nap_and_muted():
+def test_status_in_a_meeting_says_it_was_delivered():
+    """D66: a meeting holds only her voice; the relay goes as quiet text and the status says so."""
     relay, sent, desk = setup()
     relay.send('hello', CONTACT, '')
     desk.meeting_hold = lambda: DAY + timedelta(hours=1)
     desk.tick()
-    assert 'waiting (why: meeting:' in relay.status(CONTACT, '')
-    desk.meeting_hold = lambda: None
+    assert 'delivered (DM,' in relay.status(CONTACT, '')
+
+
+def test_status_quiet_nap_and_muted():
+    relay, sent, desk = setup()
+    relay.send('hello', CONTACT, '')
     row = next(iter(desk.store.rows.values()))
     row.not_before = None
     desk.quiet = lambda now: True

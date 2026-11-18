@@ -72,13 +72,23 @@ def test_at_night_routine_waits_for_the_morning_and_owed_or_timely_goes_as_quiet
         assert out.action == "send" and out.silent and out.voice == "reroute"
 
 
-def test_in_a_meeting_routine_waits_timely_goes_quiet_and_owed_waits_only_if_spoken():
+def test_in_a_meeting_everything_goes_as_quiet_text_and_nothing_is_spoken():
+    """D66 (Chris 11/18 11:42): "she can message me in discord during meetings, i just dont want her
+    voice coming through". 11:30 her MapTap result, a job he asked for, waited 40 minutes for the
+    window because she would have said it in his room."""
     end = DAY + timedelta(minutes=40)
-    assert d(ev(), meeting_until=end).action == "queue" and d(ev(), meeting_until=end).not_before == end
-    timely = d(ev(urgency="timely"), meeting_until=end)
-    assert timely.action == "send" and timely.voice == "reroute" and timely.silent
-    owed = d(ev(owed=True), meeting_until=end)
-    assert owed.action == "send" and owed.voice == "wait" and owed.not_before == end and owed.silent
+    for event in (ev(), ev(urgency="timely"), ev(owed=True)):
+        got = d(event, meeting_until=end)
+        assert got.action == "send" and got.voice == "reroute" and got.silent, event
+
+
+def test_in_a_meeting_her_brief_still_waits_and_the_budget_still_holds():
+    end = DAY + timedelta(minutes=40)
+    brief = d(ev(brief=True), meeting_until=end)
+    assert brief.action == "queue" and brief.not_before == end       # a brief is made to be said
+    prefs = Prefs(budget=3)
+    assert d(ev(), prefs=prefs, sent_today=3, meeting_until=end).action == "drop"
+    assert d(ev(owed=True), prefs=prefs, sent_today=30, meeting_until=end).action == "send"
 
 
 def test_over_budget_routine_is_dropped_timely_and_owed_still_go():
@@ -157,13 +167,14 @@ def test_a_routine_note_queued_at_night_goes_in_the_morning():
     assert desk.tick()["sent"] == 1 and len(world.spoken) == 1
 
 
-def test_an_owed_answer_waits_out_a_meeting_when_she_would_speak_it():
+def test_an_owed_answer_in_a_meeting_is_texted_now_where_she_would_have_spoken_it():
+    """D66: in his room, in a meeting, the answer he asked for goes to Discord as quiet text now,
+    never aloud and never held for the window."""
     world, meeting = World(), {"until": DAY + timedelta(minutes=30)}
     desk, clock = desk_for(world, now=DAY, meeting=meeting)
-    assert desk.reach_out(ev(owed=True)) == "queued" and world.spoken == []
-    meeting["until"] = None
-    clock["now"] = DAY + timedelta(minutes=31)
-    assert desk.tick()["sent"] == 1 and len(world.spoken) == 1
+    assert desk.reach_out(ev(owed=True)) == "sent" and world.spoken == []
+    assert len(world.texts) == 1 and world.texts[0][2] is True       # quiet
+    assert desk.reach_out(ev(dedupe_key="routine-1")) == "sent" and world.spoken == [] and len(world.texts) == 2
 
 
 def test_an_owed_answer_in_a_meeting_goes_as_quiet_text_when_she_would_have_texted_anyway():
