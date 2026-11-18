@@ -912,6 +912,14 @@ class ReachDesk:
         except Exception:
             log.warning("reach %s: delivered, but recording it failed; only the record is retried", rid)
 
+    def record_held(self, event: ReachEvent, reason: str):
+        """D70: a follow-up held before it reached the desk (a tool-less turn that claimed an act) goes on
+        the record as dropped, with her words and why, so it is never silent."""
+        now = self.clock()
+        row = self.store.add(event, now, status="dropped", reason=f"held: {reason}", not_before=None)
+        log.info("reach %s (%s): held: %s", row.id, event.source, reason)
+        return row
+
     def reach_out(self, event: ReachEvent) -> str:
         if event.urgency not in URGENCIES or not event.headline.strip():
             raise ValueError("a reach-out needs a headline and a known urgency")

@@ -274,7 +274,11 @@ _NOTE_DOING_RE = re.compile(
     rf"^\s*(?:(?:okay|ok|sure|done|got it|chris|sir)[,!.]?\s+)*(?:now\s+)?(?:{_NOTE_ING})\b"   # at the sentence's head
     rf"|\b(?:i'm|i am)\s+(?:now\s+|just\s+)?(?:{_DOING_ING})\b"
     rf"|\bi(?:'ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?(?:{_NOTE_PAST})\b", re.I)
-_NOTE_LATER_RE = re.compile(r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you)\b", re.I)
+#: D70 (his 17:45 "sure yeah"): a named later time defers a promise too ("I'll check it tomorrow" speaks). A
+#: possessive date is the task's, not the act's ("I'll cancel tomorrow's run" still holds).
+_NOTE_LATER_RE = re.compile(
+    r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you|in the morning"
+    r"|(?:tomorrow|tonight|this (?:evening|afternoon|weekend)|next (?:week|month))(?!'s))\b", re.I)
 _NOTE_NOW_RE = re.compile(r"\b(?:now|right now|right away|immediately)\b", re.I)
 _CLAUSE_START_RE = re.compile(r"[,;:\u2014]")
 _KAELS_QUOTE_RE = re.compile(r'\bkael\s+(?:said|says|wrote|writes|told me|tells me|asked)[,:]?\s*(?:"[^"\n]*"|\u201c[^\u201d\n]*\u201d)', re.I)
@@ -407,6 +411,15 @@ def kael_note_for(
                 # replies to his messages carry today's gates (D61, D65, the claim gate); this turn
                 # didn't. The note stays in her thread for her next real turn with him.
                 log.info("kael-note proactive: held (it says she did or is doing something; this turn can't act)")
+                if desk is not None:
+                    # D70: never held silently: the desk's record keeps her words and why (the daily
+                    # signals report them), so "why did she go quiet?" has an answer.
+                    try:
+                        from aerys_v2.reach import ReachEvent
+                        desk.record_held(ReachEvent(source="kael_note", topic="kael", headline=text),
+                                         "it said she did or is doing something; this turn can't act")
+                    except Exception:
+                        log.warning("kael-note proactive: the held follow-up couldn't be recorded", exc_info=True)
                 return
             if desk is not None and proactive_send is None:
                 # The reach-out desk (#176, Stage 2) owns when, where and whether: the night,

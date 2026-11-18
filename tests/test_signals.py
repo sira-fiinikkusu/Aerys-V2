@@ -128,9 +128,9 @@ def test_the_report_names_what_broke_and_what_was_checked():
 class FakeConn:
     """Answers by which SQL it was handed. No network, no server, no writes."""
 
-    def __init__(self, turns=(), held=(), memories=(), newest=None, visible=()):
+    def __init__(self, turns=(), held=(), memories=(), newest=None, visible=(), followups=()):
         self.turns, self.held, self.memories = turns, held, memories
-        self.newest, self.visible = newest, visible
+        self.newest, self.visible, self.followups = newest, visible, followups
         self.statements = []
 
     def execute(self, sql, params=None):
@@ -141,6 +141,8 @@ class FakeConn:
                      t.get('created_at')) for t in self.turns]
         elif 'portable_held' in sql:
             rows = [(h['id'], h['reason']) for h in self.held]
+        elif 'v2_reachouts' in sql:
+            rows = [(f['id'], f['headline'], f['created_at']) for f in self.followups]
         elif 'FROM memories' in sql:
             rows = [(m['id'], m['length']) for m in self.memories]
         elif 'ORDER BY created_at DESC LIMIT 1' in sql:
@@ -387,3 +389,20 @@ def test_her_offer_to_file_her_own_ticket_is_not_a_courier_slip():
     carried = [dict(id=11, channel='discord_dm', input_text='she wrote back: see you soon',
                     emitted_reply='Want me to pass that along to Kael?')]
     assert answers_not_relays(carried).failed, 'carrying someone else\'s words still fails'
+
+
+
+def test_a_held_follow_up_after_a_kael_note_is_reported_with_its_words():
+    """D70 (his 17:45): nothing held silently. Each held follow-up gets a human look: a false hold
+    silences her, which is the one-way feeling he named on 11/07."""
+    from datetime import datetime, timezone
+    when = datetime(2026, 11, 18, 23, 5, tzinfo=timezone.utc)
+    conn = FakeConn(followups=[{'id': 7, 'headline': "I'll check it tomorrow, Chris.", 'created_at': when},
+                               {'id': 9, 'headline': "I've withdrawn the request.", 'created_at': when}])
+    result = signals.note_followups_held(conn.execute(signals.HELD_FOLLOWUPS_SQL, {'window': '26 hours'}).fetchall())
+    assert result.failed and result.checked == 2
+    assert "2 follow-up" in result.detail and "withdrawn the request" in result.detail
+    quiet = signals.note_followups_held([])
+    assert not quiet.failed
+    run = signals.run_signals(turns_conn=conn, memories_conn=conn, person_id='p1', aliases=['Sira'])
+    assert any(r.name == 'note_followups_held' and r.failed for r in run)

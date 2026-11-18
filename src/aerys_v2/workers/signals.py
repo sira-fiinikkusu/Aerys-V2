@@ -379,6 +379,29 @@ LIMIT %(limit)s
 """
 
 
+HELD_FOLLOWUPS_SQL = """\
+SELECT id, headline, created_at FROM v2_reachouts
+WHERE source = 'kael_note' AND status = 'dropped' AND reason LIKE 'held:%%'
+  AND created_at > now() - %(window)s::interval
+ORDER BY created_at
+"""
+
+
+def note_followups_held(rows) -> Signal:
+    """D70 (Chris 11/18 17:45): her follow-ups after Kael's notes are never held silently.
+
+    A follow-up from a tool-less turn that claimed an act is held (it can't back it), and the
+    desk records it. Each one gets a human look: a false hold silences her, the one-way feeling
+    he named on 11/07 ("when i tell her to ask you something, she never follows up with me")."""
+    held = [dict(zip(('id', 'headline', 'created_at'), row)) for row in rows]
+    return _result(
+        'note_followups_held', held, len(held),
+        ok_detail='no follow-up of hers was held',
+        bad_detail=lambda bad: (f"{len(bad)} follow-up(s) after Kael's notes held (a false hold silences "
+                                f"her; look at each): newest '{str(bad[-1].get('headline') or '')[:120]}'"
+                                + newest_when(bad)))
+
+
 def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
                 window='24 hours', portable_limit=100, retired_openings=()):
     """Every signal, over one window. Returns the results; never writes anything.
@@ -401,6 +424,7 @@ def run_signals(*, turns_conn, memories_conn=None, person_id=None, aliases=(),
         held_review_is_current(held, now=_now()),
         house_state_claims_are_grounded(turns, retired_openings=retired_openings),
         answers_not_relays(turns),
+        note_followups_held(turns_conn.execute(HELD_FOLLOWUPS_SQL, {'window': window}).fetchall()),
     ]
 
     if memories_conn is not None:

@@ -248,8 +248,30 @@ def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     "I enjoy reading, writing, and talking with you.",
     "I'm running low on ideas, honestly.",
     "I don't think I'll withdraw it.",
+    # D70 (his 17:45 "sure yeah"): an honest promise for a named later time speaks
+    "I'll check it tomorrow.",
+    "I'll look into it tonight.",
+    "I'll send Kael the details in the morning.",
+    "I'll start the MapTap run next week.",
 ])
 def test_a_note_turn_that_only_tells_still_speaks(reply):
     g, sends = FakeGraph(), []
     note_fn(g, SpeakModel(reply), sends)(f"person:{OWNER}", "news", True)
     assert len(sends) == 1 and sends[0][2] == reply
+
+
+
+def test_a_held_follow_up_is_on_the_desks_record_never_silent():
+    """D70: a held follow-up was invisible ("you aren't told"). It lands on the reach desk's record as a
+    dropped reach-out whose reason starts "held:", with her words; nothing is delivered."""
+    from test_reach_desk import DAY, World, desk_for
+    world = World()
+    desk, _ = desk_for(world, now=DAY)
+    g = FakeGraph()
+    note = kael_note_for(g, settings_with(), proactive_model=SpeakModel("I've withdrawn the request."),
+                         proactive_lookup_chat_id=lambda s: "7113937380",
+                         proactive_lookup_surface=lambda s: ("discord", None), proactive_sync=True, desk=desk)
+    note(f"person:{OWNER}", "you can withdraw the skill request", True)
+    rows = list(desk.store.rows.values())
+    assert len(rows) == 1 and rows[0].status == "dropped" and rows[0].reason.startswith("held:")
+    assert rows[0].headline == "I've withdrawn the request." and world.spoken == [] and world.texts == []
