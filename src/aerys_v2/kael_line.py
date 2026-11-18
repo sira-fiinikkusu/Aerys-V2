@@ -173,14 +173,19 @@ def _discord_dm_send(token: str, user_id: str, text: str, *, silent: bool = Fals
     )
     with urllib.request.urlopen(req, timeout=15) as r:
         channel_id = json.load(r)["id"]
-    req = urllib.request.Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=json.dumps({"content": text[:1990], **({"flags": 1 << 12} if silent else {})}).encode(),
-        headers=headers,
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        if r.status >= 300:
-            raise RuntimeError(f"discord dm status {r.status}")
+    # T-25 (11/18): a long text goes as several messages, never cut at 1990 (her Wordle report
+    # stopped at "The main…"). Split at paragraph, line or sentence, as her replies are.
+    from aerys_v2.channels.splitter import split_message
+
+    for part in split_message(text, 1990) or [text[:1990]]:
+        req = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            data=json.dumps({"content": part, **({"flags": 1 << 12} if silent else {})}).encode(),
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            if r.status >= 300:
+                raise RuntimeError(f"discord dm status {r.status}")
 
 
 def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False) -> None:
@@ -189,15 +194,19 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
     import json
     import urllib.request
 
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data=json.dumps({"chat_id": chat_id, "text": text,
-                         **({"disable_notification": True} if silent else {})}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=15) as r:
-        if r.status != 200:
-            raise RuntimeError(f"telegram send status {r.status}")
+    from aerys_v2.channels.splitter import split_message
+
+    # T-25: Telegram refuses a message over 4096; a long report goes as several (as on Discord).
+    for part in split_message(text, 4000) or [text[:4000]]:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps({"chat_id": chat_id, "text": part,
+                             **({"disable_notification": True} if silent else {})}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as r:
+            if r.status != 200:
+                raise RuntimeError(f"telegram send status {r.status}")
 
 
 def kael_note_for(

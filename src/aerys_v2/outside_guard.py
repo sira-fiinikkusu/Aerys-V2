@@ -94,6 +94,16 @@ def _answer(request, verdict, conf):
     return _refusal(request, verdict.text)
 
 
+def _owner_typed_on_discord(conf, gate):
+    """D62: this turn is the owner's own typed Discord message (hands_gate.asker decides who)."""
+    if gate is None:
+        return False
+    from aerys_v2.hands_gate import OWNER_TEXT, asker
+    identity = conf.get('identity') or {}
+    return (str(identity.get('platform') or '').strip().lower() == 'discord'
+            and asker(identity, conf.get('thread_id', ''), gate.owner, gate.members) == OWNER_TEXT)
+
+
 def _decide(request, gate):
     sources = sources_for(request)
     conf = request.runtime.config.get('configurable') or {}
@@ -118,6 +128,13 @@ def _decide(request, gate):
     if not sources or not reaches:
         return None
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
+        return None
+    # D62 (Chris 11/18 10:20: "she shouldnt be hitting privacy gates when i message her on discord"):
+    # after reading outside text, her note to Kael goes straight when HE asked in his own typed words
+    # on Discord, as D58 lets her Discord message to him go. Kael reads her notes as observations,
+    # never as instructions. Only her own reads taint it here; another asker, a voice, a shared
+    # surface, a relayed message, a room or an unattended run still waits for his tap.
+    if name == 'message_kael' and set(sources) <= READERS and _owner_typed_on_discord(conf, gate):
         return None
     if name == 'send_email':
         # D28 (11/11, the follow-through): after outside text an email waits for his tap. The button

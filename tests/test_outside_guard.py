@@ -499,3 +499,36 @@ def test_an_approval_system_failure_leaves_the_guard_marker_but_a_wait_does_not(
         assert outside_guard(req, lambda r: pytest.fail('sent'), gate=Gate(verdict)).content == verdict.text
         sink = req.runtime.config['configurable']['outside_text']
         assert bool(sink.get('guard_error')) is failed and sink.get('untrusted_read') is True
+
+
+
+# --- D62 (Chris 11/18 10:20): her note to Kael after outside text, when he typed on Discord ----
+
+def _kael_request(identity, messages=None, extra=()):
+    msgs = messages or [ToolMessage(content='screenshot words', name='analyze_image', tool_call_id='r')]
+    req = request(msgs, name='message_kael', args={'message': 'the run is stuck on the ad'})
+    req.runtime.config['configurable'].update(identity=identity, thread_id=OWNER_THREAD)
+    return req
+
+
+def test_his_discord_ask_lets_her_note_to_kael_go_straight_after_a_read():
+    b = Box()
+    out = outside_guard(_kael_request(TEXT), lambda r: 'delivered', gate=b.gate)
+    assert out == 'delivered' and not b.approval_store.rows
+
+
+@pytest.mark.parametrize('who', ['voice', 'stranger', 'telegram', 'relay', 'no gate'])
+def test_every_other_case_still_waits_for_his_tap(who):
+    from test_hands_gate import STRANGER_ASK
+    b = Box()
+    identity = {'voice': STRONG, 'stranger': STRANGER_ASK,
+                'telegram': dict(TEXT, platform='telegram')}.get(who, TEXT)
+    messages = None
+    if who == 'relay':
+        # A message relayed to him from someone else: still outside, still waits.
+        messages = [AIMessage(content='relay', additional_kwargs={'reach_source': 'relay'}),
+                    HumanMessage(content='tell kael'),
+                    ToolMessage(content='screenshot words', name='analyze_image', tool_call_id='r')]
+    out = outside_guard(_kael_request(identity, messages), lambda r: pytest.fail('went straight'),
+                        gate=None if who == 'no gate' else b.gate)
+    assert isinstance(out, ToolMessage) and 'Delivered' not in out.content    # held: a card, a wait or a no

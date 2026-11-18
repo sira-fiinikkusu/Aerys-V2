@@ -106,16 +106,18 @@ def build_analyze_image_tool(
 
     @tool
     def analyze_image(url: str, question: str = "") -> str:
-        """Analyze an image. CALL THIS TOOL IMMEDIATELY when:
-        - A Discord CDN URL appears (https://cdn.discordapp.com/attachments/...)
-        - The user asks you to look at, describe, or analyze an image
-        - Any image URL is shared in conversation
+        """Look closely at an image by URL.
 
-        You have ZERO visual capability without this tool. You cannot see
-        images directly. Even if you think you know what the image contains,
-        you MUST call this tool.
+        The images in his current message are already attached to your turn: you can see
+        them yourself, without this tool (since 2026-09-28). A Discord image URL
+        (https://cdn.discordapp.com/attachments/...) in his CURRENT message is one of those.
+        Use this for an image you can't see: a web image, one from an earlier message, an
+        attachment that didn't load, or when you want a second, closer reading.
 
-        url: the image URL EXACTLY as it appeared — keep every query parameter
+        If this tool fails, say what failed; never say you can't see an image that is
+        attached to your turn. Describe what you see in it.
+
+        url: the image URL EXACTLY as it appeared, keep every query parameter
         (Discord CDN URLs are signed; trimming them breaks the link).
         question: what to find out about the image; empty means "describe it".
 

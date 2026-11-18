@@ -341,6 +341,45 @@ def test_voice_action_human_turn_lands_at_ack_time():
 # that claim into a real action instead of a scolding.
 
 
+# ---- D61 THE PROMISE GATE (Chris 11/18 10:16, "1. a"; ticket T-25) ------------------------
+# 09:43: "did you wanna do wordle while we wait" was routed to chat; she said "Sure, I'll play
+# today's Wordle..." holding no tools, and nothing ran. A promise like that escalates too.
+
+
+def test_promise_gate_escalates_the_wordle_promise():
+    graph = build_graph(fake_model("Sure, Chris. I'll play today's Wordle on my home machine."), soul="s")
+    stub = SeedCapturingActionGraph("Started: today's Wordle is running on my home machine.")
+    out = ask(graph, "did you wanna do wordle while we wait", identity=CHRIS, thread_id="t-promise",
+              router=chat_router, action_graph=stub)
+    assert out == "Started: today's Wordle is running on my home machine."
+    contents = [m.content for m in graph.get_state({"configurable": {"thread_id": "t-promise"}}).values["messages"]]
+    assert contents == ["did you wanna do wordle while we wait",
+                        "Started: today's Wordle is running on my home machine."]   # the promise never stays
+
+
+def test_promise_gate_marks_its_own_audit_row():
+    rec = Recorder()
+    graph = build_graph(fake_model("On it."), soul="s")
+    ask(graph, "can you check on the planner job", identity=CHRIS, thread_id="t-promise2",
+        router=chat_router, action_graph=SeedCapturingActionGraph(), record_turn=rec)
+    action_row = next(r for r in rec.wait(1) if r.get("classifier_intent") == "action")
+    degraded = json.loads(action_row["degraded"])
+    assert "promise_gate_escalated" in degraded and "claim_gate_escalated" not in degraded
+
+
+@pytest.mark.parametrize("user,reply", [
+    ("do you remember when you played wordle?", "I'll play it again sometime, it was fun."),   # reminiscing
+    ("can you start the dishwasher", "I can't start that from here."),                       # honest refusal
+    ("can you tell me a story", "I'll tell you one about a fox."),                           # talk, not a job
+    ("can you send it", "I won't send it until you say so."),                                # negated
+])
+def test_promise_gate_leaves_talk_alone(user, reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, user, identity=CHRIS, thread_id="t-promise3", router=chat_router, action_graph=stub)
+    assert out == reply and stub.seeds == []
+
+
 def test_claim_gate_escalates_a_toolless_completion_claim():
     graph = build_graph(fake_model("Got it to Kael — sent."), soul="s")
     stub = SeedCapturingActionGraph("Delivered — Kael has it now.")

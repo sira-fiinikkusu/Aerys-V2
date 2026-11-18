@@ -57,6 +57,9 @@ ABOUT_CHARS = 160
 RESULT_CHARS = 1500
 #: A job that didn't finish: its report goes in full as text, like a finished one's (Chris, 11/11).
 ERROR_CHARS = 1500
+#: T-25 (11/18): his text copy carries her whole report (her Wordle write-up stopped at "The main…");
+#: the Discord sender splits it into messages. A bound stays, so a runaway report can't flood him.
+TEXT_REPORT_CHARS = 6000
 EASTERN = ZoneInfo("America/New_York")
 _HOLD = re.compile(r"^\W*hold\W*$", re.IGNORECASE)
 #: "Ever", for the desk's ledger: a job's notice is told once, however late a retry comes.
@@ -390,8 +393,8 @@ class HomeNotices:
                             exc_info=True)
                 out["waiting"] += 1
                 continue
-            detail = (clip_report(job.result, RESULT_CHARS) if notice.status == "success"
-                      else clip_report(job.error, ERROR_CHARS))
+            detail = (clip_report(job.result, TEXT_REPORT_CHARS) if notice.status == "success"
+                      else clip_report(job.error, TEXT_REPORT_CHARS))
             if notice.status == "check_in":
                 detail = clip_report(notice.metadata.get("summary"), 2000)
             text_to = self._text_to(notice)

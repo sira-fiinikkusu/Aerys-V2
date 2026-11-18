@@ -327,3 +327,16 @@ def test_build_media_tools_names_match_what_prompts_call():
     assert [t.name for t in tools] == ["analyze_image", "read_document", "youtube_summary"]
     # descriptions keep the concrete CDN trigger string (load-bearing for invocation)
     assert "cdn.discordapp.com/attachments" in tools[0].description
+
+
+
+def test_the_image_tool_never_tells_her_she_cannot_see():
+    """T-25 (11/18): she has seen his current images herself since 9/28 (images.py). The old
+    "ZERO visual capability" line made her tell him she couldn't see a screenshot she could."""
+    import httpx
+    from aerys_v2.tools.media import build_analyze_image_tool
+    tool = build_analyze_image_tool(api_key='k', base_url='https://openrouter.example/api/v1',
+                                    client=httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))))
+    text = tool.description
+    assert 'ZERO visual capability' not in text and 'cannot see images' not in text
+    assert 'already attached to your turn' in text and "never say you can't see an image" in text

@@ -165,8 +165,11 @@ def test_a_long_failed_job_keeps_its_whole_report_and_a_whole_headline():
     detail = home.desk.store.rows[1].detail
     assert detail.startswith("I couldn't get you the listing.") and "\n- **What happened:**" in detail
     assert '"Performing security verification" with a checkbox.' in detail and "\n- **What I didn't do:**" in detail
-    assert len(detail) <= ERROR_CHARS and detail.endswith("…") and not detail.endswith(" …")
-    assert len(text_copy(said, detail)) <= 2000          # one Discord message
+    # T-25 (11/18): the whole report now, never clipped at 1500 ("The main…"); the Discord sender
+    # splits a long copy into messages at paragraph and line breaks.
+    assert not detail.endswith("…") and "More detail. " * 140 in detail.replace("\n", " ") + " "
+    from aerys_v2.channels.splitter import split_message
+    assert 2 <= len(split_message(text_copy(said, detail), 1990)) <= 3
     short = Home(job=Job(task="Look it up", error="Blocked by a check.\n\nNote to self: plan for a person."))
     short.notices.receive(note(status="error"))
     short.notices.tick()
@@ -679,3 +682,11 @@ def test_a_told_notice_whose_mark_fails_is_never_told_twice():
         except ConnectionError:
             pass
     assert len(told) == 1 and home.notices.store.open() == []
+
+
+def test_his_text_copy_carries_her_whole_report():
+    """T-25 (11/18): her Wordle write-up stopped at "The main…" at 1500 characters."""
+    from aerys_v2.home_notices import TEXT_REPORT_CHARS, clip_report
+    report = 'Message 2: walkthrough\n' + '\n'.join(f'{i}. a line about guess {i}, ' + 'detail ' * 30 for i in range(12))
+    assert 1500 < len(report) < TEXT_REPORT_CHARS
+    assert clip_report(report, TEXT_REPORT_CHARS).endswith(report.splitlines()[-1].strip())

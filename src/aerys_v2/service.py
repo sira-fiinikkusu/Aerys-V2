@@ -815,6 +815,8 @@ NO_TOOL_ACTION_MARKER = "no_tool_action"
 # how often the tool-less chat node claims work it never did (distinct from
 # chat_handoff, which is the model raising its own hand).
 CLAIM_GATE_MARKER = "claim_gate_escalated"
+#: D61 (11/18): the promise gate's own mark, countable apart from a done-claim.
+PROMISE_GATE_MARKER = "promise_gate_escalated"
 
 # False-wake grace (owner ask 2026-08-27): the router judged this voice/lens
 # capture was never directed at Aerys and the turn was dropped — no reply, no
@@ -1455,7 +1457,18 @@ def ask(
             tier_override_source=override_source, extra_degraded=downgrade_marker,
             human_privacy=origin_privacy, human_id=turn_msg_id,
         )
-        claim_escalation = False
+        claim_escalation = promise_escalation = False
+        if not handoff and action_graph is not None and _promises_effect_without_doing_it(text, reply):
+            # D61 (Chris 11/18 10:16, "1. a"; ticket T-25): the same escalation for a PROMISE
+            # with nothing behind it. At 09:43 his "did you wanna do wordle while we wait" was
+            # routed here; she said "Sure, I'll play today's Wordle..." holding no tools, and
+            # nothing ran. The action graph either starts it or says honestly why it can't.
+            log.info(
+                "promise gate: tool-less chat reply promised an effectful act — "
+                "escalating to action | thread=%s", thread_id
+            )
+            handoff = True
+            promise_escalation = True
         if not handoff and action_graph is not None and _claims_effect_without_doing_it(
             text, reply
         ):
@@ -1503,7 +1516,8 @@ def ask(
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 replace_message_id=_last_ai_message_id(graph, config["configurable"]),
                 escalated=True,
-                extra_degraded=[CLAIM_GATE_MARKER] if claim_escalation else None,
+                extra_degraded=([CLAIM_GATE_MARKER] if claim_escalation else
+                                [PROMISE_GATE_MARKER] if promise_escalation else None),
                 tier=normalize_tier(decision.tier),
             )
         _reclassify_if_needed(
@@ -2275,6 +2289,50 @@ VOICE_HANDOFF_S = 9.0
 VOICE_HANDOFF_LINES = ("One sec, let me look.", "Give me a moment, I'm checking.", "Hang on, I'm looking that up.",
                        "Let me check on that.", "Just a second, I'm on it.")
 VOICE_HANDOFF_MARKER = "voice_handoff"
+
+# D61 (Chris 11/18): what a promise to act NOW looks like, in her own voice. Effect verbs only: a
+# promise to tell a story or to remember a feeling is talk, not a job.
+_PROMISE_VERBS = (
+    r"(?:play|start|run|kick (?:it |that |this )?off|launch|send|message|email|text|book|order|"
+    r"schedule|set (?:up|it|that|a|an|the|your)|search|look (?:it |that |this )?up|"
+    r"check (?:on )?(?:it|that|them|the)|turn|switch|post|share|"
+    r"let (?:kael|kayle|cale|kale|him|her|them) know|pass (?:it |that )?(?:along|on)|"
+    r"do (?:it|that|this|today's|the|one))"
+)
+_PROMISE_PATTERNS = (
+    # "I'll play today's Wordle", "let me kick that off", "I'm going to send it now"
+    re.compile(
+        rf"\b(?:i'll|i will|i'm going to|i am going to|i'm gonna|let me|i'm about to)\s+"
+        rf"(?:go ahead and\s+|just\s+|now\s+|quickly\s+)?{_PROMISE_VERBS}\b",
+        re.I,
+    ),
+    # terse: "On it.", "Starting it now.", "Kicking that off."
+    re.compile(r"(?:^|[.!?]\s+|[—-]\s*)(?:on it|starting (?:it|that|now|the)|kicking (?:it|that) off)\b", re.I),
+)
+#: His message proposes an activity even when it isn't phrased as an order ("did you wanna...").
+_PROPOSES_RE = re.compile(
+    r"\b(?:wanna|want to|could you|can you|would you|will you|go ahead|let'?s|"
+    r"mind (?:doing|playing|checking|starting))\b", re.I)
+
+
+def promises_effect_now(text: str) -> bool:
+    """Does this reply promise, in its own voice, to do an effectful act now?"""
+    if not text:
+        return False
+    for pattern in _PROMISE_PATTERNS:
+        for m in pattern.finditer(text):
+            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+            if not _NEGATION_RE.search(window):
+                return True
+    return False
+
+
+def _promises_effect_without_doing_it(user_text: str, reply: str) -> bool:
+    """D61: a TOOL-LESS chat reply promised an act, and he had asked or proposed one. Both are
+    needed, as for the claim gate: "I'll play it later?" from reminiscing never fires."""
+    return bool(promises_effect_now(reply) and (
+        plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text or "")))
+
 
 def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
     """Did a TOOL-LESS chat reply claim it performed an effectful act?
