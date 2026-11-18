@@ -214,6 +214,14 @@ import pytest
     "Chris, I'm withdrawing the request now.",
     "I'll cancel tomorrow's run now.",
     "I'll update the ticket now so Kael knows when to start.",
+    # Codex re-check 11/18: her claim inside a quote or after a Kael clause; a task date; a second clause's
+    # timing; a negation in another sentence
+    'I can confirm: "I withdrew the request."',
+    "Kael asked and I withdrew it.",
+    "Kael asked, therefore I withdrew it.",
+    "I will cancel tomorrow's run.",
+    "I will withdraw it; I will update it tomorrow.",
+    "I cannot help with that. I will withdraw the request now.",
 ])
 def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     g, sends = FakeGraph(), []
@@ -229,6 +237,9 @@ def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     'Kael said, "I sent the fix."',
     "Kael's running the MapTap tests.",
     "When we talk next, I'll withdraw it.",
+    # Codex re-check 11/18: a gerund that isn't an act
+    "That sounds sensible, deleting the file would be risky.",
+    "I enjoy reading, writing, and talking with you.",
 ])
 def test_a_note_turn_that_only_tells_still_speaks(reply):
     g, sends = FakeGraph(), []

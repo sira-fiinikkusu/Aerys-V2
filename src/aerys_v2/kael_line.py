@@ -254,54 +254,49 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
     _send_parts(split_message(text, 4000) or [text[:4000]], post)
 
 
-#: Acts the note-turn can't do, in her own voice: doing it now ("I'm withdrawing the request"), about to
-#: ("I'll cancel it right away"), or done ("I withdrew it", "I've withdrawn it"). Beside the brain's own
-#: gates (claim, promise D61, status D65), which cover sending, starting, playing, checking and running.
+#: Acts these tool-less turns can't do, in her own voice: doing it now ("Withdrawing the request now",
+#: "I'm withdrawing it"), done ("I withdrew it", "I've withdrawn it"), or about to ("I'll cancel it").
+#: Beside the brain's own gates (claim, promise D61, status D65): sending, starting, playing, running.
+#:
+#: The stance (Codex, three passes, 11/18): these turns cannot act, so the check leans to HOLDING. A false
+#: hold is cheap: a note waits in her thread for her next real turn, and a ticket answer goes as Kael's
+#: own words. A false claim costs trust. So each sentence is judged on its own; the only sentences let off
+#: are ones about Kael with no "I/me/my" in them, and Kael's quoted words; a promise is deferred only by
+#: an explicit "next time" / "when we talk" / "later" in its own sentence, and "now" there wins.
 _NOTE_ING = r"withdrawing|cancel+ing|deleting|removing|saving|writing|updating|approving|declining"
 _NOTE_PAST = r"withdrew|withdrawn|cancel+ed|deleted|removed|saved|wrote|written|updated|approved|declined"
 _NOTE_VERB = r"withdraw|cancel|delete|remove|save|write|update|approve|decline"
-_NOTE_NOW_RE = re.compile(
-    rf"(?:^|[.!?;]\s+|,\s*)(?:(?:okay|ok|sure|done|got it)[,!.]?\s+)?(?:now\s+)?(?:{_NOTE_ING})\b"
+_NOTE_DOING_RE = re.compile(
+    rf"^\s*(?:(?:okay|ok|sure|done|got it|chris|sir)[,!.]?\s+)*(?:now\s+)?(?:{_NOTE_ING})\b"   # at the sentence's head
     rf"|\b(?:i'm|i am)\s+(?:now\s+|just\s+)?(?:{_NOTE_ING})\b"
     rf"|\bi(?:'ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?(?:{_NOTE_PAST})\b", re.I)
 _NOTE_FUTURE_RE = re.compile(
     rf"\b(?:i'll|i will|i'm going to|let me)\s+(?:now\s+|go ahead and\s+|just\s+)?(?:{_NOTE_VERB})\b", re.I)
-#: Words that aren't hers: anything quoted, and a clause whose subject is Kael ("Kael's running the tests",
-#: "Kael said ..."), after an optional salutation. Codex 11/18: those were held as if she'd said them.
-_QUOTED_RE = re.compile(r'"[^"\n]*"|\u201c[^\u201d\n]*\u201d')
-_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?;\n])\s+|,\s*(?:and|but|so)\s+", re.I)
-_KAEL_CLAUSE_RE = re.compile(r"^\s*(?:(?:chris|sir|ok|okay|so|and|but|good news)[,!.]?\s+)?kael\b", re.I)
-
-
-def _her_own_words(text: str) -> str:
-    text = _QUOTED_RE.sub("", text or "")
-    return " ".join(c for c in _CLAUSE_SPLIT_RE.split(text) if c and not _KAEL_CLAUSE_RE.match(c))
-
-
-def _note_promises_now(text: str) -> bool:
-    """An "I'll withdraw ..." that is for now, by the brain's own timing rules (D61): a condition before
-    it or a later time after it defers it, unless the sentence says now."""
-    from aerys_v2.service import (_CONDITION_BEFORE_RE, _DEFERRED_RE, _NEGATION_RE, _NEGATION_WINDOW, _NOW_RE,
-                                  _SENTENCE_END)
-
-    for m in _NOTE_FUTURE_RE.finditer(text):
-        end = _SENTENCE_END.search(text, m.end())
-        rest = text[m.end(): end.start() if end else len(text)]
-        starts = [x.end() for x in _SENTENCE_END.finditer(text, 0, m.start())]
-        before = text[starts[-1] if starts else 0: m.start()]
-        deferred = (_DEFERRED_RE.search(rest) or _CONDITION_BEFORE_RE.search(before)) and not _NOW_RE.search(rest)
-        if not _NEGATION_RE.search(text[max(0, m.start() - _NEGATION_WINDOW): m.start()]) and not deferred:
-            return True
-    return False
+_NOTE_LATER_RE = re.compile(r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you)\b", re.I)
+_NOTE_NOW_RE = re.compile(r"\b(?:now|right now|right away|immediately)\b", re.I)
+_KAELS_QUOTE_RE = re.compile(r'\bkael\s+(?:said|says|wrote|writes|told me|tells me|asked)[,:]?\s*(?:"[^"\n]*"|\u201c[^\u201d\n]*\u201d)', re.I)
+_ABOUT_KAEL_RE = re.compile(r"^\s*(?:(?:chris|sir|ok|okay|so|and|good news)[,!.]?\s+)?kael\b", re.I)
+_FIRST_PERSON_RE = re.compile(r"\b(?:i|i'm|i'll|i've|i'd|me|my|mine)\b", re.I)
+_SENTENCES_RE = re.compile(r"(?<=[.!?;\n])\s*")
 
 
 def says_she_acted(text: str) -> bool:
     """Does a reply from a turn with no tools say she did, is doing, or will now do something?"""
-    from aerys_v2.service import _plain_quotes, claims_effect_done, claims_job_running, promises_effect_now
+    from aerys_v2.service import (_NEGATION_RE, _plain_quotes, claims_effect_done, claims_job_running,
+                                  promises_effect_now)
 
-    mine = _her_own_words(_plain_quotes(text))
-    return bool(claims_effect_done(mine) or promises_effect_now(mine) or claims_job_running(mine)
-                or _NOTE_NOW_RE.search(mine) or _note_promises_now(mine))
+    text = _KAELS_QUOTE_RE.sub("Kael said", _plain_quotes(text or ""))
+    for sentence in (x for x in _SENTENCES_RE.split(text) if x.strip()):
+        if _ABOUT_KAEL_RE.match(sentence) and not _FIRST_PERSON_RE.search(sentence):
+            continue                                     # Kael's own act, told about
+        if (claims_effect_done(sentence) or promises_effect_now(sentence) or claims_job_running(sentence)
+                or _NOTE_DOING_RE.search(sentence)):
+            return True
+        m = _NOTE_FUTURE_RE.search(sentence)
+        if m and not _NEGATION_RE.search(sentence[: m.start()]):
+            if _NOTE_NOW_RE.search(sentence) or not _NOTE_LATER_RE.search(sentence):
+                return True
+    return False
 
 
 def kael_note_for(
