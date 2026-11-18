@@ -382,6 +382,16 @@ MAPTAP_1047 = ("Starting today's MapTap run on my home machine now, Chris. It'll
     ("sure, do it", "Okay, launching MapTap on my home machine."),
     ("yeah go ahead", "Sending it to Kael now."),
     ("ok sure, try it", "Got it. Opening MapTap in my browser now."),
+    # Codex 11/18: the yeses and the progress wording that still slipped
+    ("yes, please", "Starting today's MapTap run now."),
+    ("sure thing", "Starting today's MapTap run now."),
+    ("absolutely", "Starting today's MapTap run now."),
+    ("\U0001f44d", "Starting today's MapTap run now."),
+    ("yes", "I'm now starting MapTap."),
+    ("yes", "I'm just opening MapTap now."),
+    ("yes", "Checking your inbox now."),
+    ("yes", "Turning the lights off now."),
+    ("yes", "Sure thing, launching MapTap now."),
 ])
 def test_promise_gate_catches_a_yes_answered_with_starting_now(user, reply):
     graph = build_graph(fake_model(reply), soul="s")
@@ -396,6 +406,12 @@ def test_promise_gate_catches_a_yes_answered_with_starting_now(user, reply):
     ("sweet yeah, like this going forward", "Locked in. Grid first, walkthrough after."),
     ("yes", "Running low on ideas for the next one, honestly."),
     ("i told him separately", "Good, then it's covered and I'll leave it alone."),
+    # Codex 11/18: talk that opens with one of those words
+    ("yes", "Playing devil's advocate: waiting seems wiser."),
+    ("yes", "Opening thoughts: this seems sensible."),
+    ("yes", "Running total: three ideas so far."),
+    ("yes", "Starting a new chapter in life can feel scary."),
+    ("yes", "Sending good vibes your way."),
 ])
 def test_promise_gate_leaves_a_yes_to_talk_alone(user, reply):
     graph = build_graph(fake_model(reply), soul="s")

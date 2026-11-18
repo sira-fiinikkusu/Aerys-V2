@@ -2324,13 +2324,16 @@ _PROMISE_PATTERNS = (
     # terse: "On it.", "Starting it now.", "Kicking that off."
     re.compile(r"(?:^|[.!?]\s+|[—-]\s*)(?:on it|starting (?:it|that|now|the)|kicking (?:it|that) off)\b", re.I),
     # 11/18 10:47: an act in progress, said at the head of a sentence ("Starting today's MapTap run on my
-    # home machine now", "Okay, launching MapTap", "I'm sending it to Kael now"). A story's opening and
-    # "running low" are talk.
+    # home machine now", "Sure thing, launching MapTap", "I'm now sending it to Kael"). A story's opening,
+    # a heading ("Running total:") and an idiom ("Sending good vibes") are talk.
     re.compile(
-        r"(?:^|[.!?]\s+|[—-]\s*)(?:(?:okay|ok|alright|sure|great|got it|good)[,!.]?\s+)?(?:(?:chris|sir)[,!.]?\s+)?"
-        r"(?:i'm\s+|i am\s+|now\s+)?"
-        r"(?:starting|kicking off|launching|firing up|opening|sending|playing|running(?!\s+(?:low|late|out|short|behind)))\b"
-        r"(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story)\b)",
+        r"(?:^|[.!?]\s+|[—-]\s*)"
+        r"(?:(?:okay|ok|alright|sure thing|sure|great|got it|good|absolutely|on it)[,!.]?\s+)?"
+        r"(?:(?:chris|sir)[,!.]?\s+)?(?:i'm\s+|i am\s+)?(?:(?:now|just|going ahead and)\s+)*"
+        r"(?:starting|kicking off|launching|firing up|opening|sending|playing|running|checking|turning|"
+        r"switching|setting up|looking up|searching|messaging|texting|emailing|booking|ordering|posting|sharing)\b"
+        r"(?!:)(?!\s+(?:with|by|off with|over|from|to|the story|a story|the tale|our story|a new chapter|"
+        r"good vibes|devil'?s advocate|gears|low|late|out|short|behind|total|thoughts?)\b)",
         re.I,
     ),
 )
@@ -2341,10 +2344,11 @@ _PROPOSES_RE = re.compile(
 #: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
 #: "sure, do it"). The whole message, so "yeah, like this going forward" stays talk.
 _CONSENT_RE = re.compile(
-    r"\s*(?:(?:ok(?:ay)?|sure|yes|yeah|yep|yup|alright|cool|great|perfect)[\s,!.]*)*"
+    r"\s*(?:(?:ok(?:ay)?|sure|yes|yeah|yep|yup|alright|cool|great|perfect|absolutely|definitely)[\s,!.]*)*"
     r"(?:give it a (?:shot|go|try|whirl)|go for it|(?:go ahead and )?(?:do|try|start|play|run|send) it|"
-    r"go ahead|let'?s (?:do it|go|try it)|sounds good|please do|yes|yeah|yep|yup|sure|ok(?:ay)?)"
-    r"(?:\s*(?:please|then|now|sir))?[\s!.]*", re.I)
+    r"go ahead|let'?s (?:do it|go|try it)|sounds good|please do|sure thing|of course|absolutely|definitely|"
+    r"yes|yeah|yep|yup|sure|ok(?:ay)?|\U0001f44d)"
+    r"(?:[\s,!.]*(?:please|then|now|sir))?[\s!.]*", re.I)
 
 
 def _plain_quotes(text: str) -> str:
