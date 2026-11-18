@@ -26,6 +26,7 @@ inside owner-infrastructure threads.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -153,6 +154,46 @@ def _owner_last_surface(settings) -> tuple[str, str | None]:
     return ("discord", None)
 
 
+#: A rate-limited part waits at most this long before its next try.
+PART_WAIT_CAP_S = 5.0
+PART_TRIES = 3
+REST_DIDNT_SEND = "(The rest of this didn't come through. Ask me and I'll send it again.)"
+
+
+def _send_parts(parts, post, *, sleep=None) -> None:
+    """Send each part once, in order (Codex 11/18: a retry of the whole report re-sent the parts
+    that had already gone). A rate-limited part waits (Retry-After, capped) and is tried again. If
+    the FIRST part never goes, raise: nothing was delivered, so the caller may retry it all. If a
+    later part never goes, say so in one line and return: the caller's retry would repeat the start."""
+    import time
+    import urllib.error
+
+    sleep = sleep or time.sleep
+    for index, part in enumerate(parts):
+        for attempt in range(PART_TRIES):
+            try:
+                post(part)
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt < PART_TRIES - 1:
+                    try:
+                        wait = float((e.headers or {}).get("Retry-After") or 1)
+                    except (TypeError, ValueError):
+                        wait = 1.0
+                    sleep(min(PART_WAIT_CAP_S, max(0.0, wait)))
+                    continue
+                failure = e
+            except Exception as e:  # noqa: BLE001 -- the network's errors are untyped
+                failure = e
+            if index == 0:
+                raise failure
+            log.warning("long message: part %d of %d didn't send (%s); the rest is held back",
+                        index + 1, len(parts), type(failure).__name__)
+            with contextlib.suppress(Exception):
+                post(REST_DIDNT_SEND)
+            return
+
+
 def _discord_dm_send(token: str, user_id: str, text: str, *, silent: bool = False) -> None:
     """A DM from HER OWN Discord account (the soak bot). The explicit
     DiscordBot User-Agent is load-bearing — default urllib UA gets 403.
@@ -177,7 +218,7 @@ def _discord_dm_send(token: str, user_id: str, text: str, *, silent: bool = Fals
     # stopped at "The main…"). Split at paragraph, line or sentence, as her replies are.
     from aerys_v2.channels.splitter import split_message
 
-    for part in split_message(text, 1990) or [text[:1990]]:
+    def post(part):
         req = urllib.request.Request(
             f"https://discord.com/api/v10/channels/{channel_id}/messages",
             data=json.dumps({"content": part, **({"flags": 1 << 12} if silent else {})}).encode(),
@@ -186,6 +227,8 @@ def _discord_dm_send(token: str, user_id: str, text: str, *, silent: bool = Fals
         with urllib.request.urlopen(req, timeout=15) as r:
             if r.status >= 300:
                 raise RuntimeError(f"discord dm status {r.status}")
+
+    _send_parts(split_message(text, 1990) or [text[:1990]], post)
 
 
 def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False) -> None:
@@ -196,8 +239,7 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
 
     from aerys_v2.channels.splitter import split_message
 
-    # T-25: Telegram refuses a message over 4096; a long report goes as several (as on Discord).
-    for part in split_message(text, 4000) or [text[:4000]]:
+    def post(part):
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
             data=json.dumps({"chat_id": chat_id, "text": part,
@@ -207,6 +249,9 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
         with urllib.request.urlopen(req, timeout=15) as r:
             if r.status != 200:
                 raise RuntimeError(f"telegram send status {r.status}")
+
+    # T-25: Telegram refuses a message over 4096; a long report goes as several (as on Discord).
+    _send_parts(split_message(text, 4000) or [text[:4000]], post)
 
 
 def kael_note_for(

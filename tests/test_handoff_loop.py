@@ -357,6 +357,17 @@ def test_promise_gate_escalates_the_wordle_promise():
                         "Started: today's Wordle is running on my home machine."]   # the promise never stays
 
 
+@pytest.mark.parametrize("user,reply", [
+    ("did you wanna do wordle while we wait", "Sure, Chris. I\u2019ll play today\u2019s Wordle now."),  # curly
+    ("Can you check my email?", "Let me check your inbox now."),
+])
+def test_promise_gate_catches_what_codex_found_slipping(user, reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("Done for real.")
+    assert ask(graph, user, identity=CHRIS, thread_id="t-promise4", router=chat_router,
+               action_graph=stub) == "Done for real."
+
+
 def test_promise_gate_marks_its_own_audit_row():
     rec = Recorder()
     graph = build_graph(fake_model("On it."), soul="s")
@@ -372,6 +383,10 @@ def test_promise_gate_marks_its_own_audit_row():
     ("can you start the dishwasher", "I can't start that from here."),                       # honest refusal
     ("can you tell me a story", "I'll tell you one about a fox."),                           # talk, not a job
     ("can you send it", "I won't send it until you say so."),                                # negated
+    # Codex 11/18: storytelling, later, and on a condition are not "now"
+    ("Can you tell me a story?", "I'll start with a fox in a forest."),
+    ("Do you want to play Wordle tomorrow?", "I'll play it tomorrow."),
+    ("Can you send it once I approve?", "I'll send it once you approve."),
 ])
 def test_promise_gate_leaves_talk_alone(user, reply):
     graph = build_graph(fake_model(reply), soul="s")

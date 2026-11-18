@@ -259,3 +259,38 @@ def test_a_long_telegram_text_goes_as_several(monkeypatch):
     _telegram_send('token', 'chat', report)
     parts = [body['text'] for url, body in sent]
     assert len(parts) >= 3 and all(len(p) <= 4000 for p in parts)
+
+
+def test_a_rate_limited_part_is_retried_and_nothing_is_sent_twice():
+    """Codex 11/18: a 429 on part 2, then a retry of the whole report, delivered A, A, B."""
+    import urllib.error
+    from aerys_v2.kael_line import _send_parts
+    sent, failures, waited = [], {'B': 1}, []
+    def post(part):
+        if failures.get(part):
+            failures[part] -= 1
+            raise urllib.error.HTTPError('u', 429, 'slow down', {'Retry-After': '2'}, None)
+        sent.append(part)
+    _send_parts(['A', 'B', 'C'], post, sleep=waited.append)
+    assert sent == ['A', 'B', 'C'] and waited == [2.0]
+
+
+def test_a_later_part_that_never_goes_is_said_once_and_the_start_is_not_resent():
+    import urllib.error
+    from aerys_v2.kael_line import REST_DIDNT_SEND, _send_parts
+    sent = []
+    def post(part):
+        if part == 'B':
+            raise urllib.error.HTTPError('u', 500, 'down', {}, None)
+        sent.append(part)
+    _send_parts(['A', 'B', 'C'], post, sleep=lambda s: None)       # returns: no whole-report retry
+    assert sent == ['A', REST_DIDNT_SEND]
+
+
+def test_a_first_part_that_never_goes_raises_so_the_whole_report_can_be_retried():
+    import pytest, urllib.error
+    from aerys_v2.kael_line import _send_parts
+    def post(part):
+        raise urllib.error.HTTPError('u', 429, 'slow down', {'Retry-After': '1'}, None)
+    with pytest.raises(urllib.error.HTTPError):
+        _send_parts(['A', 'B'], post, sleep=lambda s: None)

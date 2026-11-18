@@ -2293,12 +2293,21 @@ VOICE_HANDOFF_MARKER = "voice_handoff"
 # D61 (Chris 11/18): what a promise to act NOW looks like, in her own voice. Effect verbs only: a
 # promise to tell a story or to remember a feeling is talk, not a job.
 _PROMISE_VERBS = (
-    r"(?:play|start|run|kick (?:it |that |this )?off|launch|send|message|email|text|book|order|"
-    r"schedule|set (?:up|it|that|a|an|the|your)|search|look (?:it |that |this )?up|"
-    r"check (?:on )?(?:it|that|them|the)|turn|switch|post|share|"
+    r"(?:play|start(?!\s+(?:with|by|off with|over|from))|run|kick (?:it |that |this )?off|launch|"
+    r"send|message|email|text|book|order|schedule|set (?:up|it|that|a|an|the|your)|search|"
+    r"look (?:it |that |this )?up|look into|"
+    r"check (?:on |in on )?(?:it|that|them|this|the|your|my|his|her|their)|read (?:it|that|your|my|the)|"
+    r"open (?:it|that|your|the)|turn|switch|post|share|"
     r"let (?:kael|kayle|cale|kale|him|her|them) know|pass (?:it |that )?(?:along|on)|"
     r"do (?:it|that|this|today's|the|one))"
 )
+#: Codex 11/18: a promise for LATER or ON A CONDITION is not "now" ("I'll play it tomorrow",
+#: "I'll send it once you approve"); checked in the rest of the promise's own sentence.
+_DEFERRED_RE = re.compile(
+    r"\b(?:tomorrow|later|tonight|next (?:week|time|month|round)|sometime|soon|whenever|"
+    r"once (?:you|it|he|that|we)|when (?:you|it|he|that|we)|after (?:you|it|he|that|we|work)|"
+    r"if (?:you|it|he|that|we)|in the morning|this (?:evening|afternoon|weekend))\b", re.I)
+_SENTENCE_END = re.compile(r"[.!?\n]")
 _PROMISE_PATTERNS = (
     # "I'll play today's Wordle", "let me kick that off", "I'm going to send it now"
     re.compile(
@@ -2315,14 +2324,22 @@ _PROPOSES_RE = re.compile(
     r"mind (?:doing|playing|checking|starting))\b", re.I)
 
 
+def _plain_quotes(text: str) -> str:
+    """Curly apostrophes as straight ones (Codex 11/18: "I’ll play" slipped past)."""
+    return (text or "").replace("\u2019", "'").replace("\u2018", "'")
+
+
 def promises_effect_now(text: str) -> bool:
     """Does this reply promise, in its own voice, to do an effectful act now?"""
+    text = _plain_quotes(text)
     if not text:
         return False
     for pattern in _PROMISE_PATTERNS:
         for m in pattern.finditer(text):
             window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
-            if not _NEGATION_RE.search(window):
+            end = _SENTENCE_END.search(text, m.end())
+            rest = text[m.end(): end.start() if end else len(text)]
+            if not _NEGATION_RE.search(window) and not _DEFERRED_RE.search(rest):
                 return True
     return False
 
@@ -2330,8 +2347,9 @@ def promises_effect_now(text: str) -> bool:
 def _promises_effect_without_doing_it(user_text: str, reply: str) -> bool:
     """D61: a TOOL-LESS chat reply promised an act, and he had asked or proposed one. Both are
     needed, as for the claim gate: "I'll play it later?" from reminiscing never fires."""
+    user_text = _plain_quotes(user_text)
     return bool(promises_effect_now(reply) and (
-        plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text or "")))
+        plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)))
 
 
 def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
