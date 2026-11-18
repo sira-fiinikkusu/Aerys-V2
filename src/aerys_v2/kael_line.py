@@ -154,8 +154,8 @@ def _owner_last_surface(settings) -> tuple[str, str | None]:
     return ("discord", None)
 
 
-#: A rate-limited part waits at most this long before its next try.
-PART_WAIT_CAP_S = 5.0
+#: A rate-limited part waits for Discord's Retry-After, up to this long, before its next try.
+PART_WAIT_CAP_S = 30.0
 PART_TRIES = 3
 REST_DIDNT_SEND = "(The rest of this didn't come through. Ask me and I'll send it again.)"
 

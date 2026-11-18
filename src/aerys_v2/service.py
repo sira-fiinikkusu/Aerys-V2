@@ -2293,7 +2293,8 @@ VOICE_HANDOFF_MARKER = "voice_handoff"
 # D61 (Chris 11/18): what a promise to act NOW looks like, in her own voice. Effect verbs only: a
 # promise to tell a story or to remember a feeling is talk, not a job.
 _PROMISE_VERBS = (
-    r"(?:play|start(?!\s+(?:with|by|off with|over|from))|run|kick (?:it |that |this )?off|launch|"
+    r"(?:play|start(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story|the game|a game|a round))|"
+    r"run|kick (?:it |that |this )?off|launch|"
     r"send|message|email|text|book|order|schedule|set (?:up|it|that|a|an|the|your)|search|"
     r"look (?:it |that |this )?up|look into|"
     r"check (?:on |in on )?(?:it|that|them|this|the|your|my|his|her|their)|read (?:it|that|your|my|the)|"
@@ -2308,6 +2309,11 @@ _DEFERRED_RE = re.compile(
     r"once (?:you|it|he|that|we)|when (?:you|it|he|that|we)|after (?:you|it|he|that|we|work)|"
     r"if (?:you|it|he|that|we)|in the morning|this (?:evening|afternoon|weekend))\b", re.I)
 _SENTENCE_END = re.compile(r"[.!?\n]")
+#: A condition stated before the promise ("Once you approve, I'll send it") defers it too.
+_CONDITION_BEFORE_RE = re.compile(r"\b(?:once|when|after|if|whenever|as soon as)\b[^.!?\n]*,\s*$", re.I)
+#: An explicit "now" wins over a date that is the task's own argument ("set the reminder for
+#: tomorrow now"): the act is now, its subject is tomorrow.
+_NOW_RE = re.compile(r"\b(?:now|right now|right away|immediately)\b", re.I)
 _PROMISE_PATTERNS = (
     # "I'll play today's Wordle", "let me kick that off", "I'm going to send it now"
     re.compile(
@@ -2339,7 +2345,10 @@ def promises_effect_now(text: str) -> bool:
             window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
             end = _SENTENCE_END.search(text, m.end())
             rest = text[m.end(): end.start() if end else len(text)]
-            if not _NEGATION_RE.search(window) and not _DEFERRED_RE.search(rest):
+            starts = [x.end() for x in _SENTENCE_END.finditer(text, 0, m.start())]
+            before = text[starts[-1] if starts else 0: m.start()]
+            deferred = (_DEFERRED_RE.search(rest) or _CONDITION_BEFORE_RE.search(before)) and not _NOW_RE.search(rest)
+            if not _NEGATION_RE.search(window) and not deferred:
                 return True
     return False
 

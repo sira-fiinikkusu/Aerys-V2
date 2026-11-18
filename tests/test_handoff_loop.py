@@ -360,6 +360,7 @@ def test_promise_gate_escalates_the_wordle_promise():
 @pytest.mark.parametrize("user,reply", [
     ("did you wanna do wordle while we wait", "Sure, Chris. I\u2019ll play today\u2019s Wordle now."),  # curly
     ("Can you check my email?", "Let me check your inbox now."),
+    ("Can you set a reminder for tomorrow?", "I will set the reminder for tomorrow now."),   # the date is the task's
 ])
 def test_promise_gate_catches_what_codex_found_slipping(user, reply):
     graph = build_graph(fake_model(reply), soul="s")
@@ -387,6 +388,8 @@ def test_promise_gate_marks_its_own_audit_row():
     ("Can you tell me a story?", "I'll start with a fox in a forest."),
     ("Do you want to play Wordle tomorrow?", "I'll play it tomorrow."),
     ("Can you send it once I approve?", "I'll send it once you approve."),
+    ("can you send it", "Once you approve, I will send it."),                 # Codex re-check: condition first
+    ("can you tell me a story", "I will start the story with a fox."),
 ])
 def test_promise_gate_leaves_talk_alone(user, reply):
     graph = build_graph(fake_model(reply), soul="s")
