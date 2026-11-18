@@ -266,18 +266,36 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
 _NOTE_ING = r"withdrawing|cancel+ing|deleting|removing|saving|writing|updating|approving|declining"
 _NOTE_PAST = r"withdrew|withdrawn|cancel+ed|deleted|removed|saved|wrote|written|updated|approved|declined"
 _NOTE_VERB = r"withdraw|cancel|delete|remove|save|write|update|approve|decline"
+#: After "I'm"/"I am", any act in progress (Codex 11/18, third pass: "Kael asked, so I am sending it now").
+_DOING_ING = (_NOTE_ING + r"|sending|starting|playing|checking|opening|launching|messaging|texting|emailing|posting"
+              r"|sharing|booking|ordering|searching|scheduling|turning|switching|kicking off|firing up"
+              r"|running(?!\s+(?:low|late|out|short|behind)\b)")
 _NOTE_DOING_RE = re.compile(
     rf"^\s*(?:(?:okay|ok|sure|done|got it|chris|sir)[,!.]?\s+)*(?:now\s+)?(?:{_NOTE_ING})\b"   # at the sentence's head
-    rf"|\b(?:i'm|i am)\s+(?:now\s+|just\s+)?(?:{_NOTE_ING})\b"
+    rf"|\b(?:i'm|i am)\s+(?:now\s+|just\s+)?(?:{_DOING_ING})\b"
     rf"|\bi(?:'ve|\s+have)?\s+(?:just\s+|now\s+|already\s+)?(?:{_NOTE_PAST})\b", re.I)
-_NOTE_FUTURE_RE = re.compile(
-    rf"\b(?:i'll|i will|i'm going to|let me)\s+(?:now\s+|go ahead and\s+|just\s+)?(?:{_NOTE_VERB})\b", re.I)
 _NOTE_LATER_RE = re.compile(r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you)\b", re.I)
 _NOTE_NOW_RE = re.compile(r"\b(?:now|right now|right away|immediately)\b", re.I)
+_CLAUSE_START_RE = re.compile(r"[,;:\u2014]")
 _KAELS_QUOTE_RE = re.compile(r'\bkael\s+(?:said|says|wrote|writes|told me|tells me|asked)[,:]?\s*(?:"[^"\n]*"|\u201c[^\u201d\n]*\u201d)', re.I)
 _ABOUT_KAEL_RE = re.compile(r"^\s*(?:(?:chris|sir|ok|okay|so|and|good news)[,!.]?\s+)?kael\b", re.I)
 _FIRST_PERSON_RE = re.compile(r"\b(?:i|i'm|i'll|i've|i'd|me|my|mine)\b", re.I)
 _SENTENCES_RE = re.compile(r"(?<=[.!?;\n])\s*")
+
+
+def _note_future_re():
+    """"I'll / I will / I'm (am) going to / I'm (am) about to / let me" + any effect verb: the note verbs and
+    D61's own promise verbs. Built on first use (it borrows service's verb list)."""
+    global _NOTE_FUTURE
+    if _NOTE_FUTURE is None:
+        from aerys_v2.service import _PROMISE_VERBS
+        _NOTE_FUTURE = re.compile(
+            r"\b(?:i'll|i will|i'm going to|i am going to|i'm about to|i am about to|let me)\s+"
+            rf"(?:now\s+|go ahead and\s+|just\s+|quickly\s+)?(?:{_NOTE_VERB}|schedule|{_PROMISE_VERBS})\b", re.I)
+    return _NOTE_FUTURE
+
+
+_NOTE_FUTURE = None
 
 
 def says_she_acted(text: str) -> bool:
@@ -289,11 +307,18 @@ def says_she_acted(text: str) -> bool:
     for sentence in (x for x in _SENTENCES_RE.split(text) if x.strip()):
         if _ABOUT_KAEL_RE.match(sentence) and not _FIRST_PERSON_RE.search(sentence):
             continue                                     # Kael's own act, told about
-        if (claims_effect_done(sentence) or promises_effect_now(sentence) or claims_job_running(sentence)
+        # The brain's own checks can only add holds here ("Starting today's run now" is D61's); what lets a
+        # promise speak is the note rule below, never D61's looser timing.
+        if (claims_effect_done(sentence) or claims_job_running(sentence) or promises_effect_now(sentence)
                 or _NOTE_DOING_RE.search(sentence)):
             return True
-        m = _NOTE_FUTURE_RE.search(sentence)
-        if m and not _NEGATION_RE.search(sentence[: m.start()]):
+        for m in _note_future_re().finditer(sentence):
+            # Negation counts in the promise's own clause only ("No worries, I will ..." is a promise).
+            clause = _CLAUSE_START_RE.split(sentence[: m.start()])[-1]
+            if _NEGATION_RE.search(clause):
+                continue
+            # The note rule for every promise: deferred only by an explicit later phrase, and "now"
+            # anywhere in the sentence wins ("I will schedule tomorrow's run" holds).
             if _NOTE_NOW_RE.search(sentence) or not _NOTE_LATER_RE.search(sentence):
                 return True
     return False

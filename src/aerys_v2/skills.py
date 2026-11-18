@@ -151,23 +151,34 @@ class OwnerSkillWrites(AgentMiddleware):
 BODY_SKILLS = "/home-skills/"
 _BODY_NAMESPACE = ("aerys", "body-skills")
 _BODY_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
-#: The latest event for each skill label in the door's feed (a tombstone is a deleted skill).
-FEED_SKILLS_SQL = """SELECT DISTINCT ON (key_label) key_label, event_type, content, context, source, observed_at
-    FROM portable_memory_feed WHERE key_label LIKE 'skill.%%' ORDER BY key_label, rack_seq DESC"""
+#: Every skill event in the door's feed, in feed order. A revision arrives as an insert of the new version
+#: and THEN a tombstone of the old one under the same label (live 11/18), so liveness is per memory, not
+#: per label: rows_from_feed works it out.
+FEED_SKILLS_SQL = """SELECT rack_seq, memory_id, key_label, event_type, content, context, source, observed_at
+    FROM portable_memory_feed WHERE key_label LIKE 'skill.%%' ORDER BY rack_seq"""
 _READ_ONLY = "Not saved: skills from my bodies are written there, not here; this shelf only reads them."
+_FEED_DOWN = ("My bodies' skills couldn't be read just now (the door's feed didn't answer), so I can't tell "
+              "which ones I have from there.")
 
 
 def rows_from_feed(rows):
-    """(key_label, event_type, content, context, source, observed_at) rows -> her live, well-formed skills."""
-    skills = []
-    for label, event, content, context, source, observed in rows:
+    """Feed rows (rack_seq, memory_id, key_label, event_type, content, context, source, observed_at), in
+    feed order -> her live, well-formed skills: per memory its last event decides (a tombstone retires it);
+    per label the newest live memory is the skill."""
+    last = {}
+    for row in rows:
+        last[row[1]] = row
+    newest = {}
+    for seq, _memory, label, event, content, context, source, observed in last.values():
         slug = str(label or "").removeprefix("skill.")
         if (not str(label or "").startswith("skill.") or event == "tombstone" or not _BODY_SLUG.fullmatch(slug)
                 or not str(content or "").strip()):
             continue
-        skills.append({"slug": slug, "content": str(content), "when": str(context or "").removeprefix("skill: ").strip(),
-                       "source": str(source or "portable"), "observed": observed})
-    return skills
+        if slug not in newest or seq > newest[slug][0]:
+            newest[slug] = (seq, {"slug": slug, "content": str(content),
+                                  "when": str(context or "").removeprefix("skill: ").strip(),
+                                  "source": str(source or "portable"), "observed": observed})
+    return [skill for _, skill in sorted(newest.values(), key=lambda pair: pair[1]["slug"])]
 
 
 def body_skill_md(row):
@@ -201,6 +212,7 @@ class BodySkillsBackend(StoreBackend):
         super().__init__(namespace=lambda rt: _BODY_NAMESPACE, store=InMemoryStore())
         self._load, self._refresh_s, self._clock = load, refresh_s, clock or time.monotonic
         self._loaded_at = None
+        self._loaded_ok = False          # until one load works, a failure is an error, not an empty shelf
         self._refresh_lock = threading.Lock()
 
     def _refresh(self):
@@ -221,10 +233,13 @@ class BodySkillsBackend(StoreBackend):
             fresh = StoreBackend(namespace=lambda rt: _BODY_NAMESPACE, store=InMemoryStore())
             for row in rows:
                 fresh.write(f"/{row['slug']}/SKILL.md", body_skill_md(row))
-            self._store = fresh._store
+            self._store, self._loaded_ok = fresh._store, True
 
     def ls(self, path):
         self._refresh()
+        if not self._loaded_ok:          # Codex 11/18: never let "couldn't read" look like "has none"
+            from deepagents.backends.protocol import LsResult
+            return LsResult(error=_FEED_DOWN)
         return super().ls(path)
 
     def read(self, file_path, offset=0, limit=2000):
@@ -238,6 +253,9 @@ class BodySkillsBackend(StoreBackend):
     async def als(self, path):
         import asyncio
         await asyncio.to_thread(self._refresh)
+        if not self._loaded_ok:
+            from deepagents.backends.protocol import LsResult
+            return LsResult(error=_FEED_DOWN)
         return await super().als(path)
 
     async def aread(self, file_path, offset=0, limit=2000):
@@ -267,6 +285,12 @@ class BodySkillsBackend(StoreBackend):
     def delete(self, file_path):
         from deepagents.backends.protocol import DeleteResult
         return DeleteResult(error=_READ_ONLY)
+
+    async def adelete(self, file_path):
+        return self.delete(file_path)
+
+    async def aupload_files(self, files):
+        return self.upload_files(files)
 
     def upload_files(self, files):
         from deepagents.backends.protocol import FileUploadResponse

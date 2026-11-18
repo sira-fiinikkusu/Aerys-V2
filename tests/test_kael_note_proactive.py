@@ -222,6 +222,12 @@ import pytest
     "I will cancel tomorrow's run.",
     "I will withdraw it; I will update it tomorrow.",
     "I cannot help with that. I will withdraw the request now.",
+    # Codex 11/18 (third pass): any effect verb follows the note rule; negation is the action's own clause
+    "I will schedule tomorrow's run.",
+    "Now I will send it when we talk.",
+    "No worries, I will withdraw the request now.",
+    "I am going to withdraw the request now.",
+    "Kael asked, so I am sending it now.",
 ])
 def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     g, sends = FakeGraph(), []
@@ -240,6 +246,8 @@ def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     # Codex re-check 11/18: a gerund that isn't an act
     "That sounds sensible, deleting the file would be risky.",
     "I enjoy reading, writing, and talking with you.",
+    "I'm running low on ideas, honestly.",
+    "I don't think I'll withdraw it.",
 ])
 def test_a_note_turn_that_only_tells_still_speaks(reply):
     g, sends = FakeGraph(), []
