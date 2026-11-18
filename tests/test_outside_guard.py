@@ -66,7 +66,9 @@ def test_reachouts_wait_and_execute_only_after_tap(name):
     assert calls == ['exact approved words']
 
 
-@pytest.mark.parametrize('identity', [TEXT, STRONG])
+# D64 (11/18): his own typed Discord start goes straight after a read (test_his_discord_ask_starts_...);
+# Telegram and voice still wait.
+@pytest.mark.parametrize('identity', [dict(TEXT, platform='telegram'), STRONG])
 def test_home_job_shortcuts_disabled_by_read(identity):
     b = Box()
     req = request([ToolMessage(content='read', name='read_email', tool_call_id='r')],
@@ -221,9 +223,10 @@ def test_actual_engine_room_and_origin_gate():
         assert receipt.content.startswith(expected)
 
 
+@pytest.mark.parametrize('platform', ['discord', 'telegram'])
 @pytest.mark.parametrize('name', ['remember', 'start_async_task'])
 @pytest.mark.parametrize('read_first', [False, True])
-def test_engine_approval_for_home_and_memory(name, read_first):
+def test_engine_approval_for_home_and_memory(name, read_first, platform):
     from aerys_v2.factory import build_action_graph
     from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
     calls = []
@@ -245,9 +248,11 @@ def test_engine_approval_for_home_and_memory(name, read_first):
     graph = build_action_graph(GenericFakeChatModel(messages=iter(replies)), 'test', [target, read_email],
                                outside_gate=b.gate, guard_owner=OWNER)
     graph.invoke({'messages': [HumanMessage(content='save')]}, {'configurable': {
-        'thread_id': OWNER_THREAD, 'identity': TEXT, 'outside_text': {}}})
-    assert calls == ([] if read_first else [name])
-    assert bool(b.approval_store.rows) is read_first
+        'thread_id': OWNER_THREAD, 'identity': dict(TEXT, platform=platform), 'outside_text': {}}})
+    # D64: his typed Discord start goes straight after a read, end to end; everything else waits.
+    waits = read_first and not (name == 'start_async_task' and platform == 'discord')
+    assert calls == ([] if waits else [name])
+    assert bool(b.approval_store.rows) is waits
 
 
 def test_live_room_provenance_uses_ids_not_labels():
@@ -532,3 +537,41 @@ def test_every_other_case_still_waits_for_his_tap(who):
     out = outside_guard(_kael_request(identity, messages), lambda r: pytest.fail('went straight'),
                         gate=None if who == 'no gate' else b.gate)
     assert isinstance(out, ToolMessage) and 'Delivered' not in out.content    # held: a card, a wait or a no
+
+
+# --- D64 (Chris 11/18 11:24, "a"): a home job he asked for on Discord starts straight after a read ---
+# 11:22: she listed her home jobs (their reports carry web text), then starting MapTap raised an
+# Approve card he "shouldnt really need at home".
+
+def _home_job_request(identity, messages=None, name='start_async_task'):
+    msgs = messages or [ToolMessage(content='[{"task_id": "t-1", "status": "success"}]',
+                                    name='list_async_tasks', tool_call_id='r')]
+    args = ({'description': "Play today's MapTap at https://maptap.gg/", 'subagent_type': 'home'}
+            if name == 'start_async_task' else {'task_id': 't-1', 'message': 'also note the score'})
+    req = request(msgs, name=name, args=args)
+    req.runtime.config['configurable'].update(identity=identity, thread_id=OWNER_THREAD)
+    return req
+
+
+def test_his_discord_ask_starts_her_home_job_straight_after_a_read():
+    b = Box()
+    out = outside_guard(_home_job_request(TEXT), lambda r: 'started', gate=b.gate)
+    assert out == 'started' and not b.approval_store.rows
+    web = [ToolMessage(content='page words', name='read_web_page', tool_call_id='w')]
+    assert outside_guard(_home_job_request(TEXT, web), lambda r: 'started', gate=b.gate) == 'started'
+
+
+@pytest.mark.parametrize('who', ['voice', 'stranger', 'telegram', 'relay', 'no gate', 'adjusting'])
+def test_every_other_home_job_case_still_waits_for_his_tap(who):
+    from test_hands_gate import STRANGER_ASK
+    b = Box()
+    identity = {'voice': STRONG, 'stranger': STRANGER_ASK,
+                'telegram': dict(TEXT, platform='telegram')}.get(who, TEXT)
+    messages = None
+    if who == 'relay':
+        messages = [AIMessage(content='relay', additional_kwargs={'reach_source': 'relay'}),
+                    HumanMessage(content='start it'),
+                    ToolMessage(content='[]', name='list_async_tasks', tool_call_id='r')]
+    req = _home_job_request(identity, messages, name='update_async_task' if who == 'adjusting' else 'start_async_task')
+    out = outside_guard(req, lambda r: pytest.fail('went straight'), gate=None if who == 'no gate' else b.gate)
+    assert isinstance(out, ToolMessage)                       # held: a card, a wait or a no

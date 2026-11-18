@@ -136,6 +136,13 @@ def _decide(request, gate):
     # surface, a relayed message, a room or an unattended run still waits for his tap.
     if name == 'message_kael' and set(sources) <= READERS and _owner_typed_on_discord(conf, gate):
         return None
+    # D64 (Chris 11/18 11:24, "a"): the same for starting a home job. 11:22 she listed her home jobs
+    # (their reports carry web text), and starting the MapTap he asked for raised a card he "shouldnt
+    # really need at home". The D10 gate, next in line, still decides who may start one. Adjusting a
+    # running job (update_async_task), another asker, a voice, Telegram, a relay or an unattended run
+    # still waits for his tap.
+    if name == 'start_async_task' and set(sources) <= READERS and _owner_typed_on_discord(conf, gate):
+        return None
     if name == 'send_email':
         # D28 (11/11, the follow-through): after outside text an email waits for his tap. The button
         # shows the exact mail; his tap is the confirmation, and the watcher sends exactly that, once
