@@ -641,6 +641,18 @@ STILL_GOING_1050 = ("Good, then it's covered and I'll leave it alone. I won't re
     "MapTap is still running.",
     "The MapTap run is still chugging along.",
     "No worries. The MapTap run is still going.",
+    # Codex re-check 11/18: punctuation between subject and status, a question after the claim,
+    # plain "is going"/"is working", and an affirmative clause after "but"
+    "The job, as expected, is still running.",
+    "The job status: still running.",
+    "The job is slow but still running.",
+    "The job is still running, would you like an update?",
+    "The job is still running; anything else?",
+    "The job is going.",
+    "The task is working.",
+    "I can't see the page, but the MapTap run is still going.",
+    "Sure, the job is still running.",                              # "sure" is not doubt
+    "It's probably still running on my home machine.",              # hedged, still unchecked
 ])
 def test_status_gate_sends_a_still_going_down_the_path_that_can_look(reply):
     graph = build_graph(fake_model(reply), soul="s")
@@ -665,6 +677,10 @@ def test_status_gate_sends_a_still_going_down_the_path_that_can_look(reply):
     "If the job is running, wait for it to finish.",
     "You asked whether the job is running.",
     "Is the MapTap run still going?",
+    # Codex re-check 11/18: uncertainty before the status, and "going to"
+    "I cannot confirm whether, at this point, the job is still running.",
+    "I cannot confirm: the job is still running.",
+    "The job is going to take a while to start.",
 ])
 def test_status_gate_leaves_other_talk_alone(reply):
     graph = build_graph(fake_model(reply), soul="s")
