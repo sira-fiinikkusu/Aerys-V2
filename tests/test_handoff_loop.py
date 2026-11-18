@@ -392,6 +392,7 @@ MAPTAP_1047 = ("Starting today's MapTap run on my home machine now, Chris. It'll
     ("yes", "Checking your inbox now."),
     ("yes", "Turning the lights off now."),
     ("yes", "Sure thing, launching MapTap now."),
+    ("yes", "Sending to Kael now."),                     # Codex re-check: "to" is not an idiom
 ])
 def test_promise_gate_catches_a_yes_answered_with_starting_now(user, reply):
     graph = build_graph(fake_model(reply), soul="s")
@@ -412,6 +413,9 @@ def test_promise_gate_catches_a_yes_answered_with_starting_now(user, reply):
     ("yes", "Running total: three ideas so far."),
     ("yes", "Starting a new chapter in life can feel scary."),
     ("yes", "Sending good vibes your way."),
+    ("yes", "Checking my understanding: you prefer blue."),
+    ("yes", "Sharing a thought: this seems sensible."),
+    ("yes", "Turning to your question: it depends."),
 ])
 def test_promise_gate_leaves_a_yes_to_talk_alone(user, reply):
     graph = build_graph(fake_model(reply), soul="s")

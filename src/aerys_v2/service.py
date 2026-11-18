@@ -2332,8 +2332,9 @@ _PROMISE_PATTERNS = (
         r"(?:(?:chris|sir)[,!.]?\s+)?(?:i'm\s+|i am\s+)?(?:(?:now|just|going ahead and)\s+)*"
         r"(?:starting|kicking off|launching|firing up|opening|sending|playing|running|checking|turning|"
         r"switching|setting up|looking up|searching|messaging|texting|emailing|booking|ordering|posting|sharing)\b"
-        r"(?!:)(?!\s+(?:with|by|off with|over|from|to|the story|a story|the tale|our story|a new chapter|"
-        r"good vibes|devil'?s advocate|gears|low|late|out|short|behind|total|thoughts?)\b)",
+        r"(?!:)(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story|a new chapter|"
+        r"good vibes|devil'?s advocate|gears|low|late|out|short|behind|total|thoughts?|a thought|my understanding|"
+        r"to (?:your|that|this|the|my) (?:question|point|topic|idea))\b)",
         re.I,
     ),
 )
