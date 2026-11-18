@@ -817,6 +817,12 @@ NO_TOOL_ACTION_MARKER = "no_tool_action"
 CLAIM_GATE_MARKER = "claim_gate_escalated"
 #: D61 (11/18): the promise gate's own mark, countable apart from a done-claim.
 PROMISE_GATE_MARKER = "promise_gate_escalated"
+#: D65 (Chris 11/18 11:38): a tool-less "the run is still going" about a home job, sent down the action
+#: path to look first. Its own marker, so the status gate's catches are countable apart from D61's.
+STATUS_GATE_MARKER = "status_gate_escalated"
+#: What the escalated turn is told (appended to his words in the action seed only; never kept in history).
+STATUS_CHECK_HINT = ("[before you say whether a home job is running or how it's going, look: list_async_tasks "
+                     "or check_async_task, and answer from what they say]")
 
 # False-wake grace (owner ask 2026-08-27): the router judged this voice/lens
 # capture was never directed at Aerys and the turn was dropped — no reply, no
@@ -1457,7 +1463,7 @@ def ask(
             tier_override_source=override_source, extra_degraded=downgrade_marker,
             human_privacy=origin_privacy, human_id=turn_msg_id,
         )
-        claim_escalation = promise_escalation = False
+        claim_escalation = promise_escalation = status_escalation = False
         if not handoff and action_graph is not None and _promises_effect_without_doing_it(text, reply):
             # D61 (Chris 11/18 10:16, "1. a"; ticket T-25): the same escalation for a PROMISE
             # with nothing behind it. At 09:43 his "did you wanna do wordle while we wait" was
@@ -1489,6 +1495,16 @@ def ask(
             )
             handoff = True
             claim_escalation = True
+        if not handoff and action_graph is not None and claims_job_running(reply):
+            # D65 (Chris 11/18 11:38; the side agent's note): at 10:50 she said "The MapTap run is still
+            # going on my home machine" from the tool-less chat path when no job had ever started.
+            # Nothing here can look at her jobs, so the turn goes where she can, told to look first.
+            log.info(
+                "status gate: tool-less chat reply said a home job is running — "
+                "escalating to action | thread=%s", thread_id
+            )
+            handoff = True
+            status_escalation = True
         if handoff and action_graph is None:
             reply = HANDOFF_UNARMED_REPLY
             msg_id = _last_ai_message_id(graph, config["configurable"])
@@ -1517,8 +1533,10 @@ def ask(
                 replace_message_id=_last_ai_message_id(graph, config["configurable"]),
                 escalated=True,
                 extra_degraded=([CLAIM_GATE_MARKER] if claim_escalation else
-                                [PROMISE_GATE_MARKER] if promise_escalation else None),
+                                [PROMISE_GATE_MARKER] if promise_escalation else
+                                [STATUS_GATE_MARKER] if status_escalation else None),
                 tier=normalize_tier(decision.tier),
+                seed_hint=STATUS_CHECK_HINT if status_escalation else None,
             )
         _reclassify_if_needed(
             graph, config, turn_msg_id, text, reply,
@@ -1980,6 +1998,19 @@ def _action_reply(content, config, messages=(), *, id=None):
                      additional_kwargs={'outside_read': True} if marked else {})
 
 
+def _with_seed_hint(seed: list, hint: str) -> list:
+    """D65: append a short instruction to his words in the action seed only (the seed is one-shot; the
+    main thread's history keeps his words as he wrote them)."""
+    if not seed or not isinstance(seed[-1], HumanMessage):
+        return seed
+    last = seed[-1]
+    if isinstance(last.content, str):
+        content = f"{last.content}\n\n{hint}"
+    else:
+        content = [*list(last.content or []), {"type": "text", "text": hint}]
+    return [*seed[:-1], last.model_copy(update={"content": content})]
+
+
 def _action_turn(
     action_graph: object,
     graph: object,
@@ -1996,6 +2027,7 @@ def _action_turn(
     extra_degraded: list[str] | None = None,
     tier: str = "standard",
     reflex: _ReflexShadow | None = None,
+    seed_hint: str | None = None,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -2029,6 +2061,8 @@ def _action_turn(
         )
         CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
         seed = _direct_device_seed(action_graph, seed)
+        if seed_hint:
+            seed = _with_seed_hint(seed, seed_hint)
         result, gate_degraded = _run_action_gated(
             action_graph,
             seed,
@@ -2382,6 +2416,27 @@ def _promises_effect_without_doing_it(user_text: str, reply: str) -> bool:
     return bool(promises_effect_now(reply) and (
         plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)
         or _CONSENT_RE.fullmatch(user_text)))
+
+
+#: D65: her reply says a home job is running or underway. The nouns are her jobs' own (run, job, task);
+#: "your job" / "his job" is his work, not hers.
+_JOB_STATUS_PATTERNS = (
+    re.compile(r"(?<!your )(?<!his )\b(?:run|job|task)\b[^.!?\n]{0,40}?\b(?:is|'s)\s+(?:still\s+)?"
+               r"(?:going|running|in progress|underway|working)\b", re.I),
+    re.compile(r"\b(?:is|'s|are)\s+(?:still\s+)?(?:running|going|underway|in progress)\s+on my home "
+               r"(?:machine|body|computer)\b", re.I),
+)
+
+
+def claims_job_running(text: str) -> bool:
+    """D65: does this reply say, in its own voice, that a home job is running right now?"""
+    text = _plain_quotes(text)
+    for pattern in _JOB_STATUS_PATTERNS:
+        for m in pattern.finditer(text or ""):
+            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+            if not _NEGATION_RE.search(window) and not _NEGATION_RE.search(m.group(0)):
+                return True
+    return False
 
 
 def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:

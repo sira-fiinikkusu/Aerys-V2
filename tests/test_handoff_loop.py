@@ -622,3 +622,54 @@ def test_router_hears_garbled_kael_as_an_action(text):
 def test_the_vegetable_is_still_a_vegetable(text):
     from aerys_v2.router import plausibly_messages_kael
     assert plausibly_messages_kael(text) is False
+
+
+# ---- D65 THE STATUS GATE (Chris 11/18 11:38, "yes i'd like for you to do that next") -----------
+# 10:50: "i told him separately" went to chat; she answered "The MapTap run is still going on my home
+# machine" when no job had ever started. A tool-less "it's still going" about a home job is re-sent
+# down the action path, told to look at the job before saying how it's going.
+STILL_GOING_1050 = ("Good, then it's covered and I'll leave it alone. I won't resend anything to Kael. "
+                    "The MapTap run is still going on my home machine.")
+
+
+@pytest.mark.parametrize("reply", [
+    STILL_GOING_1050,                                               # the live miss
+    "The job is still running, I'll tell you when it's done.",
+    "It’s still running on my home machine.",                  # curly
+    "Today's Wordle run is underway.",
+])
+def test_status_gate_sends_a_still_going_down_the_path_that_can_look(reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("Checked: no home job is running right now.")
+    out = ask(graph, "i told him separately", identity=CHRIS, thread_id="t-status", router=chat_router,
+              action_graph=stub)
+    assert out == "Checked: no home job is running right now."
+    last = stub.seeds[0][-1]
+    assert "i told him separately" in str(last.content) and "check_async_task" in str(last.content)
+    contents = [m.content for m in graph.get_state({"configurable": {"thread_id": "t-status"}}).values["messages"]]
+    assert reply not in contents                                    # the unchecked claim never stays
+
+
+@pytest.mark.parametrize("reply", [
+    "The run finished at 11:30 with 407 points.",
+    "The run isn't still going; it finished at 11:30.",
+    "Your job is still going well, I hope.",                        # his work, not her home job
+    "The dishwasher is still running.",
+    "I'm still running low on ideas.",
+])
+def test_status_gate_leaves_other_talk_alone(reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, "how are things", identity=CHRIS, thread_id="t-status2", router=chat_router, action_graph=stub)
+    assert out == reply and stub.seeds == []
+
+
+def test_status_gate_marks_its_own_audit_row():
+    rec = Recorder()
+    graph = build_graph(fake_model("The job is still running."), soul="s")
+    ask(graph, "ok", identity=CHRIS, thread_id="t-status3", router=chat_router,
+        action_graph=SeedCapturingActionGraph(), record_turn=rec)
+    action_row = next(r for r in rec.wait(1) if r.get("classifier_intent") == "action")
+    degraded = json.loads(action_row["degraded"])
+    assert "status_gate_escalated" in degraded
+    assert "promise_gate_escalated" not in degraded and "claim_gate_escalated" not in degraded
