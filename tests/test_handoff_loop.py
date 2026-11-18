@@ -369,6 +369,41 @@ def test_promise_gate_catches_what_codex_found_slipping(user, reply):
                action_graph=stub) == "Done for real."
 
 
+# 11/18 10:47: his "give it a shot" (yes to her own MapTap offer) went to chat; she said "Starting
+# today's MapTap run on my home machine now" holding no tools, and nothing ran for 20 minutes.
+MAPTAP_1047 = ("Starting today's MapTap run on my home machine now, Chris. It'll open the page and take a "
+               "look before any tap, then use browse_pointer to drag the globe and place each guess.")
+
+
+@pytest.mark.parametrize("user,reply", [
+    ("give it a shot", MAPTAP_1047),                                          # the live miss
+    ("go for it", "Kicking off today's MapTap now."),
+    ("yes", "I'm starting the MapTap run on my home machine."),
+    ("sure, do it", "Okay, launching MapTap on my home machine."),
+    ("yeah go ahead", "Sending it to Kael now."),
+    ("ok sure, try it", "Got it. Opening MapTap in my browser now."),
+])
+def test_promise_gate_catches_a_yes_answered_with_starting_now(user, reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("Started for real.")
+    assert ask(graph, user, identity=CHRIS, thread_id="t-promise5", router=chat_router,
+               action_graph=stub) == "Started for real."
+
+
+@pytest.mark.parametrize("user,reply", [
+    ("give it a shot", "Starting with a fox: once upon a time, in a forest."),   # a story is talk
+    ("perfect", "Good. I'll keep it that way for every Wordle run."),           # his 10:26 wrap-up
+    ("sweet yeah, like this going forward", "Locked in. Grid first, walkthrough after."),
+    ("yes", "Running low on ideas for the next one, honestly."),
+    ("i told him separately", "Good, then it's covered and I'll leave it alone."),
+])
+def test_promise_gate_leaves_a_yes_to_talk_alone(user, reply):
+    graph = build_graph(fake_model(reply), soul="s")
+    stub = SeedCapturingActionGraph("(must not run)")
+    out = ask(graph, user, identity=CHRIS, thread_id="t-promise6", router=chat_router, action_graph=stub)
+    assert out == reply and stub.seeds == []
+
+
 def test_promise_gate_marks_its_own_audit_row():
     rec = Recorder()
     graph = build_graph(fake_model("On it."), soul="s")

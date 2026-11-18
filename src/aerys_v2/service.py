@@ -2323,11 +2323,28 @@ _PROMISE_PATTERNS = (
     ),
     # terse: "On it.", "Starting it now.", "Kicking that off."
     re.compile(r"(?:^|[.!?]\s+|[—-]\s*)(?:on it|starting (?:it|that|now|the)|kicking (?:it|that) off)\b", re.I),
+    # 11/18 10:47: an act in progress, said at the head of a sentence ("Starting today's MapTap run on my
+    # home machine now", "Okay, launching MapTap", "I'm sending it to Kael now"). A story's opening and
+    # "running low" are talk.
+    re.compile(
+        r"(?:^|[.!?]\s+|[—-]\s*)(?:(?:okay|ok|alright|sure|great|got it|good)[,!.]?\s+)?(?:(?:chris|sir)[,!.]?\s+)?"
+        r"(?:i'm\s+|i am\s+|now\s+)?"
+        r"(?:starting|kicking off|launching|firing up|opening|sending|playing|running(?!\s+(?:low|late|out|short|behind)))\b"
+        r"(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story)\b)",
+        re.I,
+    ),
 )
 #: His message proposes an activity even when it isn't phrased as an order ("did you wanna...").
 _PROPOSES_RE = re.compile(
     r"\b(?:wanna|want to|could you|can you|would you|will you|go ahead|let'?s|"
     r"mind (?:doing|playing|checking|starting))\b", re.I)
+#: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
+#: "sure, do it"). The whole message, so "yeah, like this going forward" stays talk.
+_CONSENT_RE = re.compile(
+    r"\s*(?:(?:ok(?:ay)?|sure|yes|yeah|yep|yup|alright|cool|great|perfect)[\s,!.]*)*"
+    r"(?:give it a (?:shot|go|try|whirl)|go for it|(?:go ahead and )?(?:do|try|start|play|run|send) it|"
+    r"go ahead|let'?s (?:do it|go|try it)|sounds good|please do|yes|yeah|yep|yup|sure|ok(?:ay)?)"
+    r"(?:\s*(?:please|then|now|sir))?[\s!.]*", re.I)
 
 
 def _plain_quotes(text: str) -> str:
@@ -2358,7 +2375,8 @@ def _promises_effect_without_doing_it(user_text: str, reply: str) -> bool:
     needed, as for the claim gate: "I'll play it later?" from reminiscing never fires."""
     user_text = _plain_quotes(user_text)
     return bool(promises_effect_now(reply) and (
-        plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)))
+        plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)
+        or _CONSENT_RE.fullmatch(user_text)))
 
 
 def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
