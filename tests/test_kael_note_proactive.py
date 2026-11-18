@@ -190,3 +190,37 @@ def test_model_failure_is_swallowed_and_note_survives():
     msg_id = note(f"person:{OWNER}", "note body", True)  # must not raise
     assert msg_id.startswith("kael-note-")
     assert len(graph.updates) == 1 and sends == []
+
+
+# --- 11/18 (the side agent's note): her note-turn has no tools, so it can't back an act --------------
+# Today's honesty gates (D61 promise, D65 status, the claim gate) run on her replies to his messages. The
+# note-turn is a bare model call with no tools; at 12:23 Kael's note told her she could withdraw a skill
+# request, and that turn could have said "withdrawing it now" with nothing able to do it. A reply that
+# says she did, is doing, or will now do something holds instead; the note stays in her thread for her
+# next real turn with him.
+import pytest
+
+
+@pytest.mark.parametrize("reply", [
+    "Withdrawing the MapTap skill request now, Chris.",
+    "I'll withdraw the skill request right away.",
+    "I've withdrawn the request.",
+    "Starting today's MapTap run now.",
+    "The MapTap run is still going on my home machine.",
+    "Done. I sent Kael the details.",
+])
+def test_a_note_turn_that_claims_an_act_holds_instead(reply):
+    g, sends = FakeGraph(), []
+    note_fn(g, SpeakModel(reply), sends)(f"person:{OWNER}", "you can withdraw the skill request", True)
+    assert sends == [] and len(g.updates) == 1          # only the note itself; nothing went to him
+
+
+@pytest.mark.parametrize("reply", [
+    "Chris, Kael says the demo notes landed. Proud of you.",
+    "Kael found why my MapTap skill was stuck at the door; he's fixing it.",
+    "Kael says I can withdraw that skill request; I'll do it next time we talk.",
+])
+def test_a_note_turn_that_only_tells_still_speaks(reply):
+    g, sends = FakeGraph(), []
+    note_fn(g, SpeakModel(reply), sends)(f"person:{OWNER}", "news", True)
+    assert len(sends) == 1 and sends[0][2] == reply

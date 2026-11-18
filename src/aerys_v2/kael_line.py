@@ -254,6 +254,27 @@ def _telegram_send(token: str, chat_id: str, text: str, *, silent: bool = False)
     _send_parts(split_message(text, 4000) or [text[:4000]], post)
 
 
+#: Acts the note-turn can't do, in her own voice: doing it now ("Withdrawing the request now"), about to
+#: ("I'll cancel it right away"), or done ("I've withdrawn it"). Beside the brain's own gates (claim,
+#: promise D61, status D65), which cover sending, starting, playing, checking and running.
+_NOTE_ACT_RE = re.compile(
+    r"(?:^|[.!?]\s+)(?:(?:okay|ok|sure|done|got it)[,!.]?\s+)?(?:i'm\s+|i am\s+)?(?:now\s+)?"
+    r"(?:withdrawing|cancel+ing|deleting|removing|saving|writing|updating|approving|declining)\b"
+    r"|\b(?:i'll|i will|i'm going to|let me)\s+(?:now\s+|go ahead and\s+)?"
+    r"(?:withdraw|cancel|delete|remove|save|write|update|approve|decline)\b(?![^.!?\n]*\b(?:next time|later|tomorrow|when)\b)"
+    r"|\bi(?:'ve| have)\s+(?:just\s+|now\s+)?(?:withdrawn|cancel+ed|deleted|removed|saved|written|updated|approved|declined)\b",
+    re.I)
+
+
+def says_she_acted(text: str) -> bool:
+    """Does a reply from a turn with no tools say she did, is doing, or will now do something?"""
+    from aerys_v2.service import _plain_quotes, claims_effect_done, claims_job_running, promises_effect_now
+
+    text = _plain_quotes(text)
+    return bool(claims_effect_done(text) or promises_effect_now(text) or claims_job_running(text)
+                or _NOTE_ACT_RE.search(text))
+
+
 def kael_note_for(
     graph, settings, *,
     proactive_model=None,
@@ -331,6 +352,12 @@ def kael_note_for(
             text = _reply_text(reply).strip()
             if not text or _HOLD_RE.match(text):
                 log.info("kael-note proactive: HOLD")
+                return
+            if says_she_acted(text):
+                # 11/18 (the side agent's note): this turn has no tools, so it can't back an act. Her
+                # replies to his messages carry today's gates (D61, D65, the claim gate); this turn
+                # didn't. The note stays in her thread for her next real turn with him.
+                log.info("kael-note proactive: held (it says she did or is doing something; this turn can't act)")
                 return
             if desk is not None and proactive_send is None:
                 # The reach-out desk (#176, Stage 2) owns when, where and whether: the night,
@@ -848,7 +875,9 @@ def ticket_relay_for(graph, settings, *, model=None, reach=None, desk=None) -> C
         except Exception:
             log.warning("ticket %s relay: her words failed; passing Kael's on plainly", name,
                         exc_info=True)
-        if not text or _HOLD_RE.match(text):
+        if not text or _HOLD_RE.match(text) or says_she_acted(text):
+            # 11/18: this turn has no tools, so a reply saying she did or is doing something can't stand;
+            # his answer goes plainly, as Kael's words.
             text = f"Kael got back to me ({name}): {ticket.answer}"
         if desk is not None:
             note = ""

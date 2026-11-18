@@ -494,7 +494,10 @@ def test_the_relay_is_her_words_with_no_hold_and_the_thread_remembers():
     assert graph.updates == [("person:" + OWNER, [AIMessage(content=sent[0])])]
 
 
-@pytest.mark.parametrize("reply", [RuntimeError("model down"), "", "HOLD"])
+@pytest.mark.parametrize("reply", [RuntimeError("model down"), "", "HOLD",
+                                   # 11/18: her relay turn has no tools, so a claimed act can't stand
+                                   "Starting the backup check now, Chris.",
+                                   "I've withdrawn the request."])
 def test_when_her_words_fail_kaels_answer_still_goes_plainly(reply):
     sent = []
     relay = ticket_relay_for(FakeGraph(), owner_settings(), model=SpeakModel(reply),
