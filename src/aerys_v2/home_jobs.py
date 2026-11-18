@@ -107,7 +107,9 @@ HOME_JOBS_OVERLAY = (
     "don't check on it right after starting. When it finishes, Chris is told (\"I'm done\"), so "
     "don't promise to report back yourself. If he changes his mind mid-job, send the change with "
     "update_async_task: the job adjusts in flight. check_async_task and list_async_tasks say how his "
-    "jobs are going when he asks; cancel_async_task stops one. If a tool says it's waiting for "
+    "jobs are going when he asks; while one runs, check_async_task also shows what it is doing right now "
+    "(its plan, its last step, the page it's on, its own last words), so you can answer \"how's it going?\" "
+    "from that; cancel_async_task stops one. If a tool says it's waiting for "
     "Chris's tap, tell him it's waiting on his button and never say it started. To hand him a file "
     "your home job made, send_file_to_chris with its path: it lands in his DM. When he asks what you "
     "sent him, files_sent_to_chris is the record (direct sends aren't jobs, so the job list won't "
@@ -384,7 +386,61 @@ def home_subagent_middleware(url: str, token: str, projects=()):
     return HomeSubAgents(async_subagents=[home, *members])
 
 
-def home_ledger_middleware(ledger, owner_person_id: str, members=None):
+#: T-25 (11/18): what of a running job's own account she sees when she checks on it. Bounded: it
+#: is written by her home body, and its page title and address are outside text (check_async_task
+#: is a reader for the outside guard already).
+LIVE_KEYS = ("plan", "last_tool", "page", "said", "steps", "running_s", "at")
+LIVE_JSON_CHARS = 6000
+
+
+def home_live_fetch(url: str, token: str, *, client_factory=None, timeout: float = 4.0) -> Callable:
+    """T-25: GET the running job's thread from her home server and return its live account
+    (values.live), or None. Never raises: a check without it still says "running"."""
+    import httpx
+    from urllib.parse import quote
+
+    def fetch(thread_id: str):
+        try:
+            with (client_factory or (lambda: httpx.Client(timeout=timeout)))() as client:
+                r = client.get(f"{url.rstrip('/')}/threads/{quote(str(thread_id), safe='')}",
+                               headers={"Authorization": f"Bearer {token}"})
+            if r.status_code != 200:
+                return None
+            live = (r.json().get("values") or {}).get("live")
+            if not isinstance(live, dict):
+                return None
+            live = {k: live[k] for k in LIVE_KEYS if k in live}
+            return live if len(json.dumps(live)) <= LIVE_JSON_CHARS else None
+        except Exception:
+            log.debug("home jobs: no live account for %s", thread_id, exc_info=True)
+            return None
+    return fetch
+
+
+def with_live(result, live_fetch):
+    """T-25: a check that says "running" also says what the job is doing now."""
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    update = result.update if isinstance(result, Command) and isinstance(result.update, dict) else None
+    if live_fetch is None or not update:
+        return result
+    messages = []
+    for m in update.get("messages") or []:
+        if isinstance(m, ToolMessage):
+            try:
+                body = json.loads(m.content)
+            except (TypeError, ValueError):
+                body = None
+            if isinstance(body, dict) and body.get("status") == "running" and body.get("thread_id"):
+                live = live_fetch(body["thread_id"])
+                if live:
+                    m = m.model_copy(update={"content": json.dumps({**body, "live": live}, ensure_ascii=False)})
+        messages.append(m)
+    return dataclasses.replace(result, update={**update, "messages": messages})
+
+
+def home_ledger_middleware(ledger, owner_person_id: str, members=None, *, live_fetch=None):
     """Hands his jobs to the official home tools (through their runtime state) and writes back
     every update they return, all under his lock: one load, call, save at a time, so nothing older
     is ever written over something newer. What's on record wins over what the turn last saw. If
@@ -459,7 +515,10 @@ def home_ledger_middleware(ledger, owner_person_id: str, members=None):
             except Exception:
                 log.warning("home jobs: couldn't read the jobs; nothing runs", exc_info=True)
                 return refused(request)
-            return kept(session, handler(with_jobs(request, tasks, person)), tasks, asked(request), person)
+            result = kept(session, handler(with_jobs(request, tasks, person)), tasks, asked(request), person)
+        if (request.tool_call or {}).get("name") == "check_async_task":
+            return with_live(result, live_fetch)        # outside his lock: a slow home can't hold it
+        return result
 
     class HomeTaskLedger(AgentMiddleware):
         def wrap_tool_call(self, request, handler):
@@ -641,7 +700,8 @@ def build_home_jobs(*, url: str, token: str, ledger, owner_person_id: str,
     subagents.tools = [*subagents.tools, continue_home_job_tool(
         url=url, token=token, ledger=ledger, owner_person_id=owner_person_id,
         subagents=subagents, members=gate.members)]
-    middleware = [home_ledger_middleware(ledger, owner_person_id, gate.members), home_job_middleware(gate), subagents]
+    middleware = [home_ledger_middleware(ledger, owner_person_id, gate.members, live_fetch=home_live_fetch(url, token)),
+                  home_job_middleware(gate), subagents]
     if files is not None:
         middleware.append(files)
     return HomeJobs(middleware=middleware, overlay=HOME_JOBS_OVERLAY, gate=gate, watcher=HandsWatcher(gate))

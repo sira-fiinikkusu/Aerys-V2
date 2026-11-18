@@ -929,3 +929,76 @@ def test_his_jobs_never_go_into_her_project(home):
     (said,) = tool_texts(out)
     assert said.startswith("Not started: that's a household member's own project")
     assert not home.created("run") and b.ledger.load(OWNER) == {}
+
+
+# --- T-25 (11/18): checking a running home job shows what it's doing --------------------------
+
+def _running_command(thread_id='th-1', status='running'):
+    import json as _json
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+    return Command(update={'messages': [ToolMessage(_json.dumps({'status': status, 'thread_id': thread_id}),
+                                                    tool_call_id='c')], 'async_tasks': {}})
+
+
+def test_a_running_check_carries_the_live_account_and_a_finished_one_does_not():
+    import json as _json
+    from aerys_v2.home_jobs import with_live
+    live = {'plan': [{'id': '1', 'text': "Play today's Wordle", 'status': 'in_progress'}], 'said': 'Guess 2: BLUNT'}
+    asked = []
+    def fetch(tid):
+        asked.append(tid)
+        return live
+    out = with_live(_running_command(), fetch)
+    body = _json.loads(out.update['messages'][0].content)
+    assert body['status'] == 'running' and body['live'] == live and asked == ['th-1']
+    done = with_live(_running_command(status='success'), fetch)
+    assert 'live' not in _json.loads(done.update['messages'][0].content) and asked == ['th-1']   # not even asked
+    quiet = with_live(_running_command(), lambda tid: None)
+    assert 'live' not in _json.loads(quiet.update['messages'][0].content)        # no account: still "running"
+
+
+def test_the_live_fetch_reads_her_home_server_and_keeps_only_what_she_needs():
+    import httpx
+    from aerys_v2.home_jobs import LIVE_JSON_CHARS, home_live_fetch
+    seen = []
+    def handler(request):
+        seen.append((request.url.raw_path.decode(), request.headers.get('authorization')))
+        return httpx.Response(200, json={'values': {'live': {'said': 'Guess 2', 'steps': 7, 'secret_field': 'x'}}})
+    fetch = home_live_fetch('http://home:2024', 'tok', client_factory=lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    assert fetch('th/1') == {'said': 'Guess 2', 'steps': 7}
+    assert seen == [('/threads/th%2F1', 'Bearer tok')]
+    for response in (httpx.Response(404), httpx.Response(200, json={'values': {}}),
+                     httpx.Response(200, json={'values': {'live': {'said': 'x' * (LIVE_JSON_CHARS + 1)}}})):
+        f = home_live_fetch('http://home:2024', 'tok', client_factory=lambda r=response: httpx.Client(
+            transport=httpx.MockTransport(lambda req: r)))
+        assert f('th') is None
+    broken = home_live_fetch('http://home:2024', 'tok', client_factory=lambda: httpx.Client(
+        transport=httpx.MockTransport(lambda req: (_ for _ in ()).throw(httpx.ConnectError('down')))))
+    assert broken('th') is None                                             # never raises
+
+
+def test_her_check_on_a_running_job_goes_through_the_ledger_with_its_live_account():
+    import json as _json
+    from langchain.tools import ToolRuntime
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+    from aerys_v2.home_jobs import home_ledger_middleware
+    stamp = "2026-11-09T15:00:00Z"
+    ledger = MemoryHomeTaskLedger(clock=lambda: NOW)
+    ledger.save(OWNER, {"t-1": {"task_id": "t-1", "agent_name": "home", "thread_id": "th-1", "run_id": "r-1",
+                                "status": "running", "created_at": stamp, "last_checked_at": stamp,
+                                "last_updated_at": stamp}})
+    asked = []
+    def fetch(thread_id):
+        asked.append(thread_id)
+        return {'said': 'Guess 2: BLUNT', 'steps': 7}
+    mw = home_ledger_middleware(ledger, OWNER, live_fetch=fetch)
+    rt = ToolRuntime(state={"messages": []}, context=None, stream_writer=lambda *_: None, store=None,
+                     config={"configurable": {"thread_id": DM_THREAD, "identity": TEXT}}, tool_call_id="c1")
+    for name, want in (("check_async_task", True), ("list_async_tasks", False)):
+        req = ToolCallRequest(tool_call={"id": "c1", "name": name, "args": {"task_id": "t-1"}},
+                              tool=None, state={"messages": []}, runtime=rt)
+        out = mw.wrap_tool_call(req, lambda r: _running_command('th-1'))
+        body = _json.loads(out.update['messages'][0].content)
+        assert ('live' in body) is want, name
+    assert asked == ['th-1']                                    # asked once, for the check only
