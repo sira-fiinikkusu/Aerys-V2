@@ -228,6 +228,9 @@ import pytest
     "No worries, I will withdraw the request now.",
     "I am going to withdraw the request now.",
     "Kael asked, so I am sending it now.",
+    # Codex 11/18 on D70: a possessive "morning's" is the report's, not the act's (straight and curly)
+    "I'll update the figures in the morning's report.",
+    "I'll update the figures in the morning\u2019s report.",
 ])
 def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     g, sends = FakeGraph(), []

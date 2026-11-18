@@ -277,8 +277,8 @@ _NOTE_DOING_RE = re.compile(
 #: D70 (his 17:45 "sure yeah"): a named later time defers a promise too ("I'll check it tomorrow" speaks). A
 #: possessive date is the task's, not the act's ("I'll cancel tomorrow's run" still holds).
 _NOTE_LATER_RE = re.compile(
-    r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you|in the morning"
-    r"|(?:tomorrow|tonight|this (?:evening|afternoon|weekend)|next (?:week|month))(?!'s))\b", re.I)
+    r"\b(?:next time|when we (?:next )?talk|later|another time|whenever you"
+    r"|(?:tomorrow|tonight|in the morning|this (?:evening|afternoon|weekend)|next (?:week|month))(?!'s))\b", re.I)
 _NOTE_NOW_RE = re.compile(r"\b(?:now|right now|right away|immediately)\b", re.I)
 _CLAUSE_START_RE = re.compile(r"[,;:\u2014]")
 _KAELS_QUOTE_RE = re.compile(r'\bkael\s+(?:said|says|wrote|writes|told me|tells me|asked)[,:]?\s*(?:"[^"\n]*"|\u201c[^\u201d\n]*\u201d)', re.I)
