@@ -393,6 +393,32 @@ LIVE_KEYS = ("plan", "last_tool", "page", "said", "steps", "running_s", "at")
 LIVE_JSON_CHARS = 6000
 
 
+def fit_live(live: dict):
+    """T-25 (Codex 11/18): an account over her budget is trimmed, never dropped. The plan gives way
+    first (its notes, then its finished steps, then its last steps, then all of it, with a count of
+    what was cut); where it stands now (the last tool, the page, her last words, the step count)
+    stays. Only an account too big even without its plan is None."""
+    def size(d):
+        return len(json.dumps(d, ensure_ascii=False))
+    if size(live) <= LIVE_JSON_CHARS:
+        return live
+    plan = [p for p in live.get("plan") or [] if isinstance(p, dict)]
+    total = len(plan)
+    plan = [{k: v for k, v in p.items() if k != "note"} for p in plan]
+    for keep in (lambda p: True, lambda p: p.get("status") != "completed"):
+        plan = [p for p in plan if keep(p)]
+        trimmed = {**live, "plan": plan, "plan_cut": total - len(plan)}
+        if size(trimmed) <= LIVE_JSON_CHARS:
+            return trimmed
+    while plan:
+        plan = plan[:-1]
+        trimmed = {**live, "plan": plan, "plan_cut": total - len(plan)}
+        if size(trimmed) <= LIVE_JSON_CHARS:
+            return trimmed
+    trimmed = {**{k: v for k, v in live.items() if k != "plan"}, "plan_cut": total}
+    return trimmed if size(trimmed) <= LIVE_JSON_CHARS else None
+
+
 def home_live_fetch(url: str, token: str, *, client_factory=None, timeout: float = 4.0) -> Callable:
     """T-25: GET the running job's thread from her home server and return its live account
     (values.live), or None. Never raises: a check without it still says "running"."""
@@ -409,8 +435,7 @@ def home_live_fetch(url: str, token: str, *, client_factory=None, timeout: float
             live = (r.json().get("values") or {}).get("live")
             if not isinstance(live, dict):
                 return None
-            live = {k: live[k] for k in LIVE_KEYS if k in live}
-            return live if len(json.dumps(live)) <= LIVE_JSON_CHARS else None
+            return fit_live({k: live[k] for k in LIVE_KEYS if k in live})
         except Exception:
             log.debug("home jobs: no live account for %s", thread_id, exc_info=True)
             return None

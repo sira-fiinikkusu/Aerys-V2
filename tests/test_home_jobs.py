@@ -978,6 +978,31 @@ def test_the_live_fetch_reads_her_home_server_and_keeps_only_what_she_needs():
     assert broken('th') is None                                             # never raises
 
 
+def test_a_big_live_account_is_trimmed_plan_first_and_where_it_stands_stays():
+    import json as _json
+    from aerys_v2.home_jobs import LIVE_JSON_CHARS, fit_live
+    now = {'last_tool': 'browse_task', 'page': {'status': 'ok', 'title': 'Wordle', 'url': 'https://x'},
+           'said': 'Guess 2: ' + 'b' * 380, 'steps': 41, 'running_s': 300, 'at': '2026-11-18T16:00:00Z'}
+    step = lambda i, status: {'id': str(i), 'text': 't' * 160, 'status': status, 'note': 'n' * 160}
+    # Codex's case: 20 steps with full texts and notes (~7.8k) -> the notes go, every step stays
+    full = {**now, 'plan': [step(i, 'pending') for i in range(20)]}
+    assert len(_json.dumps(full)) > LIVE_JSON_CHARS
+    out = fit_live(full)
+    assert len(_json.dumps(out)) <= LIVE_JSON_CHARS and len(out['plan']) == 20 and out['plan_cut'] == 0
+    assert all('note' not in p for p in out['plan']) and {k: out[k] for k in now} == now
+    # finished steps go before the ones still ahead
+    long = dict(now, plan=[step(i, 'completed' if i < 30 else 'in_progress') for i in range(40)])
+    out = fit_live(long)
+    assert [p['status'] for p in out['plan']] == ['in_progress'] * 10 and out['plan_cut'] == 30
+    # then the plan's tail, then all of it; what she's doing now never goes
+    huge = dict(now, plan=[dict(step(i, 'pending'), text='t' * 2000) for i in range(10)])
+    out = fit_live(huge)
+    assert len(_json.dumps(out)) <= LIVE_JSON_CHARS and 0 < len(out['plan']) < 10
+    assert out['plan_cut'] == 10 - len(out['plan']) and {k: out[k] for k in now} == now
+    assert fit_live(dict(now, plan=[])) == dict(now, plan=[])            # small: untouched
+    assert fit_live({'said': 'x' * (LIVE_JSON_CHARS + 1)}) is None        # too big even without a plan
+
+
 def test_her_check_on_a_running_job_goes_through_the_ledger_with_its_live_account():
     import json as _json
     from langchain.tools import ToolRuntime
