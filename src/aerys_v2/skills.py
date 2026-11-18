@@ -11,7 +11,7 @@ import threading
 from types import SimpleNamespace
 
 import yaml
-from deepagents.backends import StoreBackend
+from deepagents.backends import CompositeBackend, StoreBackend
 from deepagents.backends.utils import perform_string_replacement
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
 from deepagents.middleware.skills import SkillsMiddleware
@@ -145,8 +145,140 @@ class OwnerSkillWrites(AgentMiddleware):
             _WRITE_LOCK.release()
 
 
-def skills_middleware(store, owner_person_id):
-    backend = backend_for(store)
+#: D67 (Chris 11/18 12:22, "yes please"): her bodies' skills, as they reach the house through the door, on
+#: a read-only shelf beside her own. 12:19 her brain said it had no MapTap skill (its list held one) while her
+#: home body had written a fuller one at 11:29: one identity, two shelves.
+BODY_SKILLS = "/home-skills/"
+_BODY_NAMESPACE = ("aerys", "body-skills")
+_BODY_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+#: The latest event for each skill label in the door's feed (a tombstone is a deleted skill).
+FEED_SKILLS_SQL = """SELECT DISTINCT ON (key_label) key_label, event_type, content, context, source, observed_at
+    FROM portable_memory_feed WHERE key_label LIKE 'skill.%%' ORDER BY key_label, rack_seq DESC"""
+_READ_ONLY = "Not saved: skills from my bodies are written there, not here; this shelf only reads them."
+
+
+def rows_from_feed(rows):
+    """(key_label, event_type, content, context, source, observed_at) rows -> her live, well-formed skills."""
+    skills = []
+    for label, event, content, context, source, observed in rows:
+        slug = str(label or "").removeprefix("skill.")
+        if (not str(label or "").startswith("skill.") or event == "tombstone" or not _BODY_SLUG.fullmatch(slug)
+                or not str(content or "").strip()):
+            continue
+        skills.append({"slug": slug, "content": str(content), "when": str(context or "").removeprefix("skill: ").strip(),
+                       "source": str(source or "portable"), "observed": observed})
+    return skills
+
+
+def body_skill_md(row):
+    """Her body's skill as a SKILL.md: name is its slug (the directory), description one plain line."""
+    source = "".join(ch for ch in row["source"] if ch.isalnum() or ch in "-_") or "portable"
+    description = " ".join(f"From my {source} body. {row['when']}".split())[:200]
+    date = row["observed"].strftime("%b %d, %Y") if hasattr(row["observed"], "strftime") else ""
+    return (f"---\nname: {row['slug']}\ndescription: {json.dumps(description)}\n---\n\n"
+            f"(Written by my {source} body{' on ' + date if date else ''}; it reached me through the door. "
+            f"I read it here; my {source} body keeps it.)\n\n{row['content'].rstrip()}\n")
+
+
+def feed_loader(settings, timeout=5):
+    """Production: read the door's feed from her brain's own database."""
+    def load():
+        import psycopg
+
+        with psycopg.connect(settings.database_url, connect_timeout=timeout) as conn:
+            return rows_from_feed(conn.execute(FEED_SKILLS_SQL).fetchall())
+    return load
+
+
+class BodySkillsBackend(StoreBackend):
+    """Her bodies' skills, read-only, from the door's feed: an in-memory store refilled at most every
+    refresh_s (a feed hiccup keeps the last view). Everything that would change it says no."""
+
+    def __init__(self, load, *, refresh_s=30.0, clock=None):
+        from langgraph.store.memory import InMemoryStore
+        import time
+
+        super().__init__(namespace=lambda rt: _BODY_NAMESPACE, store=InMemoryStore())
+        self._load, self._refresh_s, self._clock = load, refresh_s, clock or time.monotonic
+        self._loaded_at = None
+        self._refresh_lock = threading.Lock()
+
+    def _refresh(self):
+        from langgraph.store.memory import InMemoryStore
+
+        with self._refresh_lock:
+            now = self._clock()
+            if self._loaded_at is not None and now - self._loaded_at < self._refresh_s:
+                return
+            self._loaded_at = now
+            try:
+                rows = self._load()
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("body skills: the door's feed didn't answer; keeping the last view",
+                                                    exc_info=True)
+                return
+            fresh = StoreBackend(namespace=lambda rt: _BODY_NAMESPACE, store=InMemoryStore())
+            for row in rows:
+                fresh.write(f"/{row['slug']}/SKILL.md", body_skill_md(row))
+            self._store = fresh._store
+
+    def ls(self, path):
+        self._refresh()
+        return super().ls(path)
+
+    def read(self, file_path, offset=0, limit=2000):
+        self._refresh()
+        return super().read(file_path, offset=offset, limit=limit)
+
+    def download_files(self, paths):
+        self._refresh()
+        return super().download_files(paths)
+
+    async def als(self, path):
+        import asyncio
+        await asyncio.to_thread(self._refresh)
+        return await super().als(path)
+
+    async def aread(self, file_path, offset=0, limit=2000):
+        import asyncio
+        await asyncio.to_thread(self._refresh)
+        return await super().aread(file_path, offset=offset, limit=limit)
+
+    async def adownload_files(self, paths):
+        import asyncio
+        await asyncio.to_thread(self._refresh)
+        return await super().adownload_files(paths)
+
+    def write(self, file_path, content):
+        from deepagents.backends.protocol import WriteResult
+        return WriteResult(error=_READ_ONLY)
+
+    async def awrite(self, file_path, content):
+        return self.write(file_path, content)
+
+    def edit(self, file_path, old_string, new_string, replace_all=False):
+        from deepagents.backends.protocol import EditResult
+        return EditResult(error=_READ_ONLY)
+
+    async def aedit(self, file_path, old_string, new_string, replace_all=False):
+        return self.edit(file_path, old_string, new_string, replace_all)
+
+    def delete(self, file_path):
+        from deepagents.backends.protocol import DeleteResult
+        return DeleteResult(error=_READ_ONLY)
+
+    def upload_files(self, files):
+        from deepagents.backends.protocol import FileUploadResponse
+        return [FileUploadResponse(path=path, error="permission_denied") for path, _ in files]
+
+
+def skills_middleware(store, owner_person_id, *, body_skills=None):
+    own = backend_for(store)
+    # D67: her bodies' skills at /home-skills/, listed FIRST so her own shelf wins a name clash (later
+    # sources override); writes stay her own shelf's alone (the permissions below and OwnerSkillWrites).
+    backend = CompositeBackend(default=own, routes={BODY_SKILLS: body_skills}) if body_skills is not None else own
+    sources = ([BODY_SKILLS] if body_skills is not None else []) + ["/skills/"]
     return [
         FilesystemMiddleware(
             backend=backend, tools=["ls", "read_file", "write_file", "edit_file"],
@@ -156,8 +288,8 @@ def skills_middleware(store, owner_person_id):
                 FilesystemPermission(operations=["write"], paths=["/**"], mode="deny"),
             ], system_prompt=FILES_PROMPT,
         ),
-        FreshSkillsMiddleware(backend=backend, sources=["/skills/"], system_prompt=SKILLS_PROMPT),
-        OwnerSkillWrites(owner_person_id, backend),
+        FreshSkillsMiddleware(backend=backend, sources=sources, system_prompt=SKILLS_PROMPT),
+        OwnerSkillWrites(owner_person_id, own),
     ]
 
 

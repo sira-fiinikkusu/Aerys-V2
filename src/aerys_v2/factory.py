@@ -2776,9 +2776,11 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         extra["extra_middleware"] = home_jobs.middleware
     skill_layers = None
     if settings.her_skills and settings.database_url:
-        from aerys_v2.skills import skills_middleware, store_for
+        from aerys_v2.skills import BodySkillsBackend, feed_loader, skills_middleware, store_for
 
-        skill_layers = skills_middleware(store_for(settings), settings.owner_person_id)
+        # D67 (11/18): her bodies' skills, as they reach the house through the door, read-only beside her own.
+        skill_layers = skills_middleware(store_for(settings), settings.owner_person_id,
+                                         body_skills=BodySkillsBackend(feed_loader(settings)))
         extra["extra_middleware"] = [*extra.get("extra_middleware", ()), *skill_layers]
     from aerys_v2.hands_gate import hands_gate_for, HandsWatcher
     from aerys_v2.outside_guard import OUTSIDE_ACTION, action_executor
