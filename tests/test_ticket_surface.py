@@ -297,6 +297,17 @@ def test_t16_the_short_note_is_the_models_and_said_before_the_pointer():
                                   "each; the full answer is on Discord.")
 
 
+def test_a_short_note_that_claims_an_act_is_not_said(world=None):
+    """Codex 11/18: the short note is a second tool-less model call; "I've withdrawn the request" in it
+    must not be said. Her own first words go before the pointer instead, as for a failed note."""
+    world = World(Where("room", "dev-office", "office"))
+    desk, _ = desk_for(world, now=DAY)
+    relay = ticket_relay_for(None, owner_settings(), model=Seq(LONG, "I've withdrawn the request."), desk=desk)
+    assert relay(answered("voice")) is True
+    said = world.spoken[0][0]
+    assert said.startswith("Kael got back to me on that: ") and "withdrawn" not in said
+
+
 def test_t16_a_failed_note_falls_back_to_her_first_words():
     class Fails:
         calls = 0

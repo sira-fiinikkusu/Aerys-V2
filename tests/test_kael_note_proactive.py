@@ -208,6 +208,12 @@ import pytest
     "Starting today's MapTap run now.",
     "The MapTap run is still going on my home machine.",
     "Done. I sent Kael the details.",
+    # Codex 11/18: plain past, a salutation first, and an explicit now over a date or "when"
+    "I withdrew the request.",
+    "I deleted the file.",
+    "Chris, I'm withdrawing the request now.",
+    "I'll cancel tomorrow's run now.",
+    "I'll update the ticket now so Kael knows when to start.",
 ])
 def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     g, sends = FakeGraph(), []
@@ -219,6 +225,10 @@ def test_a_note_turn_that_claims_an_act_holds_instead(reply):
     "Chris, Kael says the demo notes landed. Proud of you.",
     "Kael found why my MapTap skill was stuck at the door; he's fixing it.",
     "Kael says I can withdraw that skill request; I'll do it next time we talk.",
+    # Codex 11/18: Kael's own acts, quoted or attributed, and a condition before her promise
+    'Kael said, "I sent the fix."',
+    "Kael's running the MapTap tests.",
+    "When we talk next, I'll withdraw it.",
 ])
 def test_a_note_turn_that_only_tells_still_speaks(reply):
     g, sends = FakeGraph(), []
