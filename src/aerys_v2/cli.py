@@ -444,6 +444,14 @@ def main() -> None:
             hands_watcher = getattr(action_graph, "hands_watcher", None)
             if hands_watcher is not None:
                 hands_watcher.note = kael_note_fn
+                if reach_desk is not None:
+                    # 11/19: a failure after his Approve reaches HIM too, once, as quiet text (owed: never
+                    # dropped or budgeted; text only: never spoken).
+                    from aerys_v2.reach import ReachEvent
+
+                    hands_watcher.owner_notice = lambda key, text: reach_desk.reach_out(ReachEvent(
+                        source="approvals", topic="approvals", headline=text, urgency="timely", owed=True,
+                        text_only=True, dedupe_key=key))
                 hands_watcher.start()
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)

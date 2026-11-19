@@ -313,6 +313,45 @@ def test_a_job_that_fails_after_his_ok_is_told_honestly_and_never_retried():
     assert len(calls) == 1
 
 
+def test_a_failure_after_his_ok_reaches_him_too_not_only_her_thread():
+    """11/19 (a side agent, fair): he tapped Approve on a home-skill edit at 14:50, it failed, and only her
+    thread heard; he found out by asking. Anything he approved that doesn't go through now reaches HIM,
+    once, as quiet text; a success, a decline or an expiry doesn't add a message."""
+    told = []
+
+    def boom(row):
+        raise ConnectionError("home server down")
+
+    b = Box(executors={HOME_JOB: boom})
+    b.watcher.owner_notice = lambda key, text: told.append((key, text))
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    b.watcher.tick()
+    assert len(told) == 1
+    key, text = told[0]
+    assert key.startswith("approved-failed:") and "didn't go through" in text and "ConnectionError" in text
+    b.watcher.tick()
+    assert len(told) == 1, "told once"
+
+    ok = Box()
+    ok.watcher.owner_notice = lambda key, text: told.append((key, text))
+    ok.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    ok.tap()
+    ok.watcher.tick()
+    assert len(told) == 1, "a success adds no message to him"
+
+
+def test_a_broken_owner_notice_never_stops_the_watcher():
+    def boom(row):
+        raise ConnectionError("down")
+
+    b = Box(executors={HOME_JOB: boom})
+    b.watcher.owner_notice = lambda key, text: (_ for _ in ()).throw(RuntimeError("desk down"))
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    assert b.watcher.tick()["failed"] == 1 and "didn't go through" in b.notes[-1][1]
+
+
 def test_two_watchers_never_both_carry_it_out():
     b = Box()
     b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)

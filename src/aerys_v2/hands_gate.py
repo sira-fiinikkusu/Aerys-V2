@@ -667,8 +667,13 @@ class HandsWatcher:
     An executor returns (True, what happened) when it went and (False, why) when it didn't;
     anything else, a refusal string included, counts as not done."""
 
-    def __init__(self, gate: HandsGate, *, note: Callable[[str, str], None] | None = None, tick_s: float = TICK_S):
+    def __init__(self, gate: HandsGate, *, note: Callable[[str, str], None] | None = None, tick_s: float = TICK_S,
+                 owner_notice: Callable[[str, str], None] | None = None):
         self.gate, self.note, self.tick_s = gate, note, tick_s
+        # 11/19 (a side agent, fair; the 14:50 home-skill edit): a failure after his Approve was only noted in
+        # her thread, so he heard nothing unless she spoke again. owner_notice(key, text) puts it in front of
+        # HIM too (the brain wires it to the reach desk as owed, quiet text). None = her thread only.
+        self.owner_notice = owner_notice
         self._stop = threading.Event()
 
     def _tell(self, row: GatedAction, text: str) -> None:
@@ -678,6 +683,17 @@ class HandsWatcher:
             self.note(row.thread_id, text)
         except Exception:
             log.warning("hands watcher: couldn't note action %s's outcome in her thread", row.id, exc_info=True)
+
+    def _tell_owner(self, row: GatedAction, outcome: str) -> None:
+        if self.owner_notice is None:
+            return
+        what = row.args.get("what") or ("the home job" if row.action == HOME_JOB else "the message")
+        try:
+            self.owner_notice(f"approved-failed:{row.id}",
+                              f"You approved {what}, but it didn't go through ({outcome or 'no clear result'}). "
+                              "It may not have happened.")
+        except Exception:
+            log.warning("hands watcher: couldn't tell the owner that action %s failed", row.id, exc_info=True)
 
     def tick(self) -> dict:
         g, out = self.gate, {"done": 0, "failed": 0, "dropped": 0}
@@ -713,6 +729,8 @@ class HandsWatcher:
                     log.warning("hands watcher: action %s %s, but recording it failed (never redone)", row.id, status)
                 out[status] += 1
                 self._tell(row, _note_for(row, status, outcome))
+                if status == "failed":
+                    self._tell_owner(row, outcome)
             elif state in ("declined", "expired", "withdrawn"):
                 if g.store.drop(row.id, state, now):
                     out["dropped"] += 1
