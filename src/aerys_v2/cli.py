@@ -446,12 +446,22 @@ def main() -> None:
                 hands_watcher.note = kael_note_fn
                 if reach_desk is not None:
                     # 11/19: a failure after his Approve reaches HIM too, once, as quiet text (owed: never
-                    # dropped or budgeted; text only: never spoken).
+                    # dropped or budgeted; text only: never spoken). Queued only, never delivered here: the
+                    # desk's own tick delivers it (Codex 11/19: delivering from this thread would wait on the
+                    # desk's lock), and add_new keeps one row per key, ever, so a re-offer after a restart
+                    # is a no-op.
+                    from datetime import datetime as _dt, timezone as _tz
+
                     from aerys_v2.reach import ReachEvent
 
-                    hands_watcher.owner_notice = lambda key, text: reach_desk.reach_out(ReachEvent(
-                        source="approvals", topic="approvals", headline=text, urgency="timely", owed=True,
-                        text_only=True, dedupe_key=key))
+                    def _owner_notice(key, text, _desk=reach_desk):
+                        now = _dt.now(_tz.utc)
+                        _desk.store.add_new(ReachEvent(source="approvals", topic="approvals", headline=text,
+                                                       urgency="timely", owed=True, text_only=True, dedupe_key=key),
+                                            now, status="queued", reason="a failure after his Approve",
+                                            not_before=now)
+
+                    hands_watcher.owner_notice = _owner_notice
                 hands_watcher.start()
             uvicorn.run(app, host="0.0.0.0", port=settings.api_port, log_level="info")
         sys.exit(0)

@@ -341,6 +341,32 @@ def test_a_failure_after_his_ok_reaches_him_too_not_only_her_thread():
     assert len(told) == 1, "a success adds no message to him"
 
 
+def test_a_lost_notice_is_offered_again_until_the_desk_has_it():
+    """Codex 11/19: a restart between finish() and the notice, or a desk hiccup, must not lose it."""
+    told, fail = [], {"n": 1}
+
+    def boom(row):
+        raise ConnectionError("down")
+
+    def notice(key, text):
+        if fail["n"]:
+            fail["n"] -= 1
+            raise RuntimeError("desk hiccup")
+        told.append(key)
+
+    b = Box(executors={HOME_JOB: boom})
+    b.watcher.owner_notice = notice
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    b.watcher.tick()
+    assert len(told) == 1                   # the first hand-off failed; the same pass's drain re-offered it
+    b.watcher.tick()
+    assert len(told) == 1                   # and not again by this process
+    fresh = HandsWatcher(b.gate, owner_notice=lambda key, text: told.append(key))
+    fresh.tick()                            # a restart re-offers it; the desk's add_new keeps one row per key
+    assert told[-1] == told[0]
+
+
 def test_a_broken_owner_notice_never_stops_the_watcher():
     def boom(row):
         raise ConnectionError("down")

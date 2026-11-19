@@ -234,6 +234,11 @@ class MemoryGatedActionStore:
         r.status, r.outcome, r.finished_at = "dropped", outcome, now
         return True
 
+    def failed_since(self, since):
+        """Approved actions that didn't go through, finished since `since` (his notice is owed for each)."""
+        return sorted((r for r in self.rows.values() if r.status == "failed" and r.finished_at
+                       and r.finished_at >= since), key=lambda r: r.id)
+
 
 class PostgresGatedActionStore:
     """v2_gated_actions (db/migrations/023). Fresh short connections per call."""
@@ -307,6 +312,10 @@ class PostgresGatedActionStore:
     def drop(self, action_id, outcome, now):
         return self._one("UPDATE v2_gated_actions SET status = 'dropped', outcome = %s, finished_at = %s "
                          "WHERE id = %s AND status = 'waiting' RETURNING id", (outcome, now, action_id)) is not None
+
+    def failed_since(self, since):
+        return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE status = 'failed' AND finished_at >= %s "
+                         "ORDER BY id", (since,))
 
 
 # --- the gate ------------------------------------------------------------------------------
@@ -661,6 +670,10 @@ def _note_for(row: GatedAction, status: str, outcome: str = "") -> str:
     return f"{said} {what}, so it wasn't done."
 
 
+#: how far back a failure after his Approve is still re-offered to the desk (a restart or a desk hiccup)
+FAILED_NOTICE_FOR = timedelta(days=2)
+
+
 class HandsWatcher:
     """tick(): every waiting action whose button was answered is done (approved, once) or dropped
     (declined, expired, withdrawn); she's told either way. Pending or unreadable: it waits.
@@ -674,6 +687,7 @@ class HandsWatcher:
         # her thread, so he heard nothing unless she spoke again. owner_notice(key, text) puts it in front of
         # HIM too (the brain wires it to the reach desk as owed, quiet text). None = her thread only.
         self.owner_notice = owner_notice
+        self._owner_told: set = set()     # this process already handed these failures to the desk
         self._stop = threading.Event()
 
     def _tell(self, row: GatedAction, text: str) -> None:
@@ -685,15 +699,33 @@ class HandsWatcher:
             log.warning("hands watcher: couldn't note action %s's outcome in her thread", row.id, exc_info=True)
 
     def _tell_owner(self, row: GatedAction, outcome: str) -> None:
-        if self.owner_notice is None:
+        """Hand his failure notice to the desk. owner_notice must be idempotent by key (the brain's is the
+        desk store's add_new: one row per key, ever) and must never deliver itself (Codex 11/19: delivering
+        here would wait on the desk's lock and stall every approval behind it)."""
+        if self.owner_notice is None or row.id in self._owner_told:
             return
         what = row.args.get("what") or ("the home job" if row.action == HOME_JOB else "the message")
         try:
             self.owner_notice(f"approved-failed:{row.id}",
                               f"You approved {what}, but it didn't go through ({outcome or 'no clear result'}). "
                               "It may not have happened.")
+            self._owner_told.add(row.id)
         except Exception:
-            log.warning("hands watcher: couldn't tell the owner that action %s failed", row.id, exc_info=True)
+            log.warning("hands watcher: couldn't hand the owner's failure notice for action %s to the desk; "
+                        "retried next pass", row.id, exc_info=True)
+
+    def _drain_failures(self, now) -> None:
+        """Codex 11/19: a restart between finish() and the notice, or a desk hiccup, must not lose it. Every
+        pass re-offers each recent failure; the desk keeps one row per key, so he's told once."""
+        if self.owner_notice is None:
+            return
+        try:
+            recent = self.gate.store.failed_since(now - FAILED_NOTICE_FOR)
+        except Exception:
+            log.warning("hands watcher: couldn't read recent failures for his notices", exc_info=True)
+            return
+        for row in recent:
+            self._tell_owner(row, row.outcome or "")
 
     def tick(self) -> dict:
         g, out = self.gate, {"done": 0, "failed": 0, "dropped": 0}
@@ -735,6 +767,7 @@ class HandsWatcher:
                 if g.store.drop(row.id, state, now):
                     out["dropped"] += 1
                     self._tell(row, _note_for(row, state))
+        self._drain_failures(g.clock())
         return out
 
     def run_forever(self) -> None:  # pragma: no cover - thin loop over tick
