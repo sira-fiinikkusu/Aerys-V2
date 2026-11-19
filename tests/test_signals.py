@@ -410,6 +410,9 @@ def test_her_offer_to_send_kael_a_summary_of_her_own_work_is_not_a_courier_slip(
     carried = [dict(id=12, channel='discord_dm', input_text='my friend said dinner is at six',
                     emitted_reply='Want me to pass that along to Kael?')]
     assert answers_not_relays(carried).failed, "carrying someone else's words still fails"
+    his_state = [dict(id=13, channel='discord_dm', input_text='ugh this is so frustrating',
+                      emitted_reply='You seem frustrated. Want me to send Kael a quick summary?')]
+    assert answers_not_relays(his_state).failed, 'a bare summary of HIM is still a courier slip (Gemini 11/19)'
 
 
 def test_a_held_follow_up_after_a_kael_note_is_reported_with_its_words():
