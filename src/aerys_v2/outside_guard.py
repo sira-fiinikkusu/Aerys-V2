@@ -125,15 +125,18 @@ def _decide(request, gate):
     # Its button shows the resolved identity and signed words, not an outside_action wrapper.
     if name == 'send_message':
         return None
-    if name in ('write_file', 'edit_file'):
-        # 11/19 (Chris tapped Approve on a home-skill edit that could never land): a skill write the fences
-        # below will refuse anyway (a home body's skill, anything outside /skills/) asks nobody; it goes
-        # straight on and is refused in her turn, where she can say so. Nothing is written either way.
-        from aerys_v2.skills import writable_skill_path
-        if not writable_skill_path(str(args.get('file_path') or '')):
-            return None
     if not sources or not reaches:
         return None
+    if name in ('write_file', 'edit_file'):
+        # 11/19 (Chris tapped Approve on a home-skill edit that could never land, and nobody told him): a
+        # write to anything but her own /skills/ shelf asks nobody and runs nothing. It's refused HERE, in
+        # her turn, where she can say so; never handed on (Codex 11/19: passing it to the handler would let
+        # any other write_file/edit_file implementation write without his tap).
+        from aerys_v2.skills import BODY_SKILLS, HOME_SKILL_REFUSAL, writable_skill_path
+        path = str(args.get('file_path') or '')
+        if not writable_skill_path(path):
+            return _refusal(request, HOME_SKILL_REFUSAL if path.startswith(BODY_SKILLS) else
+                            'Not saved: I can only write my own skills, under /skills/<name>/. Nothing changed.')
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
         return None
     # D62 (Chris 11/18 10:20: "she shouldnt be hitting privacy gates when i message her on discord"):

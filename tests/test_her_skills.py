@@ -585,19 +585,39 @@ HOME_SKILL = '/home-skills/maptap-play-with-drag-zoom-and-tap-using-browse-point
 
 
 @pytest.mark.parametrize('name', ['write_file', 'edit_file'])
-@pytest.mark.parametrize('path', [HOME_SKILL, '/elsewhere/notes.md'])
-def test_a_write_that_cannot_land_asks_nobody(name, path):
+@pytest.mark.parametrize('path', [HOME_SKILL, '/elsewhere/notes.md', None, '//skills/x/SKILL.md',
+                                  '/skills/../etc/x', '/skills/x/', '\\skills\\x\\SKILL.md', '/skills/ｘ/SKILL.md'])
+@pytest.mark.parametrize('provenance', ['current', 'earlier'])
+def test_a_write_that_cannot_land_asks_nobody_and_runs_nothing(name, path, provenance):
+    """No card, and the handler never runs: an unfenced writer downstream would write without his tap
+    (Codex 11/19). Both tool names, a missing path, path tricks, current and earlier outside text."""
+    gate = Gate()
+    messages = ([HumanMessage(content='Fix it'), ToolMessage(content='outside', name='read_web_page', tool_call_id='read')]
+                if provenance == 'current' else
+                [AIMessage(content='outside-derived', additional_kwargs={'outside_read': True}), HumanMessage(content='Fix it')])
+    args = {'content': CONTENT, 'old_string': 'a', 'new_string': 'b'}
+    if path is not None:
+        args['file_path'] = path
+    request = SimpleNamespace(runtime=SimpleNamespace(config=config()), state={'messages': messages},
+                              tool_call={'name': name, 'id': 'write', 'args': args})
+    written = []
+    result = outside_guard(request, lambda req: written.append(req) or 'WROTE IT', gate=gate)
+    assert gate.requests == [], 'no approval card for a write that cannot land'
+    assert written == [], 'nothing downstream ran'
+    assert str(result.content).startswith('Not saved')         # the guard's own refusal, like its others
+    if path == HOME_SKILL:
+        from aerys_v2.skills import HOME_SKILL_REFUSAL
+        assert result.content == HOME_SKILL_REFUSAL
+
+
+def test_a_real_skill_write_after_outside_text_still_waits_for_his_tap():
     gate = Gate()
     request = SimpleNamespace(
         runtime=SimpleNamespace(config=config()),
-        state={'messages': [HumanMessage(content='Fix it'), ToolMessage(content='outside', name='read_web_page', tool_call_id='read')]},
-        tool_call={'name': name, 'id': 'write', 'args': {'file_path': path, 'content': CONTENT,
-                                                          'old_string': 'a', 'new_string': 'b'}},
-    )
-    seen = []
-    outside_guard(request, lambda req: seen.append(req) or 'handled by the fences', gate=gate)
-    assert gate.requests == [], 'no approval card for a write the fences will refuse'
-    assert seen, 'it goes straight on, where the skill fences refuse it'
+        state={'messages': [HumanMessage(content='Save'), ToolMessage(content='outside', name='read_web_page', tool_call_id='read')]},
+        tool_call={'name': 'edit_file', 'id': 'write', 'args': {'file_path': PATH, 'old_string': 'a', 'new_string': 'b'}})
+    result = outside_guard(request, lambda _: pytest.fail('a real skill write escaped approval'), gate=gate)
+    assert result.content == 'Waiting for approval' and gate.requests[0][0][0] == OUTSIDE_ACTION
 
 
 def test_a_home_skill_edit_is_refused_with_where_to_do_it():
