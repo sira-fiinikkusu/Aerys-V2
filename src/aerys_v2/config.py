@@ -458,6 +458,15 @@ class Settings(BaseSettings):
     # 9 AM"). Inside them a message she owes him arrives as silent text, never spoken.
     owner_quiet_start_hour: int = 21
     owner_quiet_end_hour: int = 9
+    # HIS MORNINGS FROM HIS PHONE (D74, the owner 2026-11-19, board #177; wake.py): with both of his
+    # phone's sleep sensors named (the companion app's sleep confidence and sleep segment), quiet
+    # hours end when he's UP (the settled room, presence_settled_entity, leaves wake_bedroom_room
+    # after the night's wake) instead of at owner_quiet_end_hour, which stays the fallback; awake
+    # but not up, what she held overnight arrives as quiet text; asleep by day holds her like a nap.
+    # Empty = off (the fixed hours). Entity ids stay in the environment (this repo is public).
+    wake_sleep_confidence_entity: str = ""
+    wake_sleep_segment_entity: str = ""
+    wake_bedroom_room: str = "bedroom"
     # The owner's meetings (D15, 11/08: "doesnt speak over voice while a meeting is active
     # and speaks at the next window with a 10 minute buffer"). A csv of HA calendar entities
     # whose TIMED events are meetings (all-day entries never count); while one is on, and for

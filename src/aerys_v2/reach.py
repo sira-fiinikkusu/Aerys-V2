@@ -38,6 +38,13 @@ marked 'folded' in the same write that records the brief as sent; if it never go
 their own at its cutoff. With a brief armed, the night holds them until that cutoff, not 9.
 Its text part (the carried items in full) is retried until it lands, like any detail.
 
+D74 (the owner, 11/19, after a graded week on board #177): with his phone's sleep sensors armed
+(wake.py), the night's quiet hours end when he's UP (out of the bedroom after waking), with 09:00
+as the fallback when the phone gives nothing. Once he's AWAKE but not yet up, what she held
+overnight reaches him as one quiet text (release_overnight), and anything new goes as quiet text
+too; nothing is spoken until he's up. When the phone says he's asleep outside quiet hours (a nap,
+or sleeping in past them), she holds the way a nap he named does.
+
 Two more knobs (migration 019): a text_only message is never spoken, wherever he is (email:
 today he gets a DM per mail, and the desk adds its rules without moving mail into the
 speakers); and a safety warning inside quiet hours goes as a text that DOES buzz rather than
@@ -82,6 +89,7 @@ ROOM_WAIT = timedelta(minutes=1)      # a message pinned to a room he isn't in i
 DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went keeps trying this long
 TICK_S = 30
 MISSED_PREFIX = "In case you missed what I said:"
+OVERNIGHT_SOURCE = "overnight"        # D74: what the night held, in one quiet text when he wakes
 
 
 @dataclass
@@ -118,6 +126,21 @@ def text_copy(headline: str, detail: str) -> str:
     if detail and _POINTER_TAIL.search(headline or ""):
         return detail
     return (headline or "") + (f"\n\n{detail}" if detail else "")
+
+
+def told_quietly(rows: Iterable) -> list:
+    """What went as quiet text that a spoken brief may mention: never a text_only message (email
+    stays out of the room), except her overnight note (D74), which only says how many came in."""
+    return [r for r in rows if not r.text_only or r.source == OVERNIGHT_SOURCE]
+
+
+def overnight_lines(held: list) -> str:
+    """Her overnight note's text part: each held item, its detail under it (written, never said)."""
+    return "\n".join(f"- {r.headline}" + (f"\n  {r.detail}" if r.detail else "") for r in held)
+
+
+def overnight_headline(n: int) -> str:
+    return "While you slept, one thing came in:" if n == 1 else f"While you slept, {n} things came in:"
 
 
 @dataclass
@@ -236,10 +259,10 @@ def local_day_start(now: datetime) -> datetime:
 
 def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
            quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str = "meeting",
-           safety_voice_at_night: bool = False, company: bool = False) -> Decision:
+           safety_voice_at_night: bool = False, company: bool = False, awake: bool = False) -> Decision:
     d = _decide_checks(event, now, prefs=prefs, sent_today=sent_today, duplicate=duplicate, quiet=quiet,
                        meeting_until=meeting_until, morning_hour=morning_hour, hold=hold,
-                       safety_voice_at_night=safety_voice_at_night)
+                       safety_voice_at_night=safety_voice_at_night, awake=awake)
     # People are over (he said so): whatever would be said aloud goes as text instead. Safety
     # still speaks; the record says why the rest didn't.
     if company and d.action == "send" and d.voice != "reroute" and not d.breaks_through:
@@ -252,10 +275,11 @@ def decide(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, d
 
 def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today: int, duplicate: bool,
                    quiet: bool, meeting_until: datetime | None, morning_hour: int, hold: str,
-                   safety_voice_at_night: bool) -> Decision:
+                   safety_voice_at_night: bool, awake: bool = False) -> Decision:
     """The desk's checks, in order (module docstring). Pure: every input is given.
     meeting_until is any hold that works like a meeting; `hold` names it in the record
-    ("meeting" or "nap"). Safety breaks through every hold, a nap included: the owner's D4
+    ("meeting", "nap", or "asleep": the phone's nap, D74, held by the nap's rule). `awake` (D74):
+    inside quiet hours he has woken and isn't up yet. Safety breaks through every hold, a nap included: the owner's D4
     lets storm warnings break through the night, and a nap is lighter than the night. At
     night it breaks through as a text that buzzes, not out loud in the bedroom, unless
     safety_voice_at_night says to speak it."""
@@ -272,11 +296,22 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
     if quiet and not event.brief:      # a brief exists only once he's up and in its room
         if event.owed or event.urgency == "timely":
             return Decision("send", "night: as quiet text", silent=True, voice="reroute")
+        if awake:
+            # D74 call 1 (11/19): awake in bed, "nothing spoken": it reaches him as quiet text now. A
+            # routine thing still counts against the day (the night's own items don't: they go
+            # together, outside it, in her overnight note).
+            if event.source != "relay" and sent_today >= prefs.budget:
+                return Decision("drop", f"over today's budget ({prefs.budget})")
+            return Decision("send", "awake: as quiet text, nothing aloud until he's up", silent=True,
+                            voice="reroute")
         return Decision("queue", "night: waits for the morning", not_before=next_local(now, morning_hour))
+    if quiet and event.brief and event.text_only:
+        # Her overnight note (D74): written, never said, and it doesn't buzz him awake.
+        return Decision("send", "night: as quiet text", silent=True, voice="reroute")
     if meeting_until is not None:
         # A meeting ends when the calendar says; a nap can end early (he talks to her), so
         # what it holds is looked at again every couple of minutes instead of at its end.
-        if hold == "nap":
+        if hold in ("nap", "asleep"):
             meeting_until = min(meeting_until, now + NAP_RECHECK)
         elif not event.brief:
             # D66 (Chris 11/18 11:42): "she can message me in discord during meetings, i just dont want
@@ -319,6 +354,7 @@ class ReachStore(Protocol):
     def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
                 not_before: datetime | None) -> Reach | None: ...
     def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
+    def waiting(self, since: datetime) -> list[Reach]: ...
     def sent_quietly(self, since: datetime) -> list[Reach]: ...
     def sent_since(self, since: datetime) -> int: ...
     def due(self, now: datetime) -> list[Reach]: ...
@@ -403,6 +439,11 @@ class MemoryReachStore:
         return sorted((r for r in self.rows.values() if r.status == "queued" and r.source != "relay" and not r.owed and not r.brief
                        and r.urgency == "routine" and r.created_at and r.created_at >= since
                        and (r.not_before is None or r.not_before <= until)), key=lambda r: r.id)
+
+    def waiting(self, since):
+        """Everything still queued that was raised since `since` (D74: what the night held)."""
+        return sorted((r for r in self.rows.values() if r.status == "queued" and r.created_at
+                       and r.created_at >= since), key=lambda r: r.id)
 
     def sent_quietly(self, since):
         return sorted((r for r in self.rows.values() if r.status == "sent" and r.silent
@@ -560,6 +601,13 @@ class PostgresReachStore:
                 f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND source <> 'relay' AND NOT owed AND NOT brief "
                 "AND urgency = 'routine' AND created_at >= %s AND (not_before IS NULL OR not_before <= %s) "
                 "ORDER BY id", (since, until)).fetchall()
+        return [self._row(r) for r in rows]
+
+    def waiting(self, since):
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND created_at >= %s "
+                "ORDER BY id", (since,)).fetchall()
         return [self._row(r) for r in rows]
 
     def sent_quietly(self, since):
@@ -784,8 +832,15 @@ class ReachDesk:
                  said: Callable[[Reach, str], None] | None = None,
                  follow_through_after: timedelta = timedelta(minutes=5),
                  safety_voice_at_night: bool = False,
-                 clock: Callable[[], datetime] | None = None):
+                 clock: Callable[[], datetime] | None = None,
+                 awake: Callable[[datetime], bool] | None = None,
+                 asleep: Callable[[datetime], bool] | None = None,
+                 woke: Callable[[datetime], datetime | None] | None = None):
         self.store, self.deliverer = store, deliverer
+        # D74 (wake.py): he woke and isn't up yet; the phone says he's asleep; when he woke today.
+        # None = the phone isn't wired: the fixed hours and the named nap, as before.
+        self.awake, self.asleep, self.woke = awake, asleep, woke
+        self._overnight_day = None     # the day this process already looked at the overnight note
         self.safety_voice_at_night = safety_voice_at_night
         self.budget_default, self.morning_hour = budget_default, morning_hour
         self.quiet = quiet or (lambda now: False)
@@ -814,7 +869,7 @@ class ReachDesk:
         prefs = self.store.prefs(self.budget_default)
         company = prefs.company_until is not None and _utc(prefs.company_until) > now
         return ((row.brief or not self.quiet(now)) and self._meeting() is None and not company
-                and self._nap(prefs, now) is None)
+                and self._nap(prefs, now) is None and self._asleep_hold(now) is None)
 
     def _meeting(self) -> datetime | None:
         try:
@@ -836,20 +891,45 @@ class ReachDesk:
                 log.warning("reach: nap check failed; still holding", exc_info=True)
         return _utc(prefs.hold_until)
 
+    def _asleep_hold(self, now: datetime) -> datetime | None:
+        """D74 naps: the phone says he's asleep outside quiet hours (a nap, or sleeping in past them).
+        It holds like a nap he named, looked at again every couple of minutes; a phone that can't be
+        read holds nothing."""
+        if self.asleep is None or self.quiet(now):
+            return None
+        try:
+            return now + NAP_RECHECK if self.asleep(now) else None
+        except Exception:
+            log.warning("reach: the sleep check failed; not holding", exc_info=True)
+            return None
+
+    def _awake(self, now: datetime) -> bool:
+        """D74: inside quiet hours, he woke this morning and isn't up yet."""
+        if self.awake is None or not self.quiet(now):
+            return False
+        try:
+            return bool(self.awake(now))
+        except Exception:
+            log.warning("reach: the wake check failed; the night's rule stands", exc_info=True)
+            return False
+
     def _decide(self, event: ReachEvent, now: datetime, *, fresh: bool) -> Decision:
         duplicate = bool(fresh and event.dedupe_key
                          and self.store.recently_sent(event.dedupe_key, now - DEDUPE_WINDOW))
         prefs = self.store.prefs(self.budget_default)
         company = prefs.company_until is not None and _utc(prefs.company_until) > now
-        meeting, nap = self._meeting(), self._nap(prefs, now)
+        meeting, nap, slept = self._meeting(), self._nap(prefs, now), self._asleep_hold(now)
         # A nap keeps its own rule whenever one is on, even under a meeting that ends later (Codex
         # 11/18 on D66: the meeting's text-now rule must not slip a routine item through a nap).
-        hold = "nap" if nap is not None else "meeting"
-        until = max(t for t in (_utc(meeting), nap) if t is not None) if (meeting or nap) else None
+        # The phone's nap (D74) holds by the same rule.
+        hold = "nap" if nap is not None else "asleep" if slept is not None else "meeting"
+        holds = [t for t in (_utc(meeting), nap, slept) if t is not None]
+        until = max(holds) if holds else None
         return decide(event, now, prefs=prefs, sent_today=self.store.sent_since(local_day_start(now)),
                       duplicate=duplicate, quiet=self.quiet(now), meeting_until=until,
                       morning_hour=self.morning_hour, hold=hold,
-                      safety_voice_at_night=self.safety_voice_at_night, company=company)
+                      safety_voice_at_night=self.safety_voice_at_night, company=company,
+                      awake=self._awake(now))
 
     def voice_held(self, now: datetime | None = None) -> str | None:
         """Why her voice is held right now (a meeting or a nap), or None. The brief asks before
@@ -859,6 +939,8 @@ class ReachDesk:
             return "meeting"
         if self._nap(self.store.prefs(self.budget_default), now) is not None:
             return "nap"
+        if self._asleep_hold(now) is not None:
+            return "asleep"
         return None
 
     def reserve_for_brief(self, since: datetime, until: datetime, *, reason: str = "carried by the morning brief",
@@ -883,6 +965,56 @@ class ReachDesk:
                     continue
                 out.append(r)
             return out
+
+    def release_overnight(self) -> str:
+        """D74 call 1 (the owner, 11/19): once he's AWAKE (his phone) and before he's up, what she held
+        overnight reaches him as quiet text, nothing spoken. The routine items go together in ONE note
+        (folded into it, like her brief carries them, so they don't each count against the day);
+        what the night held that a note doesn't carry (messages relayed from people, check-ins) is
+        made due now and goes on its own, as quiet text too. Once a day: the note's key is on the
+        record, and a pass with nothing to carry isn't repeated by this process. Her spoken brief
+        later says how many came in (told_quietly)."""
+        if self.awake is None:
+            return "off"
+        now = self.clock()
+        day = now.astimezone(EASTERN).date()
+        if self._overnight_day == day:
+            return "done"
+        if not self._awake(now):
+            return "not awake"
+        key = f"{OVERNIGHT_SOURCE}:{day.isoformat()}"
+        if self.store.decided(key, local_day_start(now)):
+            self._overnight_day = day
+            return "done"
+        from aerys_v2.followups import CHECK_IN_TOPICS
+
+        since = datetime.combine(day - timedelta(days=1), time(18), tzinfo=EASTERN).astimezone(timezone.utc)
+        # If the note never goes (he muted it), they go on their own at the morning hour, as before; past
+        # it already (he woke late), within the hour, never tomorrow.
+        morning = datetime.combine(day, time(self.morning_hour), tzinfo=EASTERN).astimezone(timezone.utc)
+        until = morning if morning > now else now + timedelta(hours=1)
+        held = self.reserve_for_brief(since, until, reason="carried by the overnight note",
+                                      skip_topics=CHECK_IN_TOPICS)
+        carried = {r.id for r in held}
+        released = 0
+        with self.lock:
+            for r in self.store.waiting(since):
+                if r.id in carried or self._delivered(r.id) or not (r.reason or "").startswith("night:"):
+                    continue
+                try:
+                    self.store.mark(r.id, now, not_before=now)
+                    released += 1
+                except Exception:
+                    log.warning("reach %s: couldn't release it at his wake; it goes at its window", r.id)
+        self._overnight_day = day
+        if not held:
+            log.info("reach: he's awake; nothing for an overnight note (%d released)", released)
+            return "nothing held"
+        outcome = self.reach_out(ReachEvent(
+            source=OVERNIGHT_SOURCE, topic=OVERNIGHT_SOURCE, headline=overnight_headline(len(held)),
+            detail=overnight_lines(held), brief=True, text_only=True, folds=tuple(carried), dedupe_key=key))
+        log.info("reach: he's awake; overnight note %s (%d carried, %d released)", outcome, len(held), released)
+        return outcome
 
     def take_back(self, dedupe_key: str, now: datetime, reason: str) -> str:
         """Something else will say what's under this key (the welcome-home hello asks an appointment's
@@ -990,6 +1122,10 @@ class ReachDesk:
     def tick(self) -> dict:
         """The watcher's pass: deliver what's due, and text a copy of what he didn't answer."""
         out = {"sent": 0, "queued": 0, "dropped": 0, "duplicate": 0, "copied": 0, "heard": 0}
+        try:
+            self.release_overnight()            # D74: takes the lock itself; logs what it did
+        except Exception:
+            log.warning("reach: the overnight note failed this pass; retried next", exc_info=True)
         with self.lock:
             now = self.clock()
             for rid, (record, folds) in list(self.unrecorded.items()):   # delivered; only the record is owed

@@ -43,7 +43,7 @@ from aerys_v2.followups import (CHECK_IN_TOPICS, CHECKIN_FOR, CHECKIN_LOCK, DATA
                                 appointment_key)
 from aerys_v2.followups import SOURCE as FOLLOWUP_SOURCE
 from aerys_v2.followups import TOPIC as FOLLOWUP_TOPIC
-from aerys_v2.reach import EASTERN, ReachEvent, local_day_start, muted_topics, next_local
+from aerys_v2.reach import EASTERN, ReachEvent, local_day_start, muted_topics, next_local, told_quietly
 
 log = logging.getLogger(__name__)
 
@@ -502,7 +502,7 @@ class WelcomeHome:
             # Reserved first, as the brief does: what it carries can't also go out on its own.
             held = self.desk.reserve_for_brief(since, cutoff, reason="carried by the welcome-home hello",
                                                skip_topics=CHECK_IN_TOPICS)
-            quiet = [q for q in store.sent_quietly(since) if not q.text_only]
+            quiet = told_quietly(store.sent_quietly(since))
             try:
                 brief_facts = self.brief.gather(now, held, quiet)
             except Exception:

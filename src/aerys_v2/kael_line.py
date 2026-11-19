@@ -1207,12 +1207,19 @@ def reach_desk_for(settings, graph):
     def replied_since(when: datetime) -> bool:
         return owner_replied_since(settings, when)
 
+    # D74 (11/19): his mornings from his phone. Unarmed (no sensors named), the fixed hours as before.
+    from aerys_v2.wake import wake_watch_for
+
+    watch = wake_watch_for(settings)
+    if watch is not None:
+        log.info("reach desk: his mornings follow his phone (quiet ends when he's up; %02d:00 fallback)", end_h)
+
     return ReachDesk(
         PostgresReachStore(settings.database_url),
         Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface,
                   notify=notify if notify_service and getattr(settings, "ha_token", None) is not None else None),
         budget_default=int(getattr(settings, "reach_daily_budget", 3)),
-        quiet=lambda now: in_quiet_hours(now, start_h, end_h),
+        quiet=watch.quiet(start_h, end_h) if watch is not None else (lambda now: in_quiet_hours(now, start_h, end_h)),
         morning_hour=morning_h,
         meeting_hold=meeting_hold_fn_for(settings),
         replied_since=replied_since,
@@ -1220,4 +1227,7 @@ def reach_desk_for(settings, graph):
         said=lambda row, body: _said_to_owner(graph, settings, body, row),
         follow_through_after=timedelta(minutes=int(getattr(settings, "reach_follow_through_min", 5))),
         safety_voice_at_night=bool(getattr(settings, "reach_safety_voice_at_night", False)),
+        awake=watch.awake if watch is not None else None,
+        asleep=watch.asleep if watch is not None else None,
+        woke=(lambda now: watch.morning(now).woke_at) if watch is not None else None,
     )

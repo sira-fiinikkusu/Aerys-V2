@@ -36,7 +36,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Callable
 
 from aerys_v2.followups import CHECK_IN_TOPICS
-from aerys_v2.reach import EASTERN, Reach, ReachEvent, muted_topics
+from aerys_v2.reach import EASTERN, OVERNIGHT_SOURCE, Reach, ReachEvent, muted_topics, told_quietly
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,9 @@ def plain_brief(facts: Facts) -> str:
         parts.append(f"First up, {first}" + (f", and {more} more after that." if more else "."))
     else:
         parts.append("Nothing on the calendar for the rest of today.")
-    overnight = len(facts.held) + len(facts.quiet)
+    # Her overnight note (D74) is one message carrying several: count what it carried.
+    overnight = len(facts.held) + sum(max(len(getattr(r, "folds", ()) or ()), 1)
+                                      if getattr(r, "source", "") == OVERNIGHT_SOURCE else 1 for r in facts.quiet)
     if overnight == 1:
         parts.append("One thing came in overnight; it's in your messages.")
     elif overnight:
@@ -246,8 +248,8 @@ class MorningBrief:
         # Reserved first: what it will carry can't also go out on its own while she composes.
         # Never a check-in (a question with its own life, followups.py): it goes on its own.
         held = self.desk.reserve_for_brief(since, cutoff, skip_topics=CHECK_IN_TOPICS)
-        quiet = store.sent_quietly(since)
-        quiet = [r for r in quiet if not r.text_only]   # never said out loud, not even in the brief (email)
+        # Never a text_only one out loud, not even in the brief (email); her overnight note only counts.
+        quiet = told_quietly(store.sent_quietly(since))
         try:
             facts = self.gather(now, held, quiet)
         except Exception:
@@ -429,6 +431,28 @@ def _csv(value) -> list[str]:
 def _ha(settings):
     base = str(getattr(settings, "ha_base_url", "")).rstrip("/")
     return base, {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
+
+
+def with_phone_wake(read: Callable[[], Reading], woke: Callable[[datetime], datetime | None] | None,
+                    clock: Callable[[], datetime] | None = None) -> Callable[[], Reading]:
+    """D74: his phone's wake this morning (the night's, never a nap's) counts as a wake signal for the
+    brief, beside the HA ones. Unwired, or unreadable, the reading is as before."""
+    if woke is None:
+        return read
+    now_fn = clock or (lambda: datetime.now(timezone.utc))
+
+    def reading() -> Reading:
+        r = read()
+        try:
+            w = woke(now_fn())
+        except Exception:
+            log.warning("brief: couldn't read his phone's wake; going on without it", exc_info=True)
+            w = None
+        if w is not None and (r.woke_at is None or w > r.woke_at):
+            r.woke_at = w
+        return r
+
+    return reading
 
 
 def reader_for(settings, *, post=None) -> Callable[[], Reading]:
@@ -685,7 +709,7 @@ def morning_brief_for(settings, desk, *, replied_since=None, action_graph=None) 
     turn = her_turn_for(settings, action_graph)
     log.info("morning brief armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return MorningBrief(
-        desk, read=reader_for(settings), gather=gatherer_for(settings),
+        desk, read=with_phone_wake(reader_for(settings), getattr(desk, "woke", None)), gather=gatherer_for(settings),
         compose=composer_for(settings, turn=turn, kind="brief"),
         replied_since=replied_since or getattr(desk, "replied_since", None), room=room,
         start_hour=int(getattr(settings, "brief_start_hour", 5)),
