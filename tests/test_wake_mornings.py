@@ -27,8 +27,8 @@ BEDROOM = Where("room", "dev-bed", "bedroom")
 OFFICE = Where("room", "dev-office", "office")
 
 
-def at(h, m=0, day=19):
-    return datetime(2026, 11, day, h, m, tzinfo=ET)
+def at(h, m=0, sec=0, day=19):
+    return datetime(2026, 11, day, h, m, sec, tzinfo=ET)
 
 
 def fixed(t):
@@ -38,8 +38,8 @@ def fixed(t):
 
 # --- the wake rule (pure) ----------------------------------------------------------------
 
-CONF = [(at(22, 0, 18), "12"), (at(23, 10, 18), "91"), (at(6, 50), "95"), (at(7, 5), "20")]
-SEG = [(at(23, 0, 18), "unknown"), (WOKE, "28200000"), (at(13, 30), "3600000")]
+CONF = [(at(22, 0, day=18), "12"), (at(23, 10, day=18), "91"), (at(6, 50), "95"), (at(7, 5), "20")]
+SEG = [(at(23, 0, day=18), "unknown"), (WOKE, "28200000"), (at(13, 30), "3600000")]
 
 
 def test_the_night_wake_is_the_first_morning_segment_after_a_night_block():
@@ -55,7 +55,7 @@ def test_a_daytime_nap_never_makes_a_wake():
 
 
 def test_up_is_the_first_change_out_of_the_bedroom_after_the_wake():
-    room = [(at(21, 0, 18), "Bedroom"), (at(5, 10), "Office"), (at(5, 20), "Bedroom"), (UP, "Kitchen")]
+    room = [(at(21, 0, day=18), "Bedroom"), (at(5, 10), "Office"), (at(5, 20), "Bedroom"), (UP, "Kitchen")]
     assert up_time(room, WOKE, at(12), bedroom="bedroom") == UP              # the 05:10 trip was before the wake
     assert up_time(room, WOKE, at(7, 20), bedroom="bedroom") is None
     # Codex 11/19 #3: a stale 'office' from last night proves nothing; only a change after the wake does.
@@ -65,10 +65,10 @@ def test_up_is_the_first_change_out_of_the_bedroom_after_the_wake():
 
 def test_unreadable_is_no_evidence_and_no_evidence_is_the_fixed_hours():
     """Codex 11/19 #3: missing or dark room history, or a stale non-bedroom room, is no wake."""
-    day, bed = at(0).date(), [(at(21, 0, 18), "Bedroom")]
+    day, bed = at(0).date(), [(at(21, 0, day=18), "Bedroom")]
     assert read_morning(CONF, SEG, bed, day, at(9, 30), bedroom="bedroom") == Morning(WOKE, None)    # valid
     assert read_morning(CONF, SEG, [], day, at(9, 30), bedroom="bedroom") == Morning()              # no history
-    stale = [(at(20, 0, 18), "Office")]
+    stale = [(at(20, 0, day=18), "Office")]
     assert read_morning(CONF, SEG, stale, day, at(9, 30), bedroom="bedroom") == Morning()           # not in bed
     dark = bed + [(at(7, 10), "unavailable")]
     assert read_morning(CONF, SEG, dark, day, at(9, 30), bedroom="bedroom") == Morning()            # gone dark
@@ -77,8 +77,8 @@ def test_unreadable_is_no_evidence_and_no_evidence_is_the_fixed_hours():
 
 
 def test_a_reading_that_is_not_a_number_breaks_the_night_block():
-    gap = [(at(22, 0, 18), "95"), (at(23, 0, 18), "unavailable"), (at(6, 0), "95"), (at(7, 0), "10")]
-    assert night_minutes(gap, at(21, 0, 18), at(7, 0)) == 60 + 60    # 22-23 and 06-07, not the dark 7 hours
+    gap = [(at(22, 0, day=18), "95"), (at(23, 0, day=18), "unavailable"), (at(6, 0), "95"), (at(7, 0), "10")]
+    assert night_minutes(gap, at(21, 0, day=18), at(7, 0)) == 60 + 60    # 22-23 and 06-07, not the dark 7 hours
 
 
 def test_quiet_hours_end_when_he_is_up_and_09_00_is_the_fallback():
@@ -372,7 +372,7 @@ def _hist(entity, pts):
 
 
 def test_the_watch_reads_his_morning_from_history_and_a_restart_reaches_the_same_answer():
-    room = [(at(21, 0, 18), "Bedroom"), (UP, "Office")]
+    room = [(at(21, 0, day=18), "Bedroom"), (UP, "Office")]
     paths = []
 
     def get(path):
@@ -530,17 +530,17 @@ def _watch(h, cache_s=60):
 
 def test_a_no_wake_seen_at_06_00_is_never_reused_at_13_01_over_a_later_valid_wake():
     h = _History()
-    h.phase = {"sensor.conf": [(at(22, 0, 18), "12"), (at(23, 10, 18), "91")],
-               "sensor.seg": [(at(23, 0, 18), "unknown")], "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    h.phase = {"sensor.conf": [(at(22, 0, day=18), "12"), (at(23, 10, day=18), "91")],
+               "sensor.seg": [(at(23, 0, day=18), "unknown")], "sensor.room": [(at(21, 0, day=18), "Bedroom")]}
     w = _watch(h)
     assert w.morning(at(6, 0)) == Morning()
-    h.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    h.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, day=18), "Bedroom")]}
     assert w.morning(at(13, 1)) == Morning(WOKE.astimezone(timezone.utc), None)   # read again: awake in bed
 
 
 def test_a_dark_room_at_12_59_is_reread_after_it_comes_back_at_13_00():
     h = _History()
-    dark = [(at(21, 0, 18), "Bedroom"), (at(7, 10), "unavailable")]
+    dark = [(at(21, 0, day=18), "Bedroom"), (at(7, 10), "unavailable")]
     h.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": dark}
     w = _watch(h, cache_s=0)
     assert w.morning(at(12, 59)) == Morning()                        # can't tell: the fixed hours
@@ -550,21 +550,84 @@ def test_a_dark_room_at_12_59_is_reread_after_it_comes_back_at_13_00():
 
 def test_only_a_complete_valid_no_wake_past_13_00_or_an_up_settles_the_day():
     h = _History()
-    h.phase = {"sensor.conf": [(at(22, 0, 18), "12")], "sensor.seg": [(at(23, 0, 18), "unknown")],
-               "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    h.phase = {"sensor.conf": [(at(22, 0, day=18), "12")], "sensor.seg": [(at(23, 0, day=18), "unknown")],
+               "sensor.room": [(at(21, 0, day=18), "Bedroom")]}
     w = _watch(h, cache_s=0)
     assert w.morning(at(13, 5)) == Morning() and h.reads == 1
     w.morning(at(15, 0))
     assert h.reads == 1                                              # settled: no wake can come any more
     h2 = _History()
-    h2.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, 18), "Bedroom"), (UP, "Office")]}
+    h2.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, day=18), "Bedroom"), (UP, "Office")]}
     w2 = _watch(h2, cache_s=0)
     w2.morning(at(7, 30))
     w2.morning(at(9, 0))
     assert h2.reads == 1                                             # up doesn't change
     h3 = _History()
-    h3.phase = {"sensor.conf": [(at(22, 0, 18), "12")], "sensor.seg": [(at(23, 0, 18), "unknown")]}   # no room
+    h3.phase = {"sensor.conf": [(at(22, 0, day=18), "12")], "sensor.seg": [(at(23, 0, day=18), "unknown")]}   # no room
     w3 = _watch(h3, cache_s=0)
     w3.morning(at(13, 5))
     w3.morning(at(13, 6))
     assert h3.reads == 2                                             # incomplete evidence: always retried
+
+
+# --- Codex's second re-check: expiry against a fresh clock at the moment of delivery --------------
+
+class _SlowStore(MemoryReachStore):
+    """A store whose add() or prefs() takes long enough for the clock to cross T."""
+
+    def __init__(self, clock, *, slow_add_to=None, slow_prefs_to=None):
+        super().__init__()
+        self.clock, self.slow_add_to, self.slow_prefs_to = clock, slow_add_to, slow_prefs_to
+
+    def add(self, event, now, **kw):
+        row = super().add(event, now, **kw)
+        if self.slow_add_to and event.source == OVERNIGHT_SOURCE:
+            self.clock["now"], self.slow_add_to = self.slow_add_to, None
+        return row
+
+    def prefs(self, default_budget):
+        if self.slow_prefs_to and self.clock["now"] >= at(8, 59, 30):
+            self.clock["now"], self.slow_prefs_to = self.slow_prefs_to, None
+        return super().prefs(default_budget)
+
+
+def _desk_on(store, clock, phone, texts, fail_until=None):
+    def text(surface, body, silent):
+        if fail_until and clock["now"] < fail_until:
+            raise ConnectionError("discord down")
+        texts.append(body)
+
+    return ReachDesk(store, Deliverer(locate=lambda: BEDROOM, speak=lambda t, d: None, text=text),
+                     quiet=phone.quiet, morning_hour=9, clock=lambda: clock["now"], awake=phone.awake,
+                     asleep=phone.asleep, fixed_morning_hour=9)
+
+
+def test_the_clock_crossing_t_during_the_notes_first_add_sends_nothing_and_the_items_go_at_t():
+    clock, texts, phone = {"now": NIGHT}, [], Phone(at(8, 58), None)
+    store = _SlowStore(clock, slow_add_to=at(9, 1))
+    desk = _desk_on(store, clock, phone, texts)
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(8, 59)
+    assert desk.release_overnight() == "dropped" and texts == []     # T passed while it was written
+    note = next(r for r in store.rows.values() if r.source == OVERNIGHT_SOURCE)
+    assert note.status == "dropped" and note.reason == "expired before its window"
+    assert store.rows[1].not_before == at(9, 0)
+    desk.tick()
+    assert texts == ["Backup done."]
+
+
+def test_the_clock_crossing_t_during_a_retrys_prefs_sends_nothing_and_the_items_go_at_t():
+    clock, texts, phone = {"now": NIGHT}, [], Phone(at(8, 58), None)
+    store = _SlowStore(clock)
+    desk = _desk_on(store, clock, phone, texts, fail_until=at(8, 59, 10))
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(8, 58, 30)
+    desk.tick()                                                      # the note fails; retry at 08:59:30
+    note = next(r for r in store.rows.values() if r.source == OVERNIGHT_SOURCE)
+    assert note.status == "queued"
+    store.slow_prefs_to = at(9, 1)
+    clock["now"] = at(8, 59, 40)
+    desk.tick()                                                      # the retry's prefs read crosses T
+    assert texts == [] and note.status == "dropped" and note.reason == "expired before its window"
+    desk.tick()
+    assert texts == ["Backup done."]

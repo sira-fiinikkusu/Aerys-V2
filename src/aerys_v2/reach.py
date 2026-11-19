@@ -715,7 +715,7 @@ class Where:
 
 @dataclass
 class Delivery:
-    status: str                       # sent | busy | wait | away | recheck | failed
+    status: str                       # sent | busy | wait | away | recheck | expired | failed
     surface: str = ""
     spoken: bool = False
     texted: bool = False
@@ -739,6 +739,10 @@ class Deliverer:
         # only texted? Checked at the moment of speech too: a warning decided at 20:59 must
         # not be spoken at 21:00 unless the owner turned night voice on.
         self.safety_voice: Callable[[Reach], bool] = lambda row: True
+        # Set by the desk: has this row's window closed by the desk's clock RIGHT NOW? Asked last,
+        # just before anything is sent (Codex 11/19: an expiry checked against an older reading lets
+        # a note out after its items were freed).
+        self.expired: Callable[[Reach], bool] = lambda row: False
 
     def deliver(self, row: Reach, decision: Decision) -> Delivery:
         try:
@@ -750,6 +754,8 @@ class Deliverer:
             where = Where(self.text_surface)
         if row.room and not (where.kind == "room" and where.label == row.room) and not decision.anywhere:
             return Delivery("away")        # pinned to a room he isn't in: it waits for him there (not in a meeting: D66)
+        if self.expired(row):              # a fresh look at the clock, the last thing before a send
+            return Delivery("expired")
         body = text_copy(row.headline, row.detail)
         # A notification on his phone, watch and glasses, AS WELL AS the text (the owner, 11/08: "and
         # not instead of, she can discord me too"): in company (never aloud) and when he's away ("if im
@@ -870,6 +876,8 @@ class ReachDesk:
         # the record is retried, never the delivery (the check-ins' stance; Codex 11/08).
         self.unrecorded: dict = {}
         deliverer.may_speak = self._may_speak
+        deliverer.expired = lambda row: (row.expires_at is not None and not row.owed
+                                         and self.clock() >= _utc(row.expires_at))
         deliverer.safety_voice = lambda row: self.safety_voice_at_night or not self.quiet(self.clock())
 
     def _may_speak(self, row: Reach) -> bool:
@@ -1135,6 +1143,14 @@ class ReachDesk:
 
     def _attempt(self, row: Reach, d: Decision, now: datetime, *, rechecked: bool = False) -> str:
         result = self.deliverer.deliver(row, d)
+        if result.status == "expired":
+            # Its window closed while the desk worked on it (the first send and every retry come here):
+            # never sent; an overnight note frees what it carried, which goes at its own time.
+            now = self.clock()
+            self.store.mark(row.id, now, status="dropped", reason="expired before its window")
+            self._carrier_ended(row, now)
+            log.info("reach %s (%s): expired before its window", row.id, row.source)
+            return "dropped"
         if result.status == "recheck":
             # Speech was allowed when decided, not any more: decide again with the fresh clock.
             now = self.clock()
