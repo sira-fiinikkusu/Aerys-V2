@@ -670,8 +670,10 @@ def _note_for(row: GatedAction, status: str, outcome: str = "") -> str:
     return f"{said} {what}, so it wasn't done."
 
 
-#: how far back a failure after his Approve is still re-offered to the desk (a restart or a desk hiccup)
-FAILED_NOTICE_FOR = timedelta(days=2)
+#: how far back a failure after his Approve is still re-offered to the desk (a restart, a desk outage). Codex
+#: 11/19: two days could lose one to a longer outage; two weeks outlasts any outage the brain survives. The
+#: desk keeps one row per key, so re-offers cost a lookup, never a second message.
+FAILED_NOTICE_FOR = timedelta(days=14)
 
 
 class HandsWatcher:

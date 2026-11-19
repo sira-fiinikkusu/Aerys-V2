@@ -434,9 +434,10 @@ class MemoryReachStore:
         return "sent" if "sent" in states else "pending" if states else None
 
     def add_new(self, event, now, *, status, reason, not_before):
-        if any(r.dedupe_key == event.dedupe_key for r in self.rows.values()):
-            return None
-        return self.add(event, now, status=status, reason=reason, not_before=not_before)
+        with self._relay_lock:
+            if any(r.dedupe_key == event.dedupe_key for r in self.rows.values()):
+                return None
+            return self.add(event, now, status=status, reason=reason, not_before=not_before)
 
     def foldable(self, since, until, now=None):
         """Routine held items a carrier may take. With `now`: never one another carrier holds right now
@@ -556,6 +557,9 @@ class PostgresReachStore:
         for a producer outside the brain (the email watcher) whose key names one thing for
         good. None when it's already there."""
         with self._connect() as conn:
+            # Every source, not only email (Codex 11/19: migration 019's unique index covers email_watch alone):
+            # one producer per key at a time, so the NOT EXISTS below sees the other's committed row.
+            conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 19))", (event.dedupe_key,))
             row = conn.execute(
                 "INSERT INTO v2_reachouts (created_at, updated_at, source, topic, urgency, owed, headline, detail, "
                 "dedupe_key, status, not_before, expires_at, reason, room, brief, folds, text_only, text_to) "
