@@ -424,7 +424,8 @@ def test_historical_outside_scope(name):
     request = SimpleNamespace(runtime=SimpleNamespace(config=config()),
         state={'messages': [AIMessage(content='outside-derived', additional_kwargs={'outside_read': True}),
                             HumanMessage(content='Continue')]},
-        tool_call={'name': name, 'id': 'call', 'args': {}})
+        # A real skill path: since 11/19 a write the fences would refuse anyway (no path, a home skill) asks nobody.
+        tool_call={'name': name, 'id': 'call', 'args': {'file_path': PATH} if name == 'edit_file' else {}})
     calls = []
     outside_guard(request, lambda r: calls.append(r), gate=gate)
     assert bool(gate.requests) == (name == 'edit_file')
@@ -574,3 +575,38 @@ def test_two_edits_at_once_cannot_combine_into_a_file_neither_would_pass():
         sk.OwnerSkillWrites.refusal = real_refusal
     stored = sk.backend_for(store).download_files([path])[0].content.decode('utf-8')
     sk.validate_skill('sample', stored)                  # whatever landed still passes
+
+
+# 11/19 14:50 (Chris, MapTap share rule): after outside text she asked him to approve an edit_file on
+# /home-skills/... (her HOME body's skill, read-only here), he tapped Approve, and the edit was refused
+# ("Not saved"). Nobody told him. A write that can't land here is refused at once, before any card, and the
+# refusal says where it can be done: her home machine, as a home job.
+HOME_SKILL = '/home-skills/maptap-play-with-drag-zoom-and-tap-using-browse-pointer/SKILL.md'
+
+
+@pytest.mark.parametrize('name', ['write_file', 'edit_file'])
+@pytest.mark.parametrize('path', [HOME_SKILL, '/elsewhere/notes.md'])
+def test_a_write_that_cannot_land_asks_nobody(name, path):
+    gate = Gate()
+    request = SimpleNamespace(
+        runtime=SimpleNamespace(config=config()),
+        state={'messages': [HumanMessage(content='Fix it'), ToolMessage(content='outside', name='read_web_page', tool_call_id='read')]},
+        tool_call={'name': name, 'id': 'write', 'args': {'file_path': path, 'content': CONTENT,
+                                                          'old_string': 'a', 'new_string': 'b'}},
+    )
+    seen = []
+    outside_guard(request, lambda req: seen.append(req) or 'handled by the fences', gate=gate)
+    assert gate.requests == [], 'no approval card for a write the fences will refuse'
+    assert seen, 'it goes straight on, where the skill fences refuse it'
+
+
+def test_a_home_skill_edit_is_refused_with_where_to_do_it():
+    from aerys_v2.skills import HOME_SKILL_REFUSAL
+    store = InMemoryStore()
+    executor = action_executor([], skill_middleware=skills_middleware(store, OWNER))
+    row = SimpleNamespace(thread_id='person:owner-placeholder', args={
+        'identity': IDENTITY, 'tool': 'edit_file',
+        'tool_args': {'file_path': HOME_SKILL, 'old_string': "DON'T press it", 'new_string': 'press it'}})
+    ok, said = executor(row)
+    assert ok is False and said == HOME_SKILL_REFUSAL
+    assert 'home job' in HOME_SKILL_REFUSAL and 'home machine' in HOME_SKILL_REFUSAL

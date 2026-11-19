@@ -94,7 +94,9 @@ class OwnerSkillWrites(AgentMiddleware):
         if his_private_read(identity, thread, self.owner) is not None:
             return ToolMessage(content=REFUSAL, name=name, tool_call_id=call_id, status='error')
         path = str((request.tool_call.get('args') or {}).get('file_path') or '')
-        if not SKILL_FILE.match(path) or '..' in path:
+        if path.startswith(BODY_SKILLS):
+            return ToolMessage(content=HOME_SKILL_REFUSAL, name=name, tool_call_id=call_id, status='error')
+        if not writable_skill_path(path):
             return ToolMessage(content=OUTSIDE, name=name, tool_call_id=call_id, status='error')
         if path.endswith('/SKILL.md'):
             args = request.tool_call.get('args') or {}
@@ -157,6 +159,15 @@ _BODY_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 FEED_SKILLS_SQL = """SELECT rack_seq, memory_id, key_label, event_type, content, context, source, observed_at
     FROM portable_memory_feed WHERE key_label LIKE 'skill.%%' ORDER BY rack_seq"""
 _READ_ONLY = "Not saved: skills from my bodies are written there, not here; this shelf only reads them."
+#: 11/19 14:50 (Chris, the MapTap share rule): her brain asked him to approve an edit to a home skill, he
+#: tapped Approve, and the edit was refused here. A home-body skill is written by her home body.
+HOME_SKILL_REFUSAL = ("Not saved: that skill lives on my home machine, and this shelf only reads it. To change it, "
+                      "start a home job that edits it there (the same file, the same change).")
+
+
+def writable_skill_path(path: str) -> bool:
+    """A path her own skill shelf can write (the fences OwnerSkillWrites applies): /skills/<slug>/..."""
+    return bool(SKILL_FILE.match(path or '')) and '..' not in (path or '')
 _FEED_DOWN = ("My bodies' skills couldn't be read just now (the door's feed didn't answer), so I can't tell "
               "which ones I have from there.")
 

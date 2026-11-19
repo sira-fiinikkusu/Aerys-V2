@@ -125,6 +125,13 @@ def _decide(request, gate):
     # Its button shows the resolved identity and signed words, not an outside_action wrapper.
     if name == 'send_message':
         return None
+    if name in ('write_file', 'edit_file'):
+        # 11/19 (Chris tapped Approve on a home-skill edit that could never land): a skill write the fences
+        # below will refuse anyway (a home body's skill, anything outside /skills/) asks nobody; it goes
+        # straight on and is refused in her turn, where she can say so. Nothing is written either way.
+        from aerys_v2.skills import writable_skill_path
+        if not writable_skill_path(str(args.get('file_path') or '')):
+            return None
     if not sources or not reaches:
         return None
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
