@@ -280,7 +280,9 @@ RELAY_OFFER = re.compile(
 #: Her offer to file her OWN report or note (10/20: "Want me to send Kael the gap report about a
 #: keyword search?"). Nobody's words are being carried, so it is not the courier slip this
 #: check exists for. 11/17: so is a ticket to Kael ("Want me to send Kael this as a new ticket?").
-OWN_REPORT_OFFER = re.compile(r"\bgap report\b|\bmy (?:report|note|gap|ticket)\b|\b(?:new|tracked|a) ticket\b", re.I)
+#: 11/18 19:04/19:06: and a summary of her own work ("I can send him a short summary").
+OWN_REPORT_OFFER = re.compile(r"\bgap report\b|\bmy (?:report|note|gap|ticket|summary)\b|\b(?:new|tracked|a) ticket\b"
+                              r"|\ba (?:short |brief |quick )?summary\b", re.I)
 #: His words asking for a relay: then an offer to relay is the right answer, not a courier slip.
 ASKED_TO_RELAY = re.compile(
     r"^\s*(?:@?\w+[,:]?\s+)?(?:please\s+)?(?:tell|let|ask|pass|send|forward|message|remind)\b", re.I)

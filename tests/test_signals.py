@@ -392,6 +392,26 @@ def test_her_offer_to_file_her_own_ticket_is_not_a_courier_slip():
 
 
 
+def test_her_offer_to_send_kael_a_summary_of_her_own_work_is_not_a_courier_slip():
+    """11/18 19:04 and 19:06 (turns 3425, 3427): he asked how her audio research reached Kael, and she
+    offered to send Kael a short summary of it. That is her own work, like her report or ticket, not
+    anyone's words carried; the check read both as courier slips."""
+    from aerys_v2.workers.signals import answers_not_relays
+    turns = [
+        dict(id=3425, channel='discord_dm', input_text='Also how did you send the audio stuff to kael?',
+             emitted_reply="I didn't send the audio research to Kael. If you want him to have it, I can send him a "
+                           "short summary. Do you want me to send that, or would you rather hand him the file?"),
+        dict(id=3427, channel='discord_dm', input_text='Not the research helper issue. I meant the whole audio research you did?',
+             emitted_reply="I haven't sent him the report or a summary of it. Do you want me to send him a short "
+                           "summary with the file path?"),
+    ]
+    result = answers_not_relays(turns)
+    assert not result.failed and result.checked == 2, result
+    carried = [dict(id=12, channel='discord_dm', input_text='my friend said dinner is at six',
+                    emitted_reply='Want me to pass that along to Kael?')]
+    assert answers_not_relays(carried).failed, "carrying someone else's words still fails"
+
+
 def test_a_held_follow_up_after_a_kael_note_is_reported_with_its_words():
     """D70 (his 17:45): nothing held silently. Each held follow-up gets a human look: a false hold
     silences her, which is the one-way feeling he named on 11/07."""
