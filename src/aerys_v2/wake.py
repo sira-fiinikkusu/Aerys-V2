@@ -145,10 +145,15 @@ def _morning_hours(hour: int, start_h: int) -> bool:
     return WINDOW_START_H <= hour < end
 
 
-def quiet_now(now: datetime, start_h: int, end_h: int, morning: Morning | None) -> bool:
+AWAKE_UNTIL_H = 11       # D75: awake in bed, her voice comes back by 11:00 at the latest
+
+
+def quiet_now(now: datetime, start_h: int, end_h: int, morning: Morning | None,
+              awake_until_h: int | None = AWAKE_UNTIL_H) -> bool:
     """D74's quiet hours: from start_h as always; from 04:00 they end when he's up after the night's
     wake. No (valid) wake keeps the fixed end, start_h-end_h; awake but not up keeps them on until
-    he's up, at the latest until start_h, when the evening's begin anyway."""
+    he's up, or until awake_until_h (D75, the owner 11/19 10:45: "set time of 11 am would be nice"),
+    whichever comes first. None = no cap (until start_h, when the evening's begin anyway)."""
     if start_h == end_h:
         return False
     base = in_fixed_quiet(now, start_h, end_h)
@@ -161,7 +166,9 @@ def quiet_now(now: datetime, start_h: int, end_h: int, morning: Morning | None) 
     up = morning.up_at
     if up is not None and up <= now:
         return False                                 # he's up: quiet's over
-    return True                                      # awake in the bedroom: still quiet (text only), no cutoff
+    if awake_until_h is not None and hour >= awake_until_h:
+        return base                                  # D75: past 11:00 her voice is back, up or not
+    return True                                      # awake in the bedroom: still quiet (text only)
 
 
 class WakeWatch:
@@ -170,9 +177,9 @@ class WakeWatch:
 
     def __init__(self, get: Callable[[str], object], *, confidence: str, segment: str, room: str,
                  bedroom: str = "bedroom", clock: Callable[[], datetime] | None = None,
-                 cache_s: float = CACHE_S, start_h: int = 21):
+                 cache_s: float = CACHE_S, start_h: int = 21, awake_until_h: int | None = AWAKE_UNTIL_H):
         self.get, self.confidence, self.segment, self.room = get, confidence, segment, room
-        self.bedroom, self.start_h = bedroom, start_h
+        self.bedroom, self.start_h, self.awake_until_h = bedroom, start_h, awake_until_h
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.cache_s = cache_s
         self._lock = threading.Lock()
@@ -232,12 +239,14 @@ class WakeWatch:
     def quiet(self, start_h: int, end_h: int) -> Callable[[datetime], bool]:
         """quiet(now) for the desk: D74's hours (quiet_now)."""
         def quiet(now: datetime) -> bool:
-            return quiet_now(now, start_h, end_h, self.morning(now))
+            return quiet_now(now, start_h, end_h, self.morning(now), self.awake_until_h)
         return quiet
 
     def awake(self, now: datetime | None = None) -> bool:
         """He woke this morning and isn't up yet: what she holds goes as quiet text, nothing aloud."""
         now = now or self.clock()
+        if self.awake_until_h is not None and now.astimezone(EASTERN).hour >= self.awake_until_h:
+            return False                         # D75: past 11:00 she's no longer in her awake-in-bed mode
         m = self.morning(now)
         return m.woke_at is not None and m.woke_at <= now and (m.up_at is None or m.up_at > now)
 
@@ -292,4 +301,5 @@ def wake_watch_for(settings, *, get: Callable[[str], object] | None = None,
 
     return WakeWatch(get, confidence=confidence, segment=segment, room=room,
                      bedroom=str(getattr(settings, "wake_bedroom_room", "bedroom") or "bedroom"), clock=clock,
-                     start_h=int(getattr(settings, "owner_quiet_start_hour", 21)))
+                     start_h=int(getattr(settings, "owner_quiet_start_hour", 21)),
+                     awake_until_h=int(getattr(settings, "wake_awake_quiet_until_hour", AWAKE_UNTIL_H)))

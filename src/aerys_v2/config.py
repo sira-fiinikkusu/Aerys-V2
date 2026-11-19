@@ -467,6 +467,9 @@ class Settings(BaseSettings):
     wake_sleep_confidence_entity: str = ""
     wake_sleep_segment_entity: str = ""
     wake_bedroom_room: str = "bedroom"
+    # D75 (the owner 11/19 10:45, "set time of 11 am would be nice"): awake but still in the bedroom,
+    # her voice comes back at this hour at the latest (Eastern), up or not.
+    wake_awake_quiet_until_hour: int = 11
     # The owner's meetings (D15, 11/08: "doesnt speak over voice while a meeting is active
     # and speaks at the next window with a 10 minute buffer"). A csv of HA calendar entities
     # whose TIMED events are meetings (all-day entries never count); while one is on, and for

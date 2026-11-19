@@ -86,7 +86,10 @@ def test_quiet_hours_end_when_he_is_up_and_09_00_is_the_fallback():
     assert quiet_now(at(7, 10), 21, 9, m) and not quiet_now(at(7, 30), 21, 9, m)      # ends at up, not 9
     assert quiet_now(at(8, 59), 21, 9, Morning()) and not quiet_now(at(9, 0), 21, 9, Morning())   # no wake
     assert quiet_now(at(9, 30), 21, 9, Morning(WOKE, None))      # awake in bed past 9: still nothing aloud
-    assert quiet_now(at(15, 0), 21, 9, Morning(WOKE, None))      # ...until he's up, no afternoon cutoff (#4)
+    assert quiet_now(at(10, 59), 21, 9, Morning(WOKE, None))     # ...until he's up, or 11:00 (D75, 11/19 10:45)
+    assert not quiet_now(at(11, 0), 21, 9, Morning(WOKE, None))  # "set time of 11 am would be nice"
+    assert not quiet_now(at(15, 0), 21, 9, Morning(WOKE, None))
+    assert quiet_now(at(15, 0), 21, 9, Morning(WOKE, None), awake_until_h=None)   # the cap is a setting
     assert quiet_now(at(3, 59), 21, 9, Morning(at(4, 0), at(4, 0)))  # never ends before 04:00
     assert quiet_now(at(21, 0), 21, 9, m) and quiet_now(EVE, 21, 9, m)                # the start stays
     assert not quiet_now(at(7, 0), 9, 9, m)                                           # no quiet hours set
@@ -631,3 +634,17 @@ def test_the_clock_crossing_t_during_a_retrys_prefs_sends_nothing_and_the_items_
     assert texts == [] and note.status == "dropped" and note.reason == "expired before its window"
     desk.tick()
     assert texts == ["Backup done."]
+
+
+def test_d75_awake_in_bed_her_voice_comes_back_at_eleven():
+    """D75 (his 11/19 10:45, "set time of 11 am would be nice"): D74 went live with no cap, so a phone that
+    said awake and a room sensor still on Bedroom kept her text-only until 21:00. Now 11:00 at the latest;
+    up before it still ends quiet at up, and the 09:00 fallback for no evidence is unchanged."""
+    m = Morning(WOKE, None)
+    assert quiet_now(at(9, 30), 21, 9, m) and quiet_now(at(10, 59), 21, 9, m)
+    assert not quiet_now(at(11, 0), 21, 9, m) and not quiet_now(at(16, 0), 21, 9, m)
+    assert quiet_now(at(21, 30), 21, 9, m)                               # the evening's start stays
+    up = Morning(WOKE, at(7, 30))
+    assert not quiet_now(at(7, 31), 21, 9, up)                           # up before 11: ends at up
+    assert not quiet_now(at(9, 0), 21, 9, Morning())                     # no evidence: 09:00, unchanged
+    assert quiet_now(at(10, 0), 21, 9, m, awake_until_h=10) is False      # the hour comes from the setting
