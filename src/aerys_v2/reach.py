@@ -90,6 +90,8 @@ DETAIL_FOR = timedelta(days=3)        # a spoken message whose detail never went
 TICK_S = 30
 MISSED_PREFIX = "In case you missed what I said:"
 OVERNIGHT_SOURCE = "overnight"        # D74: what the night held, in one quiet text when he wakes
+CARRIED = "carried by"                # a reservation's reason prefix: a carrier holds this row
+OVERNIGHT_CARRIED = "carried by the overnight note"
 
 
 @dataclass
@@ -296,12 +298,11 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
     if quiet and not event.brief:      # a brief exists only once he's up and in its room
         if event.owed or event.urgency == "timely":
             return Decision("send", "night: as quiet text", silent=True, voice="reroute")
-        if awake:
+        if awake and (event.source == "relay" or sent_today < prefs.budget):
             # D74 call 1 (11/19): awake in bed, "nothing spoken": it reaches him as quiet text now. A
             # routine thing still counts against the day (the night's own items don't: they go
-            # together, outside it, in her overnight note).
-            if event.source != "relay" and sent_today >= prefs.budget:
-                return Decision("drop", f"over today's budget ({prefs.budget})")
+            # together, outside it, in her overnight note); over the budget it waits for the morning,
+            # exactly as the night held it before (Codex 11/19: no new drops).
             return Decision("send", "awake: as quiet text, nothing aloud until he's up", silent=True,
                             voice="reroute")
         return Decision("queue", "night: waits for the morning", not_before=next_local(now, morning_hour))
@@ -324,7 +325,9 @@ def _decide_checks(event: ReachEvent, now: datetime, *, prefs: Prefs, sent_today
                 return Decision("drop", f"over today's budget ({prefs.budget})")
             return Decision("send", "meeting: as quiet text, never spoken", silent=True, voice="reroute",
                             anywhere=True)
-        if event.urgency == "timely":
+        if event.urgency == "timely" or (event.owed and hold == "asleep"):
+            # D74 (Codex 11/19): an answer he asked for during the phone's nap goes as quiet text now,
+            # never waits for him to wake. The named nap keeps its own (older) rule below.
             return Decision("send", f"{hold}: as quiet text", silent=True, voice="reroute")
         if event.owed:
             return Decision("send", f"{hold}: quiet text, or the next window if it would be spoken",
@@ -353,7 +356,7 @@ class ReachStore(Protocol):
     def carried(self, dedupe_key: str, since: datetime) -> str | None: ...
     def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
                 not_before: datetime | None) -> Reach | None: ...
-    def foldable(self, since: datetime, until: datetime) -> list[Reach]: ...
+    def foldable(self, since: datetime, until: datetime, now: datetime | None = None) -> list[Reach]: ...
     def waiting(self, since: datetime) -> list[Reach]: ...
     def sent_quietly(self, since: datetime) -> list[Reach]: ...
     def sent_since(self, since: datetime) -> int: ...
@@ -435,10 +438,14 @@ class MemoryReachStore:
             return None
         return self.add(event, now, status=status, reason=reason, not_before=not_before)
 
-    def foldable(self, since, until):
+    def foldable(self, since, until, now=None):
+        """Routine held items a carrier may take. With `now`: never one another carrier holds right now
+        (its reservation, 'carried by ...', hasn't lapsed): each is carried once (Codex 11/19)."""
         return sorted((r for r in self.rows.values() if r.status == "queued" and r.source != "relay" and not r.owed and not r.brief
                        and r.urgency == "routine" and r.created_at and r.created_at >= since
-                       and (r.not_before is None or r.not_before <= until)), key=lambda r: r.id)
+                       and (r.not_before is None or r.not_before <= until)
+                       and not (now is not None and (r.reason or "").startswith(CARRIED)
+                                and r.not_before is not None and r.not_before > now)), key=lambda r: r.id)
 
     def waiting(self, since):
         """Everything still queued that was raised since `since` (D74: what the night held)."""
@@ -595,12 +602,15 @@ class PostgresReachStore:
         states = {r[0] for r in rows}
         return "sent" if "sent" in states else "pending" if states else None
 
-    def foldable(self, since, until):
+    def foldable(self, since, until, now=None):
+        exclusive = ("AND NOT (reason LIKE %s AND not_before IS NOT NULL AND not_before > %s) "
+                     if now is not None else "")
+        params = (since, until) + ((CARRIED + "%", now) if now is not None else ())
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE status = 'queued' AND source <> 'relay' AND NOT owed AND NOT brief "
                 "AND urgency = 'routine' AND created_at >= %s AND (not_before IS NULL OR not_before <= %s) "
-                "ORDER BY id", (since, until)).fetchall()
+                + exclusive + "ORDER BY id", params).fetchall()
         return [self._row(r) for r in rows]
 
     def waiting(self, since):
@@ -835,11 +845,14 @@ class ReachDesk:
                  clock: Callable[[], datetime] | None = None,
                  awake: Callable[[datetime], bool] | None = None,
                  asleep: Callable[[datetime], bool] | None = None,
-                 woke: Callable[[datetime], datetime | None] | None = None):
+                 fixed_morning_hour: int | None = None):
         self.store, self.deliverer = store, deliverer
-        # D74 (wake.py): he woke and isn't up yet; the phone says he's asleep; when he woke today.
-        # None = the phone isn't wired: the fixed hours and the named nap, as before.
-        self.awake, self.asleep, self.woke = awake, asleep, woke
+        # The fixed end of quiet hours (09:00): where the night's items go on their own when her
+        # overnight note doesn't (morning_hour is the brief's cutoff when a brief is armed).
+        self.fixed_morning_hour = morning_hour if fixed_morning_hour is None else fixed_morning_hour
+        # D74 (wake.py): he woke and isn't up yet; the phone says he's asleep. None = the phone
+        # isn't wired: the fixed hours and the named nap, as before.
+        self.awake, self.asleep = awake, asleep
         self._overnight_day = None     # the day this process already looked at the overnight note
         self.safety_voice_at_night = safety_voice_at_night
         self.budget_default, self.morning_hour = budget_default, morning_hour
@@ -868,6 +881,10 @@ class ReachDesk:
             return False
         prefs = self.store.prefs(self.budget_default)
         company = prefs.company_until is not None and _utc(prefs.company_until) > now
+        # D74 (Codex 11/19): a spoken brief passes the night, but never while he's awake in bed
+        # (nothing aloud until he's up), asked again right here, at the moment of speech.
+        if row.brief and not row.text_only and self._awake(now):
+            return False
         return ((row.brief or not self.quiet(now)) and self._meeting() is None and not company
                 and self._nap(prefs, now) is None and self._asleep_hold(now) is None)
 
@@ -941,25 +958,29 @@ class ReachDesk:
             return "nap"
         if self._asleep_hold(now) is not None:
             return "asleep"
+        if self._awake(now):
+            return "awake"           # D74: awake in bed, not up: nothing aloud yet
         return None
 
     def reserve_for_brief(self, since: datetime, until: datetime, *, reason: str = "carried by the morning brief",
-                          skip_topics: tuple = ()) -> list[Reach]:
+                          skip_topics: tuple = (), hold_until: datetime | None = None) -> list[Reach]:
         """The routine items held since `since` that a brief may carry, reserved for it: each
         waits until `until` (the brief's cutoff), so the watcher can't also send it while she
-        composes. Not what has expired or what he's muted since (those the watcher drops). If
-        the brief never goes, they go on their own at `until`."""
+        composes. Not what has expired or what he's muted since (those the watcher drops), nor
+        what another carrier holds right now (exclusive). If the brief never goes, they go on
+        their own at `until` (or `hold_until` when given: the overnight note takes everything the
+        night held but lets it go at the fixed morning hour)."""
         with self.lock:
             now = self.clock()
             muted = muted_topics(self.store.prefs(self.budget_default), now)
             out = []
-            for r in self.store.foldable(since, until):
+            for r in self.store.foldable(since, until, now):
                 if self._delivered(r.id) or r.topic.strip().lower() in muted or r.topic in skip_topics:
                     continue
                 if r.expires_at is not None and now >= _utc(r.expires_at):
                     continue
                 try:
-                    self.store.mark(r.id, now, not_before=until, reason=reason)
+                    self.store.mark(r.id, now, not_before=hold_until or until, reason=reason)
                 except Exception:
                     log.warning("reach %s: couldn't reserve it for the brief; it goes on its own", r.id)
                     continue
@@ -989,12 +1010,11 @@ class ReachDesk:
         from aerys_v2.followups import CHECK_IN_TOPICS
 
         since = datetime.combine(day - timedelta(days=1), time(18), tzinfo=EASTERN).astimezone(timezone.utc)
-        # If the note never goes (he muted it), they go on their own at the morning hour, as before; past
-        # it already (he woke late), within the hour, never tomorrow.
-        morning = datetime.combine(day, time(self.morning_hour), tzinfo=EASTERN).astimezone(timezone.utc)
-        until = morning if morning > now else now + timedelta(hours=1)
-        held = self.reserve_for_brief(since, until, reason="carried by the overnight note",
-                                      skip_topics=CHECK_IN_TOPICS)
+        # If the note never goes, they go on their own at the fixed morning hour (09:00); past it
+        # already (he woke late), within the hour, never tomorrow (Codex 11/19).
+        # Everything the night held routinely, whatever window it waits for (13:00 with a brief armed).
+        held = self.reserve_for_brief(since, now + timedelta(days=1), reason=OVERNIGHT_CARRIED,
+                                      skip_topics=CHECK_IN_TOPICS, hold_until=self._fallback_at(now))
         carried = {r.id for r in held}
         released = 0
         with self.lock:
@@ -1010,11 +1030,42 @@ class ReachDesk:
         if not held:
             log.info("reach: he's awake; nothing for an overnight note (%d released)", released)
             return "nothing held"
+        # Delivery is at-least-once, like every desk row (Codex 11/19 #2): a note texted whose record then
+        # fails, followed by a restart before the retry lands, can go twice. That is the desk's property,
+        # not this note's; D74 adds no other path: the note's key is created once a day (decided above),
+        # and what it carries is reserved to it alone (foldable's exclusivity) and folded with it.
         outcome = self.reach_out(ReachEvent(
             source=OVERNIGHT_SOURCE, topic=OVERNIGHT_SOURCE, headline=overnight_headline(len(held)),
             detail=overnight_lines(held), brief=True, text_only=True, folds=tuple(carried), dedupe_key=key))
+        if outcome == "dropped":                      # muted, or refused: what it carried isn't stranded
+            self._free_carried(tuple(carried), now)
         log.info("reach: he's awake; overnight note %s (%d carried, %d released)", outcome, len(held), released)
         return outcome
+
+    def _fallback_at(self, now: datetime) -> datetime:
+        """The fixed morning hour today, or within the hour when it's already past."""
+        day = now.astimezone(EASTERN).date()
+        morning = datetime.combine(day, time(self.fixed_morning_hour), tzinfo=EASTERN).astimezone(timezone.utc)
+        return morning if morning > now else now + timedelta(hours=1)
+
+    def _free_carried(self, folds: tuple, now: datetime) -> None:
+        """Her overnight note won't go (dropped, given up): what it held goes on its own at the fixed
+        morning hour, and any other carrier may take it (its reservation is lifted). Only rows still
+        reserved to the note."""
+        rows = {r.id: r for r in self.store.waiting(now - timedelta(days=2))}
+        for rid in folds:
+            r = rows.get(rid)
+            if r is None or r.reason != OVERNIGHT_CARRIED:
+                continue
+            try:
+                self.store.mark(rid, now, not_before=self._fallback_at(now),
+                                reason="the overnight note didn't go: on its own in the morning")
+            except Exception:
+                log.warning("reach %s: couldn't lift the overnight note's hold; it lapses on its own", rid)
+
+    def _carrier_ended(self, row: Reach, now: datetime) -> None:
+        if row.source == OVERNIGHT_SOURCE and row.folds:
+            self._free_carried(tuple(row.folds), now)
 
     def take_back(self, dedupe_key: str, now: datetime, reason: str) -> str:
         """Something else will say what's under this key (the welcome-home hello asks an appointment's
@@ -1084,6 +1135,7 @@ class ReachDesk:
             d2 = self._decide(row.event(), now, fresh=False)
             if d2.action == "drop":
                 self.store.mark(row.id, now, status="dropped", reason=d2.reason)
+                self._carrier_ended(row, now)
                 return "dropped"
             if d2.action == "queue":
                 self.store.mark(row.id, now, not_before=d2.not_before, reason=d2.reason)
@@ -1112,6 +1164,7 @@ class ReachDesk:
         attempts = row.attempts + 1
         if attempts >= GIVE_UP_AFTER and not row.owed:
             self.store.mark(row.id, now, status="failed", attempts=attempts, reason="couldn't reach you")
+            self._carrier_ended(row, now)
             log.warning("reach %s (%s): gave up after %d attempts", row.id, row.source, attempts)
             return "dropped"
         backoff = FAIL_BACKOFF[min(attempts - 1, len(FAIL_BACKOFF) - 1)]
@@ -1145,6 +1198,7 @@ class ReachDesk:
                 d = self._decide(row.event(), now, fresh=False)
                 if d.action == "drop":
                     self.store.mark(row.id, now, status="dropped", reason=d.reason)
+                    self._carrier_ended(row, now)
                     out["dropped"] += 1
                 elif d.action == "queue":
                     self.store.mark(row.id, now, not_before=d.not_before, reason=d.reason)

@@ -11,14 +11,18 @@ The owner's ruling, after a week of grading the rule against his mornings (10 fo
 
 The wake rule is the one graded on #177 (kael-tools wake_check.py): he woke at the first morning
 (04:00-13:00 Eastern) update of the phone's sleep-segment sensor, provided a night block came
-before it (sleep confidence >= 80 for 3 hours or more since 21:00 the evening before). A daytime
-nap never makes one: the rule only looks for the night's wake. He's UP at the first moment after
-that wake when the settled-room sensor places him outside the bedroom.
+before it (sleep confidence >= 80 for 3 hours or more since 21:00 the evening before; a reading
+that isn't a number breaks the run). A daytime nap never makes one: the rule only looks for the
+night's wake. The morning only counts when the settled-room sensor had him IN the bedroom at that
+wake; he's UP at the first change after it to somewhere else (unknown/unavailable is no place).
+Awake and still in the bedroom stays quiet until he's up, all day if need be, up to the evening's
+quiet hours (Codex 11/19 on the first cut's 13:00 cap: "nothing spoken until he's up").
 
 Everything is read from Home Assistant's history, never kept in this process, so a restart
-mid-morning reaches the same answer. Anything that can't be read falls back to the fixed hours:
-no wake means quiet until 09:00, as before; an unreadable phone means no nap hold. The entity ids
-come from the environment (Settings) and are empty by default: unset, none of this runs.
+mid-morning reaches the same answer. Unreadable is no evidence, and no evidence is the fixed hours:
+missing room history, or a room that reads unknown at the wake or now, counts as no wake (quiet
+until 09:00, as before); an unreadable phone means no nap hold. The entity ids come from the
+environment (Settings) and are empty by default: unset, none of this runs.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from aerys_v2.reach import EASTERN
 log = logging.getLogger(__name__)
 
 WINDOW_START_H = 4        # quiet never ends before 04:00, and no wake is looked for earlier
-WINDOW_END_H = 13         # the rule's window: no wake after this, and an awake morning stays quiet at most until then
+WINDOW_END_H = 13         # the rule's window: no wake is looked for after this
 NIGHT_START_H = 21        # the night block counts from here, the evening before
 ASLEEP_AT = 80.0          # sleep confidence at or above this is asleep
 NIGHT_MIN = 180.0         # minutes of it before a wake counts as the night's
@@ -63,9 +67,9 @@ def _local_at(day: date, hour: int) -> datetime:
 
 def night_minutes(conf: list, lo: datetime, hi: datetime) -> float:
     """Minutes of sleep confidence >= ASLEEP_AT between lo and hi. conf is HA history (time, state),
-    changes only: a value holds until the next one. Readings that aren't numbers are skipped (the
-    graded rule's reading: the last number stands)."""
-    pts = [(t, v) for t, s in conf if (v := _num(s)) is not None]
+    changes only: a value holds until the next one. A reading that isn't a number (unavailable)
+    breaks the run: it counts as not asleep, never as the last number carried on (Codex 11/19)."""
+    pts = [(t, v if (v := _num(s)) is not None else -1.0) for t, s in conf]
     total = 0.0
     for (t, v), nxt in zip(pts, pts[1:] + [(hi, None)]):
         a, b = max(t, lo), min(nxt[0], hi)
@@ -85,17 +89,37 @@ def wake_time(conf: list, seg: list, day: date, now: datetime) -> datetime | Non
     return None
 
 
+def _place(state) -> str:
+    return str(state).strip().lower()
+
+
+def room_at(room: list, when: datetime) -> str:
+    """The settled room's state at `when` (the last change at or before it), lowercased; '' if none."""
+    before = [s for t, s in room if t <= when]
+    return _place(before[-1]) if before else ""
+
+
 def up_time(room: list, woke_at: datetime | None, now: datetime, *, bedroom: str) -> datetime | None:
-    """The first moment at or after woke_at that the settled room is somewhere other than the
-    bedroom (or unknown), no later than now."""
+    """The first CHANGE at or after woke_at (and no later than now) to a real room other than the
+    bedroom. Where he was before the wake proves nothing (a stale 'office' from last night): only a
+    change after it counts."""
     if woke_at is None:
         return None
-    bedroom = bedroom.strip().lower()
-    out = lambda s: str(s).strip().lower() not in (*_NOTHING, bedroom)
-    before = [s for t, s in room if t <= woke_at]
-    if before and out(before[-1]):
-        return woke_at
-    return next((t for t, s in room if woke_at < t <= now and out(s)), None)
+    bedroom = _place(bedroom)
+    return next((t for t, s in room if woke_at <= t <= now and _place(s) not in (*_NOTHING, bedroom)), None)
+
+
+def read_morning(conf: list, seg: list, room: list, day: date, now: datetime, *, bedroom: str) -> Morning:
+    """Today's morning from the three histories, valid or nothing: the wake counts only if the room
+    had him in the bedroom at it; awake-not-up counts only while the room still reads a real place
+    (he's in the bedroom). Anything else is no evidence: Morning(), the fixed hours."""
+    woke = wake_time(conf, seg, day, now)
+    if woke is None or room_at(room, woke) != _place(bedroom):
+        return Morning()
+    up = up_time(room, woke, now, bedroom=bedroom)
+    if up is None and room_at(room, now) in _NOTHING:
+        return Morning()                 # the room went dark after the wake: can't tell, fixed hours
+    return Morning(woke, up)
 
 
 def in_fixed_quiet(now: datetime, start_h: int, end_h: int) -> bool:
@@ -109,15 +133,21 @@ def in_fixed_quiet(now: datetime, start_h: int, end_h: int) -> bool:
     return start_h <= hour < end_h
 
 
+def _morning_hours(hour: int, start_h: int) -> bool:
+    """Where the morning logic applies: from 04:00 until the evening's quiet hours begin."""
+    end = start_h if start_h > WINDOW_START_H else 24
+    return WINDOW_START_H <= hour < end
+
+
 def quiet_now(now: datetime, start_h: int, end_h: int, morning: Morning | None) -> bool:
-    """D74's quiet hours: from start_h as always; in the morning (04:00-13:00) they end when he's
-    up after the night's wake. No wake (or no reading) keeps the fixed end, start_h-end_h; awake
-    but not up keeps them on, at most until 13:00."""
+    """D74's quiet hours: from start_h as always; from 04:00 they end when he's up after the night's
+    wake. No (valid) wake keeps the fixed end, start_h-end_h; awake but not up keeps them on until
+    he's up, at the latest until start_h, when the evening's begin anyway."""
     if start_h == end_h:
         return False
     base = in_fixed_quiet(now, start_h, end_h)
     hour = now.astimezone(EASTERN).hour
-    if not (WINDOW_START_H <= hour < WINDOW_END_H):
+    if not _morning_hours(hour, start_h):
         return base
     woke = morning.woke_at if morning else None
     if woke is None or woke > now:
@@ -125,7 +155,7 @@ def quiet_now(now: datetime, start_h: int, end_h: int, morning: Morning | None) 
     up = morning.up_at
     if up is not None and up <= now:
         return False                                 # he's up: quiet's over
-    return True                                      # awake in the bedroom: still quiet (text only)
+    return True                                      # awake in the bedroom: still quiet (text only), no cutoff
 
 
 class WakeWatch:
@@ -134,13 +164,13 @@ class WakeWatch:
 
     def __init__(self, get: Callable[[str], object], *, confidence: str, segment: str, room: str,
                  bedroom: str = "bedroom", clock: Callable[[], datetime] | None = None,
-                 cache_s: float = CACHE_S):
+                 cache_s: float = CACHE_S, start_h: int = 21):
         self.get, self.confidence, self.segment, self.room = get, confidence, segment, room
-        self.bedroom = bedroom
+        self.bedroom, self.start_h = bedroom, start_h
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.cache_s = cache_s
         self._lock = threading.Lock()
-        self._morning: tuple[datetime, date, Morning] | None = None
+        self._morning: tuple[datetime, date, Morning, bool] | None = None
         self._asleep: tuple[datetime, bool] | None = None
 
     def _history(self, start: datetime, end: datetime, entities: list[str]) -> dict:
@@ -167,23 +197,28 @@ class WakeWatch:
     def morning(self, now: datetime | None = None) -> Morning:
         """Today's wake and up, read from history (None parts when there's nothing, or no reading)."""
         now = now or self.clock()
-        day = now.astimezone(EASTERN).date()
-        if not (WINDOW_START_H <= now.astimezone(EASTERN).hour < WINDOW_END_H):
+        local = now.astimezone(EASTERN)
+        day = local.date()
+        if not _morning_hours(local.hour, self.start_h):
             return Morning()                         # nothing to look for outside the morning
         with self._lock:
             hit = self._morning
-            if hit and hit[1] == day and (now - hit[0]).total_seconds() < self.cache_s:
-                return hit[2]
+            if hit and hit[1] == day:
+                settled = hit[2].up_at is not None or (hit[2].woke_at is None and local.hour >= WINDOW_END_H
+                                                       and hit[3])
+                if settled or (now - hit[0]).total_seconds() < self.cache_s:
+                    return hit[2]                    # up (or no wake past the window) doesn't change today
+        ok = True
         try:
             h = self._history(_local_at(day - timedelta(days=1), NIGHT_START_H) - timedelta(hours=3), now,
                               [self.confidence, self.segment, self.room])
-            woke = wake_time(h.get(self.confidence, []), h.get(self.segment, []), day, now)
-            m = Morning(woke, up_time(h.get(self.room, []), woke, now, bedroom=self.bedroom))
+            m = read_morning(h.get(self.confidence, []), h.get(self.segment, []), h.get(self.room, []),
+                             day, now, bedroom=self.bedroom)
         except Exception as e:
             log.warning("wake: couldn't read his morning (%s); the fixed hours stand", type(e).__name__)
-            m = Morning()
+            m, ok = Morning(), False
         with self._lock:
-            self._morning = (now, day, m)
+            self._morning = (now, day, m, ok)
         return m
 
     def quiet(self, start_h: int, end_h: int) -> Callable[[datetime], bool]:
@@ -248,4 +283,5 @@ def wake_watch_for(settings, *, get: Callable[[str], object] | None = None,
             return r.json()
 
     return WakeWatch(get, confidence=confidence, segment=segment, room=room,
-                     bedroom=str(getattr(settings, "wake_bedroom_room", "bedroom") or "bedroom"), clock=clock)
+                     bedroom=str(getattr(settings, "wake_bedroom_room", "bedroom") or "bedroom"), clock=clock,
+                     start_h=int(getattr(settings, "owner_quiet_start_hour", 21)))

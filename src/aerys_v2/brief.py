@@ -433,28 +433,6 @@ def _ha(settings):
     return base, {"Authorization": f"Bearer {settings.ha_token.get_secret_value()}"}
 
 
-def with_phone_wake(read: Callable[[], Reading], woke: Callable[[datetime], datetime | None] | None,
-                    clock: Callable[[], datetime] | None = None) -> Callable[[], Reading]:
-    """D74: his phone's wake this morning (the night's, never a nap's) counts as a wake signal for the
-    brief, beside the HA ones. Unwired, or unreadable, the reading is as before."""
-    if woke is None:
-        return read
-    now_fn = clock or (lambda: datetime.now(timezone.utc))
-
-    def reading() -> Reading:
-        r = read()
-        try:
-            w = woke(now_fn())
-        except Exception:
-            log.warning("brief: couldn't read his phone's wake; going on without it", exc_info=True)
-            w = None
-        if w is not None and (r.woke_at is None or w > r.woke_at):
-            r.woke_at = w
-        return r
-
-    return reading
-
-
 def reader_for(settings, *, post=None) -> Callable[[], Reading]:
     """One HA template call: the settled room, whether motion backs it, and the latest wake
     signal (an automation's last run, or a sensor that's on and came on). post(url, headers,
@@ -709,7 +687,7 @@ def morning_brief_for(settings, desk, *, replied_since=None, action_graph=None) 
     turn = her_turn_for(settings, action_graph)
     log.info("morning brief armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return MorningBrief(
-        desk, read=with_phone_wake(reader_for(settings), getattr(desk, "woke", None)), gather=gatherer_for(settings),
+        desk, read=reader_for(settings), gather=gatherer_for(settings),
         compose=composer_for(settings, turn=turn, kind="brief"),
         replied_since=replied_since or getattr(desk, "replied_since", None), room=room,
         start_hour=int(getattr(settings, "brief_start_hour", 5)),

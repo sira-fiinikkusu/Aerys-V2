@@ -665,7 +665,7 @@ def meeting_hold_fn_for(settings, *, get=None, clock=None, cache_s: float = 60.0
 
 
 def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=None,
-                    clock=None, hold_fn=None) -> Callable[[str], bool] | None:
+                    clock=None, hold_fn=None, wake_watch=None) -> Callable[[str], bool] | None:
     """fn(text) -> bool: put a message in front of the owner where he was last active (the
     proactive turn's rule, owner 8/16), except in quiet hours: nothing is spoken in a room,
     and the text arrives without a notification. A device that can't take it falls back to
@@ -685,6 +685,17 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
     chat_for = lookup_chat_id or _owner_platform_id
     hold = hold_fn if hold_fn is not None else meeting_hold_fn_for(settings)
     pick_surface = lookup_surface or _owner_last_surface
+    # D74 (Codex 11/19 #9): with his phone wired, the same wake-aware hours as the desk, and his naps;
+    # unwired, the fixed hours as before. Built once, here.
+    from aerys_v2.wake import wake_watch_for
+
+    watch = wake_watch if wake_watch is not None else wake_watch_for(settings, clock=clock)
+    wake_quiet = watch.quiet(start_h, end_h) if watch is not None else None
+
+    def in_quiet(now: datetime) -> bool:
+        if watch is None:
+            return in_quiet_hours(now, start_h, end_h)
+        return wake_quiet(now) or watch.asleep(now)
 
     def in_meeting() -> bool:
         try:
@@ -722,7 +733,7 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
 
     def reach(text: str) -> bool:
         # A meeting quiets her like the night does: nothing spoken, and text without a buzz.
-        quiet = in_quiet_hours(now_fn(), start_h, end_h) or in_meeting()
+        quiet = in_quiet(now_fn()) or in_meeting()
         surface, device_id = pick_surface(settings)
         if surface == "device" and quiet:
             surface, device_id = "discord", None      # never spoken into a room at night
@@ -1229,5 +1240,5 @@ def reach_desk_for(settings, graph):
         safety_voice_at_night=bool(getattr(settings, "reach_safety_voice_at_night", False)),
         awake=watch.awake if watch is not None else None,
         asleep=watch.asleep if watch is not None else None,
-        woke=(lambda now: watch.morning(now).woke_at) if watch is not None else None,
+        fixed_morning_hour=end_h,
     )

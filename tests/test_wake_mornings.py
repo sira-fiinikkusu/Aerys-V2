@@ -11,9 +11,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from aerys_v2.brief import Facts, MorningBrief, Reading, plain_brief, with_phone_wake
-from aerys_v2.reach import OVERNIGHT_SOURCE, MemoryReachStore, ReachDesk, ReachEvent, Where, told_quietly
-from aerys_v2.wake import Morning, WakeWatch, quiet_now, up_time, wake_time, wake_watch_for
+from aerys_v2.brief import Facts, MorningBrief, Reading, plain_brief
+from aerys_v2.reach import (OVERNIGHT_SOURCE, Deliverer, MemoryReachStore, Prefs, ReachDesk, ReachEvent, Where,
+                            told_quietly)
+from aerys_v2.wake import (Morning, WakeWatch, night_minutes, quiet_now, read_morning, up_time, wake_time,
+                           wake_watch_for)
 from test_reach_desk import World, ev
 
 ET = timezone(timedelta(hours=-5))                       # EST on these dates
@@ -52,12 +54,31 @@ def test_a_daytime_nap_never_makes_a_wake():
     assert wake_time(nap, [(at(15, 1), "7200000")], at(0).date(), at(16)) is None
 
 
-def test_up_is_the_first_moment_out_of_the_bedroom_after_the_wake():
+def test_up_is_the_first_change_out_of_the_bedroom_after_the_wake():
     room = [(at(21, 0, 18), "Bedroom"), (at(5, 10), "Office"), (at(5, 20), "Bedroom"), (UP, "Kitchen")]
     assert up_time(room, WOKE, at(12), bedroom="bedroom") == UP              # the 05:10 trip was before the wake
     assert up_time(room, WOKE, at(7, 20), bedroom="bedroom") is None
-    assert up_time([(at(6, 0), "Office")], WOKE, at(12), bedroom="bedroom") == WOKE   # already out at the wake
+    # Codex 11/19 #3: a stale 'office' from last night proves nothing; only a change after the wake does.
+    assert up_time([(at(6, 0), "Office")], WOKE, at(12), bedroom="bedroom") is None
     assert up_time([(UP, "unavailable")], WOKE, at(12), bedroom="bedroom") is None    # unknown isn't up
+
+
+def test_unreadable_is_no_evidence_and_no_evidence_is_the_fixed_hours():
+    """Codex 11/19 #3: missing or dark room history, or a stale non-bedroom room, is no wake."""
+    day, bed = at(0).date(), [(at(21, 0, 18), "Bedroom")]
+    assert read_morning(CONF, SEG, bed, day, at(9, 30), bedroom="bedroom") == Morning(WOKE, None)    # valid
+    assert read_morning(CONF, SEG, [], day, at(9, 30), bedroom="bedroom") == Morning()              # no history
+    stale = [(at(20, 0, 18), "Office")]
+    assert read_morning(CONF, SEG, stale, day, at(9, 30), bedroom="bedroom") == Morning()           # not in bed
+    dark = bed + [(at(7, 10), "unavailable")]
+    assert read_morning(CONF, SEG, dark, day, at(9, 30), bedroom="bedroom") == Morning()            # gone dark
+    assert read_morning(CONF, SEG, bed + [(UP, "Office")], day, at(9, 30), bedroom="bedroom") == Morning(WOKE, UP)
+    assert not quiet_now(at(9, 30), 21, 9, Morning())
+
+
+def test_a_reading_that_is_not_a_number_breaks_the_night_block():
+    gap = [(at(22, 0, 18), "95"), (at(23, 0, 18), "unavailable"), (at(6, 0), "95"), (at(7, 0), "10")]
+    assert night_minutes(gap, at(21, 0, 18), at(7, 0)) == 60 + 60    # 22-23 and 06-07, not the dark 7 hours
 
 
 def test_quiet_hours_end_when_he_is_up_and_09_00_is_the_fallback():
@@ -65,7 +86,7 @@ def test_quiet_hours_end_when_he_is_up_and_09_00_is_the_fallback():
     assert quiet_now(at(7, 10), 21, 9, m) and not quiet_now(at(7, 30), 21, 9, m)      # ends at up, not 9
     assert quiet_now(at(8, 59), 21, 9, Morning()) and not quiet_now(at(9, 0), 21, 9, Morning())   # no wake
     assert quiet_now(at(9, 30), 21, 9, Morning(WOKE, None))      # awake in bed past 9: still nothing aloud
-    assert not quiet_now(at(13, 0), 21, 9, Morning(WOKE, None))  # ...at most until 13:00
+    assert quiet_now(at(15, 0), 21, 9, Morning(WOKE, None))      # ...until he's up, no afternoon cutoff (#4)
     assert quiet_now(at(3, 59), 21, 9, Morning(at(4, 0), at(4, 0)))  # never ends before 04:00
     assert quiet_now(at(21, 0), 21, 9, m) and quiet_now(EVE, 21, 9, m)                # the start stays
     assert not quiet_now(at(7, 0), 9, 9, m)                                           # no quiet hours set
@@ -99,7 +120,7 @@ def desk_with(phone, world, *, now, store=None, morning_hour=9):
     desk = ReachDesk(store or MemoryReachStore(), world.deliverer(), budget_default=3, quiet=phone.quiet,
                      morning_hour=morning_hour, replied_since=lambda when: world.replied,
                      said=lambda row, body: world.said.append(body), clock=lambda: clock["now"],
-                     awake=phone.awake, asleep=phone.asleep, woke=lambda t: phone.morning(t).woke_at)
+                     awake=phone.awake, asleep=phone.asleep, fixed_morning_hour=9)
     return desk, clock
 
 
@@ -187,22 +208,25 @@ def test_a_nap_holds_her_like_a_named_nap_and_no_morning_routine_follows_it():
     assert "asleep" in desk.store.rows[1].reason
     assert desk.reach_out(ev(urgency="timely", headline="the oven timer")) == "sent"
     assert world.texts[-1] == ("discord", "the oven timer", True)
-    # Owed, in a room with a speaker: the named nap's rule, it waits for the window, never dropped.
-    assert desk.reach_out(ev(owed=True, headline="Kael answered.")) == "queued" and world.spoken == []
+    # Owed, during the phone's nap: quiet text now, never waiting for him to wake (Codex 11/19 #7).
+    assert desk.reach_out(ev(owed=True, headline="Kael answered.")) == "sent" and world.spoken == []
+    assert world.texts[-1] == ("discord", "Kael answered.", True)
     assert desk.release_overnight() == "not awake"                   # waking from a nap is no morning
     phone.asleep_now = False
     clock["now"] = at(15, 10)
     desk.tick()
-    assert ("news", "dev-bed") in world.spoken and ("Kael answered.", "dev-bed") in world.spoken
+    assert world.spoken == [("news", "dev-bed")]
     assert not any(r.source == OVERNIGHT_SOURCE for r in desk.store.rows.values())
 
 
-def test_an_owed_answer_at_his_wake_is_never_dropped_even_over_the_budget():
+def test_over_the_budget_while_awake_it_waits_for_the_morning_as_the_night_did_and_owed_still_goes():
     world, phone = World(BEDROOM), Phone(WOKE, UP)
     desk, clock = desk_with(phone, world, now=at(7, 10))
     for i in range(3):
         assert desk.reach_out(ev(headline=f"item {i}", dedupe_key=f"k{i}")) == "sent"
-    assert desk.reach_out(ev(headline="one more", dedupe_key="k9")) == "dropped"      # the day's budget
+    assert desk.reach_out(ev(headline="one more", dedupe_key="k9")) == "queued"       # no new drops (#8)
+    row = max(desk.store.rows.values(), key=lambda r: r.id)
+    assert row.reason == "night: waits for the morning" and row.not_before == at(9, 0)
     assert desk.reach_out(ev(owed=True, headline="Kael's answer.", dedupe_key="ka")) == "sent"
     assert world.spoken == [] and all(silent for *_, silent in world.texts)
 
@@ -210,14 +234,14 @@ def test_an_owed_answer_at_his_wake_is_never_dropped_even_over_the_budget():
 def test_a_muted_overnight_note_lets_the_items_go_on_their_own_later():
     world, phone = World(OFFICE), Phone(WOKE, UP)
     store = MemoryReachStore()
-    desk, clock = desk_with(phone, world, now=NIGHT, store=store)
-    from aerys_v2.reach import Prefs
-
+    desk, clock = desk_with(phone, world, now=NIGHT, store=store, morning_hour=13)   # a brief armed
     store._prefs = Prefs(muted=["overnight"])
     assert desk.reach_out(ev(headline="Backup done.")) == "queued"
     clock["now"] = at(7, 5)
     desk.tick()
     assert world.texts == []                                         # the note was muted...
+    row = store.rows[1]                                              # ...its hold lifted (#6): 9, not 13
+    assert row.not_before == at(9, 0) and not row.reason.startswith("carried by")
     clock["now"] = at(9, 1)
     desk.tick()
     assert world.spoken == [("Backup done.", "dev-office")]          # ...the item still reached him
@@ -225,8 +249,6 @@ def test_a_muted_overnight_note_lets_the_items_go_on_their_own_later():
 
 def test_a_late_wake_never_holds_the_night_until_tomorrow():
     world, phone, store = World(OFFICE), Phone(at(9, 40), None), MemoryReachStore()
-    from aerys_v2.reach import Prefs
-
     store._prefs = Prefs(muted=["overnight"])                        # the note won't go
     desk, clock = desk_with(phone, world, now=NIGHT, store=store)
     desk.reach_out(ev(headline="Backup done."))
@@ -251,7 +273,7 @@ def test_a_restart_mid_morning_never_sends_the_overnight_note_twice():
 
 # --- the brief ---------------------------------------------------------------------------
 
-def test_the_phone_wake_lets_the_brief_go_before_the_solo_hour_and_it_counts_the_overnight_note():
+def test_the_brief_counts_what_the_overnight_note_carried():
     world, phone = World(OFFICE), Phone(WOKE, UP)
     store = MemoryReachStore()
     desk, clock = desk_with(phone, world, now=NIGHT, store=store, morning_hour=13)
@@ -260,24 +282,79 @@ def test_the_phone_wake_lets_the_brief_go_before_the_solo_hour_and_it_counts_the
     clock["now"] = at(7, 5)
     desk.tick()                                                      # the note: 2 things, quietly
     seen = []
-    brief = MorningBrief(desk, read=with_phone_wake(lambda: Reading(room="office", confirmed=True), desk.woke,
-                                                    clock=lambda: clock["now"]),
+    brief = MorningBrief(desk, read=lambda: Reading(room="office", confirmed=True, woke_at=WOKE),
                          gather=lambda now, held, quiet: Facts(held=held, quiet=quiet),
                          compose=lambda facts: seen.append(facts) or "", clock=lambda: clock["now"])
-    clock["now"] = at(7, 40)                                         # up, in the office, before 8
+    clock["now"] = at(7, 40)                                         # up, in the office
     assert brief.tick() == "sent"
     facts = seen[0]
-    assert [r.source for r in facts.quiet] == [OVERNIGHT_SOURCE]
+    assert [r.source for r in facts.quiet] == [OVERNIGHT_SOURCE] and facts.held == []   # carried once
     assert "2 things came in overnight" in plain_brief(facts)
     assert world.spoken and world.spoken[-1][1] == "dev-office"
 
 
-def test_without_a_phone_wake_the_brief_still_waits_for_proof_before_the_solo_hour():
-    reading = with_phone_wake(lambda: Reading(room="office", confirmed=True), lambda now: None)
-    assert reading().woke_at is None
-    assert with_phone_wake(lambda: Reading(), None)().woke_at is None
-    broken = with_phone_wake(lambda: Reading(woke_at=WOKE), lambda now: (_ for _ in ()).throw(OSError()))
-    assert broken().woke_at == WOKE
+def test_a_spoken_brief_waits_while_he_is_awake_in_bed_and_plays_once_he_is_up():
+    """Codex 11/19 #5: a brief configured for the bedroom, his wake seen by the house: nothing aloud
+    until he's up, asked again at the moment of speech."""
+    world, phone = World(BEDROOM), Phone(WOKE, None)
+    desk, clock = desk_with(phone, world, now=at(7, 10), morning_hour=13)
+    brief = MorningBrief(desk, read=lambda: Reading(room="bedroom", confirmed=True, woke_at=WOKE),
+                         gather=lambda now, held, quiet: Facts(held=held, quiet=quiet),
+                         compose=lambda facts: "Morning!", room="bedroom", clock=lambda: clock["now"])
+    assert brief.tick() == "held: awake" and world.spoken == []
+    # Straight at the desk too: decided before he was up, it's never spoken while he's awake.
+    assert desk.reach_out(ReachEvent(source="brief", topic="brief", headline="Morning!", room="bedroom",
+                                     brief=True, dedupe_key="b")) == "queued"
+    assert world.spoken == []
+    phone.up = at(7, 30)
+    clock["now"] = at(7, 31)
+    desk.tick()
+    assert world.spoken == [("Morning!", "dev-bed")]
+
+
+def test_a_reservation_is_exclusive_each_item_is_carried_once():
+    """Codex 11/19 #1: the overnight note holds what it carries while it retries; the brief or the
+    welcome-home hello can't take the same item."""
+    phone, store, texts = Phone(WOKE, UP), MemoryReachStore(), []
+    fail = {"n": 1}
+
+    def text(surface, body, silent):
+        if fail["n"]:
+            fail["n"] -= 1
+            raise ConnectionError("discord down")
+        texts.append(body)
+
+    clock = {"now": NIGHT}
+    desk = ReachDesk(store, Deliverer(locate=lambda: OFFICE, speak=lambda t, d: None, text=text), quiet=phone.quiet,
+                     morning_hour=13, clock=lambda: clock["now"], awake=phone.awake, asleep=phone.asleep,
+                     fixed_morning_hour=9)
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(7, 5)
+    assert desk.release_overnight() == "queued"                      # the note couldn't go yet
+    from datetime import datetime as _dt
+
+    since = _dt(2026, 11, 18, 18, 0, tzinfo=ET)
+    assert desk.reserve_for_brief(since, at(13, 0)) == []            # the brief can't take it meanwhile
+    clock["now"] = at(7, 20)                                         # the retry lands
+    desk.tick()
+    desk.tick()
+    assert len(texts) == 1 and "Backup done." in texts[0]
+    assert store.rows[1].status == "folded"
+    clock["now"] = at(9, 10)                                         # a lapsed hold is fair game again
+    assert desk.reserve_for_brief(since, at(13, 0)) == []            # (it's folded: nothing left to take)
+
+
+def test_a_lapsed_reservation_is_fair_game():
+    store = MemoryReachStore()
+    from aerys_v2.reach import Reach
+
+    store.rows[1] = Reach(id=1, source="kael_note", topic="kael", urgency="routine", owed=False, headline="x",
+                          status="queued", not_before=at(7, 0), reason="carried by the morning brief",
+                          created_at=NIGHT)
+    assert [r.id for r in store.foldable(at(0), at(13), at(7, 30))] == [1]          # lapsed at 7
+    store.rows[1].not_before = at(13, 0)
+    assert store.foldable(at(0), at(13), at(7, 30)) == []                           # held by another
+    assert [r.id for r in store.foldable(at(0), at(13))] == [1]                     # no `now`: as before
 
 
 def test_an_email_sent_quietly_stays_out_of_the_brief_but_the_overnight_note_counts():
@@ -311,7 +388,8 @@ def test_the_watch_reads_his_morning_from_history_and_a_restart_reaches_the_same
     watch.morning(at(7, 30))
     assert len(paths) == n                                           # cached within the minute
     assert "filter_entity_id=sensor.conf,sensor.seg,sensor.room" in paths[0]
-    assert watch.morning(at(15, 0)) == Morning()                     # nothing to look for after 13:00
+    assert watch.morning(at(15, 0)) == Morning(WOKE.astimezone(timezone.utc), UP.astimezone(timezone.utc))
+    assert watch.morning(at(21, 30)) == Morning()                    # the evening's quiet hours: nothing to look for
 
 
 def test_the_watch_holds_for_steady_daytime_sleep_only():
@@ -351,3 +429,26 @@ def test_unarmed_unless_both_phone_sensors_are_named():
     assert wake_watch_for(SimpleNamespace(presence_settled_entity="sensor.room", ha_token=None,
                                           wake_sleep_confidence_entity="sensor.c",
                                           wake_sleep_segment_entity="sensor.s")) is None
+
+
+def test_owner_reach_uses_the_same_wake_aware_hours_when_the_phone_is_wired():
+    """Codex 11/19 #9: the desk-less path to him follows his mornings and naps too."""
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from aerys_v2.kael_line import owner_reach_for
+
+    sent = []
+    settings = SimpleNamespace(owner_person_id="p", telegram_bot_token=None, discord_bot_token=SecretStr("t"),
+                               owner_quiet_start_hour=21, owner_quiet_end_hour=9)
+    phone = Phone(WOKE, None)
+    watch = SimpleNamespace(quiet=lambda s, e: phone.quiet, asleep=phone.asleep)
+    clock = {"now": at(9, 30)}                                       # past 9, awake in bed
+    reach = owner_reach_for(settings, send=lambda surface, cid, text, quiet: sent.append((surface, quiet)),
+                            lookup_surface=lambda s: ("discord", None), lookup_chat_id=lambda s, surf: "c",
+                            clock=lambda: clock["now"], hold_fn=lambda: None, wake_watch=watch)
+    assert reach("hi") and sent[-1] == ("discord", True)            # quiet: no buzz, nothing spoken
+    phone.up = at(9, 40)
+    clock["now"] = at(9, 45)
+    assert reach("hi again") and sent[-1] == ("discord", False)
