@@ -452,3 +452,119 @@ def test_owner_reach_uses_the_same_wake_aware_hours_when_the_phone_is_wired():
     phone.up = at(9, 40)
     clock["now"] = at(9, 45)
     assert reach("hi again") and sent[-1] == ("discord", False)
+
+
+# --- Codex's re-check (review-d74-2): A, the note after its hold lapses; B, the settled cache ------
+
+def _failing_desk(phone, store, *, fail_until):
+    """A desk whose Discord fails before `fail_until`, and counts what it sent."""
+    clock, texts = {"now": NIGHT}, []
+
+    def text(surface, body, silent):
+        if clock["now"] < fail_until:
+            raise ConnectionError("discord down")
+        texts.append(body)
+
+    desk = ReachDesk(store, Deliverer(locate=lambda: BEDROOM, speak=lambda t, d: None, text=text),
+                     quiet=phone.quiet, morning_hour=9, clock=lambda: clock["now"], awake=phone.awake,
+                     asleep=phone.asleep, fixed_morning_hour=9)
+    return desk, clock, texts
+
+
+def test_a_note_that_fails_at_08_59_never_delivers_after_its_items_went_on_their_own():
+    """Codex re-check 1: the note fails at 08:59, its hold lapses at 09:00, the item goes on its own at
+    09:01; the note must never also deliver it. The note expires the instant its items are freed."""
+    phone, store = Phone(at(8, 58), None), MemoryReachStore()
+    desk, clock, texts = _failing_desk(phone, store, fail_until=at(9, 1))
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(8, 59)
+    desk.tick()                                                      # the note tries, and fails
+    note = next(r for r in store.rows.values() if r.source == OVERNIGHT_SOURCE)
+    assert note.status == "queued" and note.expires_at == at(9, 0)
+    for minute in (1, 2, 5, 15, 45):
+        clock["now"] = at(9, minute)
+        desk.tick()
+    assert sum("Backup done." in t for t in texts) == 1
+    assert note.status == "dropped" and "expired" in note.reason
+
+
+def test_woke_past_09_00_the_note_and_its_items_meet_an_hour_later_and_still_deliver_once():
+    phone, store = Phone(at(9, 40), None), MemoryReachStore()
+    desk, clock, texts = _failing_desk(phone, store, fail_until=at(10, 45))
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(9, 45)
+    desk.tick()
+    note = next(r for r in store.rows.values() if r.source == OVERNIGHT_SOURCE)
+    assert note.expires_at == at(10, 45) and store.rows[1].not_before == at(10, 45)   # T = now + 1h
+    for t in (at(9, 50), at(10, 0), at(10, 20), at(10, 46), at(11, 30)):
+        clock["now"] = t
+        desk.tick()
+    assert sum("Backup done." in t for t in texts) == 1
+
+
+def test_freeing_what_an_expired_note_carried_never_pushes_it_later_whatever_ran_first():
+    phone, store = Phone(at(8, 58), None), MemoryReachStore()
+    desk, clock, texts = _failing_desk(phone, store, fail_until=at(23, 0))
+    desk.reach_out(ev(headline="Backup done."))
+    clock["now"] = at(8, 59)
+    desk.tick()
+    note = next(r for r in store.rows.values() if r.source == OVERNIGHT_SOURCE)
+    desk._carrier_ended(note, at(9, 0, ) + timedelta(seconds=30))   # the note's drop handled first
+    assert store.rows[1].not_before == at(9, 0) and not store.rows[1].reason.startswith("carried by")
+
+
+class _History:
+    """HA history whose content changes with a phase; counts reads."""
+
+    def __init__(self):
+        self.phase, self.reads = {}, 0
+
+    def get(self, path):
+        self.reads += 1
+        return [_hist(e, pts) for e, pts in self.phase.items() if pts]
+
+
+def _watch(h, cache_s=60):
+    return WakeWatch(h.get, confidence="sensor.conf", segment="sensor.seg", room="sensor.room", cache_s=cache_s)
+
+
+def test_a_no_wake_seen_at_06_00_is_never_reused_at_13_01_over_a_later_valid_wake():
+    h = _History()
+    h.phase = {"sensor.conf": [(at(22, 0, 18), "12"), (at(23, 10, 18), "91")],
+               "sensor.seg": [(at(23, 0, 18), "unknown")], "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    w = _watch(h)
+    assert w.morning(at(6, 0)) == Morning()
+    h.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    assert w.morning(at(13, 1)) == Morning(WOKE.astimezone(timezone.utc), None)   # read again: awake in bed
+
+
+def test_a_dark_room_at_12_59_is_reread_after_it_comes_back_at_13_00():
+    h = _History()
+    dark = [(at(21, 0, 18), "Bedroom"), (at(7, 10), "unavailable")]
+    h.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": dark}
+    w = _watch(h, cache_s=0)
+    assert w.morning(at(12, 59)) == Morning()                        # can't tell: the fixed hours
+    h.phase["sensor.room"] = dark + [(at(13, 0), "Bedroom")]
+    assert w.morning(at(13, 1)) == Morning(WOKE.astimezone(timezone.utc), None)
+
+
+def test_only_a_complete_valid_no_wake_past_13_00_or_an_up_settles_the_day():
+    h = _History()
+    h.phase = {"sensor.conf": [(at(22, 0, 18), "12")], "sensor.seg": [(at(23, 0, 18), "unknown")],
+               "sensor.room": [(at(21, 0, 18), "Bedroom")]}
+    w = _watch(h, cache_s=0)
+    assert w.morning(at(13, 5)) == Morning() and h.reads == 1
+    w.morning(at(15, 0))
+    assert h.reads == 1                                              # settled: no wake can come any more
+    h2 = _History()
+    h2.phase = {"sensor.conf": CONF, "sensor.seg": SEG, "sensor.room": [(at(21, 0, 18), "Bedroom"), (UP, "Office")]}
+    w2 = _watch(h2, cache_s=0)
+    w2.morning(at(7, 30))
+    w2.morning(at(9, 0))
+    assert h2.reads == 1                                             # up doesn't change
+    h3 = _History()
+    h3.phase = {"sensor.conf": [(at(22, 0, 18), "12")], "sensor.seg": [(at(23, 0, 18), "unknown")]}   # no room
+    w3 = _watch(h3, cache_s=0)
+    w3.morning(at(13, 5))
+    w3.morning(at(13, 6))
+    assert h3.reads == 2                                             # incomplete evidence: always retried

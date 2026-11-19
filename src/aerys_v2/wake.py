@@ -109,6 +109,12 @@ def up_time(room: list, woke_at: datetime | None, now: datetime, *, bedroom: str
     return next((t for t, s in room if woke_at <= t <= now and _place(s) not in (*_NOTHING, bedroom)), None)
 
 
+def complete_evidence(conf: list, seg: list, room: list, now: datetime) -> bool:
+    """All three histories are there, and the room reads a real place at the observation (Codex
+    re-check 10: only such a read may settle a no-wake day)."""
+    return bool(conf) and bool(seg) and bool(room) and room_at(room, now) not in _NOTHING
+
+
 def read_morning(conf: list, seg: list, room: list, day: date, now: datetime, *, bedroom: str) -> Morning:
     """Today's morning from the three histories, valid or nothing: the wake counts only if the room
     had him in the bedroom at it; awake-not-up counts only while the room still reads a real place
@@ -170,7 +176,7 @@ class WakeWatch:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.cache_s = cache_s
         self._lock = threading.Lock()
-        self._morning: tuple[datetime, date, Morning, bool] | None = None
+        self._morning: tuple[datetime, date, Morning, bool] | None = None    # (seen at, day, morning, settled)
         self._asleep: tuple[datetime, bool] | None = None
 
     def _history(self, start: datetime, end: datetime, entities: list[str]) -> dict:
@@ -203,22 +209,24 @@ class WakeWatch:
             return Morning()                         # nothing to look for outside the morning
         with self._lock:
             hit = self._morning
-            if hit and hit[1] == day:
-                settled = hit[2].up_at is not None or (hit[2].woke_at is None and local.hour >= WINDOW_END_H
-                                                       and hit[3])
-                if settled or (now - hit[0]).total_seconds() < self.cache_s:
-                    return hit[2]                    # up (or no wake past the window) doesn't change today
-        ok = True
+            if hit and hit[1] == day and (hit[3] or (now - hit[0]).total_seconds() < self.cache_s):
+                return hit[2]
+        settled = False
         try:
             h = self._history(_local_at(day - timedelta(days=1), NIGHT_START_H) - timedelta(hours=3), now,
                               [self.confidence, self.segment, self.room])
-            m = read_morning(h.get(self.confidence, []), h.get(self.segment, []), h.get(self.room, []),
-                             day, now, bedroom=self.bedroom)
+            conf, seg, room = h.get(self.confidence, []), h.get(self.segment, []), h.get(self.room, [])
+            m = read_morning(conf, seg, room, day, now, bedroom=self.bedroom)
+            # Settled for the day only by what was OBSERVED (Codex re-check 10): an up (it doesn't change),
+            # or a no-wake read at or after 13:00 (the rule's window is closed) from complete, valid
+            # evidence. Anything else is retried after the minute's cache.
+            settled = m.up_at is not None or (m.woke_at is None and local.hour >= WINDOW_END_H
+                                              and complete_evidence(conf, seg, room, now))
         except Exception as e:
             log.warning("wake: couldn't read his morning (%s); the fixed hours stand", type(e).__name__)
-            m, ok = Morning(), False
+            m = Morning()
         with self._lock:
-            self._morning = (now, day, m, ok)
+            self._morning = (now, day, m, settled)
         return m
 
     def quiet(self, start_h: int, end_h: int) -> Callable[[datetime], bool]:

@@ -1012,9 +1012,12 @@ class ReachDesk:
         since = datetime.combine(day - timedelta(days=1), time(18), tzinfo=EASTERN).astimezone(timezone.utc)
         # If the note never goes, they go on their own at the fixed morning hour (09:00); past it
         # already (he woke late), within the hour, never tomorrow (Codex 11/19).
-        # Everything the night held routinely, whatever window it waits for (13:00 with a brief armed).
+        # Everything the night held routinely, whatever window it waits for (13:00 with a brief armed),
+        # held until T. The note EXPIRES at the same T (Codex re-check 1): it can only go before T, its
+        # items only at or after T, so the two can never both deliver.
+        released_at = self._fallback_at(now)
         held = self.reserve_for_brief(since, now + timedelta(days=1), reason=OVERNIGHT_CARRIED,
-                                      skip_topics=CHECK_IN_TOPICS, hold_until=self._fallback_at(now))
+                                      skip_topics=CHECK_IN_TOPICS, hold_until=released_at)
         carried = {r.id for r in held}
         released = 0
         with self.lock:
@@ -1036,7 +1039,8 @@ class ReachDesk:
         # and what it carries is reserved to it alone (foldable's exclusivity) and folded with it.
         outcome = self.reach_out(ReachEvent(
             source=OVERNIGHT_SOURCE, topic=OVERNIGHT_SOURCE, headline=overnight_headline(len(held)),
-            detail=overnight_lines(held), brief=True, text_only=True, folds=tuple(carried), dedupe_key=key))
+            detail=overnight_lines(held), brief=True, text_only=True, folds=tuple(carried), dedupe_key=key,
+            expires_at=released_at))
         if outcome == "dropped":                      # muted, or refused: what it carried isn't stranded
             self._free_carried(tuple(carried), now)
         log.info("reach: he's awake; overnight note %s (%d carried, %d released)", outcome, len(held), released)
@@ -1057,8 +1061,13 @@ class ReachDesk:
             r = rows.get(rid)
             if r is None or r.reason != OVERNIGHT_CARRIED:
                 continue
+            # Never later than the hold it already had: freed after its T (the note expired), the item is
+            # due now, whichever of the two the watcher reached first.
+            at = self._fallback_at(now)
+            if r.not_before is not None and _utc(r.not_before) < at:
+                at = _utc(r.not_before)
             try:
-                self.store.mark(rid, now, not_before=self._fallback_at(now),
+                self.store.mark(rid, now, not_before=at,
                                 reason="the overnight note didn't go: on its own in the morning")
             except Exception:
                 log.warning("reach %s: couldn't lift the overnight note's hold; it lapses on its own", rid)
@@ -1193,6 +1202,7 @@ class ReachDesk:
                 now = self.clock()                     # per row: a slow delivery can cross 21:00
                 if row.expires_at and _utc(row.expires_at) <= now and not row.owed:
                     self.store.mark(row.id, now, status="dropped", reason="expired before its window")
+                    self._carrier_ended(row, now)          # an expired overnight note frees what it carried
                     out["dropped"] += 1
                     continue
                 d = self._decide(row.event(), now, fresh=False)
