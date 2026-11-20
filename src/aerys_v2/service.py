@@ -835,19 +835,24 @@ ONE_LOOP_MARKER = "text_one_loop"
 ONE_LOOP_TIER_SOURCE = "one_loop"
 #: D79 (Codex 11/20 #3, re-check #3): what she did this turn is read from the tool receipts, each sorted by
 #: what it does: send, start, record, device or read. A claim is backed only by a COMPLETED receipt of its
-#: own kind. Names are the rack's live tools (Kael 11/20) and the async-task tools; nothing invented.
-ONE_LOOP_SEND = frozenset({"send_message", "send_email", "message_kael"})
-ONE_LOOP_START = frozenset({"start_async_task", "update_async_task"})
+#: own kind. Names are every tool the main action graph binds as action_stack_for builds it, fully armed:
+#: action_tools_for plus the home-job, send-file and skill-file middleware tools (the D79 replay, turn 3069,
+#: ran write_file and send_file_to_chris; tests/test_d79_text_one_loop.py builds that graph and checks each
+#: bound name is sorted here).
+ONE_LOOP_SEND = frozenset({"send_message", "send_email", "message_kael", "send_file_to_chris"})
+ONE_LOOP_START = frozenset({"start_async_task", "update_async_task", "continue_home_job"})
+#: Stopping a home job: an act, but not a start (it backs "I stopped it", never "I started it").
+ONE_LOOP_STOP = frozenset({"cancel_async_task"})
 #: Tools that only read.
 ONE_LOOP_READ_ONLY = frozenset({
     "analyze_image", "calendar_events", "get_weather", "messages_sent", "no_action", "read_document",
     "read_email", "read_his_email", "read_my_code", "read_web_page", "search_email", "search_entities",
     "search_his_email", "search_web", "where_is_chris_nearby", "youtube_summary", "check_async_task",
-    "list_async_tasks",
+    "list_async_tasks", "files_sent_to_chris", "ls", "read_file",
 })
 #: Tools that keep a record (memory, a note, a list, a draft, a link) and no other kind of act.
 ONE_LOOP_RECORD = frozenset({"remember", "log_gap", "sticky_note", "save_contact_email", "draft_email",
-                             "draft_in_his_gmail", "add_to_cart_link"})
+                             "draft_in_his_gmail", "add_to_cart_link", "write_file", "edit_file"})
 #: Tools that change something in the house, and nothing else.
 ONE_LOOP_DEVICE = frozenset({"keep_listening"})
 #: Tools that read or act by their operation (the tool's own argument names, from its code): which
@@ -896,6 +901,8 @@ ONE_LOOP_FAILURE_LINE = "Something went wrong on my side before I could finish t
 ONE_LOOP_ACT_WORDS = {
     "send_message": "the message", "send_email": "the email", "message_kael": "the note to Kael",
     "start_async_task": "the home job", "update_async_task": "the change to the home job",
+    "continue_home_job": "the go-ahead for the home job", "cancel_async_task": "stopping the home job",
+    "send_file_to_chris": "the file", "write_file": "the file change", "edit_file": "the file change",
     "home_control": "the house change", "music": "the music change", "timer": "the timer",
     "control_alarm": "the alarm change", "remember": "the note to my memory", "sticky_note": "the Sticky note",
     "manage_list": "the list change", "kael_tickets": "the update to Kael's ticket", "wake_me": "the wake-up",
@@ -906,7 +913,9 @@ ONE_LOOP_ACT_WORDS = {
 _ONE_LOOP_PENDING_RE = re.compile(
     r"^\s*(?:waiting for|still waiting|chris approved|that'?s already being done)", re.I)
 _ONE_LOOP_REFUSED_RE = re.compile(
-    r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed)\b|refused\b|"
+    r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed|drafted|withdrawn|"
+    r"logged|kept|created)\b|not delivered\b(?! yet)|draft not created\b|nothing was kept\b|"
+    r"couldn'?t change it\b|only (?:he|the owner|chris) can\b|i'?m not sure it'?s him\b|refused\b|"
     r"chris said no\b|nothing (?:was|has been) (?:done|sent)|that exact message already went)"
     r"|\bnothing happened\b|\bnothing (?:went|was sent|changed)\b", re.I)
 #: Codex second re-check #1: an act counts as done only on the tool's own words for success (read from each
@@ -932,7 +941,7 @@ _ONE_LOOP_DONE_WORDS = {
     "manage_list": ((r"^(?:Added to|Removed from|Checked off on) the\b", {"record"}),),
     "kael_tickets": ((r"^Added to T-\d+; Kael has it now\b", {"send", "record"}),
                      (r"^Added to T-\d+, but Kael's line didn't take it\b", {"record"}),   # kept, not delivered
-                     (r"^Canceled T-\d+\b", {"send", "record"})),
+                     (r"^Canceled T-\d+\b", {"record"})),           # its note to Kael is never checked
     "kael_checkins": ((r"^(?:Stopped|Resumed) [^:\n]+:", {"record"}),),
     "reach_prefs": ((r"^(?:Changed:|Holding:|Discreet:|The nap hold is off\b|Company's gone\b)", {"record"}),),
     "my_pending_requests": ((r"^Withdrawn request #\d+", {"record"}),),
@@ -940,15 +949,41 @@ _ONE_LOOP_DONE_WORDS = {
     "check_back": ((r"^(?:Set:|Canceled:)", {"record"}),),
     "start_async_task": ((r"^Launched async subagent\b", {"start"}),),
     "update_async_task": ((r"^(?:Updated async subagent|Queued follow-up to async subagent)\b", {"start"}),),
+    "continue_home_job": ((r"^(?:Updated async subagent|Queued follow-up to async subagent|"
+                           r"The continuation was queued)\b", {"start"}),),
+    "cancel_async_task": ((r"^Cancelled async subagent task\b", {"stop"}),),
+    "send_file_to_chris": ((r"^SENT:", {"send"}),),
+    "write_file": ((r"^Updated file ", {"record"}),),          # outside_guard's own test of a write
+    "edit_file": ((r"^Successfully replaced ", {"record"}),),
 }
 #: music's acts answer "Done: …" on success (WRITE_OK_PREFIX), DJ breaks their own line (dj.set_enabled); what
 #: kind they are comes from the operation.
 _ONE_LOOP_MUSIC_DONE = re.compile(r"^(?:Done:|DJ breaks are (?:back on|off)\b)")
 #: A read's own refusal ("Couldn't read his email…", "His library is his…"): not a completed look.
 _ONE_LOOP_READ_REFUSED = re.compile(
-    r"^\s*(?:couldn'?t|i couldn'?t|i could not|can'?t|cannot|not here\b|only (?:he|the owner|chris)\b|"
-    r"his library is his|i'?m not sure it'?s him|refused\b|not done\b|unknown\b|"
-    r"home assistant is unreachable)", re.I)
+    r"^\s*(?:couldn'?t|i couldn'?t|i could not|can'?t|cannot|not here\b|not available\b|only (?:he|the owner|chris)\b|"
+    r"his library is his|i'?m not sure it'?s him|refused\b|not done\b|unknown\b|use \w+ to read\b|"
+    r"location request refused|current location is unavailable|give search_for\b|search for at least\b|"
+    r"\w+ needs (?:a|an|the|some)\b|[\w ']{0,40}\b(?:failed|is unreachable|unavailable|came back malformed)\b|"
+    r"[\w ]{0,30}: not available\b)", re.I)
+#: His message asks about something already done (D79 replay, turn 3426: "how did you send …?").
+_ONE_LOOP_PAST_ASK = re.compile(
+    r"\b(?:did|have|had)\s+you\b(?!\s+(?:want|need|mean)\b)|\bwhat happened\b|\bremind me what\b", re.I)
+#: A sentence tied to an earlier time, or to her notes of earlier turns (turn 3376: "my notes say I've played").
+#: Only words that place HER act earlier: a time that can be the content ("you weighed 182 this morning",
+#: "a reminder for Monday") is not one, so a weekday or a date counts only after "on" or "last".
+_ONE_LOOP_EARLIER = re.compile(
+    r"\b(?:yesterday|last (?:night|week|weekend|month|time)|earlier (?:today|this week|on)|the other day|"
+    r"(?:on|last) (?:mon|tues|wednes|thurs|fri|satur|sun)day|\d+ (?:hours?|days?|weeks?) ago|"
+    r"back (?:then|when)|at the time|my notes|i remember|"
+    r"on (?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2}(?:st|nd|rd|th)?\b)", re.I)
+#: A sentence tied to now is about this turn, whatever else it says; so is a status line ("Logged: …").
+_ONE_LOOP_NOW_ANCHOR = re.compile(
+    r"\b(?:now|just|this turn|a (?:moment|second) ago)\b|^\s*(?:logged|saved|added|done|noted|set|sent|kept):",
+    re.I)
+#: A web search or page read can look anything up ("the Switch price", "the train schedule"): it backs a look
+#: of any kind.
+_ONE_LOOP_ANY_LOOK = frozenset({"search_web", "read_web_page"})
 #: A claimed look names what it looked at; it needs a completed read of that kind (Codex second re-check #3).
 #: No family named: any completed read.
 _ONE_LOOP_READ_FAMILIES = (
@@ -2345,12 +2380,14 @@ def _action_turn(
 
 
 def _one_loop_call_kinds(name: str, args: dict) -> frozenset:
-    """What a call does: some of send / start / record / device / read; 'other' for a tool the checks don't
-    know, which backs only a general claim of having done something."""
+    """What a call does: some of send / start / stop / record / device / read; 'other' for a tool the checks
+    don't know (it backs no claim, and counts as something that may have acted)."""
     if name in ONE_LOOP_SEND:
         return frozenset({"send"})
     if name in ONE_LOOP_START:
         return frozenset({"start"})
+    if name in ONE_LOOP_STOP:
+        return frozenset({"stop"})
     if name in ONE_LOOP_READ_ONLY:
         return frozenset({"read"})
     if name in ONE_LOOP_RECORD:
@@ -2390,8 +2427,8 @@ def _one_loop_done_kinds(name: str, args: dict, content: str, status: object = N
     for success (_ONE_LOOP_DONE_WORDS); an unknown tool never. Recording and delivery are separate kinds, so
     a ticket kept but not yet delivered backs "noted", not "sent"."""
     text = str(content or "")
-    if _one_loop_outcome(text, status) != "completed":
-        return frozenset()
+    if name == "no_action" or _one_loop_outcome(text, status) != "completed":
+        return frozenset()       # no_action answers in words only: it never backs a look or an act
     kinds = _one_loop_call_kinds(name, args)
     if kinds == {"read"}:
         first = next((line for line in text.splitlines() if line.strip()), "")
@@ -2434,8 +2471,11 @@ def _one_loop_receipts(messages: list) -> list[dict]:
 
 
 def _one_loop_acted(receipts: list[dict]) -> bool:
-    """Did anything this turn change something (a completed act, not a read)?"""
-    return any(set(r["done"]) - {"read"} for r in receipts)
+    """MAY anything this turn have changed something? Then a correction is words only: running his turn
+    armed again could do it twice. Wider than what backs a claim: an act whose answer isn't clearly a
+    refusal, a failure or a wait counts, confirmed or not (an unknown tool, an unrecognised answer, a write
+    HA took without showing a change)."""
+    return any(set(r["kinds"]) - {"read"} and r["outcome"] in ("completed", "unconfirmed") for r in receipts)
 
 
 _ONE_LOOP_SEND_VERBS = (
@@ -2466,12 +2506,15 @@ _ONE_LOOP_LOOK_VERB = re.compile(
     r"\b(?:check|checking|look|looking|search|searching|read|reading|open|opening|find|finding)\b", re.I)
 
 
+def _negation_window(text: str, at: int) -> str:
+    """The words just before AT that can negate what starts there (the shared gates' 45-character window,
+    across a sentence end too: the D79 replay measured this, and keeping it in the sentence surfaced false
+    claims like "not by rolling anything. I skipped 17")."""
+    return text[max(0, at - _NEGATION_WINDOW): at]
+
+
 def _unnegated(pattern: re.Pattern, text: str) -> bool:
-    for m in pattern.finditer(text):
-        window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
-        if not _NEGATION_RE.search(window):
-            return True
-    return False
+    return any(not _NEGATION_RE.search(_negation_window(text, m.start())) for m in pattern.finditer(text))
 
 
 def _now_promises(text: str) -> list[str]:
@@ -2479,7 +2522,7 @@ def _now_promises(text: str) -> list[str]:
     found = []
     for pattern in _PROMISE_PATTERNS:
         for m in pattern.finditer(text):
-            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+            window = _negation_window(text, m.start())
             end = _SENTENCE_END.search(text, m.end())
             rest = text[m.end(): end.start() if end else len(text)]
             starts = [x.end() for x in _SENTENCE_END.finditer(text, 0, m.start())]
@@ -2502,33 +2545,45 @@ def _sentence_of(text: str, fragment: str) -> str:
 
 def _claim_sentences(pattern: re.Pattern, text: str) -> list[str]:
     """The sentences holding an un-negated match of PATTERN."""
-    found = []
-    for m in pattern.finditer(text):
-        window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
-        if not _NEGATION_RE.search(window):
-            found.append(_sentence_of(text, m.group(0)))
-    return found
+    return [_sentence_of(text, m.group(0)) for m in pattern.finditer(text)
+            if not _NEGATION_RE.search(_negation_window(text, m.start()))]
 
 
 def _one_loop_looked(sentence: str, read_tools: set) -> bool:
     """A claimed or promised look in SENTENCE is backed: by a completed read of the kind it names, or, when it
     names none, by any completed read (Codex second re-check #3: an act is never a look)."""
     families = [tools for pattern, tools in _ONE_LOOP_READ_FAMILIES if pattern.search(sentence)]
-    if not families:
+    if not families or read_tools & _ONE_LOOP_ANY_LOOK:
         return bool(read_tools)
     return any(read_tools & tools for tools in families)
 
 
-def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] | None:
+def _one_loop_present(reply: str, asked: str) -> str:
+    """The part of her reply that speaks about THIS turn (D79 replay, turns 3426 and 3376). A sentence tied to
+    an earlier time or to her notes ("on Wednesday", "yesterday", "my notes say") describes an earlier turn,
+    and so does every sentence when his message asks about the past ("how did you…", "did you…"): this
+    turn's receipts can't back those, and earlier turns' receipts aren't in the seed (it carries text only).
+    A sentence tied to now ("just", "now") stays, whatever he asked."""
+    past_ask = bool(_ONE_LOOP_PAST_ASK.search(asked or ""))
+    kept = [sentence for sentence in re.split(r"(?<=[.!?\n])", reply)
+            if _ONE_LOOP_NOW_ANCHOR.search(sentence)
+            or not (past_ask or _ONE_LOOP_EARLIER.search(sentence))]
+    return "".join(kept)
+
+
+def _one_loop_check(reply: str, receipts: list[dict], *, asked: str = "") -> tuple[str, str, bool] | None:
     """D79's postconditions on a one-loop reply: (marker, correction, words_only) for the first thing it
-    says that this turn's COMPLETED receipts don't back, else None (Codex 11/20 #3 and re-check #2, #3):
+    says that this turn's COMPLETED receipts don't back, else None (Codex 11/20 #3, re-checks #2 and #3):
     - she says she heard audio: nothing can back that, and it is always corrected in words only;
     - a start needs a completed start; a send a completed send; a record (Logged:, saved, added) a
       completed record; a house change (turned, played, a timer set) a completed device act; another act
-      ("done", cancelled, scheduled) any completed act; a claimed look (checked, looked up) any completed call;
-    - a promise to act now needs a completed act; a promise to look is kept by any completed call;
+      ("done", cancelled, scheduled) any completed act; a claimed look (checked, looked up) a completed read
+      of the kind it names (any read when it names none; a web search or page read backs any kind);
+    - a promise to act now needs a completed act; a promise to look needs a completed read, as above;
     - how a home job stands needs a completed look at her jobs.
-    A refused, pending or failed call backs nothing."""
+    Claims about an earlier turn (_one_loop_present; ASKED is his message) aren't this turn's to back.
+    Only the tools' own words for success complete anything; a refused, pending, failed or unrecognised
+    answer backs nothing."""
     text = _plain_quotes(reply or "")
     if audio_perception_claim(text):
         return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
@@ -2537,13 +2592,14 @@ def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] |
         done |= set(r["done"])
     acts = done - {"read"}
     read_tools = {r["name"] for r in receipts if "read" in r["done"]}
+    now = _one_loop_present(text, asked)
     unbacked = (
-        (_unnegated(_STARTED_CLAIM_RE, text) and "start" not in done)
-        or (_unnegated(_ONE_LOOP_SEND_CLAIM, text) and "send" not in done)
-        or ((record_action_claim(text) or _unnegated(_ONE_LOOP_RECORD_CLAIM, text)) and "record" not in done)
-        or (_unnegated(_ONE_LOOP_DEVICE_CLAIM, text) and "device" not in done)
-        or (_unnegated(_ONE_LOOP_ACT_CLAIM, text) and not acts)
-        or any(not _one_loop_looked(sentence, read_tools) for sentence in _claim_sentences(_ONE_LOOP_READ_CLAIM, text))
+        (_unnegated(_STARTED_CLAIM_RE, now) and "start" not in done)
+        or (_unnegated(_ONE_LOOP_SEND_CLAIM, now) and "send" not in done)
+        or ((record_action_claim(now) or _unnegated(_ONE_LOOP_RECORD_CLAIM, now)) and "record" not in done)
+        or (_unnegated(_ONE_LOOP_DEVICE_CLAIM, now) and "device" not in done)
+        or (_unnegated(_ONE_LOOP_ACT_CLAIM, now) and not acts)
+        or any(not _one_loop_looked(sentence, read_tools) for sentence in _claim_sentences(_ONE_LOOP_READ_CLAIM, now))
     )
     if not unbacked:
         promises = _now_promises(text)
@@ -2677,7 +2733,7 @@ def _text_one_loop_turn(
         turn["messages"] = list(result["messages"])
         reply = _strip_handoff(_reply_text(turn["messages"][-1]))
         receipts = _one_loop_receipts(turn["messages"])
-        check = _one_loop_check(reply, receipts)
+        check = _one_loop_check(reply, receipts, asked=text)
         if check is not None:
             marker, correction, words_only = check
             if words_only or _one_loop_acted(receipts):
@@ -2698,7 +2754,7 @@ def _text_one_loop_turn(
                 turn["messages"] = [*turn["messages"], *list(result["messages"])[len(seed):]]
                 receipts = _one_loop_receipts(turn["messages"])
             reply = _strip_handoff(_reply_text(turn["messages"][-1]))
-            survived = _one_loop_check(reply, receipts)
+            survived = _one_loop_check(reply, receipts, asked=text)
             if survived is not None:
                 log.warning("one loop: %s survived the correction — emitting with the marker", survived[0])
                 turn["degraded"].append(survived[0])

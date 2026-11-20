@@ -780,32 +780,113 @@ def test_each_tool_is_sorted_by_what_it_does(name, args, kinds):
     assert set(_one_loop_call_kinds(name, args)) == kinds
 
 
-#: The rack's live tool list (Kael, 11/20), plus the async-task tools.
-LIVE_TOOLS = {
-    "add_to_cart_link", "analyze_image", "calendar_events", "check_back", "control_alarm", "draft_email",
-    "draft_in_his_gmail", "get_weather", "home_control", "kael_checkins", "kael_tickets", "keep_listening",
-    "log_gap", "manage_list", "message_kael", "messages_sent", "music", "my_pending_requests", "no_action",
-    "reach_prefs", "read_document", "read_email", "read_his_email", "read_my_code", "read_web_page", "remember",
-    "save_contact_email", "search_email", "search_entities", "search_his_email", "search_web", "send_email",
-    "send_message", "sticky_note", "timer", "wake_me", "where_is_chris_nearby", "youtube_summary",
-    "start_async_task", "update_async_task", "check_async_task", "list_async_tasks",
-}
+#: Every tool half armed (fake values; nothing is reached while building).
+ARMED = dict(
+    anthropic_api_key="sk-test", action_loop="agent", ha_token="ha", ha_base_url="http://ha:8123",
+    database_url="postgresql://x/aerys_v2", memories_database_url="postgresql://x/aerys", owner_person_id=OWNER,
+    embeddings_api_key="e", tavily_api_key="t", firecrawl_api_key="f", discord_bot_token="d",
+    kael_desk_url="http://desk", kael_desk_token="k", email_address="a@b.c", email_app_password="p",
+    email_imap_host="imap", email_smtp_host="smtp", ha_alarm_entity="alarm_control_panel.x",
+    ha_sticky_note_entity="input_text.x", ha_todo_lists="shopping=todo.s", ha_calendar_entities="calendar.x",
+    ha_weather_entity="weather.x", ha_music_players="assist_satellite.x=media_player.x",
+    ha_music_default_player="media_player.x", ha_music_config_entry="abc", ha_timer_fallback_entity="timer.x",
+    presence_geocoded_entity="sensor.g", presence_person_entity="person.x", presence_coords_entity="sensor.c",
+    followups=True, wakeups=True, gmail_drafts=True, gmail_read=True, her_skills=True, home_jobs=True,
+    hands_gates=True, approvals=True, reach_notify_service="mobile_app_x", home_url="http://home:1",
+    home_api_token="tok", dj_breaks=True, reach_email_via_desk=True, messages_as_herself=True,
+    message_people="Sam", gmail_drafts_client_id="ci", gmail_drafts_client_secret="cs",
+    gmail_drafts_refresh_token="rt", gmail_drafts_from="a@b.c")
 
 
-def test_every_tool_the_checks_name_is_a_real_tool():
-    from aerys_v2 import service
+@pytest.fixture(scope="module")
+def armed():
+    """The MAIN action graph exactly as action_stack_for builds it, every half armed (coordinator, replay
+    point A: the kind tables must cover the real bound set, middleware tools included). The skills store is
+    in memory and the memory/family/room seams are off, so nothing is reached; the models record the tools
+    each call is handed."""
+    need()
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.outputs import ChatGeneration, ChatResult
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+    from langgraph.store.memory import InMemoryStore
 
-    named = (set(service.ONE_LOOP_SEND) | set(service.ONE_LOOP_START) | set(service.ONE_LOOP_READ_ONLY)
-             | set(service.ONE_LOOP_RECORD) | set(service.ONE_LOOP_DEVICE) | set(service.ONE_LOOP_BY_OPERATION)
-             | set(service.ONE_LOOP_JOB_LOOKS))
-    assert named <= LIVE_TOOLS, named - LIVE_TOOLS
+    import aerys_v2.action_loop as action_loop
+    import aerys_v2.factory as factory
+    import aerys_v2.kael_line as kael_line
+    import aerys_v2.skills as skills
+    from aerys_v2.config import Settings
+
+    log, script = [], []
+
+    class Rec(BaseChatModel):
+        bound: tuple = ()
+
+        @property
+        def _llm_type(self):
+            return "rec"
+
+        def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+            return self.model_copy(update={"bound": tuple(convert_to_openai_tool(t)["function"]["name"]
+                                                          for t in tools)})
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            log.append(set(self.bound))
+            return ChatResult(generations=[ChatGeneration(message=script.pop(0))])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("LANGSMITH_API_KEY", raising=False)
+        mp.setattr(skills, "store_for", lambda settings: InMemoryStore())
+        mp.setattr(factory, "context_fn_for", lambda settings, **kw: None)
+        mp.setattr(factory, "voice_room_fn_for", lambda settings: None)
+        mp.setattr(kael_line, "family_notes_fn_for", lambda settings: None)
+        mp.setattr(action_loop, "build_agent_tool_models", lambda settings, tools: action_loop.AgentToolModels(
+            Rec(), (Rec(), True), (Rec(), True)))
+        _, graph = factory.action_stack_for(Settings(_env_file=None, **ARMED), soul="SOUL")
+    return SimpleNamespace(graph=graph, log=log, script=script,
+                           names=set(graph.nodes["tools"].bound.tools_by_name))
 
 
-def test_every_live_tool_is_sorted():
+def test_the_armed_graph_is_the_whole_set(armed):
+    # The set the tables are checked against really is the full one (home jobs, files, skills, sends).
+    assert {"start_async_task", "update_async_task", "check_async_task", "list_async_tasks", "cancel_async_task",
+            "continue_home_job", "send_file_to_chris", "files_sent_to_chris", "write_file", "edit_file",
+            "read_file", "ls", "send_message", "messages_sent", "home_control", "music"} <= armed.names
+
+
+def test_every_bound_tool_is_sorted(armed):
     from aerys_v2.service import _one_loop_call_kinds
 
-    for name in LIVE_TOOLS:
-        assert "other" not in _one_loop_call_kinds(name, {}), name
+    assert not {name for name in armed.names if "other" in _one_loop_call_kinds(name, {})}
+
+
+def test_every_tool_the_checks_name_is_bound(armed):
+    from aerys_v2 import service
+
+    named = (set(service.ONE_LOOP_SEND) | set(service.ONE_LOOP_START) | set(service.ONE_LOOP_STOP)
+             | set(service.ONE_LOOP_READ_ONLY) | set(service.ONE_LOOP_RECORD) | set(service.ONE_LOOP_DEVICE)
+             | set(service.ONE_LOOP_BY_OPERATION) | set(service.ONE_LOOP_JOB_LOOKS)
+             | set(service._ONE_LOOP_DONE_WORDS))
+    assert named <= armed.names, named - armed.names
+
+
+def test_every_bound_act_can_be_confirmed(armed):
+    # An act with no success words could never back a claim: every one has them (music by its operation).
+    from aerys_v2.service import _ONE_LOOP_DONE_WORDS, _one_loop_call_kinds
+
+    acts = {n for n in armed.names if set(_one_loop_call_kinds(n, {})) - {"read"}}
+    assert not acts - set(_ONE_LOOP_DONE_WORDS) - {"music"}
+
+
+def test_a_one_loop_turn_is_handed_the_home_job_tools(armed):
+    # Replay point C (turn 3462 said the home-job tool "isn't available this turn"): on the real graph a
+    # household DM's one-loop turn is handed every home-job tool. The replay's missing hooks were its own.
+    armed.script[:] = [AIMessage(content="Hi.")]
+    armed.log.clear()
+    armed.graph.invoke({"messages": [HumanMessage(content="fix the skill on your home machine")]},
+                       {"configurable": {"thread_id": f"person:{OWNER}", "text_one_loop": True, "specialist": False,
+                                         "identity": dm()}, "recursion_limit": 10})
+    assert {"start_async_task", "update_async_task", "check_async_task", "list_async_tasks", "cancel_async_task",
+            "continue_home_job", "send_file_to_chris"} <= armed.log[0]
 
 
 # ---- Codex re-check #4: a recognised failure still says what went through ---------------------
@@ -860,7 +941,7 @@ def test_a_rate_limit_after_a_send_still_says_the_send_went_through():
     ("kael_tickets", {"action": "update"}, "Added to T-3; Kael has it now.", {"send", "record"}),
     ("kael_tickets", {"action": "update"}, "Added to T-3, but Kael's line didn't take it right now; it's retried "
                                            "automatically. Don't send it again.", {"record"}),
-    ("kael_tickets", {"action": "cancel"}, "Canceled T-3.", {"send", "record"}),
+    ("kael_tickets", {"action": "cancel"}, "Canceled T-3.", {"record"}),       # its note to Kael isn't checked
     ("kael_checkins", {"action": "stop"}, "Stopped morning-post: it won't tap Kael until it's resumed.", {"record"}),
     ("reach_prefs", {"action": "mute"}, "Changed: you won't bring up weather on your own now.", {"record"}),
     ("my_pending_requests", {"action": "withdraw"}, "Withdrawn request #4. It cannot execute from this request.",
@@ -926,3 +1007,133 @@ def test_a_look_must_be_the_right_kind_of_look():
     web = Action(tool_then("search_web", "I checked the forecast: rain after 3.", "rain after 3pm"))
     run("will it rain", action=web)
     assert len(web.calls) == 1
+
+
+# ---- Replay point A: the real file tools back what they did (turn 3069's shape) -------------------
+
+def test_a_written_file_sent_to_his_dm_is_backed():
+    wrote = [AIMessage(content="", tool_calls=[{"id": "w", "name": "write_file",
+                                                "args": {"file_path": "/notes/howto.md", "content": "x"}}]),
+             ToolMessage(content="Updated file /notes/howto.md", name="write_file", tool_call_id="w")]
+    sent = tool_then("send_file_to_chris", "I wrote the how-to to a file and sent it to your DM.",
+                     "SENT: howto.md (812 bytes) is in your Discord DM.", args={"path": "notes/howto.md"})
+    action = Action([*wrote, *sent])
+    run("put that in a file for me", action=action)
+    assert len(action.calls) == 1 and action.reply_calls == []
+
+
+# ---- Replay point B: answers about an EARLIER turn aren't this turn's claims ---------------------
+# Paraphrased shapes of turns 3426 and 3376; chosen rule: _one_loop_present (his past question, or a
+# sentence tied to an earlier time or her notes). The seed carries text only, so earlier receipts can't back.
+
+def test_his_question_about_an_earlier_send_is_answered_without_a_bounce():
+    # He asks how she got something to Kael; this turn she only looks at her tickets.
+    action = Action(tool_then("kael_tickets",
+                              "I sent the question to Kael with my direct line, and it opened ticket T-9. "
+                              "I just checked, and none of my tickets are open now.",
+                              "You haven't asked Kael anything yet.", args={"action": "list"}))
+    run("how did you get that question to kael?", action=action)
+    assert len(action.calls) == 1 and action.reply_calls == []
+
+
+def test_what_her_notes_say_she_did_before_is_not_a_claim_about_now():
+    # He tells her how a game works; she recalls from her notes what she did on an earlier day.
+    action = Action("You're right, it's drag to spin. My notes say I've played it twice that way, on Monday.")
+    run("you have to drag the globe to turn it", action=action)
+    assert len(action.calls) == 1 and action.reply_calls == []
+
+
+def test_a_claim_tied_to_now_is_still_checked_when_he_asks_about_the_past():
+    action = Action("Yes, I just sent it to Sam.", "I haven't sent it yet.")
+    run("did you send it to sam?", action=action)
+    assert len(action.calls) == 2
+
+
+def test_a_plain_claim_with_no_earlier_time_is_still_checked():
+    action = Action("I've turned off the lamp.", "I haven't touched the lamp.")
+    run("the lamp is still on", action=action)
+    assert len(action.calls) == 2
+
+
+def test_a_promise_is_checked_even_when_he_asks_about_the_past():
+    action = Action("I'll send it to Sam right now.", "I haven't sent it.")
+    run("did you send it to sam?", action=action)
+    assert len(action.calls) == 2
+
+
+# ---- Advisor (pre-report): what may have acted vs what backs a claim ------------------------------
+
+def test_an_unconfirmed_act_never_runs_his_turn_armed_again():
+    # An unknown tool, or an answer the table doesn't recognise, backs nothing but may have done something:
+    # the correction is words only, so nothing can happen twice.
+    for name, content, args in (("some_new_tool", "ok", {}),
+                                ("home_control", "Sent turn_on to Lamp; Home Assistant accepted it (200) but "
+                                                 "light.lamp reported NO state change.", {"operation": "turn_on"})):
+        action = Action(tool_then(name, "I've turned on the lamp.", content, args=args),
+                        words=["I asked for it; I can't see that it changed."])
+        run("lamp on", action=action)
+        assert len(action.calls) == 1 and len(action.reply_calls) == 1, name
+
+
+def test_no_action_never_backs_a_look():
+    action = Action(tool_then("no_action", "I looked into it: nothing's wrong.", "NO_ACTION: say this"),
+                    "I haven't looked yet.")
+    run("is anything wrong?", action=action)
+    assert len(action.calls) == 2
+
+
+@pytest.mark.parametrize("name,content", [
+    ("get_weather", "Rain chance: not available right now."),
+    ("calendar_events", "The calendar is unreachable right now (couldn't read: calendar.x)."),
+    ("search_web", "web search failed: the search service is unreachable right now (timeout)."),
+    ("search_web", "search_web needs a search query — there is nothing to look up."),
+    ("read_web_page", "Reading the page failed: the reading service is unreachable right now."),
+    ("read_email", "read_email needs the uid of a message — call search_email first."),
+    ("search_email", "email search failed: timeout."),
+    ("check_async_task", "Not done: I couldn't get to his home jobs just now, so nothing happened."),
+    ("read_my_code", "Not available: only Chris's turns and my own wake-ups can read my code."),
+    ("where_is_chris_nearby", "Location request refused: I can only tell him where he is."),
+    ("analyze_image", "The vision service is unreachable right now (timeout)."),
+])
+def test_a_read_that_failed_is_not_a_look(name, content):
+    from aerys_v2.service import _one_loop_done_kinds
+
+    assert not _one_loop_done_kinds(name, {}, content, None)
+
+
+def test_a_web_search_backs_a_look_of_any_kind():
+    for claim in ("I looked up the train schedule: the 5:10 runs late.", "I looked up that song: it's from 1994."):
+        action = Action(tool_then("search_web", claim, "results: …"))
+        run("look it up", action=action)
+        assert len(action.calls) == 1 and action.reply_calls == [], claim
+
+
+@pytest.mark.parametrize("reply", [
+    "Logged: you ran 5k yesterday.",                 # a status line is this turn's, whatever day it names
+    "I've set the check-back for Monday.",           # a day that is the content, not when she acted
+    "I saved that you weighed 182 this morning.",
+])
+def test_a_time_that_is_the_content_does_not_excuse_a_claim(reply):
+    action = Action(reply, "I haven't done that yet.")
+    run("note it", action=action)
+    assert len(action.calls) == 2, reply
+
+
+def test_the_home_job_and_file_tools_answer_in_the_words_the_checks_expect():
+    # The installed deepagents writes these; a version whose wording moved would leave every start unconfirmed.
+    need("deepagents")
+    import inspect
+
+    import deepagents.middleware.async_subagents as async_subagents
+    import deepagents.middleware.filesystem as filesystem
+    from aerys_v2.service import _one_loop_done_kinds
+
+    source = inspect.getsource(async_subagents) + inspect.getsource(filesystem)
+    for words, name, kinds in (("Launched async subagent. task_id:", "start_async_task", {"start"}),
+                               ("Updated async subagent. task_id:", "update_async_task", {"start"}),
+                               ("Queued follow-up to async subagent", "continue_home_job", {"start"}),
+                               ("Cancelled async subagent task:", "cancel_async_task", {"stop"}),
+                               ("Updated file ", "write_file", {"record"}),
+                               ("Successfully replaced ", "edit_file", {"record"})):
+        assert words in source, words
+        assert set(_one_loop_done_kinds(name, {}, words + " x", None)) == kinds, name

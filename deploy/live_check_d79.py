@@ -54,9 +54,14 @@ try:
     from aerys_v2.service import (_claims_effect_without_doing_it as _cD79, _one_loop_check as _okD79,
                                   _one_loop_receipts as _rcD79)
 
+    # Each tool answers in its own words: only those count as done (Codex re-check 2 #1).
+    _wordsD79 = {"list_async_tasks": "No async subagent tasks tracked.",
+                 "send_message": "Sent: the signed message went through Discord.",
+                 "start_async_task": "Launched async subagent. task_id: j1", "home_control": "light.lamp: off"}
+
     def _turnD79(name, said, args=None):
         return [_AD79(content="", tool_calls=[{"id": "c", "name": name, "args": args or {}}]),
-                _TD79(content="ok", name=name, tool_call_id="c"), _AD79(content=said)]
+                _TD79(content=_wordsD79[name], name=name, tool_call_id="c"), _AD79(content=said)]
 
     _rD79 = "I’ve started a home job to update the MapTap skill, Chris."
     _D79.append(_cD79("you are good to update your skill", _rD79)
@@ -70,6 +75,21 @@ try:
 except Exception as _e:
     _D79.append(False)
     print("#D79 claim postconditions (failed to load):", False)
+try:
+    # The home-job and file tools' success words, as THIS install's deepagents writes them: a version whose
+    # wording moved would leave every start unconfirmed.
+    import inspect as _inD79
+    import deepagents.middleware.async_subagents as _asD79
+    import deepagents.middleware.filesystem as _fsD79
+    _srcD79 = _inD79.getsource(_asD79) + _inD79.getsource(_fsD79)
+    _D79.append(all(w in _srcD79 for w in (
+        "Launched async subagent. task_id:", "Updated async subagent. task_id:",
+        "Queued follow-up to async subagent", "Cancelled async subagent task:", "Updated file ",
+        "Successfully replaced ")))
+    print("#D79 the home-job and file tools answer in the words the checks expect:", _D79[-1])
+except Exception as _e:
+    _D79.append(False)
+    print("#D79 home-job and file tool words (failed to load):", False)
 if not all(_D79):
     import sys as _sysD79
     print("#D79 live checks: FAILED", file=_sysD79.stderr)
