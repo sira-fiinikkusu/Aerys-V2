@@ -2314,7 +2314,7 @@ _STARTED_CLAIM_RE = re.compile(
     r"(?:(?:it|them)\b|(?:that|this)(?=\s*(?:[.,;:!?\u2014-]|$|now\b|for you\b|already\b|on my\b))"
     r"|(?:(?:a|an|the|your|my|today's|that|this|on|up)\s+)?(?:\w+\s+){0,3}?"
     # an execution job, never a job at work (Codex second re-check 11/20)
-    r"(?:home\s+job|job\s+on\s+my\s+home|(?:async|background)\s+job|(?<=the )job|task|run|update|edit|wordle|maptap|"
+    r"(?:home\s+job|job\s+on\s+my\s+home|(?:async|background)\s+job|task|run|update|edit|wordle|maptap|"
     r"timer|download|scan|backup)s?\b)",
     re.I,
 )
