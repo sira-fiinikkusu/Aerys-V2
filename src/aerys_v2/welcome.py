@@ -168,7 +168,8 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
         lines.append("- Left on today's calendar: " + ("; ".join(b.events) if b.events else "nothing"))
         overnight = [*b.held, *b.quiet]
         lines.append("- Came in overnight, each with the time it happened: "
-                     + ("; ".join(stamped(r) for r in overnight) if overnight else "nothing"))
+                     + ("; ".join(stamped(r) for r in overnight) if overnight
+                        else "nothing (say nothing about it)"))
     return DATA_ONLY + "\n".join(lines)
 
 

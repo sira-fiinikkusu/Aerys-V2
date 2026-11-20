@@ -50,7 +50,8 @@ BRIEF_PROMPT = (
     "first person, your own voice, the most useful thing first. Use ONLY the facts below and "
     "never add any: no weather, plans or news that aren't listed. Say times the way people say "
     "them (\"ten thirty\"). Work meetings: how many and when, never what they're about. If "
-    "something came in overnight, say so in a few words; the details are in his messages. Each "
+    "something came in overnight, say so in a few words; the details are in his messages. If "
+    "nothing did, leave it out: don't say so (Chris 11/20: \"it does feel like noise\"). Each "
     "overnight note carries the time it happened: it is how things stood THEN, so say it as what "
     "happened, never as how things are now. "
     "Nothing to read off a screen: no lists, no markdown, no emoji. Reply with ONLY what to say."
@@ -134,7 +135,7 @@ def facts_text(facts: Facts) -> str:
         lines.append("Came in overnight, each with the time it happened (the details are in his messages):")
         lines += [f"- {stamped(r)}" for r in [*facts.held, *facts.quiet]]
     else:
-        lines.append("Came in overnight: nothing")
+        lines.append("Came in overnight: nothing (say nothing about it)")
     return "\n".join(lines)
 
 

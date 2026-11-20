@@ -459,3 +459,21 @@ def test_what_a_brief_carried_never_goes_again_while_its_record_keeps_failing():
     h.at(datetime(2026, 11, 10, 13, 2, tzinfo=ET))
     h.desk.tick()
     assert h.desk.store.rows[1].status == "folded" and h.desk.unrecorded == {} and len(h.world.spoken) == 1
+
+
+def test_a_quiet_night_goes_unsaid():
+    """Chris 11/20 08:41: "can you have her not include it unless there is something of value? it
+    does feel like noise tbh". Her fact sheet said "Came in overnight: nothing", so she said it every
+    morning. Now the empty line says to leave it out, the way unknown weather does, and her brief's
+    rule says so too; a night that held something is still told."""
+    from aerys_v2.brief import BRIEF_PROMPT
+    from aerys_v2.welcome import WelcomeFacts, welcome_facts_text
+    assert "Came in overnight: nothing (say nothing about it)" in facts_text(Facts())
+    note = SimpleNamespace(headline="Your package came.", created_at=None)
+    told = facts_text(Facts(quiet=[note]))
+    assert "overnight: nothing" not in told and "- Your package came." in told
+    assert "If nothing did, leave it out" in BRIEF_PROMPT
+    quiet = welcome_facts_text(WelcomeFacts(away=timedelta(hours=2), brief=Facts(weather="sun")))
+    assert "- Came in overnight, each with the time it happened: nothing (say nothing about it)" in quiet
+    busy = welcome_facts_text(WelcomeFacts(away=timedelta(hours=2), brief=Facts(weather="sun", quiet=[note])))
+    assert "- Came in overnight, each with the time it happened: Your package came." in busy
