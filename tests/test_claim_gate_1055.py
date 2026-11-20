@@ -111,7 +111,25 @@ def test_ordinary_talk_with_permission_words_does_not_escalate():
 def test_permission_with_a_real_act_still_counts():
     assert _claims_effect_without_doing_it("you are good to update your skill", SAID)
     assert _claims_effect_without_doing_it("you're good to go ahead and start it", "I've started it.")
-    assert _claims_effect_without_doing_it("feel free to kick it off", "I’ve kicked off the job.")
+    assert _claims_effect_without_doing_it("feel free to kick it off", "I’ve kicked off the home job.")
     assert _claims_effect_without_doing_it("you have my go", "I've launched today's run.")
     assert claims_effect_done("I've started a home job.")
     assert claims_effect_done("I’ve started the update on my home machine.")
+
+
+def test_codex_second_round_conversation_stays_talk():
+    """Codex's second re-check (11/20 17:19): permissions with no act after them, a new job at work, and a
+    book she started are all talk."""
+    assert not _promises_effect_without_doing_it("you're good to sleep in", "I'll play devil's advocate.")
+    assert not _promises_effect_without_doing_it("feel free to vent", "I'll play devil's advocate.")
+    assert not _claims_effect_without_doing_it("feel free to vent", "I started a new job at work.")
+    assert not _claims_effect_without_doing_it("feel free to vent", "I started this book last night.")
+    assert not _claims_effect_without_doing_it("feel free to vent", "I started that show you liked.")
+    assert _claims_effect_without_doing_it("feel free to start it", "I've started it.")
+    assert _claims_effect_without_doing_it("you're good to run it", "I've started that.")
+    assert _claims_effect_without_doing_it("you are good to update your skill", "I’ve started the home job.")
+
+
+def test_a_job_at_work_is_not_a_home_job():
+    """Codex third look (11/20): bare 'the job' read as execution evidence."""
+    assert not _claims_effect_without_doing_it("feel free to tell me about your day", "I started the job at work today.")
