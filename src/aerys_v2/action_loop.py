@@ -220,6 +220,7 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
         voice_room_fn=kw.get("voice_room_fn"),
         shared_surface_ids=kw.get("shared_surface_ids"),
         context_trailing=kw.get("context_trailing", False),
+        conversational_context_fn=kw.get("conversational_context_fn"),
     )
     if isinstance(models, SurfaceSplitAgentModels):
         default = models.text.conversational

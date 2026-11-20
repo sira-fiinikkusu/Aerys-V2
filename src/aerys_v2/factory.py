@@ -1783,6 +1783,25 @@ TYPED_SURFACE_STYLE = (
 )
 
 
+# D79 (Chris 11/20: "its like im talking to twins"): a household DM's chat-shaped turn now runs on this
+# tool-armed graph as conversation, the typed counterpart of VOICE_BANTER_OVERLAY. It carries what the chat
+# node's capability block told her that still holds with tools in hand (durable memory, no invented
+# promises, current facts are looked up rather than guessed), lifts the action overlay's "one short
+# sentence" for talk, and keeps banter from drifting procedural.
+TEXT_BANTER_OVERLAY = (
+    "This is a CONVERSATION in a direct message, and you have your tools in hand. Use one when the "
+    "request actually needs it: a device, a message to send or pass on, a home job, a search, current "
+    "facts (products, prices, hours, anything after your knowledge cutoff), a file or link. Just talk "
+    "when it doesn't; most conversation needs no tool at all. The one-short-sentence rule above is for "
+    "confirming an act you just did with a tool; otherwise answer the way you normally would in this "
+    "conversation, as long as it needs. Never say you did, started, sent or checked something unless a "
+    "tool did it this turn, and never say how something stands now unless you looked. Your conversation "
+    "memory is durable across restarts and sessions, and you also know long-term facts about the person. "
+    "Never say someone promised, agreed to or owes you something, or that you are waiting on something "
+    "from them, unless it is in front of you; if you are not sure, ask."
+)
+
+
 SPECIALIST_CHARTER = (
     "You are the tool specialist acting for Aerys, the household assistant — her "
     "hands, not her conversational voice. You get ONE job per turn: the user's "
@@ -2061,9 +2080,14 @@ def _action_prompt_builder(
     voice_room_fn,
     shared_surface_ids: dict | None,
     context_trailing: bool,
+    conversational_context_fn: ContextFn | None = None,
 ):
     """The action mind's prompt for one create_agent model pass. Returns
-    fn(messages, config) -> (prompt, specialist, fast)."""
+    fn(messages, config) -> (prompt, specialist, fast).
+
+    conversational_context_fn (D79): her FULL long-term memory (embedding-backed, the chat node's
+    seam) for a one-loop conversation turn (configurable text_one_loop, not specialist). Every other
+    turn keeps context_fn, the profile-only seam, exactly as before."""
 
     def assemble(messages: list, config: RunnableConfig) -> tuple[list, bool, bool]:
         # Same identity rule as the chat node: from per-call config, never state.
@@ -2077,6 +2101,8 @@ def _action_prompt_builder(
         configurable = config.get("configurable") or {}
         memo = configurable.get("action_context_memo")
         specialist = bool(configurable.get("specialist"))
+        # D79: a one-loop conversation turn (service._text_one_loop_turn) — never a specialist turn.
+        one_loop = bool(configurable.get("text_one_loop")) and not specialist
         fast = configurable.get("tier") == "fast"  # the router's grade rides in
         persona = charter if specialist else soul
         caller_line = (
@@ -2103,6 +2129,9 @@ def _action_prompt_builder(
             # The typed counterpart, same reason as the chat node: this mind shares
             # the same person-keyed thread, so it inherits the same voice precedent.
             ack_block = TYPED_SURFACE_STYLE
+            if one_loop:
+                # D79: a household DM's conversation on this graph: her typed banter voice.
+                ack_block = f"{ack_block}\n\n{TEXT_BANTER_OVERLAY}"
         else:
             ack_block = ""
         # Lens surface rides on top of (and after) the voice styling so its
@@ -2117,7 +2146,9 @@ def _action_prompt_builder(
         # the range math. context_fn here is the PROFILE-ONLY seam (identity
         # claims, no embedding call) — same graceful contract as the chat node.
         knowledge = ""
-        if context_fn is not None:
+        # D79: a one-loop conversation gets her full memory, as the chat node did (Codex 11/20 #2).
+        memory_fn = conversational_context_fn if (one_loop and conversational_context_fn is not None) else context_fn
+        if memory_fn is not None:
             latest = next(
                 (m for m in reversed(messages) if getattr(m, "type", "") == "human"),
                 None,
@@ -2127,7 +2158,7 @@ def _action_prompt_builder(
                 content = latest.content
                 query_text = content if isinstance(content, str) else str(content)
             try:
-                block = memoized(context_fn, memo)(
+                block = memoized(memory_fn, memo)(
                     str(identity.get("user_id", "")),
                     query_text,
                     identity.get("privacy_context", "public"),
@@ -2137,7 +2168,7 @@ def _action_prompt_builder(
                 block = ""
             if block:
                 knowledge = f"\n\n[What you know about this person]\n{block}"
-            knowledge += people_knowledge(context_fn, identity, messages, query_text, memo=memo)
+            knowledge += people_knowledge(memory_fn, identity, messages, query_text, memo=memo)
         # Same clock+location the chat node injects, so a time/where question answers
         # identically whichever path the router chose. Its absence here is exactly why
         # "what time is it" web-searched on the tool path and punted to the lock screen.
@@ -2237,12 +2268,14 @@ def build_action_graph(
     guard_owner=None,
     *,
     extra_middleware=(),
+    conversational_context_fn: ContextFn | None = None,
 ) -> object:
     """Build the sole action engine, retaining the public builder's call signature."""
     from aerys_v2.action_loop import build_agent_action_graph
 
     return build_agent_action_graph(
         api_model_with_tools, soul, tools, context_fn=context_fn, overlay=overlay,
+        conversational_context_fn=conversational_context_fn,
         family_notes_fn=family_notes_fn, room_context_fn=room_context_fn,
         portable_context_fn=portable_context_fn, presence_fn=presence_fn,
         voice_room_fn=voice_room_fn, shared_surface_ids=shared_surface_ids,
@@ -2793,6 +2826,9 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         soul,  # used by voice banter turns; action routes swap in the charter per call
         tools,
         context_fn=context_fn_for(settings, profile_only=True),
+        # D79: her full memory for a household DM's conversation on this graph (Codex 11/20 #2). Only
+        # the main graph: the guest and wake graphs keep the profile-only seam.
+        conversational_context_fn=context_fn_for(settings),
         overlay=overlay,
         # Owner nit 8/05: voice/glasses ALWAYS run this graph — the family
         # splice must ride it or it misses the surfaces that matter most.

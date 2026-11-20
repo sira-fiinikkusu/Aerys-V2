@@ -824,6 +824,75 @@ STATUS_GATE_MARKER = "status_gate_escalated"
 STATUS_CHECK_HINT = ("[before you say whether a home job is running or how it's going, look: list_async_tasks "
                      "or check_async_task, and answer from what they say]")
 
+# ── D79 (Chris 11/20): one her, not twins ──────────────────────────────────────────────
+# "its really awful that we are using scripts based on literal wording to switch" / "its like im talking
+# to twins". Household DMs run every typed turn on the tool-armed action graph, the way voice has since
+# 2026-07-25 (VOICE-ALWAYS-ACTION): the router's verdict picks only the shape of the reply. Behind a flag
+# that starts off (text_one_loop_flag), so flag off is the old split.
+#: Every one-loop row carries it, so the switch's turns are countable apart from the old chat path's.
+ONE_LOOP_MARKER = "text_one_loop"
+#: The served tier when the router asked for another: banter rides her conversational model (standard).
+ONE_LOOP_TIER_SOURCE = "one_loop"
+#: What her one-loop reply is told when it says a home job is running without having looked.
+ONE_LOOP_STATUS_CORRECTION = (
+    "You said how a home job stands without looking. Look first with list_async_tasks or check_async_task, "
+    "then answer from what they say. This note is internal: never mention it or the earlier answer."
+)
+#: Tools that only read: a successful call to one of these does not back a claim that something was done.
+#: (outside_guard.READERS plus the house and her own records' read-only tools.) An unknown tool counts as
+#: an act, so a new reader can only let a claim through, never bounce a real act.
+ONE_LOOP_READ_ONLY = frozenset({
+    "search_web", "read_web_page", "analyze_image", "read_document", "youtube_summary", "search_email",
+    "read_email", "search_his_email", "read_his_email", "check_async_task", "list_async_tasks",
+    "search_entities", "get_state", "messages_sent", "files_sent_to_chris", "kael_tickets", "list_skills",
+    "read_skill", "search_memory", "my_pending_requests", "weather", "forecast", "search_her_code",
+})
+#: A successful call to one of these is a look at her home jobs.
+ONE_LOOP_JOB_LOOKS = frozenset({"check_async_task", "list_async_tasks", "start_async_task", "update_async_task"})
+
+
+def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
+    """D79: may this typed turn take the one loop? Only a resolved HOUSEHOLD identity on an actual DM
+    surface (Discord or Telegram, channel_kind 'dm'). Never a shared room, a guest, a cold handle, voice
+    or the lens, or a surface with no platform. Household = the action allowlist (owner + the people Chris
+    added); with no allowlist (a dev box) only the configured owner. Called AFTER ask()'s allowlist gate,
+    and it checks the allowlist itself, so it can never hand a guest the privileged graph (Codex 11/20)."""
+    identity = identity or {}
+    if identity.get("voice") or is_lens_surface(identity):
+        return False
+    if str(identity.get("platform") or "").lower() not in ("discord", "telegram"):
+        return False
+    if str(identity.get("channel_kind") or "").lower() != "dm":
+        return False
+    user = str(identity.get("user_id") or "")
+    if not user or ":" in user:          # a cold '{platform}:{id}' handle is a stranger
+        return False
+    if action_allowlist is not None:
+        return user in action_allowlist
+    return bool(owner_id) and user == str(owner_id)
+
+
+def text_one_loop_flag(settings) -> Callable[[], bool]:
+    """The switch, read on every turn: the file (settings.text_one_loop_file) when it exists and says
+    on/off, else settings.text_one_loop. The file lets a deploy flip it without recreating a container
+    (the way ~/bench/text-loop picks the engine); an unreadable or empty file falls back to the setting."""
+    path = str(getattr(settings, "text_one_loop_file", "") or "").strip()
+
+    def read() -> bool:
+        if path:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    word = fh.read().strip().lower()
+            except OSError:
+                word = ""
+            if word in ("on", "true", "1", "yes"):
+                return True
+            if word in ("off", "false", "0", "no"):
+                return False
+        return bool(getattr(settings, "text_one_loop", False))
+
+    return read
+
 # False-wake grace (owner ask 2026-08-27): the router judged this voice/lens
 # capture was never directed at Aerys and the turn was dropped — no reply, no
 # action, but ALWAYS this receipt (never silent-silent; the marker is how drop
@@ -1167,6 +1236,7 @@ def ask(
     drop_unaddressed: bool = False,
     drop_conversation_window_s: float = 180.0,
     activity_registry: dict[str, float] | None = None,
+    text_one_loop: bool | Callable[[], bool] = False,
 ) -> str:
     """Run one conversational turn and return the reply text.
 
@@ -1223,6 +1293,9 @@ def ask(
       private-CONTENT things never do. None = feature off: DM turns stay 'private' and
       simply never carry into public. Never touches latency (daemon thread) and never
       loosens the public-origin path (those turns are already 'public').
+    - text_one_loop: D79's switch (a bool, or text_one_loop_flag(settings), read per turn).
+      On, a chat-routed typed turn from a household DM runs the tool-armed action graph as
+      conversation (_text_one_loop_turn) instead of the tool-less chat graph. Off = unchanged.
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
@@ -1428,6 +1501,31 @@ def ask(
                 record_turn=record_turn, reflex=shadow, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 tier=normalize_tier(decision.tier),
+            )
+            _reclassify_if_needed(
+                graph, config, turn_msg_id, text, reply,
+                content_privacy_classifier, origin_privacy,
+            )
+            _face(face_push, "idle", reply)
+            registry[thread_id] = time.monotonic()
+            return _for_surface(reply, config)
+
+        # D79: one her, not twins. A chat-shaped turn from a household DM runs on the tool-armed graph
+        # as conversation. Checked AFTER the allowlist gate above, and the eligibility test checks the
+        # allowlist itself, so a guest can never reach the privileged graph this way.
+        one_loop_on = text_one_loop() if callable(text_one_loop) else bool(text_one_loop)
+        if (one_loop_on and action_graph is not None
+                and text_one_loop_eligible(identity, action_allowlist, factory._OWNER_ID)):
+            served = DEFAULT_TIER
+            asked_tier = normalize_tier(decision.tier)
+            log.info("route decision | thread=%s route=chat → one loop (asked tier=%s, served %s)",
+                     thread_id, asked_tier, served)
+            _face(face_push, "working")
+            reply = _text_one_loop_turn(
+                action_graph, graph, text, config, rails, started,
+                record_turn=record_turn, reflex=shadow,
+                human_privacy=origin_privacy, human_id=turn_msg_id,
+                tier=served, tier_override_source=ONE_LOOP_TIER_SOURCE if asked_tier != served else None,
             )
             _reclassify_if_needed(
                 graph, config, turn_msg_id, text, reply,
@@ -2129,6 +2227,136 @@ def _action_turn(
     return final
 
 
+def _one_loop_check(reply: str, result_messages: list) -> tuple[str, str] | None:
+    """D79's postconditions on a one-loop reply: (correction, marker) for the first claim nothing backs, else
+    None. The chat path's checks, kept as a look at what she SAYS, never as a switch (Codex 11/20 #5):
+    - she says she heard audio (no tool can back that);
+    - she reports a record written ("Logged: …") with no successful write;
+    - she claims an act done, or promises one now, with no successful act. A successful READ does not back
+      it (Codex: an unrelated tool call must not suppress the check): "I've started a home job" after only
+      list_async_tasks is still a claim nothing backs;
+    - she says how a home job stands without having looked at her jobs this turn."""
+    calls = extract_tool_calls(result_messages)
+    acted = any(c["ok"] and c["name"] not in ONE_LOOP_READ_ONLY for c in calls)
+    looked = any(c["ok"] and c["name"] in ONE_LOOP_JOB_LOOKS for c in calls)
+    if audio_perception_claim(reply):
+        return AUDIO_CLAIM_CORRECTION, AUDIO_CLAIM_MARKER
+    if record_action_claim(reply) and not acted:
+        return RECORD_CLAIM_CORRECTION, RECORD_CLAIM_MARKER
+    if (claims_effect_done(reply) or promises_effect_now(reply)) and not acted:
+        return ACTION_NO_TOOL_CORRECTION, NO_TOOL_ACTION_MARKER
+    if claims_job_running(reply) and not looked:
+        return ONE_LOOP_STATUS_CORRECTION, STATUS_GATE_MARKER
+    return None
+
+
+def _text_one_loop_turn(
+    action_graph: object,
+    graph: object,
+    text: str,
+    config: dict,
+    rails: Rails,
+    started: float,
+    *,
+    record_turn: Callable[[dict], None] | None = None,
+    reflex: _ReflexShadow | None = None,
+    human_privacy: str = PRIVATE,
+    human_id: str | None = None,
+    tier: str = DEFAULT_TIER,
+    tier_override_source: str | None = None,
+) -> str:
+    """D79: a typed household-DM turn on the tool-armed action graph, as conversation.
+
+    The voice banter branch's shape (_voice_parallel_start, 2026-07-25), synchronous and typed: no ack, no
+    spoken follow-up, no handoff timer (Discord shows typing and splits long replies itself).
+    - specialist=False: her soul, not the charter, and no forced first tool; text_one_loop=True picks her
+      full long-term memory and the typed banter overlay in the prompt builder (factory).
+    - the seed is the room-gated thread with her own replies, inside the chat graph's 200-message window
+      (_action_history_seed, non-specialist), with her old voice tags taken off what she is shown.
+    - the chat path's claim checks run as postconditions (_one_loop_check): one bounce, then a marker.
+    - exactly one durable exchange (his words + her reply) and one audit row, on success or failure.
+    The served tier is the conversational model's (standard): deep credits are never spent here, and a
+    different verdict from the router is kept on the row (tier_override_source)."""
+    from aerys_v2.factory import _untag_own_replies
+
+    configurable = config["configurable"]
+    LOCAL_FALLBACK_FIRED.set(False)
+
+    def land(reply_text: str, messages=()) -> None:
+        graph.update_state(
+            {"configurable": configurable},
+            {"messages": [_human_turn(text, human_privacy, human_id,
+                                       sealed_room=_sealed_room(config),
+                                       owner_assumed=_owner_assumed(config)),
+                          _action_reply(reply_text, config, list(messages))]},
+            as_node="chat",
+        )
+
+    run_config = {**config, "configurable": {**configurable, "specialist": False, "tier": tier,
+                                               "text_one_loop": True}}
+    degraded: list[str] = [ONE_LOOP_MARKER]
+    try:
+        seed = _untag_own_replies(_action_history_seed(graph, configurable, text))
+        CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
+        result = _invoke_action_graph(action_graph, seed, run_config)
+        result_messages = result["messages"]
+        reply = _strip_handoff(_reply_text(result_messages[-1]))
+        check = _one_loop_check(reply, result_messages)
+        if check is not None:
+            correction, marker = check
+            log.info("one loop: %s in her reply — bouncing once | thread=%s", marker, configurable.get("thread_id"))
+            result = _invoke_action_graph(
+                action_graph, [*result_messages, HumanMessage(content=correction)], run_config)
+            result_messages = result["messages"]
+            reply = _strip_handoff(_reply_text(result_messages[-1]))
+            again = _one_loop_check(reply, result_messages)
+            if again is not None:
+                log.warning("one loop: %s survived the bounce — emitting with the marker", again[1])
+                degraded.append(again[1])
+    except Exception as e:
+        honest = _honest_reply_for_failure(e)
+        _record_turn_failure(
+            record_turn, config, text, started, e, reflex=reflex,
+            classifier_intent="chat", tier=tier, tier_override_source=tier_override_source,
+            base_degraded=[*degraded, *(["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else [])],
+            emitted_reply=honest,
+        )
+        if honest is None:
+            raise
+        land(honest)                 # he reads this line, so the thread carries it too
+        return honest
+
+    raw = reply
+    if not raw.strip():
+        degraded.append(EMPTY_REPLY_MARKER)
+        reply = BLANK_REPLY_LINE
+        _log_empty_reply("one_loop", configurable.get("thread_id"), result_messages[-1])
+    land(reply, result_messages)
+
+    elapsed = time.monotonic() - started
+    timed_out = elapsed > rails.wall_clock_s
+    if LOCAL_FALLBACK_FIRED.get():
+        degraded.append("local_model_fallback")
+    if timed_out:
+        # Late but real: the reply exists and is already in history, so it is sent (the voice banter rule),
+        # never raised into a dead turn.
+        degraded.append("wall_clock_exceeded")
+        log.warning("one loop: turn took %.1fs (budget %ss)", elapsed, rails.wall_clock_s)
+    _fire_turn_record(
+        record_turn, config, text, int(elapsed * 1000),
+        reflex=reflex,
+        classifier_intent="chat",
+        tier=tier,
+        tier_override_source=tier_override_source,
+        raw_reply=raw,
+        emitted_reply=reply,
+        messages=result_messages,
+        extra_degraded=degraded,
+        error=f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)" if timed_out else None,
+    )
+    return reply
+
+
 _TITLE_ABBREVIATIONS = frozenset({"mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vol.", "no.",
                                   "feat.", "ft.", "vs.", "pt.", "op."})
 
@@ -2303,11 +2531,22 @@ _NEGATION_RE = re.compile(
 _NEGATION_WINDOW = 45
 
 
+#: D79 (11/20 10:55, turn 3476): "I’ve started a home job to update the MapTap skill" claimed a job she never
+#: started and slipped past both "I've" (a curly apostrophe) and the verb list. A start reported in her own
+#: voice, with something started as its object.
+_STARTED_CLAIM_RE = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:started|kicked off|launched|fired off|fired up|"
+    r"set off|queued up|begun)\s+(?:a|an|the|your|my|his|her|it|that|this|today's|on|up)\b",
+    re.I,
+)
+
+
 def claims_effect_done(text: str) -> bool:
     """Does this reply claim, in its own voice, that an effectful act happened?"""
+    text = _plain_quotes(text)
     if not text:
         return False
-    for pattern in _CLAIM_PATTERNS:
+    for pattern in (*_CLAIM_PATTERNS, _STARTED_CLAIM_RE):
         for m in pattern.finditer(text):
             window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
             if not _NEGATION_RE.search(window):
@@ -2373,9 +2612,14 @@ _PROMISE_PATTERNS = (
     ),
 )
 #: His message proposes an activity even when it isn't phrased as an order ("did you wanna...").
+#: D79 (11/20 10:55): or gives his permission ("you are good to update your skill", "feel free to", "you have
+#: my go"), which the router read as talk.
 _PROPOSES_RE = re.compile(
     r"\b(?:wanna|want to|could you|can you|would you|will you|go ahead|let'?s|"
-    r"mind (?:doing|playing|checking|starting))\b", re.I)
+    r"mind (?:doing|playing|checking|starting)|"
+    r"you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine|welcome) to|feel free to|"
+    r"you (?:can|may) (?:go ahead|proceed|start|do it)|"
+    r"you have my (?:go|ok|okay|blessing|permission|approval)|permission granted)\b", re.I)
 #: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
 #: "sure, do it"). The whole message, so "yeah, like this going forward" stays talk.
 _CONSENT_RE = re.compile(
@@ -2469,10 +2713,15 @@ def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
     router's own action heuristics), so reminiscing ("remember when you turned
     the lights off?") or hypotheticals never trip it — only a real request that
     the router sent to chat, answered as though it had been carried out.
+
+    D79 (11/20 10:55): a proposal or a yes counts as asking, the same as for the
+    promise gate (his "you are good to update your skill" was neither an order
+    nor a question).
     """
-    return bool(
-        plausibly_asks_for_action(user_text) and claims_effect_done(reply)
-    )
+    user_text = _plain_quotes(user_text)
+    asked = (plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)
+             or _CONSENT_RE.fullmatch(user_text))
+    return bool(asked and claims_effect_done(reply))
 
 
 def _voice_parallel_start(

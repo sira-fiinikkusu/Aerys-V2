@@ -159,6 +159,12 @@ class Settings(BaseSettings):
     action_force_tool: bool = True
     # ACTION_LOOP remains accepted for live environment files; create_agent is the only engine.
     action_loop: Literal["agent"] = "agent"
+    # TEXT_ONE_LOOP (D79, Chris 11/20: "its like im talking to twins"): a household DM's chat-shaped typed
+    # turn runs on the tool-armed action graph as conversation, the way voice has since 2026-07-25. Off by
+    # default. TEXT_ONE_LOOP_FILE, when set and the file says on/off, wins over the setting and is read on
+    # every turn (service.text_one_loop_flag), so it can be flipped without recreating a container.
+    text_one_loop: bool = False
+    text_one_loop_file: str = ""
     # HISTORY_WINDOW_MESSAGES: maximum prior thread messages shown to the model
     # (chat includes the current human in this tail). The checkpointer keeps
     # everything; 0 disables the window. 2026-09-19: 824 messages cost 62,588 tokens.

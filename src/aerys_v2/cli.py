@@ -88,7 +88,7 @@ def main() -> None:
 
     if "--ask" in sys.argv:  # one-shot turn: aerys-v2 --ask "hello" — the first REAL call path
         from aerys_v2.factory import build_graph, build_model, load_soul
-        from aerys_v2.service import ask
+        from aerys_v2.service import ask, text_one_loop_flag
 
         from aerys_v2.factory import checkpointer_for, turn_recorder_for
 
@@ -215,7 +215,7 @@ def main() -> None:
         )
         from aerys_v2.kael_line import family_notes_fn_for, kael_note_for, parse_room_devices
         from aerys_v2.tickets import start_tickets, ticket_door_for
-        from aerys_v2.service import ask
+        from aerys_v2.service import ask, text_one_loop_flag
         from aerys_v2.services.a2a_memory import a2a_memory_writer_for
         from aerys_v2.transports.http_api import build_app
 
@@ -342,6 +342,7 @@ def main() -> None:
                     face_push=face_push,
                     drop_unaddressed=settings.voice_drop_unaddressed,
                     drop_conversation_window_s=settings.voice_drop_conversation_window_s,
+                    text_one_loop=text_one_loop_flag(settings),
                 ),
                 settings.api_token.get_secret_value(),
                 # authed HTTP callers ARE the owner when configured — voice-Chris
@@ -496,7 +497,7 @@ def main() -> None:
             face_pusher_for,
             turn_recorder_for,
         )
-        from aerys_v2.service import ask
+        from aerys_v2.service import ask, text_one_loop_flag
         from aerys_v2.services.live_room import LiveRoomReader
         from aerys_v2.transports.discord_gateway import AerysDiscordClient, parse_sealed_dm_users
 
@@ -609,6 +610,8 @@ def main() -> None:
                 record_turn=record_turn,
                 content_privacy_classifier=content_privacy, reflex=reflex,
                 face_push=face_push,
+                # D79: one her for household DMs (off unless TEXT_ONE_LOOP / its file says on).
+                text_one_loop=text_one_loop_flag(settings),
             ),
             resolve_fn=resolve,
             allowed_guild_id=settings.discord_guild_id,
@@ -690,7 +693,7 @@ def main() -> None:
             face_pusher_for,
             turn_recorder_for,
         )
-        from aerys_v2.service import ask
+        from aerys_v2.service import ask, text_one_loop_flag
         from aerys_v2.transports.telegram_gateway import AerysTelegramClient
 
         # [01-05 PHOENIX] same degrade-safe arming as --serve/--discord: this
@@ -772,6 +775,8 @@ def main() -> None:
                 record_turn=record_turn,
                 content_privacy_classifier=content_privacy, reflex=reflex,
                 face_push=face_push,
+                # D79: one her for household DMs (off unless TEXT_ONE_LOOP / its file says on).
+                text_one_loop=text_one_loop_flag(settings),
             ),
             resolve_fn=resolve,
             allowed_chat_ids=chat_ids,

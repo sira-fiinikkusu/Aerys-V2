@@ -470,6 +470,7 @@ def test_service_ai_writer_inventory():
         ('_complete_action', '_action_reply'): 1,  # voice background success/failure
         ('_voice_parallel_start', '_action_reply'): 2,  # banter success/failure
         ('_finish_handed_off', '_action_reply'): 1,  # banter handed off past HA's wait (#214): late success/failure
+        ('land', '_action_reply'): 1,  # D79 one-loop typed turn: success and honest failure share it
     })
 
 
