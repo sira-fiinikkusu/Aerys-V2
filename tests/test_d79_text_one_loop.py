@@ -1023,8 +1023,9 @@ def test_a_written_file_sent_to_his_dm_is_backed():
 
 
 # ---- Replay point B: answers about an EARLIER turn aren't this turn's claims ---------------------
-# Paraphrased shapes of turns 3426 and 3376; chosen rule: _one_loop_present (his past question, or a
-# sentence tied to an earlier time or her notes). The seed carries text only, so earlier receipts can't back.
+# Paraphrased shapes of turns 3426 and 3376; chosen rule: _one_loop_present (a sentence reporting her notes,
+# or an answer to a message that ONLY asks about the past when she attempted no act). The seed carries text
+# only, so earlier turns' receipts can't back them.
 
 def test_his_question_about_an_earlier_send_is_answered_without_a_bounce():
     # He asks how she got something to Kael; this turn she only looks at her tickets.
@@ -1038,7 +1039,7 @@ def test_his_question_about_an_earlier_send_is_answered_without_a_bounce():
 
 def test_what_her_notes_say_she_did_before_is_not_a_claim_about_now():
     # He tells her how a game works; she recalls from her notes what she did on an earlier day.
-    action = Action("You're right, it's drag to spin. My notes say I've played it twice that way, on Monday.")
+    action = Action("You're right, it's drag to spin. My notes say I've played it twice that way.")
     run("you have to drag the globe to turn it", action=action)
     assert len(action.calls) == 1 and action.reply_calls == []
 
@@ -1112,6 +1113,8 @@ def test_a_web_search_backs_a_look_of_any_kind():
     "Logged: you ran 5k yesterday.",                 # a status line is this turn's, whatever day it names
     "I've set the check-back for Monday.",           # a day that is the content, not when she acted
     "I saved that you weighed 182 this morning.",
+    "I've saved that you ran 5k yesterday.",
+    "I've added that to my notes.",                  # her notes as where a write went, not a report of them
 ])
 def test_a_time_that_is_the_content_does_not_excuse_a_claim(reply):
     action = Action(reply, "I haven't done that yet.")
@@ -1137,3 +1140,28 @@ def test_the_home_job_and_file_tools_answer_in_the_words_the_checks_expect():
                                ("Successfully replaced ", "edit_file", {"record"})):
         assert words in source, words
         assert set(_one_loop_done_kinds(name, {}, words + " x", None)) == kinds, name
+
+
+def test_a_request_beside_his_past_question_is_still_checked():
+    # The 10:55 shape: he asks whether she got it AND tells her to go ahead; she claims a start she never made.
+    action = Action("I've started a home job to update the skill.", "I haven't started it yet.")
+    run("did you get that? go ahead and start it", action=action)
+    assert len(action.calls) == 2
+
+
+def test_an_act_tried_this_turn_ends_the_past_question_pass():
+    # He asks "did you send it?"; this turn's send is refused; "Yes, I sent it" is about THIS turn now.
+    action = Action(tool_then("send_message", "Yes, I sent it to Sam.",
+                              "Not sent: that person isn't on the list of people I can message; ask the owner."),
+                    "No: Sam isn't on the list of people I can message.")
+    run("did you send it to sam?", action=action)
+    assert len(action.calls) == 2                   # checked: refused, nothing was done, so his turn runs again
+
+
+def test_a_draft_that_timed_out_is_never_tried_again_armed():
+    # "check Gmail before trying again": it may have landed, so the correction is words only.
+    action = Action(tool_then("draft_in_his_gmail", "I've drafted it in your Gmail.",
+                              "Not drafted: create timed out; check Gmail before trying again."),
+                    words=["The draft timed out; check Gmail before I try again."])
+    run("draft a reply to sam", action=action)
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1

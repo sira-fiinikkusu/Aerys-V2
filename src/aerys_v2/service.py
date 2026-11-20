@@ -913,7 +913,7 @@ ONE_LOOP_ACT_WORDS = {
 _ONE_LOOP_PENDING_RE = re.compile(
     r"^\s*(?:waiting for|still waiting|chris approved|that'?s already being done)", re.I)
 _ONE_LOOP_REFUSED_RE = re.compile(
-    r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed|drafted|withdrawn|"
+    r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed|withdrawn|"
     r"logged|kept|created)\b|not delivered\b(?! yet)|draft not created\b|nothing was kept\b|"
     r"couldn'?t change it\b|only (?:he|the owner|chris) can\b|i'?m not sure it'?s him\b|refused\b|"
     r"chris said no\b|nothing (?:was|has been) (?:done|sent)|that exact message already went)"
@@ -969,14 +969,11 @@ _ONE_LOOP_READ_REFUSED = re.compile(
 #: His message asks about something already done (D79 replay, turn 3426: "how did you send …?").
 _ONE_LOOP_PAST_ASK = re.compile(
     r"\b(?:did|have|had)\s+you\b(?!\s+(?:want|need|mean)\b)|\bwhat happened\b|\bremind me what\b", re.I)
-#: A sentence tied to an earlier time, or to her notes of earlier turns (turn 3376: "my notes say I've played").
-#: Only words that place HER act earlier: a time that can be the content ("you weighed 182 this morning",
-#: "a reminder for Monday") is not one, so a weekday or a date counts only after "on" or "last".
+#: Her notes of earlier turns, reported (turn 3376: "my notes say I've played it"). Not a time: a time can be
+#: the content ("you ran 5k yesterday"), and not "my notes" alone: that can be where a write went.
 _ONE_LOOP_EARLIER = re.compile(
-    r"\b(?:yesterday|last (?:night|week|weekend|month|time)|earlier (?:today|this week|on)|the other day|"
-    r"(?:on|last) (?:mon|tues|wednes|thurs|fri|satur|sun)day|\d+ (?:hours?|days?|weeks?) ago|"
-    r"back (?:then|when)|at the time|my notes|i remember|"
-    r"on (?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2}(?:st|nd|rd|th)?\b)", re.I)
+    r"\b(?:my notes (?:say|said|show|showed|have it|mention|mentioned)|according to my notes|from my notes|"
+    r"i remember)\b", re.I)
 #: A sentence tied to now is about this turn, whatever else it says; so is a status line ("Logged: …").
 _ONE_LOOP_NOW_ANCHOR = re.compile(
     r"\b(?:now|just|this turn|a (?:moment|second) ago)\b|^\s*(?:logged|saved|added|done|noted|set|sent|kept):",
@@ -2474,8 +2471,10 @@ def _one_loop_acted(receipts: list[dict]) -> bool:
     """MAY anything this turn have changed something? Then a correction is words only: running his turn
     armed again could do it twice. Wider than what backs a claim: an act whose answer isn't clearly a
     refusal, a failure or a wait counts, confirmed or not (an unknown tool, an unrecognised answer, a write
-    HA took without showing a change)."""
-    return any(set(r["kinds"]) - {"read"} and r["outcome"] in ("completed", "unconfirmed") for r in receipts)
+    HA took without showing a change), and so does one that failed: a timeout or an error can land
+    halfway ("Not drafted: … timed out; check Gmail before trying again")."""
+    return any(set(r["kinds"]) - {"read"} and r["outcome"] in ("completed", "unconfirmed", "failed")
+               for r in receipts)
 
 
 _ONE_LOOP_SEND_VERBS = (
@@ -2558,16 +2557,24 @@ def _one_loop_looked(sentence: str, read_tools: set) -> bool:
     return any(read_tools & tools for tools in families)
 
 
-def _one_loop_present(reply: str, asked: str) -> str:
-    """The part of her reply that speaks about THIS turn (D79 replay, turns 3426 and 3376). A sentence tied to
-    an earlier time or to her notes ("on Wednesday", "yesterday", "my notes say") describes an earlier turn,
-    and so does every sentence when his message asks about the past ("how did you…", "did you…"): this
-    turn's receipts can't back those, and earlier turns' receipts aren't in the seed (it carries text only).
-    A sentence tied to now ("just", "now") stays, whatever he asked."""
-    past_ask = bool(_ONE_LOOP_PAST_ASK.search(asked or ""))
+def _only_asks_about_the_past(asked: str) -> bool:
+    """His message is a question about something already done, and nothing else: every part of it is a
+    question or asks about the past ("did you get that? go ahead and start it" asks for an act too)."""
+    parts = [p.strip() for p in re.split(r"(?<=[.!?\n])", asked or "") if p.strip(" .!?\n")]
+    return (bool(parts) and bool(_ONE_LOOP_PAST_ASK.search(asked))
+            and all(p.endswith("?") or _ONE_LOOP_PAST_ASK.search(p) for p in parts))
+
+
+def _one_loop_present(reply: str, asked: str, attempted: bool = False) -> str:
+    """The part of her reply that speaks about THIS turn (D79 replay, turns 3426 and 3376). A sentence that
+    reports her notes of earlier turns ("my notes say I've played it") is about those turns; so is every
+    sentence of an answer to a question that only asks about the past ("how did you send…?"), when she
+    attempted no act this turn. This turn's receipts can't back those, and earlier turns' receipts aren't in
+    the seed (it carries text only). A sentence tied to now ("just", "now", a status line) always stays."""
+    past = _only_asks_about_the_past(asked) and not attempted
     kept = [sentence for sentence in re.split(r"(?<=[.!?\n])", reply)
             if _ONE_LOOP_NOW_ANCHOR.search(sentence)
-            or not (past_ask or _ONE_LOOP_EARLIER.search(sentence))]
+            or not (past or _ONE_LOOP_EARLIER.search(sentence))]
     return "".join(kept)
 
 
@@ -2592,7 +2599,7 @@ def _one_loop_check(reply: str, receipts: list[dict], *, asked: str = "") -> tup
         done |= set(r["done"])
     acts = done - {"read"}
     read_tools = {r["name"] for r in receipts if "read" in r["done"]}
-    now = _one_loop_present(text, asked)
+    now = _one_loop_present(text, asked, attempted=any(set(r["kinds"]) - {"read"} for r in receipts))
     unbacked = (
         (_unnegated(_STARTED_CLAIM_RE, now) and "start" not in done)
         or (_unnegated(_ONE_LOOP_SEND_CLAIM, now) and "send" not in done)
