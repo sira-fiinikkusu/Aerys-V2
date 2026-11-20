@@ -2311,8 +2311,11 @@ _STARTED_CLAIM_RE = re.compile(
     r"set off|queued up|begun)\s+"
     # What was started is a job, not a book (Codex re-check 11/20: "I started a new book" is talk): the
     # pronoun of something just asked for, or a job-shaped noun within a few words.
-    r"(?:(?:it|that|this|them)\b|(?:(?:a|an|the|your|my|today's|that|this|on|up)\s+)?(?:\w+\s+){0,3}?"
-    r"(?:home\s+)?(?:job|task|run|update|edit|game|wordle|maptap|session|timer|search|download|scan|backup)s?\b)",
+    r"(?:(?:it|them)\b|(?:that|this)(?=\s*(?:[.,;:!?\u2014-]|$|now\b|for you\b|already\b|on my\b))"
+    r"|(?:(?:a|an|the|your|my|today's|that|this|on|up)\s+)?(?:\w+\s+){0,3}?"
+    # an execution job, never a job at work (Codex second re-check 11/20)
+    r"(?:home\s+job|job\s+on\s+my\s+home|(?:async|background)\s+job|(?<=the )job|task|run|update|edit|wordle|maptap|"
+    r"timer|download|scan|backup)s?\b)",
     re.I,
 )
 
@@ -2342,7 +2345,7 @@ VOICE_HANDOFF_MARKER = "voice_handoff"
 # D61 (Chris 11/18): what a promise to act NOW looks like, in her own voice. Effect verbs only: a
 # promise to tell a story or to remember a feeling is talk, not a job.
 _PROMISE_VERBS = (
-    r"(?:play|start(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story|the game|a game|a round))|"
+    r"(?:play(?!\s+(?:devil'?s advocate|along|nice|it (?:cool|safe|by ear)|dumb|hard to get|favou?rites|the long game))|start(?!\s+(?:with|by|off with|over|from|the story|a story|the tale|our story|the game|a game|a round))|"
     r"run|kick (?:it |that |this )?off|launch|"
     r"send|message|email|text|book|order|schedule|set (?:up|it|that|a|an|the|your)|search|"
     r"look (?:it |that |this )?up|look into|"
@@ -2395,7 +2398,9 @@ _PROPOSES_RE = re.compile(
     r"mind (?:doing|playing|checking|starting)|"
     # A permission with an act after it: "you're good to update it". Not "you're good to go" on its own, not
     # "you're welcome to your opinion" (Codex re-check 11/20: both escalated ordinary talk).
-    r"you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine) to (?!go\b(?!\s+ahead)|be\b|your\b)|feel free to|"
+    r"(?:you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine) to|feel free to)\s+(?:go ahead|update|start|"
+    r"run|send|play|kick|launch|do|edit|fix|change|book|order|post|share|message|email|text|turn|switch|set|"
+    r"check|look|search|schedule|add|remove|save|write|try|make|open|pass|tell|let)\b|"
     r"you (?:can|may) (?:go ahead|proceed|start|do it)|"
     r"you have my (?:go|ok|okay|blessing|permission|approval)|permission granted)\b", re.I)
 #: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
