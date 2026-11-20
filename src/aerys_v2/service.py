@@ -2303,11 +2303,22 @@ _NEGATION_RE = re.compile(
 _NEGATION_WINDOW = 45
 
 
+#: D79 (11/20 10:55, turn 3476): "I’ve started a home job to update the MapTap skill" claimed a job she never
+#: started and slipped past both "I've" (a curly apostrophe) and the verb list. A start reported in her own
+#: voice, with something started as its object.
+_STARTED_CLAIM_RE = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:started|kicked off|launched|fired off|fired up|"
+    r"set off|queued up|begun)\s+(?:a|an|the|your|my|his|her|it|that|this|today's|on|up)\b",
+    re.I,
+)
+
+
 def claims_effect_done(text: str) -> bool:
     """Does this reply claim, in its own voice, that an effectful act happened?"""
+    text = _plain_quotes(text)
     if not text:
         return False
-    for pattern in _CLAIM_PATTERNS:
+    for pattern in (*_CLAIM_PATTERNS, _STARTED_CLAIM_RE):
         for m in pattern.finditer(text):
             window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
             if not _NEGATION_RE.search(window):
@@ -2373,9 +2384,14 @@ _PROMISE_PATTERNS = (
     ),
 )
 #: His message proposes an activity even when it isn't phrased as an order ("did you wanna...").
+#: D79 (11/20 10:55): or gives his permission ("you are good to update your skill", "feel free to", "you have
+#: my go"), which the router read as talk.
 _PROPOSES_RE = re.compile(
     r"\b(?:wanna|want to|could you|can you|would you|will you|go ahead|let'?s|"
-    r"mind (?:doing|playing|checking|starting))\b", re.I)
+    r"mind (?:doing|playing|checking|starting)|"
+    r"you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine|welcome) to|feel free to|"
+    r"you (?:can|may) (?:go ahead|proceed|start|do it)|"
+    r"you have my (?:go|ok|okay|blessing|permission|approval)|permission granted)\b", re.I)
 #: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
 #: "sure, do it"). The whole message, so "yeah, like this going forward" stays talk.
 _CONSENT_RE = re.compile(
@@ -2469,10 +2485,15 @@ def _claims_effect_without_doing_it(user_text: str, reply: str) -> bool:
     router's own action heuristics), so reminiscing ("remember when you turned
     the lights off?") or hypotheticals never trip it — only a real request that
     the router sent to chat, answered as though it had been carried out.
+
+    D79 (11/20 10:55): a proposal or a yes counts as asking, the same as for the
+    promise gate (his "you are good to update your skill" was neither an order
+    nor a question).
     """
-    return bool(
-        plausibly_asks_for_action(user_text) and claims_effect_done(reply)
-    )
+    user_text = _plain_quotes(user_text)
+    asked = (plausibly_asks_for_action(user_text) or _PROPOSES_RE.search(user_text)
+             or _CONSENT_RE.fullmatch(user_text))
+    return bool(asked and claims_effect_done(reply))
 
 
 def _voice_parallel_start(
