@@ -96,3 +96,22 @@ def test_his_permission_counts_as_asking():
 def test_talk_still_stays_talk():
     assert not _claims_effect_without_doing_it("remember when you started that job?", "Yes, I've started one before.")
     assert not _claims_effect_without_doing_it("how was your day", SAID)
+
+
+def test_ordinary_talk_with_permission_words_does_not_escalate():
+    """Codex 11/20 re-check: the first cut escalated ordinary conversation. 'You're good to go' with a book
+    she started, and 'you're welcome to your opinion' with devil's advocate, are talk on both sides."""
+    assert not _claims_effect_without_doing_it("you're good to go", "I started a new book last night.")
+    assert not _claims_effect_without_doing_it("you’re good to go", "I’ve started a new book.")
+    assert not _promises_effect_without_doing_it("you're welcome to your opinion", "I'll play devil's advocate.")
+    assert not claims_effect_done("I started a new book.")
+    assert not claims_effect_done("I've started reading about octopuses.")
+
+
+def test_permission_with_a_real_act_still_counts():
+    assert _claims_effect_without_doing_it("you are good to update your skill", SAID)
+    assert _claims_effect_without_doing_it("you're good to go ahead and start it", "I've started it.")
+    assert _claims_effect_without_doing_it("feel free to kick it off", "I’ve kicked off the job.")
+    assert _claims_effect_without_doing_it("you have my go", "I've launched today's run.")
+    assert claims_effect_done("I've started a home job.")
+    assert claims_effect_done("I’ve started the update on my home machine.")
