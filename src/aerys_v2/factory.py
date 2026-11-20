@@ -2067,6 +2067,21 @@ def _build_tool_model(settings: Settings, tools: list, *, timeout_s: float, back
     return ToolModelPair(conversational, std_auto, std_forced, fast_auto, fast_forced)
 
 
+def one_loop_note(configurable: dict) -> str:
+    """D79: the internal note for one pass of a one-loop turn: what she already did this turn (a reply-only
+    pass after an act) and what to fix. Empty when there is none. System prompt only, never history."""
+    done = str((configurable or {}).get("one_loop_done") or "").strip()
+    correction = str((configurable or {}).get("one_loop_correction") or "").strip()
+    if not done and not correction:
+        return ""
+    parts = ["\n\n[For this reply only. Internal: never mention this note.]"]
+    if done:
+        parts.append(f"Already done this turn, and finished (do not do any of it again):\n{done}")
+    if correction:
+        parts.append(correction)
+    return "\n".join(parts)
+
+
 def _action_prompt_builder(
     soul: str,
     *,
@@ -2132,6 +2147,9 @@ def _action_prompt_builder(
             if one_loop:
                 # D79: a household DM's conversation on this graph: her typed banter voice.
                 ack_block = f"{ack_block}\n\n{TEXT_BANTER_OVERLAY}"
+                # D79 (Codex 11/20 #2): a correction for THIS pass rides the system prompt, never the
+                # history, so his turn stays the latest human turn (a relay before it still taints).
+                ack_block += one_loop_note(configurable)
         else:
             ack_block = ""
         # Lens surface rides on top of (and after) the voice styling so its

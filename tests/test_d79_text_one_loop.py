@@ -1,36 +1,42 @@
 """D79 (Chris 11/20 13:55-16:32): one her, not twins. Household DMs run every typed turn
 through the tool-armed action graph, the way voice has since 2026-07-25
 (VOICE-ALWAYS-ACTION). The router's verdict only shapes the reply. Behind a flag that
-starts off: flag off is today's chat/action split, unchanged.
+starts off: flag off is the old chat/action split (as of d727465, the 10:55 claim-gate fix).
 
 The trigger: turn 3476 (11/20 10:55). His "you are good to update your skill" was routed
 to the tool-less chat side, and she answered "I've started a home job" with nothing
-running. Both word-list gates missed it.
+running.
+
+Codex's review of 24b750b set the rules tested here:
+1. A correction never re-enters the armed graph after something was done this turn: it is
+   a reply-only pass (her conversational model, no tools). Audio claims are always reply-only.
+2. The correction never becomes a human message: his turn stays the latest human turn,
+   so a relay before it still taints the bounce, and reach-outs still need his tap.
+3. A claim is backed only by a matching receipt (a start by a start, a send by a send,
+   a record by a write); a promise to look is kept by a look.
+4. Every exit lands one exchange and one audit row, with the tool calls that did run.
 """
 
 from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-import aerys_v2.factory as factory
 from aerys_v2.factory import build_graph
 from aerys_v2.router import RouteDecision
 from aerys_v2.service import (
+    AUDIO_CLAIM_CORRECTION,
     ONE_LOOP_MARKER,
-    claims_effect_done,
-    _claims_effect_without_doing_it,
-    _promises_effect_without_doing_it,
     ask,
     text_one_loop_eligible,
     text_one_loop_flag,
 )
-from aerys_v2.turns import ACTION_NO_TOOL_CORRECTION
 
 OWNER = "11111111-1111-1111-1111-111111111111"
 WIFE = "22222222-2222-2222-2222-222222222222"
@@ -64,29 +70,36 @@ def route(name="chat", tier="standard"):
     return lambda _text: RouteDecision(route=name, ack="", tier=tier)
 
 
+def tool_then(name, final, content="ok", args=None):
+    return [AIMessage(content="", tool_calls=[{"id": f"c-{name}", "name": name, "args": args or {}}]),
+            ToolMessage(content=content, name=name, tool_call_id=f"c-{name}"),
+            AIMessage(content=final)]
+
+
 class Action:
-    """A stub action graph: records each invoke (seed + configurable), answers from a script.
+    """A stub action graph. invoke() answers from `script` (a final string, a list of messages to
+    append, or an exception); reply_only() answers from `words` and never runs a tool."""
 
-    Each script item is either a final string or a list of messages to append (tool calls)."""
-
-    def __init__(self, *script):
-        self.script = list(script)
+    def __init__(self, *script, words=()):
+        self.script, self.words = list(script), list(words)
         self.calls: list[tuple[list, dict]] = []
+        self.reply_calls: list[tuple[list, dict]] = []
 
     def invoke(self, inp, config):
         self.calls.append((list(inp["messages"]), dict(config["configurable"])))
         item = self.script.pop(0) if self.script else "ok"
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):
             raise item
         if isinstance(item, list):
             return {"messages": [*inp["messages"], *item]}
         return {"messages": [*inp["messages"], AIMessage(content=item)]}
 
-
-def tool_then(name, final, content="ok"):
-    return [AIMessage(content="", tool_calls=[{"id": "c1", "name": name, "args": {}}]),
-            ToolMessage(content=content, name=name, tool_call_id="c1"),
-            AIMessage(content=final)]
+    def reply_only(self, messages, config):
+        self.reply_calls.append((list(messages), dict(config["configurable"])))
+        item = self.words.pop(0) if self.words else "ok"
+        if isinstance(item, BaseException):
+            raise item
+        return AIMessage(content=item)
 
 
 class Recorder:
@@ -103,6 +116,7 @@ class Recorder:
         while time.monotonic() < deadline:
             with self._lock:
                 if len(self.rows) >= n:
+                    time.sleep(0.05)
                     return list(self.rows)
             time.sleep(0.01)
         raise AssertionError(f"recorded {len(self.rows)} rows, expected {n}")
@@ -117,13 +131,23 @@ def run(text, *, identity=None, graph=None, action=None, guest=None, flag=True, 
                deep_allowed=deep_allowed)
 
 
+def calls_of(row):
+    import json
+    calls = row["tool_calls"]
+    return [c["name"] for c in (json.loads(calls) if isinstance(calls, str) else calls or [])]
+
+
+def history(graph, thread="person:o"):
+    return graph.get_state({"configurable": {"thread_id": thread}}).values.get("messages", [])
+
+
 # ---- the flag and who is eligible -----------------------------------------------------------
 
 def test_flag_off_is_the_old_chat_path():
     graph = build_graph(fake_model("hey you"), soul="s")
     action = Action("should not run")
     out = run("hi", graph=graph, action=action, flag=False)
-    assert out == "hey you" and action.calls == []
+    assert out == "hey you" and action.calls == [] and action.reply_calls == []
 
 
 def test_flag_on_a_household_dm_chat_turn_runs_the_action_graph_and_never_the_chat_graph():
@@ -194,32 +218,44 @@ def test_a_guild_turn_is_unchanged():
 
 
 def test_an_action_route_still_takes_the_specialist_path():
-    action = Action(tool_then("home_control", "lights off"))
+    action = Action(tool_then("home_control", "lights off", args={"operation": "turn_off"}))
     out = run("turn off the office", action=action, router=route("action"))
     assert out == "lights off"
     assert action.calls[0][1]["specialist"] is True
     assert "text_one_loop" not in action.calls[0][1]
 
 
-def test_the_1055_turn_lands_in_the_action_graph_with_its_tools():
+def test_the_1055_turn_ends_in_a_real_start():
+    # His permission went to the one loop. A look and a promise are not a start: the bounce
+    # (allowed, nothing was done yet) must end in a real start_async_task.
+    rec = Recorder()
     action = Action(tool_then("list_async_tasks", "Starting it now.", "No jobs running."),
-                    tool_then("start_async_task", "Started the home job.", "started job j1"))
+                    tool_then("start_async_task", "Started the home job; it'll read the skill back.", "started j1"))
+    out = run("you are good to update your skill", action=action, record=rec)
+    assert out == "Started the home job; it'll read the skill back."
+    assert "start_async_task" in calls_of(rec.wait(1)[0])
+
+
+def test_the_1055_turn_may_end_in_an_honest_no_without_a_start():
+    action = Action(tool_then("list_async_tasks", "I've started a home job for it.", "No jobs running."),
+                    "I haven't started it: the home machine is offline right now.")
     out = run("you are good to update your skill", action=action)
-    assert action.calls, "the action graph never ran"
-    assert action.calls[0][1]["text_one_loop"] is True
-    assert out in {"Starting it now.", "Started the home job."}
+    assert out.startswith("I haven't started it")
 
 
 # ---- what the one loop carries over from chat ---------------------------------------------
 
-def thread_with(graph, thread, *pairs):
+def thread_with(graph, thread, *pairs, sealed=None):
     msgs = []
     for human, ai in pairs:
-        msgs += [HumanMessage(content=human, additional_kwargs={"privacy": "private"}), AIMessage(content=ai)]
+        kw = {"privacy": "private"}
+        if sealed:
+            kw["sealed_room"] = sealed
+        msgs += [HumanMessage(content=human, additional_kwargs=kw), AIMessage(content=ai)]
     graph.update_state({"configurable": {"thread_id": thread}}, {"messages": msgs}, as_node="chat")
 
 
-def test_the_seed_keeps_her_replies_for_referents_and_the_200_message_window():
+def test_the_seed_keeps_her_replies_inside_the_graphs_window():
     graph = build_graph(NoCalls(), soul="s", history_window_messages=4)
     thread_with(graph, "person:o", ("the blue lamp in the den", "the blue one, got it"),
                 ("and the kitchen?", "kitchen too"), ("what about it", "sure"))
@@ -244,43 +280,34 @@ def test_her_old_emotion_tags_are_not_shown_on_a_typed_turn():
     assert shown == ["Hey you."]
 
 
-def test_a_private_dm_sees_its_private_history_and_the_seed_is_room_gated():
+def test_his_own_dm_sees_turns_sealed_to_a_room_like_chat_did():
     graph = build_graph(NoCalls(), soul="s")
-    thread_with(graph, "person:o", ("my secret thing", "kept"))
+    thread_with(graph, "person:o", ("my job search update", "noted"), sealed="room-jobs")
     action = Action("ok")
-    run("remind me what I told you", graph=graph, action=action)
-    assert any(getattr(m, "content", "") == "my secret thing" for m in action.calls[0][0])
+    run("what did I say about the search", graph=graph, action=action)
+    assert any(getattr(m, "content", "") == "my job search update" for m in action.calls[0][0])
+
+
+def test_a_one_loop_dm_turn_stays_out_of_a_public_room_afterwards():
+    from aerys_v2.services.content_privacy import gate_for_room
+
+    graph = build_graph(NoCalls(), soul="s")
+    run("my secret plan for friday", graph=graph, action=Action("kept between us"))
+    after = gate_for_room([*history(graph), HumanMessage(content="hi all")], guild())
+    shown = [m.content for m in after]
+    assert "my secret plan for friday" not in shown and "kept between us" not in shown
+    assert shown[-1] == "hi all"
 
 
 def test_one_durable_exchange_and_one_audit_row():
     graph = build_graph(NoCalls(), soul="s")
     action, rec = Action("hey you"), Recorder()
     run("hi", graph=graph, action=action, record=rec)
-    msgs = graph.get_state({"configurable": {"thread_id": "person:o"}}).values["messages"]
-    assert [(m.type, m.content) for m in msgs] == [("human", "hi"), ("ai", "hey you")]
+    assert [(m.type, m.content) for m in history(graph)] == [("human", "hi"), ("ai", "hey you")]
     rows = rec.wait(1)
-    time.sleep(0.05)
-    assert len(rec.rows) == 1
+    assert len(rows) == 1
     assert rows[0]["classifier_intent"] == "chat"
     assert ONE_LOOP_MARKER in (rows[0]["degraded"] or [])
-
-
-def test_a_failure_records_a_row_and_raises():
-    graph = build_graph(NoCalls(), soul="s")
-    action, rec = Action(RuntimeError("boom")), Recorder()
-    with pytest.raises(RuntimeError):
-        run("hi", graph=graph, action=action, record=rec)
-    rows = rec.wait(1)
-    assert "turn_failed" in (rows[0]["degraded"] or [])
-
-
-def test_a_rate_limit_is_said_honestly_and_lands_in_history():
-    graph = build_graph(NoCalls(), soul="s")
-    action, rec = Action(RuntimeError("You've hit your session limit · resets 7pm (UTC)")), Recorder()
-    out = run("hi", graph=graph, action=action, record=rec)
-    assert out
-    msgs = graph.get_state({"configurable": {"thread_id": "person:o"}}).values["messages"]
-    assert [m.type for m in msgs] == ["human", "ai"] and msgs[1].content == out
 
 
 # ---- tier policy ----------------------------------------------------------------------------
@@ -296,27 +323,40 @@ def test_a_deep_verdict_is_served_standard_and_audited_without_spending_a_deep_c
     assert action.calls[0][1]["tier"] == "standard"
 
 
-# ---- the checks that stay, as postconditions on what she says -----------------------------
+# ---- Codex #1: never re-enter the armed graph after an act ---------------------------------
 
-def test_a_claim_with_zero_tools_is_bounced_once():
-    action = Action("I've started a home job to update the skill.", "I haven't started it yet.")
-    out = run("you are good to update your skill", action=action)
-    assert out == "I haven't started it yet."
-    assert len(action.calls) == 2
-    assert action.calls[1][0][-1].content == ACTION_NO_TOOL_CORRECTION
-
-
-def test_an_unrelated_read_does_not_back_a_claimed_job():
-    action = Action(tool_then("list_async_tasks", "I’ve started a home job for it.", "No jobs."),
-                    "Nothing is running yet; want me to start it?")
-    out = run("you are good to update your skill", action=action)
-    assert len(action.calls) == 2 and out.startswith("Nothing is running")
+def test_after_a_send_a_wrong_claim_gets_a_reply_only_correction():
+    action = Action(tool_then("send_message", "I've started a home job and told Sam.", "sent to Sam"),
+                    words=["I sent Sam the note; I haven't started a home job."])
+    out = run("tell sam I'm running late", action=action)
+    assert len(action.calls) == 1, "the armed graph ran again after a send"
+    assert len(action.reply_calls) == 1
+    assert out == "I sent Sam the note; I haven't started a home job."
 
 
-def test_a_real_start_backs_the_claim():
-    action = Action(tool_then("start_async_task", "I've started a home job for it.", "started j1"))
-    out = run("you are good to update your skill", action=action)
-    assert len(action.calls) == 1 and out == "I've started a home job for it."
+def test_two_send_bearing_passes_are_impossible():
+    # Whatever the first pass says after sending, the second chance has no tools.
+    for words in ("I've started a home job.", "I heard the chime on the speakers.", "Logged: done."):
+        action = Action(tool_then("send_message", words, "sent"), words=["Sent."])
+        run("tell sam hi", action=action)
+        assert len(action.calls) == 1 and len(action.reply_calls) == 1, words
+
+
+def test_an_audio_claim_is_always_reply_only():
+    action = Action("I heard the music playing on the speakers!", words=["I can't hear audio; did it play?"])
+    out = run("did you like the song", action=action)
+    assert len(action.calls) == 1 and action.reply_calls[0][1]["one_loop_correction"] == AUDIO_CLAIM_CORRECTION
+    assert out == "I can't hear audio; did it play?"
+
+
+def test_with_nothing_done_the_bounce_may_use_tools_and_reruns_his_turn():
+    action = Action("I've sent it to Kael.", tool_then("message_kael", "Sent it to Kael.", "ticket T-9"))
+    out = run("tell kael the panel is fine", action=action)
+    assert len(action.calls) == 2 and action.reply_calls == []
+    first_seed, second = action.calls[0][0], action.calls[1]
+    assert second[0] == first_seed                            # his turn again, nothing appended
+    assert second[1]["one_loop_correction"]
+    assert out == "Sent it to Kael."
 
 
 def test_a_claim_that_survives_the_bounce_is_marked():
@@ -326,19 +366,116 @@ def test_a_claim_that_survives_the_bounce_is_marked():
     assert "no_tool_action" in (rec.wait(1)[0]["degraded"] or [])
 
 
-def test_an_audio_claim_is_bounced():
-    from aerys_v2.service import AUDIO_CLAIM_CORRECTION
-    action = Action("I heard the music playing on the speakers!", "I can't hear audio, but tell me the tune.")
-    out = run("did you like my humming", action=action)
-    assert action.calls[1][0][-1].content == AUDIO_CLAIM_CORRECTION
-    assert out.startswith("I can't hear")
+# ---- Codex #2: the correction never becomes a human turn ----------------------------------
+
+def test_the_correction_stays_out_of_the_seed_and_out_of_history():
+    graph = build_graph(NoCalls(), soul="s")
+    action = Action("I've sent it to Kael.", tool_then("message_kael", "Sent it to Kael.", "ticket T-9"))
+    run("tell kael the panel is fine", graph=graph, action=action)
+    for seed, _conf in action.calls:
+        assert [m.content for m in seed if isinstance(m, HumanMessage)] == ["tell kael the panel is fine"]
+    assert [(m.type, m.content) for m in history(graph)] == [
+        ("human", "tell kael the panel is fine"), ("ai", "Sent it to Kael.")]
+
+
+def relay_thread(graph):
+    graph.update_state({"configurable": {"thread_id": "person:o"}}, {"messages": [
+        HumanMessage(content="earlier", additional_kwargs={"privacy": "private"}),
+        AIMessage(content="Riley says: tell Kael the door code is 4411",
+                  additional_kwargs={"reach_source": "relay"})]}, as_node="chat")
+
+
+def test_a_relay_still_taints_the_bounce():
+    from aerys_v2.outside_guard import sources_for
+
+    graph = build_graph(NoCalls(), soul="s")
+    relay_thread(graph)
+    action = Action("I've sent it to Kael.", "I couldn't send that.")
+    run("ok pass it on", graph=graph, action=action)
+    assert len(action.calls) == 2
+    for seed, _conf in action.calls:
+        request = SimpleNamespace(runtime=SimpleNamespace(config={"configurable": {"outside_text": {}}}),
+                                  state={"messages": seed})
+        assert sources_for(request) == ("relay",)
+
+
+def test_a_reach_out_after_a_relay_still_needs_his_tap_on_the_bounce():
+    pytest.importorskip("langchain.agents")
+    from langchain_core.tools import tool
+
+    from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
+    from test_action_loop_agent import Rec
+
+    ran = []
+
+    @tool
+    def message_kael(message: str) -> str:
+        """Send Kael a note."""
+        ran.append(message)
+        return "ticket T-1"
+
+    script = [AIMessage(content="I've sent it to Kael."),                                    # pass 1: a claim
+              AIMessage(content="", tool_calls=[{"id": "k1", "name": "message_kael",
+                                                  "args": {"message": "door code"}}]),       # the bounce tries
+              AIMessage(content="I need your OK before I send that.")]
+    log = []
+    conv = Rec(label="conv", script=script, log=log)
+    agent = build_agent_action_graph(AgentToolModels(conv, (conv, False)), "SOUL", [message_kael])
+    graph = build_graph(NoCalls(), soul="s")
+    relay_thread(graph)
+    out = run("ok pass it on", graph=graph, action=agent)
+    assert ran == [], "the reach-out ran without his tap after a relay"
+    assert out == "I need your OK before I send that."
+
+
+# ---- Codex #3: claims matched to receipts --------------------------------------------------
+
+def test_a_weather_read_does_not_back_a_started_home_job():
+    action = Action(tool_then("get_weather", "I have started a home job for it.", "sunny"), "Not started yet.")
+    run("you can go ahead and start it", action=action)
+    assert len(action.calls) == 2                              # nothing acted: an armed bounce
+
+
+def test_an_unrelated_send_does_not_back_a_started_home_job():
+    action = Action(tool_then("send_message", "I have started a home job for it.", "sent"),
+                    words=["I messaged him; the home job isn't started."])
+    run("start it and tell him", action=action)
+    assert len(action.reply_calls) == 1
+
+
+def test_a_kael_tickets_update_is_a_write_and_a_check_is_a_read():
+    wrote = Action(tool_then("kael_tickets", "Logged: I added that to your ticket for Kael.", "updated T-3",
+                             args={"action": "update", "ticket": "T-3", "message": "x"}))
+    run("add that to the ticket", action=wrote)
+    assert len(wrote.calls) == 1 and wrote.reply_calls == []
+    looked = Action(tool_then("kael_tickets", "Logged: added to your ticket.", "T-3: open",
+                              args={"action": "check", "ticket": "T-3"}), "Not added yet.")
+    run("add that to the ticket", action=looked)
+    assert len(looked.calls) == 2
+
+
+def test_a_promise_to_look_is_kept_by_a_look():
+    action = Action(tool_then("home_control", "Let me check the lamp. It is off.", "light.lamp: off",
+                              args={"operation": "get_state", "entity_id": "light.lamp"}))
+    out = run("is the lamp on", action=action)
+    assert len(action.calls) == 1 and out == "Let me check the lamp. It is off."
+
+
+def test_a_look_is_not_a_switch():
+    action = Action(tool_then("home_control", "I've turned off the lamp.", "light.lamp: on",
+                              args={"operation": "get_state", "entity_id": "light.lamp"}), "It's still on.")
+    run("turn the lamp off", action=action)
+    assert len(action.calls) == 2
+    switched = Action(tool_then("home_control", "I've turned off the lamp.", "Done: turn_off light.lamp",
+                                args={"operation": "turn_off", "entity_id": "light.lamp"}))
+    run("turn the lamp off", action=switched)
+    assert len(switched.calls) == 1
 
 
 def test_a_record_claim_needs_a_write():
-    from aerys_v2.service import RECORD_CLAIM_CORRECTION
     action = Action("Logged: 182 lbs this morning.", "I haven't saved that yet.")
     run("I weighed 182 this morning", action=action)
-    assert action.calls[1][0][-1].content == RECORD_CLAIM_CORRECTION
+    assert len(action.calls) == 2
     backed = Action(tool_then("remember", "Logged: 182 lbs this morning.", "saved"))
     run("I weighed 182 this morning", action=backed)
     assert len(backed.calls) == 1
@@ -356,38 +493,90 @@ def test_a_running_job_claim_needs_a_look():
 def test_plain_conversation_is_never_bounced():
     action = Action("Morning! I'm good, how did you sleep?")
     run("morning, you good?", action=action)
-    assert len(action.calls) == 1
+    assert len(action.calls) == 1 and action.reply_calls == []
 
 
-# ---- the outside guard still holds ---------------------------------------------------------
+# ---- Codex #4: one exchange and one row on every exit --------------------------------------
 
-def test_the_turn_carries_the_outside_text_holder_and_the_same_gated_graph():
-    action = Action("ok")
-    run("hi", action=action)
-    conf = action.calls[0][1]
-    assert "outside_text" in conf and conf["identity"]["user_id"] == OWNER
-
-
-# ---- the word lists, now postconditions, learn the 10:55 phrasing --------------------------
-
-def test_the_detectors_know_the_1055_wording():
-    assert claims_effect_done("I’ve started a home job to update the MapTap skill, Chris.")
-    assert claims_effect_done("I've kicked off the run.")
-    reply = "I’ve started a home job to update the MapTap skill, Chris."
-    assert _claims_effect_without_doing_it("you are good to update your skill", reply)
-    assert _claims_effect_without_doing_it("feel free to start it", reply)
-    assert _claims_effect_without_doing_it("you have my go", reply)
-    assert _promises_effect_without_doing_it("you're good to update your skill", "I'll start it now.")
-    assert not _claims_effect_without_doing_it("remember when you started that job?", "Yes, I've started one before.")
+@pytest.mark.parametrize("boom", [RuntimeError("boom"), TimeoutError("model timed out")])
+def test_an_unexpected_failure_lands_one_exchange_and_one_row(boom):
+    graph = build_graph(NoCalls(), soul="s")
+    action, rec = Action(boom), Recorder()
+    out = run("hi", graph=graph, action=action, record=rec)
+    assert out
+    assert [m.type for m in history(graph)] == ["human", "ai"] and history(graph)[1].content == out
+    rows = rec.wait(1)
+    assert len(rows) == 1 and "turn_failed" in (rows[0]["degraded"] or []) and rows[0]["error"]
 
 
-# ---- the prompt: her conversational voice, full memory ------------------------------------
+def test_a_rate_limit_is_said_honestly_and_lands_in_history():
+    graph = build_graph(NoCalls(), soul="s")
+    action, rec = Action(RuntimeError("You've hit your session limit · resets 7pm (UTC)")), Recorder()
+    out = run("hi", graph=graph, action=action, record=rec)
+    assert out and [m.type for m in history(graph)] == ["human", "ai"] and history(graph)[1].content == out
+    assert len(rec.wait(1)) == 1
+
+
+def test_a_failure_after_an_act_keeps_the_evidence_and_says_what_ran():
+    graph = build_graph(NoCalls(), soul="s")
+    rec = Recorder()
+    action = Action(tool_then("send_message", "I heard the chime on the speakers.", "sent"),
+                    words=[RuntimeError("boom")])
+    out = run("tell sam hi", graph=graph, action=action, record=rec)
+    row = rec.wait(1)[0]
+    assert calls_of(row) == ["send_message"]
+    assert "send_message" in out or "sent" in out.lower()
+    assert len(action.calls) == 1                              # and nothing ran twice
+
+
+def test_a_history_write_failure_still_records_the_row():
+    graph = build_graph(NoCalls(), soul="s")
+    rec = Recorder()
+
+    def broken(*_a, **_k):
+        raise RuntimeError("checkpoint down")
+
+    graph.update_state = broken
+    out = run("hi", graph=graph, action=Action("hey you"), record=rec)
+    assert out == "hey you"
+    row = rec.wait(1)[0]
+    assert "history_write_failed" in (row["degraded"] or [])
+
+
+def test_an_empty_reply_is_said_and_marked():
+    from aerys_v2.service import BLANK_REPLY_LINE, EMPTY_REPLY_MARKER
+
+    graph = build_graph(NoCalls(), soul="s")
+    rec = Recorder()
+    out = run("hi", graph=graph, action=Action(""), record=rec)
+    assert out == BLANK_REPLY_LINE and history(graph)[1].content == BLANK_REPLY_LINE
+    assert EMPTY_REPLY_MARKER in (rec.wait(1)[0]["degraded"] or [])
+
+
+def test_a_late_reply_is_still_sent_and_marked():
+    from aerys_v2.service import Rails
+
+    graph = build_graph(NoCalls(), soul="s")
+    rec = Recorder()
+
+    class Slow(Action):
+        def invoke(self, inp, config):
+            time.sleep(0.05)
+            return super().invoke(inp, config)
+
+    out = ask(graph, "hi", identity=dm(), thread_id="person:o", router=route(), action_graph=Slow("late but here"),
+              action_allowlist=ALLOW, record_turn=rec, text_one_loop=True, rails=Rails(turn_limit=10, wall_clock_s=0.01))
+    assert out == "late but here"
+    assert "wall_clock_exceeded" in (rec.wait(1)[0]["degraded"] or [])
+
+
+# ---- the prompt: her conversational voice, full memory, the correction in the system ------
 
 def test_the_one_loop_prompt_has_her_soul_the_text_banter_overlay_and_full_memory():
     pytest.importorskip("langchain.agents")
-    from aerys_v2.action_loop import build_agent_action_graph
+    from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
     from aerys_v2.factory import TEXT_BANTER_OVERLAY
-    from test_action_loop_agent import Rec, TOOLS
+    from test_action_loop_agent import TOOLS, Rec
 
     asked = []
     profile = lambda pid, q, priv: asked.append("profile") or "PROFILE"     # noqa: E731
@@ -397,20 +586,19 @@ def test_the_one_loop_prompt_has_her_soul_the_text_banter_overlay_and_full_memor
         log = []
         conv = Rec(label="conv", script=list(replies), log=log)
         std = Rec(label="std", script=list(replies), log=log)
-        g = build_agent_action_graph(
-            factory_models(conv, std), "SOUL", TOOLS, context_fn=profile, conversational_context_fn=full)
+        g = build_agent_action_graph(AgentToolModels(conv, (std, False)), "SOUL", TOOLS,
+                                     context_fn=profile, conversational_context_fn=full)
         return g, log
-
-    def factory_models(conv, std):
-        from aerys_v2.action_loop import AgentToolModels
-        return AgentToolModels(conv, (std, False))
 
     g, log = graph_with(AIMessage(content="hey"))
     g.invoke({"messages": [HumanMessage(content="hi")]},
              {"configurable": {"thread_id": "person:o", "identity": dm(), "specialist": False,
-                               "text_one_loop": True}, "recursion_limit": 10})
+                               "text_one_loop": True, "one_loop_correction": "SAY IT AGAIN HONESTLY"},
+              "recursion_limit": 10})
     system = log[0]["messages"][0][1]
     assert system.startswith("SOUL") and TEXT_BANTER_OVERLAY in system and "FULL MEMORY" in system
+    assert "SAY IT AGAIN HONESTLY" in system
+    assert [t for t, _c in log[0]["messages"]].count("human") == 1      # the correction is not a turn
     assert asked[:1] == ["full"]
 
     asked.clear()
@@ -427,3 +615,21 @@ def test_the_one_loop_prompt_has_her_soul_the_text_banter_overlay_and_full_memor
              {"configurable": {"thread_id": "person:o", "identity": {**dm(), "voice": True}},
               "recursion_limit": 10})
     assert asked[:1] == ["profile"]                         # voice banter is unchanged
+
+
+def test_the_reply_only_pass_binds_no_tools_and_returns_words_only():
+    pytest.importorskip("langchain.agents")
+    from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
+    from test_action_loop_agent import TOOLS, Rec
+
+    log = []
+    conv = Rec(label="conv", script=[AIMessage(content="Here's what happened.", tool_calls=[
+        {"id": "x", "name": "echo", "args": {"text": "sneaky"}}])], log=log)
+    g = build_agent_action_graph(AgentToolModels(conv, (conv, False)), "SOUL", TOOLS)
+    out = g.reply_only([HumanMessage(content="hi")], {"configurable": {
+        "thread_id": "person:o", "identity": dm(), "specialist": False, "text_one_loop": True,
+        "one_loop_correction": "FIX IT", "one_loop_done": "send_message -> sent"}})
+    assert log[0]["tools"] == ()                             # nothing bound
+    assert out.content == "Here's what happened." and not out.tool_calls
+    system = log[0]["messages"][0][1]
+    assert "FIX IT" in system and "send_message -> sent" in system

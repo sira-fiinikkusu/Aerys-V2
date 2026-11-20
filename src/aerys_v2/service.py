@@ -833,22 +833,55 @@ STATUS_CHECK_HINT = ("[before you say whether a home job is running or how it's 
 ONE_LOOP_MARKER = "text_one_loop"
 #: The served tier when the router asked for another: banter rides her conversational model (standard).
 ONE_LOOP_TIER_SOURCE = "one_loop"
-#: What her one-loop reply is told when it says a home job is running without having looked.
-ONE_LOOP_STATUS_CORRECTION = (
-    "You said how a home job stands without looking. Look first with list_async_tasks or check_async_task, "
-    "then answer from what they say. This note is internal: never mention it or the earlier answer."
-)
-#: Tools that only read: a successful call to one of these does not back a claim that something was done.
-#: (outside_guard.READERS plus the house and her own records' read-only tools.) An unknown tool counts as
-#: an act, so a new reader can only let a claim through, never bounce a real act.
+#: D79 (Codex 11/20 #3): what she did this turn is read from the tool receipts, each sorted by what it IS:
+#: a send, a start, a read or a write. A claim is backed only by a receipt of its own kind.
+ONE_LOOP_SEND = frozenset({"send_message", "send_email", "message_kael", "pass_to_chris", "report_to_kael",
+                           "send_file_to_chris"})
+ONE_LOOP_START = frozenset({"start_async_task", "update_async_task"})
+#: Tools that only read. An unknown tool counts as a write, so a new reader can only let a write claim
+#: through, never bounce a real act.
 ONE_LOOP_READ_ONLY = frozenset({
     "search_web", "read_web_page", "analyze_image", "read_document", "youtube_summary", "search_email",
     "read_email", "search_his_email", "read_his_email", "check_async_task", "list_async_tasks",
-    "search_entities", "get_state", "messages_sent", "files_sent_to_chris", "kael_tickets", "list_skills",
-    "read_skill", "search_memory", "my_pending_requests", "weather", "forecast", "search_her_code",
+    "search_entities", "get_state", "get_weather", "calendar_events", "whereabouts", "where_is_chris_nearby",
+    "messages_sent", "files_sent_to_chris", "relay_status", "read_my_code", "list_skills", "read_skill",
+    "search_memory", "no_action",
 })
+#: Tools that read or write by their argument: these operations only read.
+ONE_LOOP_READ_OPS = {
+    "home_control": frozenset({"get_state", "history"}),
+    "kael_tickets": frozenset({"check", "list"}),
+    "manage_list": frozenset({"show"}),
+    "kael_checkins": frozenset({"list"}),
+    "reach_prefs": frozenset({"show"}),
+    "my_pending_requests": frozenset({"list"}),
+    "control_alarm": frozenset({"status"}),
+    "music": frozenset({"now_playing", "status", "search", "queue"}),
+}
 #: A successful call to one of these is a look at her home jobs.
 ONE_LOOP_JOB_LOOKS = frozenset({"check_async_task", "list_async_tasks", "start_async_task", "update_async_task"})
+#: The correction for a claim or promise nothing backs, on a pass that may still use tools (nothing was
+#: done yet this turn).
+ONE_LOOP_CLAIM_CORRECTION = (
+    "Your answer said something was done, sent, started or checked, or that you would do it now, and this "
+    "turn's tool results don't show it. Answer again from what your tools actually did: do it now with the "
+    "right tool, or say plainly that it isn't done."
+)
+#: The same on a reply-only pass (something was already done this turn): words only, no more tools.
+ONE_LOOP_REPLY_ONLY_CORRECTION = (
+    "Your answer claimed something that this turn's tool results don't show. Answer again in words only, "
+    "from what is listed above as done: say plainly what was done and what wasn't. You can't do anything "
+    "more in this reply."
+)
+#: What her one-loop reply is told when it says a home job is running without having looked.
+ONE_LOOP_STATUS_CORRECTION = (
+    "You said how a home job stands without looking. Look first with list_async_tasks or check_async_task, "
+    "then answer from what they say."
+)
+#: Marker when his words and her reply could not be written to the thread (the row still records the turn).
+ONE_LOOP_LAND_FAILED = "history_write_failed"
+#: What he reads when a one-loop turn fails in a way that isn't a rate limit (one exchange on every exit).
+ONE_LOOP_FAILURE_LINE = "Something went wrong on my side before I could finish that, so I stopped."
 
 
 def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
@@ -2227,27 +2260,146 @@ def _action_turn(
     return final
 
 
-def _one_loop_check(reply: str, result_messages: list) -> tuple[str, str] | None:
-    """D79's postconditions on a one-loop reply: (correction, marker) for the first claim nothing backs, else
-    None. The chat path's checks, kept as a look at what she SAYS, never as a switch (Codex 11/20 #5):
-    - she says she heard audio (no tool can back that);
-    - she reports a record written ("Logged: …") with no successful write;
-    - she claims an act done, or promises one now, with no successful act. A successful READ does not back
-      it (Codex: an unrelated tool call must not suppress the check): "I've started a home job" after only
-      list_async_tasks is still a claim nothing backs;
-    - she says how a home job stands without having looked at her jobs this turn."""
-    calls = extract_tool_calls(result_messages)
-    acted = any(c["ok"] and c["name"] not in ONE_LOOP_READ_ONLY for c in calls)
-    looked = any(c["ok"] and c["name"] in ONE_LOOP_JOB_LOOKS for c in calls)
-    if audio_perception_claim(reply):
-        return AUDIO_CLAIM_CORRECTION, AUDIO_CLAIM_MARKER
-    if record_action_claim(reply) and not acted:
-        return RECORD_CLAIM_CORRECTION, RECORD_CLAIM_MARKER
-    if (claims_effect_done(reply) or promises_effect_now(reply)) and not acted:
-        return ACTION_NO_TOOL_CORRECTION, NO_TOOL_ACTION_MARKER
-    if claims_job_running(reply) and not looked:
-        return ONE_LOOP_STATUS_CORRECTION, STATUS_GATE_MARKER
+def _one_loop_call_kind(name: str, args: dict) -> str:
+    """send | start | read | write, from the tool and (for tools that do both) its operation."""
+    if name in ONE_LOOP_SEND:
+        return "send"
+    if name in ONE_LOOP_START:
+        return "start"
+    if name in ONE_LOOP_READ_ONLY:
+        return "read"
+    reads = ONE_LOOP_READ_OPS.get(name)
+    if reads is not None:
+        op = str((args or {}).get("operation") or (args or {}).get("action") or "").strip().lower()
+        return "read" if op in reads else "write"
+    return "write"
+
+
+def _one_loop_receipts(messages: list) -> list[dict]:
+    """Every executed call this turn: {name, kind, ok, args, result}. Repair receipts (a malformed call that
+    never ran) are not calls."""
+    from aerys_v2.turns import classify_tool_result, invalid_call_ids, is_repair_receipt
+
+    requested: dict = {}
+    for m in messages:
+        for tc in (getattr(m, "tool_calls", None) or []):
+            if isinstance(tc, dict) and tc.get("id"):
+                requested[tc["id"]] = (tc.get("name"), tc.get("args") or {})
+    repairs = invalid_call_ids(messages)
+    out = []
+    for m in messages:
+        if getattr(m, "type", "") != "tool" or is_repair_receipt(m, repairs):
+            continue
+        asked_name, args = requested.get(getattr(m, "tool_call_id", None), (None, {}))
+        name = getattr(m, "name", None) or asked_name or "unknown"
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        out.append({"name": name, "kind": _one_loop_call_kind(name, args),
+                    "ok": classify_tool_result(content, getattr(m, "status", None)) is None,
+                    "args": args, "result": content})
+    return out
+
+
+def _one_loop_acted(receipts: list[dict]) -> bool:
+    """Did anything this turn change something (a successful send, start or write)?"""
+    return any(r["ok"] and r["kind"] != "read" for r in receipts)
+
+
+_ONE_LOOP_SEND_VERBS = (
+    r"(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|notified|"
+    r"passed (?:it |that |them )?(?:along|on)|let (?:kael|kayle|cale|kale|kail|cael|him|her|them) know|"
+    r"got it to \w+)"
+)
+_ONE_LOOP_SEND_CLAIM = re.compile(
+    rf"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?{_ONE_LOOP_SEND_VERBS}\b"
+    rf"|(?:^|[.!?]\s+|[\u2014-]\s*){_ONE_LOOP_SEND_VERBS}(?:\s+(?:it|that|this|them|those))?"
+    r"(?:\s+(?:along|over|on|off|through|already|now|just now|for you|to \w+|your way))*\s*(?:[.!?]|$)",
+    re.I)
+_ONE_LOOP_RECORD_CLAIM = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:logged|filed|recorded|noted|saved|added|"
+    r"written|wrote)\b", re.I)
+_ONE_LOOP_ACT_CLAIM = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:turned|switched|set|dimmed|brightened|"
+    r"cancel(?:l)?ed|removed|completed|armed|disarmed|played|paused|skipped|scheduled|queued|posted|shared|"
+    r"booked|ordered)\b"
+    r"|\b(?:timer|alarm|reminder)\s+(?:is\s+)?set\b|^\s*(?:done|all set|taken care of)\b", re.I)
+_ONE_LOOP_LOOK_VERB = re.compile(
+    r"\b(?:check|checking|look|looking|search|searching|read|reading|open|opening|find|finding)\b", re.I)
+
+
+def _unnegated(pattern: re.Pattern, text: str) -> bool:
+    for m in pattern.finditer(text):
+        window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+        if not _NEGATION_RE.search(window):
+            return True
+    return False
+
+
+def _now_promises(text: str) -> list[str]:
+    """The promises to act NOW in her reply (promises_effect_now's rule), as the words that made them."""
+    found = []
+    for pattern in _PROMISE_PATTERNS:
+        for m in pattern.finditer(text):
+            window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+            end = _SENTENCE_END.search(text, m.end())
+            rest = text[m.end(): end.start() if end else len(text)]
+            starts = [x.end() for x in _SENTENCE_END.finditer(text, 0, m.start())]
+            before = text[starts[-1] if starts else 0: m.start()]
+            deferred = (_DEFERRED_RE.search(rest) or _CONDITION_BEFORE_RE.search(before)) and not _NOW_RE.search(rest)
+            if not _NEGATION_RE.search(window) and not deferred:
+                found.append(m.group(0))
+    return found
+
+
+def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] | None:
+    """D79's postconditions on a one-loop reply: (marker, correction, words_only) for the first thing it
+    says that this turn's receipts don't back, else None. The chat path's checks, now a look at what she
+    SAYS, never a switch (Codex 11/20 #3):
+    - she says she heard audio: nothing can back that, and it is always corrected in words only;
+    - a start ("I've started a home job") needs a successful start; a send needs a successful send;
+      a record ("Logged: …", "I've saved…") needs a successful write; another act needs any act;
+    - a promise to do something now needs an act; a promise to LOOK is kept by any successful call;
+    - how a home job stands needs a look at her jobs this turn."""
+    text = _plain_quotes(reply or "")
+    if audio_perception_claim(text):
+        return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
+    done = {r["kind"] for r in receipts if r["ok"]}
+    acts = done - {"read"}
+    unbacked = (
+        (_unnegated(_STARTED_CLAIM_RE, text) and "start" not in done)
+        or (_unnegated(_ONE_LOOP_SEND_CLAIM, text) and "send" not in done)
+        or ((record_action_claim(text) or _unnegated(_ONE_LOOP_RECORD_CLAIM, text)) and "write" not in done)
+        or (_unnegated(_ONE_LOOP_ACT_CLAIM, text) and not acts)
+    )
+    if not unbacked:
+        promises = _now_promises(text)
+        looks_only = promises and all(_ONE_LOOP_LOOK_VERB.search(p) for p in promises)
+        unbacked = bool(promises) and not (done if looks_only else acts)
+    if unbacked:
+        return NO_TOOL_ACTION_MARKER, ONE_LOOP_CLAIM_CORRECTION, False
+    looked = any(r["ok"] and r["name"] in ONE_LOOP_JOB_LOOKS for r in receipts)
+    if claims_job_running(text) and not looked:
+        return STATUS_GATE_MARKER, ONE_LOOP_STATUS_CORRECTION, False
     return None
+
+
+def _one_loop_done_note(receipts: list[dict]) -> str:
+    """What already ran this turn, for a reply-only pass's system prompt (system only, never history)."""
+    lines = []
+    for r in receipts:
+        result = " ".join(str(r["result"]).split())
+        if len(result) > 300:
+            result = result[:300] + "…"
+        lines.append(f"- {r['name']} ({'ok' if r['ok'] else 'failed'}): {result}")
+    return "\n".join(lines)
+
+
+def _one_loop_failure_line(receipts: list[dict]) -> str:
+    """His line when the turn failed: honest about anything that already went through."""
+    ran = sorted({r["name"] for r in receipts if r["ok"] and r["kind"] != "read"})
+    if not ran:
+        return ONE_LOOP_FAILURE_LINE
+    return (f"{ONE_LOOP_FAILURE_LINE} Before that, this went through: {', '.join(ran)}. "
+            "Check it before asking me again, so nothing happens twice.")
 
 
 def _text_one_loop_turn(
@@ -2273,88 +2425,112 @@ def _text_one_loop_turn(
       full long-term memory and the typed banter overlay in the prompt builder (factory).
     - the seed is the room-gated thread with her own replies, inside the chat graph's 200-message window
       (_action_history_seed, non-specialist), with her old voice tags taken off what she is shown.
-    - the chat path's claim checks run as postconditions (_one_loop_check): one bounce, then a marker.
-    - exactly one durable exchange (his words + her reply) and one audit row, on success or failure.
+    - postconditions (_one_loop_check), one correction (Codex 11/20 #1, #2):
+        * the correction rides the system prompt for that pass (configurable one_loop_correction), never
+          the history: his turn stays the latest human turn, so a relay before it still taints, and a
+          reach-out still needs his tap;
+        * after anything was done this turn (a send, a start, a write), or for an audio claim, the
+          correction is WORDS ONLY (action_graph.reply_only: no tools bound), so nothing can run twice;
+        * with nothing done, the turn may run again, armed, from his same turn;
+        * still unbacked after that: emitted with the marker.
+    - every exit, success or failure, lands one exchange (his words + what he reads) and fires one audit
+      row carrying every tool call that did run (Codex 11/20 #4).
     The served tier is the conversational model's (standard): deep credits are never spent here, and a
     different verdict from the router is kept on the row (tier_override_source)."""
     from aerys_v2.factory import _untag_own_replies
 
     configurable = config["configurable"]
     LOCAL_FALLBACK_FIRED.set(False)
-
-    def land(reply_text: str, messages=()) -> None:
-        graph.update_state(
-            {"configurable": configurable},
-            {"messages": [_human_turn(text, human_privacy, human_id,
-                                       sealed_room=_sealed_room(config),
-                                       owner_assumed=_owner_assumed(config)),
-                          _action_reply(reply_text, config, list(messages))]},
-            as_node="chat",
-        )
-
     run_config = {**config, "configurable": {**configurable, "specialist": False, "tier": tier,
                                                "text_one_loop": True}}
-    degraded: list[str] = [ONE_LOOP_MARKER]
+    turn = {"messages": [], "degraded": [ONE_LOOP_MARKER], "error": None}
+    done = {"finished": False}
+
+    def finish(reply_text: str, raw_text: str | None = None) -> str:
+        """The one exit: land the exchange, then record the row, whatever happened before."""
+        if done["finished"]:
+            return reply_text
+        done["finished"] = True
+        try:
+            graph.update_state(
+                {"configurable": configurable},
+                {"messages": [_human_turn(text, human_privacy, human_id,
+                                           sealed_room=_sealed_room(config),
+                                           owner_assumed=_owner_assumed(config)),
+                              _action_reply(reply_text, config, turn["messages"])]},
+                as_node="chat",
+            )
+        except Exception:
+            log.warning("one loop: couldn't write the exchange to the thread", exc_info=True)
+            turn["degraded"].append(ONE_LOOP_LAND_FAILED)
+        elapsed = time.monotonic() - started
+        if LOCAL_FALLBACK_FIRED.get():
+            turn["degraded"].append("local_model_fallback")
+        error = turn["error"]
+        if elapsed > rails.wall_clock_s:
+            # Late but real: the reply exists and is in history, so it is sent (the voice banter rule).
+            turn["degraded"].append("wall_clock_exceeded")
+            late = f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)"
+            error = f"{error}; {late}" if error else late
+        _fire_turn_record(
+            record_turn, config, text, int(elapsed * 1000),
+            reflex=reflex,
+            classifier_intent="chat",
+            tier=tier,
+            tier_override_source=tier_override_source,
+            raw_reply=reply_text if raw_text is None else raw_text,
+            emitted_reply=reply_text,
+            messages=turn["messages"],
+            extra_degraded=turn["degraded"],
+            error=error,
+        )
+        return reply_text
+
     try:
         seed = _untag_own_replies(_action_history_seed(graph, configurable, text))
         CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
         result = _invoke_action_graph(action_graph, seed, run_config)
-        result_messages = result["messages"]
-        reply = _strip_handoff(_reply_text(result_messages[-1]))
-        check = _one_loop_check(reply, result_messages)
+        turn["messages"] = list(result["messages"])
+        reply = _strip_handoff(_reply_text(turn["messages"][-1]))
+        receipts = _one_loop_receipts(turn["messages"])
+        check = _one_loop_check(reply, receipts)
         if check is not None:
-            correction, marker = check
-            log.info("one loop: %s in her reply — bouncing once | thread=%s", marker, configurable.get("thread_id"))
-            result = _invoke_action_graph(
-                action_graph, [*result_messages, HumanMessage(content=correction)], run_config)
-            result_messages = result["messages"]
-            reply = _strip_handoff(_reply_text(result_messages[-1]))
-            again = _one_loop_check(reply, result_messages)
-            if again is not None:
-                log.warning("one loop: %s survived the bounce — emitting with the marker", again[1])
-                degraded.append(again[1])
+            marker, correction, words_only = check
+            if words_only or _one_loop_acted(receipts):
+                # Something already ran (or nothing could back it): words only, nothing runs twice.
+                log.info("one loop: %s after an act — a words-only correction | thread=%s",
+                         marker, configurable.get("thread_id"))
+                note = correction if words_only else ONE_LOOP_REPLY_ONLY_CORRECTION
+                again = action_graph.reply_only(seed, {**run_config, "configurable": {
+                    **run_config["configurable"], "one_loop_correction": note,
+                    "one_loop_done": _one_loop_done_note(receipts)}})
+                turn["messages"] = [*turn["messages"], again]
+            else:
+                # Nothing was done yet: run his same turn again, armed, with the correction in the system.
+                log.info("one loop: %s with nothing done — running his turn again | thread=%s",
+                         marker, configurable.get("thread_id"))
+                result = _invoke_action_graph(action_graph, seed, {**run_config, "configurable": {
+                    **run_config["configurable"], "one_loop_correction": correction}})
+                turn["messages"] = [*turn["messages"], *list(result["messages"])[len(seed):]]
+                receipts = _one_loop_receipts(turn["messages"])
+            reply = _strip_handoff(_reply_text(turn["messages"][-1]))
+            survived = _one_loop_check(reply, receipts)
+            if survived is not None:
+                log.warning("one loop: %s survived the correction — emitting with the marker", survived[0])
+                turn["degraded"].append(survived[0])
     except Exception as e:
         honest = _honest_reply_for_failure(e)
-        _record_turn_failure(
-            record_turn, config, text, started, e, reflex=reflex,
-            classifier_intent="chat", tier=tier, tier_override_source=tier_override_source,
-            base_degraded=[*degraded, *(["local_model_fallback"] if LOCAL_FALLBACK_FIRED.get() else [])],
-            emitted_reply=honest,
-        )
-        if honest is None:
-            raise
-        land(honest)                 # he reads this line, so the thread carries it too
-        return honest
+        turn["degraded"].append("recursion_limit" if type(e).__name__ == "GraphRecursionError" else "turn_failed")
+        turn["error"] = str(e) or type(e).__name__
+        log.warning("one loop: the turn failed (%s); landing an honest line", turn["error"], exc_info=True)
+        return finish(honest or _one_loop_failure_line(_one_loop_receipts(turn["messages"])))
 
     raw = reply
     if not raw.strip():
-        degraded.append(EMPTY_REPLY_MARKER)
+        turn["degraded"].append(EMPTY_REPLY_MARKER)
         reply = BLANK_REPLY_LINE
-        _log_empty_reply("one_loop", configurable.get("thread_id"), result_messages[-1])
-    land(reply, result_messages)
-
-    elapsed = time.monotonic() - started
-    timed_out = elapsed > rails.wall_clock_s
-    if LOCAL_FALLBACK_FIRED.get():
-        degraded.append("local_model_fallback")
-    if timed_out:
-        # Late but real: the reply exists and is already in history, so it is sent (the voice banter rule),
-        # never raised into a dead turn.
-        degraded.append("wall_clock_exceeded")
-        log.warning("one loop: turn took %.1fs (budget %ss)", elapsed, rails.wall_clock_s)
-    _fire_turn_record(
-        record_turn, config, text, int(elapsed * 1000),
-        reflex=reflex,
-        classifier_intent="chat",
-        tier=tier,
-        tier_override_source=tier_override_source,
-        raw_reply=raw,
-        emitted_reply=reply,
-        messages=result_messages,
-        extra_degraded=degraded,
-        error=f"turn took {elapsed:.1f}s (budget {rails.wall_clock_s}s)" if timed_out else None,
-    )
-    return reply
+        _log_empty_reply("one_loop", configurable.get("thread_id"), turn["messages"][-1])
+    return finish(reply, raw)
 
 
 _TITLE_ABBREVIATIONS = frozenset({"mr.", "mrs.", "ms.", "dr.", "st.", "jr.", "sr.", "vol.", "no.",

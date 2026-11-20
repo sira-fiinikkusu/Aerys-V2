@@ -249,4 +249,27 @@ def build_agent_action_graph(models, soul: str, tools: list, **kw) -> object:
     )
     compiled.presence_fn = presence_fn
     compiled.action_loop = "agent"
+
+    def reply_only(messages: list, config: dict):
+        """D79 (Codex 11/20 #1): words only, for a one-loop correction after something was already done.
+        Her conversational model, the same prompt (soul, overlays, the correction and what was done, in the
+        system prompt) and the same history, with NO tools bound; any tool call it tries is dropped, so a
+        correction can never repeat a send or a start."""
+        from langchain_core.messages import AIMessage
+
+        if isinstance(models, SurfaceSplitAgentModels):
+            model = models.current().conversational
+        elif isinstance(models, AgentToolModels):
+            model = models.conversational
+        else:
+            raise RuntimeError("no conversational model for a reply-only pass")
+        prompt, _specialist, _fast = build_prompt(list(messages), config)
+        out = model.invoke(prompt)
+        content = out.content
+        if not isinstance(content, str):
+            content = "".join(p.get("text", "") for p in content
+                              if isinstance(p, dict) and p.get("type") == "text")
+        return AIMessage(content=content)
+
+    compiled.reply_only = reply_only
     return compiled
