@@ -44,6 +44,8 @@ TICK_S = 60
 SOURCE = "brief"
 TOPIC = "brief"          # he can mute it in words, like any topic (tools/reach_prefs.py)
 
+#: A quiet night goes unsaid (Chris 11/20 08:41: "can you have her not include it unless there is
+#: something of value? it does feel like noise tbh"); see facts_text's empty overnight line.
 BRIEF_PROMPT = (
     "\n\n[Your morning brief] Chris just walked into his office. He's up, but groggy until "
     "he's had coffee. Give him his morning brief out loud: two to five short sentences, warm, "
@@ -51,7 +53,7 @@ BRIEF_PROMPT = (
     "never add any: no weather, plans or news that aren't listed. Say times the way people say "
     "them (\"ten thirty\"). Work meetings: how many and when, never what they're about. If "
     "something came in overnight, say so in a few words; the details are in his messages. If "
-    "nothing did, leave it out: don't say so (Chris 11/20: \"it does feel like noise\"). Each "
+    "nothing did, leave it out: don't say so. Each "
     "overnight note carries the time it happened: it is how things stood THEN, so say it as what "
     "happened, never as how things are now. "
     "Nothing to read off a screen: no lists, no markdown, no emoji. Reply with ONLY what to say."
