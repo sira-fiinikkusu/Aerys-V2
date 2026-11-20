@@ -2712,7 +2712,11 @@ _NEGATION_WINDOW = 45
 #: voice, with something started as its object.
 _STARTED_CLAIM_RE = re.compile(
     r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:started|kicked off|launched|fired off|fired up|"
-    r"set off|queued up|begun)\s+(?:a|an|the|your|my|his|her|it|that|this|today's|on|up)\b",
+    r"set off|queued up|begun)\s+"
+    # What was started is a job, not a book (Codex re-check 11/20: "I started a new book" is talk): the
+    # pronoun of something just asked for, or a job-shaped noun within a few words.
+    r"(?:(?:it|that|this|them)\b|(?:(?:a|an|the|your|my|today's|that|this|on|up)\s+)?(?:\w+\s+){0,3}?"
+    r"(?:home\s+)?(?:job|task|run|update|edit|game|wordle|maptap|session|timer|search|download|scan|backup)s?\b)",
     re.I,
 )
 
@@ -2793,7 +2797,9 @@ _PROMISE_PATTERNS = (
 _PROPOSES_RE = re.compile(
     r"\b(?:wanna|want to|could you|can you|would you|will you|go ahead|let'?s|"
     r"mind (?:doing|playing|checking|starting)|"
-    r"you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine|welcome) to|feel free to|"
+    # A permission with an act after it: "you're good to update it". Not "you're good to go" on its own, not
+    # "you're welcome to your opinion" (Codex re-check 11/20: both escalated ordinary talk).
+    r"you(?:'re| are) (?:good|free|clear|cleared|okay|ok|fine) to (?!go\b(?!\s+ahead)|be\b|your\b)|feel free to|"
     r"you (?:can|may) (?:go ahead|proceed|start|do it)|"
     r"you have my (?:go|ok|okay|blessing|permission|approval)|permission granted)\b", re.I)
 #: 11/18 10:47: or his whole message is a yes to what she offered ("give it a shot", "go for it",
