@@ -909,6 +909,63 @@ _ONE_LOOP_REFUSED_RE = re.compile(
     r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed)\b|refused\b|"
     r"chris said no\b|nothing (?:was|has been) (?:done|sent)|that exact message already went)"
     r"|\bnothing happened\b|\bnothing (?:went|was sent|changed)\b", re.I)
+#: Codex second re-check #1: an act counts as done only on the tool's own words for success (read from each
+#: live tool's code), never by default. Each rule: a pattern on the tool's answer and the kinds it completes;
+#: every matching rule adds its kinds (a cart link can be made AND sent). Anything else is not done.
+_ONE_LOOP_DONE_WORDS = {
+    "send_message": ((r"^Sent:", {"send"}),),
+    "send_email": ((r"^Sent: email\b", {"send"}),),
+    "message_kael": ((r"^Delivered\b", {"send"}),
+                     (r"^NOT DELIVERED YET:.*\bsaved as ticket\b", {"record"})),   # kept, not delivered
+    "remember": ((r"^(?:Kept|Already kept):", {"record"}),),
+    "log_gap": ((r"^Logged\b", {"record"}),),
+    "sticky_note": ((r"^Note is up\b", {"record"}),),
+    "save_contact_email": ((r"^Saved:", {"record"}),),
+    "draft_email": ((r"^DRAFT \(not sent\):", {"record"}),),
+    "draft_in_his_gmail": ((r"^Drafted:", {"record"}),),
+    "add_to_cart_link": ((r"^https://", {"record"}), (r"(?m)^Sent the link to his Discord DM\.", {"send"})),
+    "keep_listening": ((r"^Keep listening is (?:on|off)\b", {"device"}),),
+    "timer": ((r"^Timer set for\b", {"device"}), (r"\bI started a background\b", {"device"}),
+              (r"^Done:", {"device"}), (r"^Cancelled the background timer\b", {"device"})),
+    "control_alarm": ((r"^Alarm \w+ sent\b", {"device"}),),
+    "home_control": ((r"^Done:", {"device"}),),
+    "manage_list": ((r"^(?:Added to|Removed from|Checked off on) the\b", {"record"}),),
+    "kael_tickets": ((r"^Added to T-\d+; Kael has it now\b", {"send", "record"}),
+                     (r"^Added to T-\d+, but Kael's line didn't take it\b", {"record"}),   # kept, not delivered
+                     (r"^Canceled T-\d+\b", {"send", "record"})),
+    "kael_checkins": ((r"^(?:Stopped|Resumed) [^:\n]+:", {"record"}),),
+    "reach_prefs": ((r"^(?:Changed:|Holding:|Discreet:|The nap hold is off\b|Company's gone\b)", {"record"}),),
+    "my_pending_requests": ((r"^Withdrawn request #\d+", {"record"}),),
+    "wake_me": ((r"^(?:Set:|Canceled:|Paused:|Resumed:|Running wake-up #|Updated:)", {"record"}),),
+    "check_back": ((r"^(?:Set:|Canceled:)", {"record"}),),
+    "start_async_task": ((r"^Launched async subagent\b", {"start"}),),
+    "update_async_task": ((r"^(?:Updated async subagent|Queued follow-up to async subagent)\b", {"start"}),),
+}
+#: music's acts answer "Done: …" on success (WRITE_OK_PREFIX), DJ breaks their own line (dj.set_enabled); what
+#: kind they are comes from the operation.
+_ONE_LOOP_MUSIC_DONE = re.compile(r"^(?:Done:|DJ breaks are (?:back on|off)\b)")
+#: A read's own refusal ("Couldn't read his email…", "His library is his…"): not a completed look.
+_ONE_LOOP_READ_REFUSED = re.compile(
+    r"^\s*(?:couldn'?t|i couldn'?t|i could not|can'?t|cannot|not here\b|only (?:he|the owner|chris)\b|"
+    r"his library is his|i'?m not sure it'?s him|refused\b|not done\b|unknown\b|"
+    r"home assistant is unreachable)", re.I)
+#: A claimed look names what it looked at; it needs a completed read of that kind (Codex second re-check #3).
+#: No family named: any completed read.
+_ONE_LOOP_READ_FAMILIES = (
+    (re.compile(r"\b(?:weather|forecast|rain|temperature|sunny|storm)\b", re.I),
+     {"get_weather", "search_web", "read_web_page"}),
+    (re.compile(r"\b(?:calendar|schedule|meetings?|appointments?)\b", re.I), {"calendar_events"}),
+    (re.compile(r"\b(?:e-?mails?|inbox|gmail)\b", re.I),
+     {"search_email", "read_email", "search_his_email", "read_his_email"}),
+    (re.compile(r"\b(?:lamps?|lights?|doors?|locks?|thermostat|sensors?|garage|fans?|switch(?:es)?)\b", re.I),
+     {"home_control", "search_entities"}),
+    (re.compile(r"\b(?:home jobs?|jobs?|tasks?|home machine)\b", re.I),
+     {"list_async_tasks", "check_async_task", "manage_list"}),
+    (re.compile(r"\b(?:lists?|to-?dos?|shopping|groceries)\b", re.I), {"manage_list"}),
+    (re.compile(r"\b(?:playlists?|songs?|music|queue|library)\b", re.I), {"music"}),
+    (re.compile(r"\b(?:tickets?|kael)\b", re.I), {"kael_tickets"}),
+    (re.compile(r"\b(?:web|online|internet|news)\b", re.I), {"search_web", "read_web_page"}),
+)
 
 
 def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
@@ -2327,6 +2384,27 @@ def _one_loop_outcome(content: str, status: object = None) -> str:
     return "completed"
 
 
+def _one_loop_done_kinds(name: str, args: dict, content: str, status: object = None) -> frozenset:
+    """What this call COMPLETED (Codex second re-check #1, #2): the kinds its own words confirm, else nothing.
+    A read is completed when it answered (not failed, refused or waiting); an act only on its tool's words
+    for success (_ONE_LOOP_DONE_WORDS); an unknown tool never. Recording and delivery are separate kinds, so
+    a ticket kept but not yet delivered backs "noted", not "sent"."""
+    text = str(content or "")
+    if _one_loop_outcome(text, status) != "completed":
+        return frozenset()
+    kinds = _one_loop_call_kinds(name, args)
+    if kinds == {"read"}:
+        first = next((line for line in text.splitlines() if line.strip()), "")
+        return frozenset({"read"}) if first.strip() and not _ONE_LOOP_READ_REFUSED.search(first) else frozenset()
+    if name == "music":
+        return frozenset(kinds) if _ONE_LOOP_MUSIC_DONE.search(text) else frozenset()
+    done: set = set()
+    for pattern, completes in _ONE_LOOP_DONE_WORDS.get(name, ()):
+        if re.search(pattern, text.strip(), re.S):
+            done |= completes
+    return frozenset(done)
+
+
 def _one_loop_receipts(messages: list) -> list[dict]:
     """Every executed call this turn: {name, kinds, outcome, ok (= completed), args, result}. Repair receipts
     (a malformed call that never ran) are not calls."""
@@ -2345,15 +2423,19 @@ def _one_loop_receipts(messages: list) -> list[dict]:
         asked_name, args = requested.get(getattr(m, "tool_call_id", None), (None, {}))
         name = getattr(m, "name", None) or asked_name or "unknown"
         content = m.content if isinstance(m.content, str) else str(m.content)
-        outcome = _one_loop_outcome(content, getattr(m, "status", None))
-        out.append({"name": name, "kinds": _one_loop_call_kinds(name, args), "outcome": outcome,
-                    "ok": outcome == "completed", "args": args, "result": content})
+        status = getattr(m, "status", None)
+        outcome = _one_loop_outcome(content, status)
+        done = _one_loop_done_kinds(name, args, content, status)
+        if outcome == "completed" and not done:
+            outcome = "unconfirmed"          # no words of success from the tool: it backs nothing
+        out.append({"name": name, "kinds": _one_loop_call_kinds(name, args), "done": done, "outcome": outcome,
+                    "ok": bool(done), "args": args, "result": content})
     return out
 
 
 def _one_loop_acted(receipts: list[dict]) -> bool:
-    """Did anything this turn change something (a completed call that isn't only a read)?"""
-    return any(r["ok"] and r["kinds"] != {"read"} for r in receipts)
+    """Did anything this turn change something (a completed act, not a read)?"""
+    return any(set(r["done"]) - {"read"} for r in receipts)
 
 
 _ONE_LOOP_SEND_VERBS = (
@@ -2408,6 +2490,35 @@ def _now_promises(text: str) -> list[str]:
     return found
 
 
+def _sentence_of(text: str, fragment: str) -> str:
+    """The sentence of TEXT that holds FRAGMENT (for naming what a claim or a promise is about)."""
+    at = text.find(fragment)
+    if at < 0:
+        return text
+    starts = [m.end() for m in _SENTENCE_END.finditer(text, 0, at)]
+    end = _SENTENCE_END.search(text, at + len(fragment))
+    return text[starts[-1] if starts else 0: end.start() if end else len(text)]
+
+
+def _claim_sentences(pattern: re.Pattern, text: str) -> list[str]:
+    """The sentences holding an un-negated match of PATTERN."""
+    found = []
+    for m in pattern.finditer(text):
+        window = text[max(0, m.start() - _NEGATION_WINDOW): m.start()]
+        if not _NEGATION_RE.search(window):
+            found.append(_sentence_of(text, m.group(0)))
+    return found
+
+
+def _one_loop_looked(sentence: str, read_tools: set) -> bool:
+    """A claimed or promised look in SENTENCE is backed: by a completed read of the kind it names, or, when it
+    names none, by any completed read (Codex second re-check #3: an act is never a look)."""
+    families = [tools for pattern, tools in _ONE_LOOP_READ_FAMILIES if pattern.search(sentence)]
+    if not families:
+        return bool(read_tools)
+    return any(read_tools & tools for tools in families)
+
+
 def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] | None:
     """D79's postconditions on a one-loop reply: (marker, correction, words_only) for the first thing it
     says that this turn's COMPLETED receipts don't back, else None (Codex 11/20 #3 and re-check #2, #3):
@@ -2423,21 +2534,24 @@ def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] |
         return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
     done: set = set()
     for r in receipts:
-        if r["ok"]:
-            done |= set(r["kinds"])
+        done |= set(r["done"])
     acts = done - {"read"}
+    read_tools = {r["name"] for r in receipts if "read" in r["done"]}
     unbacked = (
         (_unnegated(_STARTED_CLAIM_RE, text) and "start" not in done)
         or (_unnegated(_ONE_LOOP_SEND_CLAIM, text) and "send" not in done)
         or ((record_action_claim(text) or _unnegated(_ONE_LOOP_RECORD_CLAIM, text)) and "record" not in done)
         or (_unnegated(_ONE_LOOP_DEVICE_CLAIM, text) and "device" not in done)
         or (_unnegated(_ONE_LOOP_ACT_CLAIM, text) and not acts)
-        or (_unnegated(_ONE_LOOP_READ_CLAIM, text) and not done)
+        or any(not _one_loop_looked(sentence, read_tools) for sentence in _claim_sentences(_ONE_LOOP_READ_CLAIM, text))
     )
     if not unbacked:
         promises = _now_promises(text)
         looks_only = promises and all(_ONE_LOOP_LOOK_VERB.search(p) for p in promises)
-        unbacked = bool(promises) and not (done if looks_only else acts)
+        if looks_only:
+            unbacked = any(not _one_loop_looked(_sentence_of(text, p), read_tools) for p in promises)
+        else:
+            unbacked = bool(promises) and not acts
     if unbacked:
         return NO_TOOL_ACTION_MARKER, ONE_LOOP_CLAIM_CORRECTION, False
     looked = any(r["ok"] and r["name"] in ONE_LOOP_JOB_LOOKS for r in receipts)
@@ -2462,7 +2576,7 @@ def _one_loop_with_evidence(line: str, receipts: list[dict]) -> str:
     recognised failure like a rate limit), so he doesn't ask again and have it happen twice."""
     ran = []
     for r in receipts:
-        if r["ok"] and r["kinds"] != {"read"}:
+        if set(r["done"]) - {"read"}:
             words = ONE_LOOP_ACT_WORDS.get(r["name"], r["name"])
             if words not in ran:
                 ran.append(words)

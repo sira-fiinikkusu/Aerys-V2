@@ -83,6 +83,10 @@ def route(name="chat", tier="standard"):
     return lambda _text: RouteDecision(route=name, ack="", tier=tier)
 
 
+#: send_message's own words for a send that went through (tools/send_message.py).
+SENT_OK = "Sent: the signed message went through Discord."
+
+
 def tool_then(name, final, content="ok", args=None):
     return [AIMessage(content="", tool_calls=[{"id": f"c-{name}", "name": name, "args": args or {}}]),
             ToolMessage(content=content, name=name, tool_call_id=f"c-{name}"),
@@ -243,7 +247,8 @@ def test_the_1055_turn_ends_in_a_real_start():
     # (allowed, nothing was done yet) must end in a real start_async_task.
     rec = Recorder()
     action = Action(tool_then("list_async_tasks", "Starting it now.", "No jobs running."),
-                    tool_then("start_async_task", "Started the home job; it'll read the skill back.", "started j1"))
+                    tool_then("start_async_task", "Started the home job; it'll read the skill back.",
+                              "Launched async subagent. task_id: j1"))
     out = run("you are good to update your skill", action=action, record=rec)
     assert out == "Started the home job; it'll read the skill back."
     assert "start_async_task" in calls_of(rec.wait(1)[0])
@@ -339,7 +344,7 @@ def test_a_deep_verdict_is_served_standard_and_audited_without_spending_a_deep_c
 # ---- Codex #1: never re-enter the armed graph after an act ---------------------------------
 
 def test_after_a_send_a_wrong_claim_gets_a_reply_only_correction():
-    action = Action(tool_then("send_message", "I've started a home job and told Sam.", "sent to Sam"),
+    action = Action(tool_then("send_message", "I've started a home job and told Sam.", SENT_OK),
                     words=["I sent Sam the note; I haven't started a home job."])
     out = run("tell sam I'm running late", action=action)
     assert len(action.calls) == 1, "the armed graph ran again after a send"
@@ -350,7 +355,7 @@ def test_after_a_send_a_wrong_claim_gets_a_reply_only_correction():
 def test_two_send_bearing_passes_are_impossible():
     # Whatever the first pass says after sending, the second chance has no tools.
     for words in ("I've started a home job.", "I heard the chime on the speakers.", "Logged: done."):
-        action = Action(tool_then("send_message", words, "sent"), words=["Sent."])
+        action = Action(tool_then("send_message", words, SENT_OK), words=["Sent."])
         run("tell sam hi", action=action)
         assert len(action.calls) == 1 and len(action.reply_calls) == 1, words
 
@@ -450,14 +455,14 @@ def test_a_weather_read_does_not_back_a_started_home_job():
 
 
 def test_an_unrelated_send_does_not_back_a_started_home_job():
-    action = Action(tool_then("send_message", "I have started a home job for it.", "sent"),
+    action = Action(tool_then("send_message", "I have started a home job for it.", SENT_OK),
                     words=["I messaged him; the home job isn't started."])
     run("start it and tell him", action=action)
     assert len(action.reply_calls) == 1
 
 
 def test_a_kael_tickets_update_is_a_write_and_a_check_is_a_read():
-    wrote = Action(tool_then("kael_tickets", "Logged: I added that to your ticket for Kael.", "updated T-3",
+    wrote = Action(tool_then("kael_tickets", "Logged: I added that to your ticket for Kael.", "Added to T-3; Kael has it now.",
                              args={"action": "update", "ticket": "T-3", "message": "x"}))
     run("add that to the ticket", action=wrote)
     assert len(wrote.calls) == 1 and wrote.reply_calls == []
@@ -489,7 +494,7 @@ def test_a_record_claim_needs_a_write():
     action = Action("Logged: 182 lbs this morning.", "I haven't saved that yet.")
     run("I weighed 182 this morning", action=action)
     assert len(action.calls) == 2
-    backed = Action(tool_then("remember", "Logged: 182 lbs this morning.", "saved"))
+    backed = Action(tool_then("remember", "Logged: 182 lbs this morning.", "Kept: 182 lbs this morning"))
     run("I weighed 182 this morning", action=backed)
     assert len(backed.calls) == 1
 
@@ -533,7 +538,7 @@ def test_a_rate_limit_is_said_honestly_and_lands_in_history():
 def test_a_failure_after_an_act_keeps_the_evidence_and_says_what_ran():
     graph = build_graph(NoCalls(), soul="s")
     rec = Recorder()
-    action = Action(tool_then("send_message", "I heard the chime on the speakers.", "sent"),
+    action = Action(tool_then("send_message", "I heard the chime on the speakers.", SENT_OK),
                     words=[RuntimeError("boom")])
     out = run("tell sam hi", graph=graph, action=action, record=rec)
     row = rec.wait(1)[0]
@@ -705,7 +710,7 @@ def test_the_execution_outcome_contract(content, status, outcome):
 # ---- Codex re-check #3: a claim needs a receipt of its own kind -------------------------------
 
 def test_an_unrelated_send_does_not_back_a_house_change():
-    action = Action(tool_then("send_message", "I've turned off the lamp and told Sam.", "sent"),
+    action = Action(tool_then("send_message", "I've turned off the lamp and told Sam.", SENT_OK),
                     words=["I told Sam; the lamp is still on."])
     run("turn off the lamp and tell sam", action=action)
     assert len(action.reply_calls) == 1
@@ -807,8 +812,117 @@ def test_every_live_tool_is_sorted():
 
 def test_a_rate_limit_after_a_send_still_says_the_send_went_through():
     graph = build_graph(NoCalls(), soul="s")
-    action = Action(tool_then("send_message", "I heard the chime on the speakers.", "sent"),
+    action = Action(tool_then("send_message", "I heard the chime on the speakers.", SENT_OK),
                     words=[RuntimeError("You've hit your session limit · resets 7pm (UTC)")])
     out = run("tell sam hi", graph=graph, action=action)
     assert "went through" in out and "message" in out
     assert history(graph)[1].content == out
+
+
+# ---- Codex second re-check #1: a claim needs AFFIRMATIVE completion evidence ------------------
+# The tools' real answers (tools/*.py, wakeups.py, followups.py, keep_listening.py, deepagents' async tools).
+
+@pytest.mark.parametrize("name,args,content,kinds", [
+    ("send_message", {}, "Sent: the signed message went through Discord.", {"send"}),
+    ("send_message", {}, "Not sent: that person isn't on the list of people I can message; ask the owner.", set()),
+    ("send_email", {}, "Sent: email to sam@example.com — subject 'Hi'.", {"send"}),
+    ("message_kael", {}, "Delivered — Kael has it now as ticket T-9.", {"send"}),
+    ("message_kael", {}, "NOT DELIVERED YET: the line is busy right now. It's saved as ticket T-9 and goes to Kael "
+                         "automatically (retried every 10 minutes). Don't send it again.", {"record"}),
+    ("message_kael", {}, "NOT DELIVERED: Kael's line is down right now.", set()),
+    ("remember", {}, "Kept: he weighed 182 this morning", {"record"}),
+    ("remember", {}, "Nothing was kept: questions are not facts.", set()),
+    ("log_gap", {}, "Logged as gap #12. The owner will see it in /gaps.", {"record"}),
+    ("sticky_note", {}, "Note is up on the sticky displays: milk", {"record"}),
+    ("save_contact_email", {}, "Saved: sam@example.com is on Sam's record.", {"record"}),
+    ("draft_email", {}, "DRAFT (not sent):\nFrom: a\nTo: b", {"record"}),
+    ("draft_in_his_gmail", {}, "Drafted: Hello — to sam@example.com.", {"record"}),
+    ("add_to_cart_link", {}, "https://www.amazon.com/gp/aws/cart/add.html?x=1\nSent the link to his Discord DM.",
+     {"record", "send"}),
+    ("add_to_cart_link", {}, "https://www.amazon.com/gp/aws/cart/add.html?x=1\nNot sent: Discord sending is not available.",
+     {"record"}),
+    ("keep_listening", {}, "Keep listening is on: after I ask you something, I'll keep listening.", {"device"}),
+    ("timer", {"action": "start"}, "Timer set for 10 minutes — starting now.", {"device"}),
+    ("timer", {"action": "start"}, "I couldn't start the timer — Home Assistant said: 500", set()),
+    ("control_alarm", {"action": "arm_away"}, "Alarm arm_away sent — the panel now reports: armed_away.", {"device"}),
+    ("control_alarm", {"action": "arm_away"}, "The arm_away FAILED — Home Assistant said: 500.", set()),
+    ("home_control", {"operation": "turn_off"}, "Done: turned off light.lamp", {"device"}),
+    ("home_control", {"operation": "turn_off"}, "OK (already there): light.lamp was already off", set()),
+    ("music", {"operation": "add_to_playlist"}, "Done: added Song to Focus.", {"record"}),
+    ("music", {"operation": "add_to_playlist"}, "Only he can change his music library.", set()),
+    ("music", {"operation": "play"}, "Done: playing Focus on Office.", {"device"}),
+    ("music", {"operation": "play"}, "Starting music on Office FAILED — Home Assistant said: 500.", set()),
+    ("music", {"operation": "dj", "query": "off"}, "DJ breaks are off until 06:00.", {"device"}),
+    ("kael_checkins", {"action": "resume"}, "Resumed morning post: it taps Kael again at its next time.", {"record"}),
+    ("home_control", {"operation": "turn_on"}, "Sent turn_on to Lamp; Home Assistant accepted it (200) but light.lamp "
+                                               "reported NO state change and a read-back does not show it happened.", set()),
+    ("manage_list", {"action": "add"}, "Added to the shopping list: milk", {"record"}),
+    ("kael_tickets", {"action": "update"}, "Added to T-3; Kael has it now.", {"send", "record"}),
+    ("kael_tickets", {"action": "update"}, "Added to T-3, but Kael's line didn't take it right now; it's retried "
+                                           "automatically. Don't send it again.", {"record"}),
+    ("kael_tickets", {"action": "cancel"}, "Canceled T-3.", {"send", "record"}),
+    ("kael_checkins", {"action": "stop"}, "Stopped morning-post: it won't tap Kael until it's resumed.", {"record"}),
+    ("reach_prefs", {"action": "mute"}, "Changed: you won't bring up weather on your own now.", {"record"}),
+    ("my_pending_requests", {"action": "withdraw"}, "Withdrawn request #4. It cannot execute from this request.",
+     {"record"}),
+    ("wake_me", {"action": "add"}, "Set: wake-up #3 daily at 7. It ends Fri unless you end it sooner.", {"record"}),
+    ("check_back", {"action": "add"}, "Set: you'll check back on the parcel at Fri Nov 21, 05:00 PM.", {"record"}),
+    ("start_async_task", {}, "Launched async subagent. task_id: abc", {"start"}),
+    ("start_async_task", {}, "Waiting for approval on Discord. Nothing has been done.", set()),
+    ("update_async_task", {}, "Updated async subagent. task_id: abc", {"start"}),
+    ("some_new_tool", {}, "Done: whatever it was", set()),        # unknown: nothing can be confirmed
+    ("get_weather", {}, "Sunny, high 76.", {"read"}),
+    ("music", {"operation": "my_playlists"}, "His library is his: only he can ask me what's in it.", set()),
+    ("read_his_email", {}, "Couldn't read his email: only the owner can ask about his Gmail.", set()),
+])
+def test_completion_needs_the_tools_own_words_for_success(name, args, content, kinds):
+    from aerys_v2.service import _one_loop_done_kinds
+
+    assert set(_one_loop_done_kinds(name, args, content, None)) == kinds
+
+
+def test_a_real_music_refusal_does_not_back_a_saved_playlist():
+    action = Action(tool_then("music", "I've saved it to your playlist.", "Only he can change his music library.",
+                              args={"operation": "add_to_playlist"}), "I couldn't save it: only you can change it.")
+    run("save it to focus", action=action)
+    assert len(action.calls) == 2
+
+
+# ---- Codex second re-check #2: recorded is not delivered ---------------------------------------
+
+QUEUED_TICKET = ("Added to T-3, but Kael's line didn't take it right now; it's retried automatically. "
+                 "Don't send it again.")
+
+
+def test_a_queued_ticket_update_backs_noted_but_not_sent():
+    noted = Action(tool_then("kael_tickets", "I've noted it on your ticket for Kael.", QUEUED_TICKET,
+                             args={"action": "update", "ticket": "T-3", "message": "x"}))
+    run("add that for kael", action=noted)
+    assert len(noted.calls) == 1 and noted.reply_calls == []
+    sent = Action(tool_then("kael_tickets", "I've sent it to Kael.", QUEUED_TICKET,
+                            args={"action": "update", "ticket": "T-3", "message": "x"}),
+                  words=["It's on the ticket; Kael's line will take it shortly."])
+    run("add that for kael", action=sent)
+    assert len(sent.reply_calls) == 1                         # recorded (an act), so words only
+
+
+# ---- Codex second re-check #3: a claimed look needs a completed READ of the right kind -------
+
+def test_a_send_does_not_back_a_claimed_weather_check():
+    action = Action(tool_then("send_message", "I checked the weather: sunny.",
+                              "Sent: the signed message went through Discord."),
+                    words=["I sent the message; I haven't checked the weather."])
+    run("check the weather and tell sam", action=action)
+    assert len(action.reply_calls) == 1
+
+
+def test_a_look_must_be_the_right_kind_of_look():
+    wrong = Action(tool_then("get_weather", "I checked your calendar: two meetings.", "Sunny."), "Let me look.")
+    run("what's on my calendar", action=wrong)
+    assert len(wrong.calls) == 2
+    right = Action(tool_then("calendar_events", "I checked your calendar: two meetings.", "9:00 standup; 10:00 1:1"))
+    run("what's on my calendar", action=right)
+    assert len(right.calls) == 1
+    web = Action(tool_then("search_web", "I checked the forecast: rain after 3.", "rain after 3pm"))
+    run("will it rain", action=web)
+    assert len(web.calls) == 1
