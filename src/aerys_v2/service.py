@@ -833,30 +833,40 @@ STATUS_CHECK_HINT = ("[before you say whether a home job is running or how it's 
 ONE_LOOP_MARKER = "text_one_loop"
 #: The served tier when the router asked for another: banter rides her conversational model (standard).
 ONE_LOOP_TIER_SOURCE = "one_loop"
-#: D79 (Codex 11/20 #3): what she did this turn is read from the tool receipts, each sorted by what it IS:
-#: a send, a start, a read or a write. A claim is backed only by a receipt of its own kind.
-ONE_LOOP_SEND = frozenset({"send_message", "send_email", "message_kael", "pass_to_chris", "report_to_kael",
-                           "send_file_to_chris"})
+#: D79 (Codex 11/20 #3, re-check #3): what she did this turn is read from the tool receipts, each sorted by
+#: what it does: send, start, record, device or read. A claim is backed only by a COMPLETED receipt of its
+#: own kind. Names are the rack's live tools (Kael 11/20) and the async-task tools; nothing invented.
+ONE_LOOP_SEND = frozenset({"send_message", "send_email", "message_kael"})
 ONE_LOOP_START = frozenset({"start_async_task", "update_async_task"})
-#: Tools that only read. An unknown tool counts as a write, so a new reader can only let a write claim
-#: through, never bounce a real act.
+#: Tools that only read.
 ONE_LOOP_READ_ONLY = frozenset({
-    "search_web", "read_web_page", "analyze_image", "read_document", "youtube_summary", "search_email",
-    "read_email", "search_his_email", "read_his_email", "check_async_task", "list_async_tasks",
-    "search_entities", "get_state", "get_weather", "calendar_events", "whereabouts", "where_is_chris_nearby",
-    "messages_sent", "files_sent_to_chris", "relay_status", "read_my_code", "list_skills", "read_skill",
-    "search_memory", "no_action",
+    "analyze_image", "calendar_events", "get_weather", "messages_sent", "no_action", "read_document",
+    "read_email", "read_his_email", "read_my_code", "read_web_page", "search_email", "search_entities",
+    "search_his_email", "search_web", "where_is_chris_nearby", "youtube_summary", "check_async_task",
+    "list_async_tasks",
 })
-#: Tools that read or write by their argument: these operations only read.
-ONE_LOOP_READ_OPS = {
-    "home_control": frozenset({"get_state", "history"}),
-    "kael_tickets": frozenset({"check", "list"}),
-    "manage_list": frozenset({"show"}),
-    "kael_checkins": frozenset({"list"}),
-    "reach_prefs": frozenset({"show"}),
-    "my_pending_requests": frozenset({"list"}),
-    "control_alarm": frozenset({"status"}),
-    "music": frozenset({"now_playing", "status", "search", "queue"}),
+#: Tools that keep a record (memory, a note, a list, a draft, a link) and no other kind of act.
+ONE_LOOP_RECORD = frozenset({"remember", "log_gap", "sticky_note", "save_contact_email", "draft_email",
+                             "draft_in_his_gmail", "add_to_cart_link"})
+#: Tools that change something in the house, and nothing else.
+ONE_LOOP_DEVICE = frozenset({"keep_listening"})
+#: Tools that read or act by their operation (the tool's own argument names, from its code): which
+#: operations read, and what every other operation is. An operation not named in `reads` is the default kind.
+ONE_LOOP_BY_OPERATION = {
+    "home_control": {"arg": "operation", "reads": {"get_state", "history"}, "default": {"device"}},
+    "music": {"arg": "operation",
+              "reads": {"recently_played", "queue", "my_playlists", "my_taste", "up_next", "now_playing"},
+              "record": {"like", "add_to_library", "new_playlist", "add_to_playlist"},
+              "default": {"device"}},
+    "timer": {"arg": "action", "reads": set(), "default": {"device"}},
+    "control_alarm": {"arg": "action", "reads": {"status"}, "default": {"device"}},
+    "kael_tickets": {"arg": "action", "reads": {"check", "list"}, "default": {"send", "record"}},
+    "manage_list": {"arg": "action", "reads": {"show"}, "default": {"record"}},
+    "kael_checkins": {"arg": "action", "reads": {"list"}, "default": {"record"}},
+    "reach_prefs": {"arg": "action", "reads": {"show"}, "default": {"record"}},
+    "my_pending_requests": {"arg": "action", "reads": {"list"}, "default": {"record"}},
+    "wake_me": {"arg": "action", "reads": {"list"}, "default": {"record"}},
+    "check_back": {"arg": "action", "reads": {"list"}, "default": {"record"}},
 }
 #: A successful call to one of these is a look at her home jobs.
 ONE_LOOP_JOB_LOOKS = frozenset({"check_async_task", "list_async_tasks", "start_async_task", "update_async_task"})
@@ -882,6 +892,23 @@ ONE_LOOP_STATUS_CORRECTION = (
 ONE_LOOP_LAND_FAILED = "history_write_failed"
 #: What he reads when a one-loop turn fails in a way that isn't a rate limit (one exchange on every exit).
 ONE_LOOP_FAILURE_LINE = "Something went wrong on my side before I could finish that, so I stopped."
+#: How each act reads in his words when a failed turn says what already went through (Codex re-check #4).
+ONE_LOOP_ACT_WORDS = {
+    "send_message": "the message", "send_email": "the email", "message_kael": "the note to Kael",
+    "start_async_task": "the home job", "update_async_task": "the change to the home job",
+    "home_control": "the house change", "music": "the music change", "timer": "the timer",
+    "control_alarm": "the alarm change", "remember": "the note to my memory", "sticky_note": "the Sticky note",
+    "manage_list": "the list change", "kael_tickets": "the update to Kael's ticket", "wake_me": "the wake-up",
+    "check_back": "the check-back", "log_gap": "the gap report", "save_contact_email": "the contact's email",
+    "draft_email": "the draft", "draft_in_his_gmail": "the Gmail draft", "add_to_cart_link": "the cart link",
+}
+#: Policy outcomes, by the first line of a tool's answer (hands_gate, outside_guard, the tools' own refusals).
+_ONE_LOOP_PENDING_RE = re.compile(
+    r"^\s*(?:waiting for|still waiting|chris approved|that'?s already being done)", re.I)
+_ONE_LOOP_REFUSED_RE = re.compile(
+    r"^\s*(?:not (?:done|sent|saved|started|added|changed|set|played|scheduled|allowed)\b|refused\b|"
+    r"chris said no\b|nothing (?:was|has been) (?:done|sent)|that exact message already went)"
+    r"|\bnothing happened\b|\bnothing (?:went|was sent|changed)\b", re.I)
 
 
 def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
@@ -2260,25 +2287,50 @@ def _action_turn(
     return final
 
 
-def _one_loop_call_kind(name: str, args: dict) -> str:
-    """send | start | read | write, from the tool and (for tools that do both) its operation."""
+def _one_loop_call_kinds(name: str, args: dict) -> frozenset:
+    """What a call does: some of send / start / record / device / read; 'other' for a tool the checks don't
+    know, which backs only a general claim of having done something."""
     if name in ONE_LOOP_SEND:
-        return "send"
+        return frozenset({"send"})
     if name in ONE_LOOP_START:
-        return "start"
+        return frozenset({"start"})
     if name in ONE_LOOP_READ_ONLY:
-        return "read"
-    reads = ONE_LOOP_READ_OPS.get(name)
-    if reads is not None:
-        op = str((args or {}).get("operation") or (args or {}).get("action") or "").strip().lower()
-        return "read" if op in reads else "write"
-    return "write"
+        return frozenset({"read"})
+    if name in ONE_LOOP_RECORD:
+        return frozenset({"record"})
+    if name in ONE_LOOP_DEVICE:
+        return frozenset({"device"})
+    rule = ONE_LOOP_BY_OPERATION.get(name)
+    if rule is None:
+        return frozenset({"other"})
+    op = str((args or {}).get(rule["arg"]) or "").strip().lower()
+    if op in rule["reads"]:
+        return frozenset({"read"})
+    if op in rule.get("record", ()):
+        return frozenset({"record"})
+    return frozenset(rule["default"])
+
+
+def _one_loop_outcome(content: str, status: object = None) -> str:
+    """The execution-outcome contract (Codex re-check #2): completed, refused, pending or failed. Only a
+    completed call backs a claim. classify_tool_result measures infrastructure failure and counts a policy
+    refusal as success, so the refusals and waits are read here first, from the answer's first line."""
+    from aerys_v2.turns import classify_tool_result
+
+    first = next((line for line in str(content or "").splitlines() if line.strip()), "")
+    if classify_tool_result(str(content or ""), status) is not None:
+        return "failed"
+    if _ONE_LOOP_PENDING_RE.search(first):
+        return "pending"
+    if _ONE_LOOP_REFUSED_RE.search(first):
+        return "refused"
+    return "completed"
 
 
 def _one_loop_receipts(messages: list) -> list[dict]:
-    """Every executed call this turn: {name, kind, ok, args, result}. Repair receipts (a malformed call that
-    never ran) are not calls."""
-    from aerys_v2.turns import classify_tool_result, invalid_call_ids, is_repair_receipt
+    """Every executed call this turn: {name, kinds, outcome, ok (= completed), args, result}. Repair receipts
+    (a malformed call that never ran) are not calls."""
+    from aerys_v2.turns import invalid_call_ids, is_repair_receipt
 
     requested: dict = {}
     for m in messages:
@@ -2293,15 +2345,15 @@ def _one_loop_receipts(messages: list) -> list[dict]:
         asked_name, args = requested.get(getattr(m, "tool_call_id", None), (None, {}))
         name = getattr(m, "name", None) or asked_name or "unknown"
         content = m.content if isinstance(m.content, str) else str(m.content)
-        out.append({"name": name, "kind": _one_loop_call_kind(name, args),
-                    "ok": classify_tool_result(content, getattr(m, "status", None)) is None,
-                    "args": args, "result": content})
+        outcome = _one_loop_outcome(content, getattr(m, "status", None))
+        out.append({"name": name, "kinds": _one_loop_call_kinds(name, args), "outcome": outcome,
+                    "ok": outcome == "completed", "args": args, "result": content})
     return out
 
 
 def _one_loop_acted(receipts: list[dict]) -> bool:
-    """Did anything this turn change something (a successful send, start or write)?"""
-    return any(r["ok"] and r["kind"] != "read" for r in receipts)
+    """Did anything this turn change something (a completed call that isn't only a read)?"""
+    return any(r["ok"] and r["kinds"] != {"read"} for r in receipts)
 
 
 _ONE_LOOP_SEND_VERBS = (
@@ -2316,12 +2368,18 @@ _ONE_LOOP_SEND_CLAIM = re.compile(
     re.I)
 _ONE_LOOP_RECORD_CLAIM = re.compile(
     r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:logged|filed|recorded|noted|saved|added|"
-    r"written|wrote)\b", re.I)
+    r"written|wrote|drafted)\b", re.I)
+_ONE_LOOP_DEVICE_CLAIM = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:turned|switched|dimmed|brightened|armed|"
+    r"disarmed|played|paused|resumed|skipped|stopped the|locked|unlocked|set (?:it|them|the|a|an|your))\b"
+    r"|\b(?:timer|alarm)\s+(?:is\s+)?set\b", re.I)
 _ONE_LOOP_ACT_CLAIM = re.compile(
-    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:turned|switched|set|dimmed|brightened|"
-    r"cancel(?:l)?ed|removed|completed|armed|disarmed|played|paused|skipped|scheduled|queued|posted|shared|"
-    r"booked|ordered)\b"
-    r"|\b(?:timer|alarm|reminder)\s+(?:is\s+)?set\b|^\s*(?:done|all set|taken care of)\b", re.I)
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:cancel(?:l)?ed|removed|completed|scheduled|"
+    r"queued|posted|shared|booked|ordered)\b"
+    r"|\breminder\s+(?:is\s+)?set\b|^\s*(?:done|all set|taken care of)\b", re.I)
+_ONE_LOOP_READ_CLAIM = re.compile(
+    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:checked|looked(?: it)? up|looked at|looked into|"
+    r"searched|read through|pulled up)\b", re.I)
 _ONE_LOOP_LOOK_VERB = re.compile(
     r"\b(?:check|checking|look|looking|search|searching|read|reading|open|opening|find|finding)\b", re.I)
 
@@ -2352,23 +2410,29 @@ def _now_promises(text: str) -> list[str]:
 
 def _one_loop_check(reply: str, receipts: list[dict]) -> tuple[str, str, bool] | None:
     """D79's postconditions on a one-loop reply: (marker, correction, words_only) for the first thing it
-    says that this turn's receipts don't back, else None. The chat path's checks, now a look at what she
-    SAYS, never a switch (Codex 11/20 #3):
+    says that this turn's COMPLETED receipts don't back, else None (Codex 11/20 #3 and re-check #2, #3):
     - she says she heard audio: nothing can back that, and it is always corrected in words only;
-    - a start ("I've started a home job") needs a successful start; a send needs a successful send;
-      a record ("Logged: …", "I've saved…") needs a successful write; another act needs any act;
-    - a promise to do something now needs an act; a promise to LOOK is kept by any successful call;
-    - how a home job stands needs a look at her jobs this turn."""
+    - a start needs a completed start; a send a completed send; a record (Logged:, saved, added) a
+      completed record; a house change (turned, played, a timer set) a completed device act; another act
+      ("done", cancelled, scheduled) any completed act; a claimed look (checked, looked up) any completed call;
+    - a promise to act now needs a completed act; a promise to look is kept by any completed call;
+    - how a home job stands needs a completed look at her jobs.
+    A refused, pending or failed call backs nothing."""
     text = _plain_quotes(reply or "")
     if audio_perception_claim(text):
         return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
-    done = {r["kind"] for r in receipts if r["ok"]}
+    done: set = set()
+    for r in receipts:
+        if r["ok"]:
+            done |= set(r["kinds"])
     acts = done - {"read"}
     unbacked = (
         (_unnegated(_STARTED_CLAIM_RE, text) and "start" not in done)
         or (_unnegated(_ONE_LOOP_SEND_CLAIM, text) and "send" not in done)
-        or ((record_action_claim(text) or _unnegated(_ONE_LOOP_RECORD_CLAIM, text)) and "write" not in done)
+        or ((record_action_claim(text) or _unnegated(_ONE_LOOP_RECORD_CLAIM, text)) and "record" not in done)
+        or (_unnegated(_ONE_LOOP_DEVICE_CLAIM, text) and "device" not in done)
         or (_unnegated(_ONE_LOOP_ACT_CLAIM, text) and not acts)
+        or (_unnegated(_ONE_LOOP_READ_CLAIM, text) and not done)
     )
     if not unbacked:
         promises = _now_promises(text)
@@ -2389,16 +2453,22 @@ def _one_loop_done_note(receipts: list[dict]) -> str:
         result = " ".join(str(r["result"]).split())
         if len(result) > 300:
             result = result[:300] + "…"
-        lines.append(f"- {r['name']} ({'ok' if r['ok'] else 'failed'}): {result}")
+        lines.append(f"- {r['name']} ({r['outcome']}): {result}")
     return "\n".join(lines)
 
 
-def _one_loop_failure_line(receipts: list[dict]) -> str:
-    """His line when the turn failed: honest about anything that already went through."""
-    ran = sorted({r["name"] for r in receipts if r["ok"] and r["kind"] != "read"})
+def _one_loop_with_evidence(line: str, receipts: list[dict]) -> str:
+    """A failed turn's line, plus what already went through (Codex re-check #4: always, also after a
+    recognised failure like a rate limit), so he doesn't ask again and have it happen twice."""
+    ran = []
+    for r in receipts:
+        if r["ok"] and r["kinds"] != {"read"}:
+            words = ONE_LOOP_ACT_WORDS.get(r["name"], r["name"])
+            if words not in ran:
+                ran.append(words)
     if not ran:
-        return ONE_LOOP_FAILURE_LINE
-    return (f"{ONE_LOOP_FAILURE_LINE} Before that, this went through: {', '.join(ran)}. "
+        return line
+    return (f"{line} Before that, this went through: {', '.join(ran)}. "
             "Check it before asking me again, so nothing happens twice.")
 
 
@@ -2523,7 +2593,8 @@ def _text_one_loop_turn(
         turn["degraded"].append("recursion_limit" if type(e).__name__ == "GraphRecursionError" else "turn_failed")
         turn["error"] = str(e) or type(e).__name__
         log.warning("one loop: the turn failed (%s); landing an honest line", turn["error"], exc_info=True)
-        return finish(honest or _one_loop_failure_line(_one_loop_receipts(turn["messages"])))
+        return finish(_one_loop_with_evidence(honest or ONE_LOOP_FAILURE_LINE,
+                                              _one_loop_receipts(turn["messages"])))
 
     raw = reply
     if not raw.strip():

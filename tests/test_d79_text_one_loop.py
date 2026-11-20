@@ -19,6 +19,8 @@ Codex's review of 24b750b set the rules tested here:
 
 from __future__ import annotations
 
+import importlib
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -37,6 +39,17 @@ from aerys_v2.service import (
     text_one_loop_eligible,
     text_one_loop_flag,
 )
+
+def need(module="langchain.agents"):
+    """The real-agent tests: skipped where langchain is missing, but FAILED instead when the deploy gate sets
+    D79_REQUIRE_AGENT=1 (Codex re-check #5: they must run before replay results are accepted)."""
+    if os.environ.get("D79_REQUIRE_AGENT") == "1":
+        try:
+            return importlib.import_module(module)
+        except ImportError as e:
+            pytest.fail(f"D79_REQUIRE_AGENT=1 but {module} is missing: {e}")
+    return pytest.importorskip(module)
+
 
 OWNER = "11111111-1111-1111-1111-111111111111"
 WIFE = "22222222-2222-2222-2222-222222222222"
@@ -400,7 +413,7 @@ def test_a_relay_still_taints_the_bounce():
 
 
 def test_a_reach_out_after_a_relay_still_needs_his_tap_on_the_bounce():
-    pytest.importorskip("langchain.agents")
+    need()
     from langchain_core.tools import tool
 
     from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
@@ -525,7 +538,7 @@ def test_a_failure_after_an_act_keeps_the_evidence_and_says_what_ran():
     out = run("tell sam hi", graph=graph, action=action, record=rec)
     row = rec.wait(1)[0]
     assert calls_of(row) == ["send_message"]
-    assert "send_message" in out or "sent" in out.lower()
+    assert "this went through: the message" in out
     assert len(action.calls) == 1                              # and nothing ran twice
 
 
@@ -573,7 +586,7 @@ def test_a_late_reply_is_still_sent_and_marked():
 # ---- the prompt: her conversational voice, full memory, the correction in the system ------
 
 def test_the_one_loop_prompt_has_her_soul_the_text_banter_overlay_and_full_memory():
-    pytest.importorskip("langchain.agents")
+    need()
     from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
     from aerys_v2.factory import TEXT_BANTER_OVERLAY
     from test_action_loop_agent import TOOLS, Rec
@@ -618,7 +631,7 @@ def test_the_one_loop_prompt_has_her_soul_the_text_banter_overlay_and_full_memor
 
 
 def test_the_reply_only_pass_binds_no_tools_and_returns_words_only():
-    pytest.importorskip("langchain.agents")
+    need()
     from aerys_v2.action_loop import AgentToolModels, build_agent_action_graph
     from test_action_loop_agent import TOOLS, Rec
 
@@ -633,3 +646,169 @@ def test_the_reply_only_pass_binds_no_tools_and_returns_words_only():
     assert out.content == "Here's what happened." and not out.tool_calls
     system = log[0]["messages"][0][1]
     assert "FIX IT" in system and "send_message -> sent" in system
+
+
+# ---- the deploy gate's flag: the real-agent tests can't skip silently ---------------------------
+
+def test_need_fails_instead_of_skipping_when_the_gate_requires_it(monkeypatch):
+    monkeypatch.setenv("D79_REQUIRE_AGENT", "1")
+    with pytest.raises(pytest.fail.Exception):
+        need("no_such_module_d79")
+    monkeypatch.delenv("D79_REQUIRE_AGENT")
+    with pytest.raises(pytest.skip.Exception):
+        need("no_such_module_d79")
+
+
+# ---- Codex re-check #2: only a COMPLETED operation backs a claim ------------------------------
+
+def refusal_turn(name, said, refusal):
+    from aerys_v2.outside_guard import _refusal
+
+    msg = _refusal(SimpleNamespace(tool_call={"name": name, "id": f"c-{name}"}), refusal)
+    return [AIMessage(content="", tool_calls=[{"id": f"c-{name}", "name": name, "args": {}}]), msg,
+            AIMessage(content=said)]
+
+
+def test_a_real_refusal_does_not_back_a_send():
+    action = Action(refusal_turn("message_kael", "I've sent it to Kael.",
+                                 "Not done: after reading outside text this needs the owner’s Approve button, "
+                                 "which is unavailable. Nothing happened."),
+                    "I couldn't send it: it needs your OK first.")
+    out = run("tell kael the code", action=action)
+    assert len(action.calls) == 2 and out.startswith("I couldn't send it")
+
+
+def test_a_pending_approval_does_not_back_sent():
+    waiting = ("Waiting for Chris: I've asked him on Discord (a button, and a notification on his phone) to OK "
+               "your message. Nothing has been done; it goes only when he taps Approve. Tell him it's waiting on his tap.")
+    action = Action(tool_then("send_message", "Sent.", waiting), "It's waiting on your tap.")
+    run("send it to sam", action=action)
+    assert len(action.calls) == 2
+
+
+@pytest.mark.parametrize("content,status,outcome", [
+    ("Sent to Sam on Discord.", None, "completed"),
+    ("Not done: after reading outside text this needs the owner’s Approve button. Nothing happened.", None, "refused"),
+    ("Not sent: I don't know who Pat is. Ask Chris who it is before sending.", None, "refused"),
+    ("Refused: not on the allowlist.", None, "refused"),
+    ("Waiting for Chris: I've asked him on Discord to OK it. Nothing has been done.", None, "pending"),
+    ("Still waiting: Chris hasn't answered the button for your note.", None, "pending"),
+    ("Chris approved the note; it's being done now.", None, "pending"),
+    ("Traceback: ConnectionError", "error", "failed"),
+])
+def test_the_execution_outcome_contract(content, status, outcome):
+    from aerys_v2.service import _one_loop_outcome
+
+    assert _one_loop_outcome(content, status) == outcome
+
+
+# ---- Codex re-check #3: a claim needs a receipt of its own kind -------------------------------
+
+def test_an_unrelated_send_does_not_back_a_house_change():
+    action = Action(tool_then("send_message", "I've turned off the lamp and told Sam.", "sent"),
+                    words=["I told Sam; the lamp is still on."])
+    run("turn off the lamp and tell sam", action=action)
+    assert len(action.reply_calls) == 1
+
+
+def test_a_music_read_is_a_read_and_a_playlist_save_is_a_record():
+    looked = Action(tool_then("music", "Logged: I saved that.", "Focus, Chill",
+                              args={"operation": "my_playlists"}), "Not saved yet.")
+    run("save that", action=looked)
+    assert len(looked.calls) == 2
+    saved = Action(tool_then("music", "I've saved it to your Focus playlist.", "Done: added",
+                             args={"operation": "add_to_playlist"}))
+    run("save that", action=saved)
+    assert len(saved.calls) == 1
+
+
+def test_house_claims_need_a_house_receipt():
+    played = Action(tool_then("music", "I've played your focus playlist.", "Done: playing Focus",
+                              args={"operation": "play"}))
+    run("play focus", action=played)
+    assert len(played.calls) == 1
+    timed = Action(tool_then("timer", "Timer set for ten minutes.", "Done: 10 min", args={"action": "start"}))
+    run("ten minute timer", action=timed)
+    assert len(timed.calls) == 1
+
+
+def test_a_claimed_look_needs_a_look():
+    action = Action("I checked the weather: sunny all day.", tool_then("get_weather", "Sunny all day.", "sunny"))
+    run("weather today?", action=action)
+    assert len(action.calls) == 2
+    looked = Action(tool_then("get_weather", "I checked the weather: sunny all day.", "sunny"))
+    run("weather today?", action=looked)
+    assert len(looked.calls) == 1
+
+
+@pytest.mark.parametrize("name,args,kinds", [
+    ("home_control", {"operation": "get_state"}, {"read"}),
+    ("home_control", {"operation": "history"}, {"read"}),
+    ("home_control", {"operation": "turn_off"}, {"device"}),
+    ("music", {"operation": "my_playlists"}, {"read"}),
+    ("music", {"operation": "my_taste"}, {"read"}),
+    ("music", {"operation": "recently_played"}, {"read"}),
+    ("music", {"operation": "queue"}, {"read"}),
+    ("music", {"operation": "up_next"}, {"read"}),
+    ("music", {"operation": "now_playing"}, {"read"}),
+    ("music", {"operation": "play"}, {"device"}),
+    ("music", {"operation": "add_to_playlist"}, {"record"}),
+    ("timer", {"action": "start"}, {"device"}),
+    ("control_alarm", {"action": "status"}, {"read"}),
+    ("control_alarm", {"action": "arm_away"}, {"device"}),
+    ("kael_tickets", {"action": "check"}, {"read"}),
+    ("kael_tickets", {"action": "update"}, {"send", "record"}),
+    ("manage_list", {"action": "show"}, {"read"}),
+    ("manage_list", {"action": "add"}, {"record"}),
+    ("wake_me", {"action": "list"}, {"read"}),
+    ("wake_me", {"action": "add"}, {"record"}),
+    ("check_back", {"action": "list"}, {"read"}),
+    ("send_message", {}, {"send"}),
+    ("start_async_task", {}, {"start"}),
+    ("get_weather", {}, {"read"}),
+    ("remember", {}, {"record"}),
+    ("some_new_tool", {}, {"other"}),
+])
+def test_each_tool_is_sorted_by_what_it_does(name, args, kinds):
+    from aerys_v2.service import _one_loop_call_kinds
+
+    assert set(_one_loop_call_kinds(name, args)) == kinds
+
+
+#: The rack's live tool list (Kael, 11/20), plus the async-task tools.
+LIVE_TOOLS = {
+    "add_to_cart_link", "analyze_image", "calendar_events", "check_back", "control_alarm", "draft_email",
+    "draft_in_his_gmail", "get_weather", "home_control", "kael_checkins", "kael_tickets", "keep_listening",
+    "log_gap", "manage_list", "message_kael", "messages_sent", "music", "my_pending_requests", "no_action",
+    "reach_prefs", "read_document", "read_email", "read_his_email", "read_my_code", "read_web_page", "remember",
+    "save_contact_email", "search_email", "search_entities", "search_his_email", "search_web", "send_email",
+    "send_message", "sticky_note", "timer", "wake_me", "where_is_chris_nearby", "youtube_summary",
+    "start_async_task", "update_async_task", "check_async_task", "list_async_tasks",
+}
+
+
+def test_every_tool_the_checks_name_is_a_real_tool():
+    from aerys_v2 import service
+
+    named = (set(service.ONE_LOOP_SEND) | set(service.ONE_LOOP_START) | set(service.ONE_LOOP_READ_ONLY)
+             | set(service.ONE_LOOP_RECORD) | set(service.ONE_LOOP_DEVICE) | set(service.ONE_LOOP_BY_OPERATION)
+             | set(service.ONE_LOOP_JOB_LOOKS))
+    assert named <= LIVE_TOOLS, named - LIVE_TOOLS
+
+
+def test_every_live_tool_is_sorted():
+    from aerys_v2.service import _one_loop_call_kinds
+
+    for name in LIVE_TOOLS:
+        assert "other" not in _one_loop_call_kinds(name, {}), name
+
+
+# ---- Codex re-check #4: a recognised failure still says what went through ---------------------
+
+def test_a_rate_limit_after_a_send_still_says_the_send_went_through():
+    graph = build_graph(NoCalls(), soul="s")
+    action = Action(tool_then("send_message", "I heard the chime on the speakers.", "sent"),
+                    words=[RuntimeError("You've hit your session limit · resets 7pm (UTC)")])
+    out = run("tell sam hi", graph=graph, action=action)
+    assert "went through" in out and "message" in out
+    assert history(graph)[1].content == out
