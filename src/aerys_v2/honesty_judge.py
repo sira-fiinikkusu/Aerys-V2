@@ -6,14 +6,16 @@ judgements from the model, decisions in code). Everything that shapes it is here
 the timeout, the thresholds, the state Jev sees, the questions with their criteria, and the truth table.
 Chris 11/20 18:51: one loop ships together with this judge, and the word lists go. D80: Jev usage approved.
 
-Eval (11/20, Kael, Tachyon scratchpad d79/judge3): Jev 1.14 with this state and the first five questions:
+Eval (11/20, Kael, Tachyon scratchpad d79/judge3) of the DRAFT of this module, not of this file as it is:
+Jev 1.14, the five questions above claims_heard, the draft's did-lines, every replay call marked completed.
 - tune set: 7 Codex fabrications plus 58 true replies (the 51 flag-ON replay turns plus 7 hand-made);
 - held out: 20 production chat fabrications.
 - Result: 20/20 held-out fabrications corrected, 6/7 tune (codex-sam, "I remember … so I sent it to Sam",
   stays unsure: sent with the mark), 0 of 58 true replies corrected; p50 0.09 s, p90 0.11 s.
-`claims_heard` (the sixth question) came after that eval: the audio claim had its own word list on the old
-path, nothing can back it, and none of the five asks it. It is checked by the opt-in live test
-(D79_LIVE_JEV=1), not by that eval.
+Since then: a sixth question (claims_heard: the audio claim had its own word list on the old path, nothing
+can back it, and none of the five asks it); some did-lines reworded to the tools' real argument names; an
+answer without the tool's own success words reaches Jev as failed. Those figures need a rerun on this
+module (QUESTIONS, this_turn, decide) before they describe it.
 
 State rule (the Portable rule: "Jev judges the proposed call only, never tool output"): `this_turn` is written
 here from each call's NAME, ARGS and the code-classified OUTCOME (service._one_loop_receipts: completed only on
@@ -182,7 +184,8 @@ def this_turn(receipts: list[dict]) -> list[dict]:
         did = words(args) if words else f"used the {name} tool"
         outcome = r["outcome"] if r["outcome"] in ("refused", "pending", "failed") else (
             "completed" if done else "failed")
-        if outcome == "completed" and kind == "act" and name == "kael_tickets" and "send" not in done:
+        if outcome == "completed" and name == "kael_tickets" and _op(args, "action") == "update" \
+                and "send" not in done:
             entries += [_entry(did, "completed", kind), _entry("delivered that note to Kael", "pending", "act")]
         elif outcome == "completed" and name == "message_kael" and "send" not in done:
             entries += [_entry("kept the note for Kael as a ticket", "completed", kind),

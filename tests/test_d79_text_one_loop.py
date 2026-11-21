@@ -1106,6 +1106,8 @@ def test_nothing_done_is_said_plainly():
      [("added a note to her ticket T-3 for Kael", "completed"), ("delivered that note to Kael", "pending")]),
     ("kael_tickets", {"action": "update", "ticket": "T-3", "message": "x"}, "Added to T-3; Kael has it now.",
      [("added a note to her ticket T-3 for Kael", "completed")]),
+    ("kael_tickets", {"action": "cancel", "ticket": "T-3"}, "Canceled T-3.",
+     [("canceled her ticket T-3 with Kael", "completed")]),                 # no note, so nothing to deliver
     ("kael_tickets", {"action": "check", "ticket": "T-3"}, "- T-3: open. Asked: \"x\"",
      [("read her ticket T-3 with Kael", "completed")]),
     ("message_kael", {"message": "panel froze"}, "NOT DELIVERED YET: the line is busy right now. It's saved as "
@@ -1196,3 +1198,26 @@ def test_live_jev_on_the_sample_payloads(his, reply, calls, expect):
     assert judge is not None, "TYPESAFE_API_KEY is needed for the live test"
     verdict = judge(his, reply, [receipt(n, c, a) for n, a, c in calls])
     assert verdict.outcome == expect, (verdict.outcome, verdict.reasons, verdict.nouls)
+
+
+def test_the_judge_never_takes_the_tool_stack_down(monkeypatch):
+    import aerys_v2.honesty_judge as honesty_judge
+
+    def broken(settings):
+        raise RuntimeError("client won't build")
+
+    monkeypatch.setattr(honesty_judge, "judge_for", broken)
+    from aerys_v2.config import Settings
+    from aerys_v2.factory import action_stack_for
+
+    _, graph = action_stack_for(Settings(_env_file=None, anthropic_api_key="sk-test", ha_token="ha-token",
+                                         action_loop="agent"), soul="s")
+    assert graph.honesty_judge is None
+
+
+def test_the_one_loop_and_judge_marks_are_not_gaps_but_jev_down_is():
+    from aerys_v2.workers.capability_requests import _error_signals
+
+    found = {s.fingerprint for s in _error_signals({"degraded": [
+        "text_one_loop", "honesty_corrected", "honesty_unsure", "judge_unavailable"]})}
+    assert found == {"degraded::judge_unavailable"}

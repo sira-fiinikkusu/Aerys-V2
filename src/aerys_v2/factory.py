@@ -2866,10 +2866,16 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     from aerys_v2.dj import store_for
 
     action_graph.dj_store = store_for(settings.database_url)
-    # D79: the honesty judge on her one-loop replies (Jev on the reflex's key; None without one).
-    from aerys_v2.honesty_judge import judge_for
+    # D79: the honesty judge on her one-loop replies (Jev on the reflex's key; None without one). It can
+    # never take the tool stack down: a judge that won't build is None, i.e. judge_unavailable on each turn.
+    try:
+        from aerys_v2.honesty_judge import judge_for
 
-    action_graph.honesty_judge = judge_for(settings)
+        action_graph.honesty_judge = judge_for(settings)
+    except Exception:
+        log.warning("honesty judge: couldn't build it; one-loop replies go out marked judge_unavailable",
+                    exc_info=True)
+        action_graph.honesty_judge = None
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else

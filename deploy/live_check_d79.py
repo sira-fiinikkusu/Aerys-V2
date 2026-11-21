@@ -64,13 +64,19 @@ try:
                     _TD79(content="Launched async subagent. task_id: j1 " + _injD79, name="start_async_task",
                           tool_call_id="c")])
     _stD79 = _hjD79.build_state("go ahead", "I've started it.", _hjD79.this_turn(_rD79))
-    _D79.append(_stD79["this_turn"] == [{"did": "started a home job that will: Edit the MapTap skill",
-                                         "outcome": "completed"}]
+    # With the switch expected ON, the judge must also be armed here (this brain's TypeSafe key): otherwise
+    # every one-loop reply would go out unjudged, marked judge_unavailable.
+    import os as _os2D79
+    from aerys_v2.config import Settings as _S2D79
+    _armedD79 = _os2D79.environ.get("D79_EXPECT", "off").strip().lower() != "on" or \
+        _hjD79.judge_for(_S2D79()) is not None
+    _D79.append(_armedD79 and _stD79["this_turn"] == [{"did": "started a home job that will: Edit the MapTap skill",
+                                                       "outcome": "completed"}]
                 and _injD79 not in str(_stD79) and len(_hjD79.QUESTIONS) == 6
                 and _okD79(_hjD79.Verdict(_hjD79.CORRECT), "I've started it.", []) is not None
                 and _okD79(_hjD79.Verdict(_hjD79.UNAVAILABLE), "I've started it.", []) is None)
-    print("#D79 the honesty judge loads and builds its state from code-written lines, never tool output:",
-          _D79[-1])
+    print("#D79 the honesty judge loads and builds its state from code-written lines, never tool output "
+          "(and, with D79_EXPECT=on, is armed with this brain's key):", _D79[-1])
 except Exception as _e:
     _D79.append(False)
     print("#D79 the honesty judge (failed to load):", False)
