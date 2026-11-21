@@ -63,11 +63,21 @@ def sources_for(request):
     # Keep the immediately replied-to relay tainted through every tool/model step.
     human = next((i for i in range(len(messages) - 1, -1, -1)
                   if isinstance(messages[i], HumanMessage)), None)
+    # D79 (Codex review of 45ea17c #1): a correction pass, or the zero-tool bounce inside one, appends a
+    # human-shaped instruction after his turn. The caller says where his real turn is, so the relay right
+    # before IT keeps tainting every step. Unset (every other turn), or not a human message there: as above.
+    start = config.get('turn_human_index')
+    if (isinstance(start, int) and not isinstance(start, bool) and 0 <= start < len(messages)
+            and isinstance(messages[start], HumanMessage)):
+        human = start
     if human is not None and human > 0:
         prior = messages[human - 1]
         if isinstance(prior, AIMessage) and prior.additional_kwargs.get('reach_source') == 'relay':
             sources.add('relay')
     sources.update(m.name for m in messages if isinstance(m, ToolMessage) and m.name in READERS)
+    # D79 (#2): a correction rerun starts from his turn again; the earlier pass's outside reads ride along
+    # (code-owned reader names), so what they read still can't authorize a reach-out on the rerun.
+    sources.update(str(s) for s in (config.get('carried_sources') or ()) if str(s) in READERS)
     return tuple(sorted(sources))
 
 

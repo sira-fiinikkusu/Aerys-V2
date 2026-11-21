@@ -2280,6 +2280,10 @@ def _action_turn(
         seed = _direct_device_seed(action_graph, seed)
         if seed_hint:
             seed = _with_seed_hint(seed, seed_hint)
+        if judged:
+            # D79 (Codex review of 45ea17c #1): the guard is told where his turn is, so a zero-tool bounce's
+            # human-shaped line never hides a relay before it, on this pass or the correction's.
+            config = {**config, "configurable": {**config["configurable"], "turn_human_index": _human_index(seed)}}
         result, gate_degraded = _run_action_gated(
             action_graph,
             seed,
@@ -2353,6 +2357,55 @@ def _action_turn(
     return final
 
 
+def _human_index(seed: list) -> int | None:
+    """Where his turn is in a seed (the last human message: a device seed or a hint may follow or edit it)."""
+    return next((i for i in range(len(seed) - 1, -1, -1) if isinstance(seed[i], HumanMessage)), None)
+
+
+def _carried_sources(messages: list) -> tuple:
+    """The outside readers that ran in MESSAGES (an earlier pass of this turn), for the guard on a rerun that
+    starts from his turn again (Codex review of 45ea17c #2). Names only, never what they read."""
+    from aerys_v2.outside_guard import READERS
+
+    return tuple(sorted({m.name for m in messages if isinstance(m, ToolMessage) and m.name in READERS}))
+
+
+def _invoke_collecting(action_graph: object, messages: list, config: dict, sink: list) -> dict:
+    """_invoke_action_graph, keeping what has run in SINK as it runs (the latest full message list), so a
+    model call that raises after a tool ran still leaves that tool's receipt for the reply and the row
+    (Codex review of 45ea17c #3). A graph that can't stream is invoked as before."""
+    stream = getattr(action_graph, "stream", None)
+    if stream is None or not callable(stream):
+        out = _invoke_action_graph(action_graph, messages, config)
+        sink[:] = list(out["messages"])
+        return out
+    config = {**config, "configurable": {**config.get("configurable", {}), "action_context_memo": {}}}
+    last = None
+    with track_local_tool_fallback():
+        for state in stream({"messages": messages}, config, stream_mode="values"):
+            if isinstance(state, dict) and isinstance(state.get("messages"), list):
+                last = state
+                sink[:] = list(state["messages"])
+    return last if last is not None else {"messages": list(messages)}
+
+
+def _run_gated_collecting(action_graph: object, seed: list, config: dict, sink: list) -> tuple[dict, list[str]]:
+    """_run_action_gated (the zero-tool bounce, unchanged) for a correction rerun, keeping what ran in SINK.
+    The legacy engine re-invokes outside the graph, so it is run as before (SINK gets its result)."""
+    if getattr(action_graph, "action_loop", None) != "agent":
+        result, marks = _run_action_gated(action_graph, seed, config)
+        sink[:] = list(result["messages"])
+        return result, marks
+    route = config.get("configurable", {}).get("specialist_route", "action")
+    config = {**config, "configurable": {**config.get("configurable", {}), "honesty_gate": True}}
+    result = _invoke_collecting(action_graph, seed, config, sink)
+    retried = any(isinstance(m, HumanMessage) and m.content == ACTION_NO_TOOL_CORRECTION
+                  for m in result["messages"])
+    verdict = action_honesty_gate(route, extract_tool_calls(result["messages"]), already_retried=retried,
+                                  specialists=(route,))
+    return result, [NO_TOOL_ACTION_MARKER] if verdict == GATE_MARK else []
+
+
 def _action_turn_judged(text_one_loop, route: str, identity: dict, action_allowlist, owner_id: str) -> bool:
     """D79 on the ACTION path (Chris 11/20 21:09; a side agent found the gap): an action-routed turn is
     judged when the one-loop switch is on and the caller is eligible for the one loop (household identity on
@@ -2410,12 +2463,19 @@ def _judged_action_pass(action_graph: object, seed: list, result: dict, run_conf
         else:
             log.info("action honesty judge: %s with only reads — running his turn again | thread=%s",
                      marker, conf.get("thread_id"))
-            again, again_marks = _run_action_gated(action_graph, seed, {**run_config, "configurable": {
-                **conf, "one_loop_correction": correction}})
+            sink: list = []
+            try:
+                again, again_marks = _run_gated_collecting(action_graph, seed, {**run_config, "configurable": {
+                    **conf, "one_loop_correction": correction, "turn_human_index": _human_index(seed),
+                    "carried_sources": _carried_sources(this_run())}}, sink)
+            except Exception:
+                messages.extend(sink[len(seed):])           # what the rerun did before it failed
+                raise
             messages.extend(list(again["messages"])[len(seed):])
             marks.extend(m for m in again_marks if m not in marks)
             receipts = _one_loop_receipts(this_run())
     except Exception as e:
+        receipts = _one_loop_receipts(this_run())
         honest = _honest_reply_for_failure(e)
         log.warning("action honesty judge: the correction failed (%s); saying what went through", e, exc_info=True)
         marks.append(ACTION_CORRECTION_FAILED)
@@ -2709,8 +2769,16 @@ def _text_one_loop_turn(
     try:
         seed = _untag_own_replies(_action_history_seed(graph, configurable, text))
         turn["seed"] = len(seed)
+        # The guard is told where his turn is (Codex review of 45ea17c #1), on this pass and the rerun.
+        run_config = {**run_config, "configurable": {**run_config["configurable"],
+                                                     "turn_human_index": _human_index(seed)}}
         CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
-        result = _invoke_action_graph(action_graph, seed, run_config)
+        sink: list = []
+        try:
+            result = _invoke_collecting(action_graph, seed, run_config, sink)
+        except Exception:
+            turn["messages"] = list(sink)                   # what ran before it failed stays in evidence
+            raise
         turn["messages"] = list(result["messages"])
         reply = _strip_handoff(_reply_text(turn["messages"][-1]))
         receipts = _one_loop_receipts(this_run())
@@ -2733,8 +2801,16 @@ def _text_one_loop_turn(
                 # Nothing was done yet: run his same turn again, armed, with the correction in the system.
                 log.info("one loop: %s with nothing done — running his turn again | thread=%s",
                          marker, configurable.get("thread_id"))
-                result = _invoke_action_graph(action_graph, seed, {**run_config, "configurable": {
-                    **run_config["configurable"], "one_loop_correction": correction}})
+                # From his turn again, with the first pass's outside reads carried for the guard (#2), and
+                # what it does kept as it goes (#3).
+                sink = []
+                try:
+                    result = _invoke_collecting(action_graph, seed, {**run_config, "configurable": {
+                        **run_config["configurable"], "one_loop_correction": correction,
+                        "carried_sources": _carried_sources(this_run())}}, sink)
+                except Exception:
+                    turn["messages"] = [*turn["messages"], *sink[len(seed):]]
+                    raise
                 turn["messages"] = [*turn["messages"], *list(result["messages"])[len(seed):]]
                 receipts = _one_loop_receipts(this_run())
             reply = _strip_handoff(_reply_text(turn["messages"][-1]))
