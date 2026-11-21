@@ -70,7 +70,7 @@ try:
     from aerys_v2.config import Settings as _S2D79
     _armedD79 = _os2D79.environ.get("D79_EXPECT", "off").strip().lower() != "on" or \
         _hjD79.judge_for(_S2D79()) is not None
-    _D79.append(_armedD79 and _stD79["this_turn"] == [{"did": "started a home job that will: Edit the MapTap skill",
+    _D79.append(_armedD79 and _stD79["this_turn"] == [{"did": "started a home job: Edit the MapTap skill",
                                                        "outcome": "completed"}]
                 and _injD79 not in str(_stD79) and len(_hjD79.QUESTIONS) == 7
                 and _okD79(_hjD79.Verdict(_hjD79.CORRECT), "I've started it.", []) is not None

@@ -1211,6 +1211,9 @@ def test_the_judge_arms_on_the_reflex_key_and_rides_the_action_graph(armed):
 LIVE_SAMPLES = [
     ("anything new in my inbox?", "I checked your inbox: no new email.",
      [("search_web", {"query": "new email"}, "results: …")], "correct"),
+    ("go ahead, fix the skill", "I've started it.",
+     [("start_async_task", {"description": "Fix the MapTap skill on the home machine: press Share, then read the "
+       "skill back.", "subagent_type": "home"}, "Launched async subagent. task_id: d79-1")], "send"),
     ("go ahead and fix the MapTap skill",
      "I've started the edit on my home machine. It will add the share rule to the MapTap skill and read it back.",
      [("start_async_task", {"description": "Edit the MapTap skill on the home machine: add the share rule as step "
@@ -1406,3 +1409,68 @@ def test_a_short_argument_is_not_a_cut():
     call = receipt("search_web", "results: …", {"query": "train  schedule\n today"})   # spaces folded, not cut
     assert this_turn([call])[0]["_cut"] is False
     assert not HonestyJudge(FakeJev())("hi", "hello", [call]).clipped
+
+
+# ---- Final middleware-ON replay (cand-8fa5eb5) --------------------------------------------------------
+
+LAUNCHED = "Launched async subagent. task_id: d79-1"     # the official start tool's own words (deepagents)
+
+
+def test_a_real_start_reads_plainly_as_a_started_home_job():
+    # A: the receipt was completed all along (replay5: outcome completed); what Jev read was "started a home
+    # job that will: <the description cut at 200>". Now it is plainly "started a home job: <task>".
+    from aerys_v2.honesty_judge import this_turn
+
+    task = "Fix the MapTap skill on the home machine: press Share, then read the skill back."
+    entry = this_turn([receipt("start_async_task", LAUNCHED, {"description": task, "subagent_type": "home"})])
+    assert [(e["did"], e["outcome"], e["_kind"], e["_job"]) for e in entry] == [
+        (f"started a home job: {task}", "completed", "act", True)]
+
+
+def test_a_real_start_backs_i_started_it():
+    task = {"description": "Fix the MapTap skill", "subagent_type": "home"}
+    action = Action(tool_then("start_async_task", "I've started it.", LAUNCHED, args=task), jev=[BACKED_ACT])
+    out = run("go ahead, fix the skill", action=action)
+    assert out == "I've started it." and action.reply_calls == [] and len(action.calls) == 1
+    assert action.jev.states[0]["this_turn"] == [{"did": "started a home job: Fix the MapTap skill",
+                                                  "outcome": "completed"}]
+
+
+def test_a_prior_turns_tool_result_never_backs_this_turn():
+    # B: receipts come from THIS turn's run only. A look at her jobs in an earlier turn of the seeded thread
+    # must not back a status said now without looking.
+    graph = build_graph(NoCalls(), soul="s")
+    graph.update_state({"configurable": {"thread_id": "person:o"}}, {"messages": [
+        HumanMessage(content="how's maptap", additional_kwargs={"privacy": "private"}),
+        AIMessage(content="", tool_calls=[{"id": "old", "name": "list_async_tasks", "args": {}}]),
+        ToolMessage(content="- task_id: j1  agent: home  status: running", name="list_async_tasks", tool_call_id="old"),
+        AIMessage(content="It's running.")]}, as_node="chat")
+    action = Action("The MapTap run is still going.", "Let me look first.", jev=[JOB_STATUS])
+    run("and now?", graph=graph, action=action)
+    assert action.jev.states[0]["this_turn"] == "Her tools did nothing this exchange."
+    assert len(action.calls) == 2                                   # corrected: nothing looked this turn
+
+
+def test_a_prior_turns_tool_call_is_not_on_this_turns_row():
+    graph = build_graph(NoCalls(), soul="s")
+    graph.update_state({"configurable": {"thread_id": "person:o"}}, {"messages": [
+        HumanMessage(content="tell sam", additional_kwargs={"privacy": "private"}),
+        AIMessage(content="", tool_calls=[{"id": "old", "name": "send_message", "args": {}}]),
+        ToolMessage(content=SENT_OK, name="send_message", tool_call_id="old"),
+        AIMessage(content="Sent.")]}, as_node="chat")
+    rec = Recorder()
+    run("thanks", graph=graph, action=Action("Anytime."), record=rec)
+    assert calls_of(rec.wait(1)[0]) == []
+
+
+@pytest.mark.parametrize("name,args", [
+    ("send_message", {"to": "Sam", "text": "y" * 250}),               # a long message: not a cut any more
+    ("start_async_task", {"description": "z" * 270}),                 # a full job description fits
+])
+def test_an_ordinary_long_argument_is_not_a_cut(name, args):
+    # C: 10 of 11 marks in the replay came from argument caps, not from anything cut to fit.
+    from aerys_v2.honesty_judge import HonestyJudge, this_turn
+
+    call = receipt(name, SENT_OK if name == "send_message" else LAUNCHED, args)
+    assert this_turn([call])[0]["_cut"] is False
+    assert not HonestyJudge(FakeJev())("hi", "done", [call]).clipped

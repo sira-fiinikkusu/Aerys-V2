@@ -2569,8 +2569,13 @@ def _text_one_loop_turn(
     LOCAL_FALLBACK_FIRED.set(False)
     run_config = {**config, "configurable": {**configurable, "specialist": False, "tier": tier,
                                                "text_one_loop": True}}
-    turn = {"messages": [], "degraded": [ONE_LOOP_MARKER], "error": None}
+    # "seed": how many of turn["messages"] are the seeded thread (earlier turns + his message). Receipts and
+    # the row read only what ran after it (the final replay: an earlier turn's look backed a status said now).
+    turn = {"messages": [], "seed": 0, "degraded": [ONE_LOOP_MARKER], "error": None}
     done = {"finished": False}
+
+    def this_run() -> list:
+        return turn["messages"][turn["seed"]:]
 
     def finish(reply_text: str, raw_text: str | None = None) -> str:
         """The one exit: land the exchange, then record the row, whatever happened before."""
@@ -2606,7 +2611,7 @@ def _text_one_loop_turn(
             tier_override_source=tier_override_source,
             raw_reply=reply_text if raw_text is None else raw_text,
             emitted_reply=reply_text,
-            messages=turn["messages"],
+            messages=this_run(),
             extra_degraded=turn["degraded"],
             error=error,
         )
@@ -2614,11 +2619,12 @@ def _text_one_loop_turn(
 
     try:
         seed = _untag_own_replies(_action_history_seed(graph, configurable, text))
+        turn["seed"] = len(seed)
         CURRENT_TURN_TEXT.set(_remember_window_for(seed, text, config))
         result = _invoke_action_graph(action_graph, seed, run_config)
         turn["messages"] = list(result["messages"])
         reply = _strip_handoff(_reply_text(turn["messages"][-1]))
-        receipts = _one_loop_receipts(turn["messages"])
+        receipts = _one_loop_receipts(this_run())
         verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
         _one_loop_mark(turn["degraded"], verdict)
         check = _one_loop_check(verdict, reply, receipts) if verdict is not None else None
@@ -2641,7 +2647,7 @@ def _text_one_loop_turn(
                 result = _invoke_action_graph(action_graph, seed, {**run_config, "configurable": {
                     **run_config["configurable"], "one_loop_correction": correction}})
                 turn["messages"] = [*turn["messages"], *list(result["messages"])[len(seed):]]
-                receipts = _one_loop_receipts(turn["messages"])
+                receipts = _one_loop_receipts(this_run())
             reply = _strip_handoff(_reply_text(turn["messages"][-1]))
             again_verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
             _one_loop_mark(turn["degraded"], again_verdict)
@@ -2655,7 +2661,7 @@ def _text_one_loop_turn(
         turn["error"] = str(e) or type(e).__name__
         log.warning("one loop: the turn failed (%s); landing an honest line", turn["error"], exc_info=True)
         return finish(_one_loop_with_evidence(honest or ONE_LOOP_FAILURE_LINE,
-                                              _one_loop_receipts(turn["messages"])))
+                                              _one_loop_receipts(this_run())))
 
     raw = reply
     if not raw.strip():

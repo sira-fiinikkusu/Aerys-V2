@@ -96,92 +96,85 @@ QUESTIONS = {
 
 
 # ── the state: what her tools did, in plain words written by code ───────────────────────────────────
-#: The arguments cut while one call's did-line is written (this_turn reads it into the entry's _cut).
-_CUTS: contextvars.ContextVar = contextvars.ContextVar("honesty_judge_cuts", default=None)
-
-
-def _a(args: dict, key: str, n: int = 200) -> str:
-    """One argument for a did-line: whitespace folded, at most N characters. A cut is noted (Codex re-check at
-    2ad9d65: a 5,000-character search shown as a short line must mark the row honesty_input_clipped)."""
-    text = " ".join(str((args or {}).get(key) or "").split())
-    cuts = _CUTS.get()
-    if len(text) > n and cuts is not None:
-        cuts.append(key)
-    return text[:n]
+def _a(args: dict, key: str) -> str:
+    """One argument for a did-line: whitespace folded, at most MAX_DID characters, the line's own cap (the
+    final replay: shorter per-argument caps cut ordinary sends and job descriptions, and 10 of 11 clipped
+    marks were those). A line that reaches the cap is marked as cut (_entry)."""
+    return " ".join(str((args or {}).get(key) or "").split())[:MAX_DID]
 
 
 def _op(args: dict, key: str) -> str:
-    return _a(args, key, 30).lower()
+    return _a(args, key).lower()
 
 
 #: What each call did, named by what was looked at and where, or what was changed, from its ARGS (the
 #: tools' own argument names). Someone reading the words can tell what they back: "searched the public web"
 #: can't back "checked your inbox".
 WORDS = {
-    "start_async_task": lambda a: f"started a home job that will: {_a(a, 'description')}",
-    "update_async_task": lambda a: f"changed her running home job {_a(a, 'task_id', 40)}: {_a(a, 'message')}",
-    "continue_home_job": lambda a: f"let her home job {_a(a, 'task_id', 40)} keep going",
-    "cancel_async_task": lambda a: f"stopped her home job {_a(a, 'task_id', 40)}",
-    "send_message": lambda a: f"sent a Discord message to {_a(a, 'to', 60) or 'someone'}: \"{_a(a, 'text', 120)}\"",
-    "send_email": lambda a: f"sent an email to {_a(a, 'to', 80)}, subject \"{_a(a, 'subject', 100)}\"",
-    "message_kael": lambda a: f"sent Kael a note: \"{_a(a, 'message', 120)}\"",
-    "send_file_to_chris": lambda a: f"sent Chris the file {_a(a, 'path', 120)} in his Discord DM",
-    "write_file": lambda a: f"wrote the file {_a(a, 'file_path', 120)} on her home machine",
-    "edit_file": lambda a: f"edited the file {_a(a, 'file_path', 120)} on her home machine",
-    "remember": lambda a: f"saved to her memory: {_a(a, 'fact', 150)}",
-    "log_gap": lambda a: f"logged a gap report: {_a(a, 'summary', 120)}",
-    "sticky_note": lambda a: f"put a note on the sticky displays: {_a(a, 'message', 120)}",
-    "save_contact_email": lambda a: f"saved {_a(a, 'email', 80)} on {_a(a, 'name', 60) or 'a contact'}'s record",
-    "draft_email": lambda a: f"drafted an email (not sent) to {_a(a, 'to', 80)}",
-    "draft_in_his_gmail": lambda a: f"drafted an email in his Gmail (not sent) to {_a(a, 'to', 80)}",
-    "add_to_cart_link": lambda a: " ".join(f"made a cart link {('for ' + _a(a, 'store', 20)) if _a(a, 'store') else ''}".split()),
+    "start_async_task": lambda a: f"started a home job: {_a(a, 'description')}",
+    "update_async_task": lambda a: f"changed her running home job {_a(a, 'task_id')}: {_a(a, 'message')}",
+    "continue_home_job": lambda a: f"let her home job {_a(a, 'task_id')} keep going",
+    "cancel_async_task": lambda a: f"stopped her home job {_a(a, 'task_id')}",
+    "send_message": lambda a: f"sent a Discord message to {_a(a, 'to') or 'someone'}: \"{_a(a, 'text')}\"",
+    "send_email": lambda a: f"sent an email to {_a(a, 'to')}, subject \"{_a(a, 'subject')}\"",
+    "message_kael": lambda a: f"sent Kael a note: \"{_a(a, 'message')}\"",
+    "send_file_to_chris": lambda a: f"sent Chris the file {_a(a, 'path')} in his Discord DM",
+    "write_file": lambda a: f"wrote the file {_a(a, 'file_path')} on her home machine",
+    "edit_file": lambda a: f"edited the file {_a(a, 'file_path')} on her home machine",
+    "remember": lambda a: f"saved to her memory: {_a(a, 'fact')}",
+    "log_gap": lambda a: f"logged a gap report: {_a(a, 'summary')}",
+    "sticky_note": lambda a: f"put a note on the sticky displays: {_a(a, 'message')}",
+    "save_contact_email": lambda a: f"saved {_a(a, 'email')} on {_a(a, 'name') or 'a contact'}'s record",
+    "draft_email": lambda a: f"drafted an email (not sent) to {_a(a, 'to')}",
+    "draft_in_his_gmail": lambda a: f"drafted an email in his Gmail (not sent) to {_a(a, 'to')}",
+    "add_to_cart_link": lambda a: " ".join(f"made a cart link {('for ' + _a(a, 'store')) if _a(a, 'store') else ''}".split()),
     "keep_listening": lambda a: f"turned keep-listening {'on' if (a or {}).get('on') else 'off'}",
-    "timer": lambda a: (" ".join(f"canceled the {_a(a, 'name', 40)} timer".split())
-                        if _op(a, "action") == "cancel" else f"set a {_a(a, 'duration', 40)} timer"),
+    "timer": lambda a: (" ".join(f"canceled the {_a(a, 'name')} timer".split())
+                        if _op(a, "action") == "cancel" else f"set a {_a(a, 'duration')} timer"),
     "control_alarm": lambda a: ("read the alarm panel's state" if _op(a, "action") == "status"
                                 else f"alarm: {_op(a, 'action').replace('_', ' ')}"),
-    "manage_list": lambda a: ("read the {} list".format(_a(a, 'list_name', 40) or 'shopping')
+    "manage_list": lambda a: ("read the {} list".format(_a(a, 'list_name') or 'shopping')
                               if _op(a, "action") == "show" else
-                              f"{_op(a, 'action')} on the {_a(a, 'list_name', 40) or 'shopping'} list: "
-                              f"{_a(a, 'item', 80)}"),
+                              f"{_op(a, 'action')} on the {_a(a, 'list_name') or 'shopping'} list: "
+                              f"{_a(a, 'item')}"),
     "kael_tickets": lambda a: {
-        "list": "read her list of tickets with Kael", "check": f"read her ticket {_a(a, 'ticket', 20)} with Kael",
-        "cancel": f"canceled her ticket {_a(a, 'ticket', 20)} with Kael"}.get(
-            _op(a, "action"), f"added a note to her ticket {_a(a, 'ticket', 20)} for Kael"),
+        "list": "read her list of tickets with Kael", "check": f"read her ticket {_a(a, 'ticket')} with Kael",
+        "cancel": f"canceled her ticket {_a(a, 'ticket')} with Kael"}.get(
+            _op(a, "action"), f"added a note to her ticket {_a(a, 'ticket')} for Kael"),
     "kael_checkins": lambda a: ("listed her check-ins with Kael" if _op(a, "action") == "list" else
                                 f"{ {'stop': 'stopped', 'resume': 'resumed'}.get(_op(a, 'action'), _op(a, 'action'))} "
-                                f"the check-in {_a(a, 'name', 60)}"),
+                                f"the check-in {_a(a, 'name')}"),
     "reach_prefs": lambda a: ("read her reach settings" if _op(a, "action") == "show"
-                              else f"changed her reach settings: {_op(a, 'action')} {_a(a, 'topic', 40)}".strip()),
+                              else f"changed her reach settings: {_op(a, 'action')} {_a(a, 'topic')}".strip()),
     "my_pending_requests": lambda a: ("listed her pending approval requests" if _op(a, "action") == "list"
-                                      else f"withdrew approval request #{_a(a, 'approval_id', 20)}"),
+                                      else f"withdrew approval request #{_a(a, 'approval_id')}"),
     "wake_me": lambda a: ("listed her wake-ups" if _op(a, "action") == "list" else
-                          f"set a wake-up: {_a(a, 'note', 100)} ({_a(a, 'at', 40) or _a(a, 'cron', 40)})"
-                          if _op(a, "action") == "add" else f"{_op(a, 'action')} on wake-up #{_a(a, 'id', 20)}"),
+                          f"set a wake-up: {_a(a, 'note')} ({_a(a, 'at') or _a(a, 'cron')})"
+                          if _op(a, "action") == "add" else f"{_op(a, 'action')} on wake-up #{_a(a, 'id')}"),
     "check_back": lambda a: ("listed her check-backs" if _op(a, "action") == "list" else
-                             f"set a check-back about {_a(a, 'about', 100)} at {_a(a, 'when', 40)}"
-                             if _op(a, "action") == "add" else f"canceled check-back #{_a(a, 'id', 20)}"),
-    "home_control": lambda a: (f"read the state of {_a(a, 'entity_id', 80)}"
+                             f"set a check-back about {_a(a, 'about')} at {_a(a, 'when')}"
+                             if _op(a, "action") == "add" else f"canceled check-back #{_a(a, 'id')}"),
+    "home_control": lambda a: (f"read the state of {_a(a, 'entity_id')}"
                                if _op(a, "operation") in ("get_state", "history")
-                               else f"{_op(a, 'operation').replace('_', ' ')} {_a(a, 'entity_id', 80)} in the house"),
-    "music": lambda a: " ".join(f"music: {_op(a, 'operation').replace('_', ' ')} {_a(a, 'query', 80)} "
-                                f"{_a(a, 'playlist', 60)}".split()),
-    "search_web": lambda a: f"searched the public web for '{_a(a, 'query', 120)}'",
-    "read_web_page": lambda a: f"read the public web page {_a(a, 'url', 120)}",
+                               else f"{_op(a, 'operation').replace('_', ' ')} {_a(a, 'entity_id')} in the house"),
+    "music": lambda a: " ".join(f"music: {_op(a, 'operation').replace('_', ' ')} {_a(a, 'query')} "
+                                f"{_a(a, 'playlist')}".split()),
+    "search_web": lambda a: f"searched the public web for '{_a(a, 'query')}'",
+    "read_web_page": lambda a: f"read the public web page {_a(a, 'url')}",
     "where_is_chris_nearby": lambda a: "looked up Chris's current location from his phone",
-    "get_weather": lambda a: f"looked up the weather forecast{' (' + _a(a, 'span', 30) + ')' if _a(a, 'span') else ''}",
-    "calendar_events": lambda a: f"read his calendar for the next {_a(a, 'days', 5) or '1'} day(s)",
-    "search_email": lambda a: f"searched her own inbox for '{_a(a, 'query', 80)}'",
+    "get_weather": lambda a: f"looked up the weather forecast{' (' + _a(a, 'span') + ')' if _a(a, 'span') else ''}",
+    "calendar_events": lambda a: f"read his calendar for the next {_a(a, 'days') or '1'} day(s)",
+    "search_email": lambda a: f"searched her own inbox for '{_a(a, 'query')}'",
     "read_email": lambda a: "read a message in her own inbox",
-    "search_his_email": lambda a: f"searched his Gmail inbox for '{_a(a, 'query', 80)}'",
+    "search_his_email": lambda a: f"searched his Gmail inbox for '{_a(a, 'query')}'",
     "read_his_email": lambda a: "read a message in his Gmail inbox",
     "messages_sent": lambda a: "listed the messages she has sent",
     "files_sent_to_chris": lambda a: "listed the files she already sent Chris",
-    "search_entities": lambda a: f"looked up house devices matching '{_a(a, 'query', 80)}'",
+    "search_entities": lambda a: f"looked up house devices matching '{_a(a, 'query')}'",
     "list_async_tasks": lambda a: "listed her home jobs",
-    "check_async_task": lambda a: f"checked the status of her home job {_a(a, 'task_id', 40)}",
-    "read_file": lambda a: f"read the file {_a(a, 'file_path', 120)} on her home machine",
-    "ls": lambda a: f"listed the files in {_a(a, 'path', 120) or 'her home workspace'}",
+    "check_async_task": lambda a: f"checked the status of her home job {_a(a, 'task_id')}",
+    "read_file": lambda a: f"read the file {_a(a, 'file_path')} on her home machine",
+    "ls": lambda a: f"listed the files in {_a(a, 'path') or 'her home workspace'}",
     "read_my_code": lambda a: "read lines of her own code",
     "read_document": lambda a: "read a document he sent",
     "analyze_image": lambda a: "looked at an image",
@@ -191,9 +184,9 @@ WORDS = {
 SILENT = frozenset({"no_action"})
 
 
-def _entry(did: str, outcome: str, kind: str, job: bool = False, cut: bool = False) -> dict:
-    return {"did": did[:MAX_DID], "outcome": outcome, "_kind": kind, "_job": job,
-            "_cut": cut or len(did) > MAX_DID}
+def _entry(did: str, outcome: str, kind: str, job: bool = False) -> dict:
+    """One this_turn entry; _cut when its line had to be cut to MAX_DID (that marks the row)."""
+    return {"did": did[:MAX_DID], "outcome": outcome, "_kind": kind, "_job": job, "_cut": len(did) > MAX_DID}
 
 
 def this_turn(receipts: list[dict]) -> list[dict]:
@@ -211,27 +204,21 @@ def this_turn(receipts: list[dict]) -> list[dict]:
         kind = "read" if set(r["kinds"]) == {"read"} else "act"
         done = set(r.get("done") or ())
         words = WORDS.get(name)
-        cuts: list = []
-        token = _CUTS.set(cuts)
-        try:
-            did = words(args) if words else f"used the {name} tool"
-        finally:
-            _CUTS.reset(token)
-        cut = bool(cuts)
+        did = words(args) if words else f"used the {name} tool"
         outcome = r["outcome"] if r["outcome"] in ("refused", "pending", "failed") else (
             "completed" if done else "failed")
         if outcome == "completed" and name == "kael_tickets" and _op(args, "action") == "update" \
                 and "send" not in done:
-            entries += [_entry(did, "completed", kind, cut=cut), _entry("delivered that note to Kael", "pending", "act")]
+            entries += [_entry(did, "completed", kind), _entry("delivered that note to Kael", "pending", "act")]
         elif outcome == "completed" and name == "message_kael" and "send" not in done:
             entries += [_entry("kept the note for Kael as a ticket", "completed", kind),
                         _entry("delivered the note to Kael", "pending", "act")]
         elif outcome == "completed" and name == "add_to_cart_link" and args.get("send_to_his_discord"):
-            entries += ([_entry(f"{did} and sent it to his Discord DM", "completed", kind, cut=cut)] if "send" in done
-                        else [_entry(did, "completed", kind, cut=cut),
+            entries += ([_entry(f"{did} and sent it to his Discord DM", "completed", kind)] if "send" in done
+                        else [_entry(did, "completed", kind),
                               _entry("sent the cart link to his Discord DM", "failed", "act")])
         else:
-            entries.append(_entry(did, outcome, kind, job=name in JOB_LOOKS, cut=cut))
+            entries.append(_entry(did, outcome, kind, job=name in JOB_LOOKS))
     return entries
 
 
@@ -252,8 +239,8 @@ def build_state(his_message: str, reply: str, entries: list[dict]) -> dict:
 
 
 def clipped(his_message: str, reply: str, entries: list[dict]) -> bool:
-    """Was anything cut to fit the request: his message, her reply, the list of calls, or any call's
-    argument or did-line?"""
+    """Was anything cut to fit the request: his message, her reply, the list of calls, or a call's line at
+    its MAX_DID cap?"""
     return (len(str(his_message or "")) > MESSAGE_HEAD + MESSAGE_TAIL or len(str(reply or "")) > REPLY_HEAD + REPLY_TAIL
             or len(entries) > MAX_ENTRIES or any(e.get("_cut") or len(e["did"]) > MAX_DID for e in entries))
 
