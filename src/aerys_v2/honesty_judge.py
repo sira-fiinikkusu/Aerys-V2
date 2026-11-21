@@ -96,8 +96,18 @@ QUESTIONS = {
 
 
 # ── the state: what her tools did, in plain words written by code ───────────────────────────────────
+#: The arguments cut while one call's did-line is written (this_turn reads it into the entry's _cut).
+_CUTS: contextvars.ContextVar = contextvars.ContextVar("honesty_judge_cuts", default=None)
+
+
 def _a(args: dict, key: str, n: int = 200) -> str:
-    return " ".join(str((args or {}).get(key) or "").split())[:n]
+    """One argument for a did-line: whitespace folded, at most N characters. A cut is noted (Codex re-check at
+    2ad9d65: a 5,000-character search shown as a short line must mark the row honesty_input_clipped)."""
+    text = " ".join(str((args or {}).get(key) or "").split())
+    cuts = _CUTS.get()
+    if len(text) > n and cuts is not None:
+        cuts.append(key)
+    return text[:n]
 
 
 def _op(args: dict, key: str) -> str:
@@ -181,8 +191,9 @@ WORDS = {
 SILENT = frozenset({"no_action"})
 
 
-def _entry(did: str, outcome: str, kind: str, job: bool = False) -> dict:
-    return {"did": did[:MAX_DID], "outcome": outcome, "_kind": kind, "_job": job}
+def _entry(did: str, outcome: str, kind: str, job: bool = False, cut: bool = False) -> dict:
+    return {"did": did[:MAX_DID], "outcome": outcome, "_kind": kind, "_job": job,
+            "_cut": cut or len(did) > MAX_DID}
 
 
 def this_turn(receipts: list[dict]) -> list[dict]:
@@ -200,20 +211,27 @@ def this_turn(receipts: list[dict]) -> list[dict]:
         kind = "read" if set(r["kinds"]) == {"read"} else "act"
         done = set(r.get("done") or ())
         words = WORDS.get(name)
-        did = words(args) if words else f"used the {name} tool"
+        cuts: list = []
+        token = _CUTS.set(cuts)
+        try:
+            did = words(args) if words else f"used the {name} tool"
+        finally:
+            _CUTS.reset(token)
+        cut = bool(cuts)
         outcome = r["outcome"] if r["outcome"] in ("refused", "pending", "failed") else (
             "completed" if done else "failed")
         if outcome == "completed" and name == "kael_tickets" and _op(args, "action") == "update" \
                 and "send" not in done:
-            entries += [_entry(did, "completed", kind), _entry("delivered that note to Kael", "pending", "act")]
+            entries += [_entry(did, "completed", kind, cut=cut), _entry("delivered that note to Kael", "pending", "act")]
         elif outcome == "completed" and name == "message_kael" and "send" not in done:
             entries += [_entry("kept the note for Kael as a ticket", "completed", kind),
                         _entry("delivered the note to Kael", "pending", "act")]
         elif outcome == "completed" and name == "add_to_cart_link" and args.get("send_to_his_discord"):
-            entries += ([_entry(f"{did} and sent it to his Discord DM", "completed", kind)] if "send" in done else
-                        [_entry(did, "completed", kind), _entry("sent the cart link to his Discord DM", "failed", "act")])
+            entries += ([_entry(f"{did} and sent it to his Discord DM", "completed", kind, cut=cut)] if "send" in done
+                        else [_entry(did, "completed", kind, cut=cut),
+                              _entry("sent the cart link to his Discord DM", "failed", "act")])
         else:
-            entries.append(_entry(did, outcome, kind, job=name in JOB_LOOKS))
+            entries.append(_entry(did, outcome, kind, job=name in JOB_LOOKS, cut=cut))
     return entries
 
 
@@ -234,9 +252,10 @@ def build_state(his_message: str, reply: str, entries: list[dict]) -> dict:
 
 
 def clipped(his_message: str, reply: str, entries: list[dict]) -> bool:
-    """Was anything cut to fit the request?"""
+    """Was anything cut to fit the request: his message, her reply, the list of calls, or any call's
+    argument or did-line?"""
     return (len(str(his_message or "")) > MESSAGE_HEAD + MESSAGE_TAIL or len(str(reply or "")) > REPLY_HEAD + REPLY_TAIL
-            or len(entries) > MAX_ENTRIES)
+            or len(entries) > MAX_ENTRIES or any(e.get("_cut") or len(e["did"]) > MAX_DID for e in entries))
 
 
 def build_request(his_message: str, reply: str, entries: list[dict]) -> dict:

@@ -1384,3 +1384,25 @@ def test_only_reads_leave_the_correction_armed():
                     "Not started yet.", jev=[UNBACKED_ACT])
     run("go ahead and start it", action=action)
     assert len(action.calls) == 2 and action.reply_calls == []
+
+
+def test_one_long_argument_cut_to_its_line_marks_the_cut():
+    # Codex re-check at 2ad9d65: a 5,000-char search becomes a short did-line; that is a cut too.
+    from aerys_v2.honesty_judge import HonestyJudge, this_turn
+
+    call = receipt("search_web", "results: …", {"query": "q" * 5_000})
+    assert this_turn([call])[0]["_cut"] is True
+    verdict = HonestyJudge(FakeJev())("hi", "hello", [call])
+    assert verdict.clipped
+    rec = Recorder()
+    run("look it up", action=Action(tool_then("search_web", "Found it.", "results: …", args={"query": "q" * 5_000})),
+        record=rec)
+    assert "honesty_input_clipped" in (rec.wait(1)[0]["degraded"] or [])
+
+
+def test_a_short_argument_is_not_a_cut():
+    from aerys_v2.honesty_judge import HonestyJudge, this_turn
+
+    call = receipt("search_web", "results: …", {"query": "train  schedule\n today"})   # spaces folded, not cut
+    assert this_turn([call])[0]["_cut"] is False
+    assert not HonestyJudge(FakeJev())("hi", "hello", [call]).clipped
