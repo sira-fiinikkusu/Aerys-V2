@@ -693,18 +693,20 @@ def test_a_real_refusal_does_not_back_a_send():
     action = Action(refusal_turn("message_kael", "I've sent it to Kael.",
                                  "Not done: after reading outside text this needs the owner’s Approve button, "
                                  "which is unavailable. Nothing happened."),
-                    "I couldn't send it: it needs your OK first.", jev=[UNBACKED_ACT])
+                    words=["I couldn't send it: it needs your OK first."], jev=[UNBACKED_ACT])
     out = run("tell kael the code", action=action)
-    assert len(action.calls) == 2 and out.startswith("I couldn't send it")   # refused: nothing acted, armed
+    # A send was CALLED (refused): the correction is words only, never his turn again with tools.
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1 and out.startswith("I couldn't send it")
     assert action.jev.states[0]["this_turn"][0]["outcome"] == "refused"
 
 
 def test_a_pending_approval_does_not_back_sent():
     waiting = ("Waiting for Chris: I've asked him on Discord (a button, and a notification on his phone) to OK "
                "your message. Nothing has been done; it goes only when he taps Approve. Tell him it's waiting on his tap.")
-    action = Action(tool_then("send_message", "Sent.", waiting), "It's waiting on your tap.", jev=[UNBACKED_ACT])
+    action = Action(tool_then("send_message", "Sent.", waiting), words=["It's waiting on your tap."],
+                    jev=[UNBACKED_ACT])
     run("send it to sam", action=action)
-    assert len(action.calls) == 2
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1
     assert action.jev.states[0]["this_turn"][0]["outcome"] == "pending"
 
 
@@ -1340,3 +1342,45 @@ def test_a_saturated_judge_is_unavailable_not_blocking():
     verdict = judge("hi", "hello", [])
     assert verdict.outcome == "judge_unavailable" and verdict.reasons == ["busy"]
     assert time.monotonic() - started < 0.05
+
+
+
+# ---- Middleware-ON replay: a pending send must never be asked for twice ---------------------------
+
+WAITING = ("Waiting for Chris: I've asked him on Discord (a button, and a notification on his phone) to OK your "
+           "message. Nothing has been done; it goes only when he taps Approve. Tell him it's waiting on his tap.")
+
+
+def test_after_a_relay_a_pending_send_and_a_sent_claim_get_one_approval_and_a_words_only_correction():
+    # The replay's shape: a relay in the thread, her send comes back PENDING his tap, she says "sent", the
+    # judge flags it. Pending isn't completed, but the send WAS called: the correction is words only, so no
+    # second send and no second approval button for the same message.
+    graph = build_graph(NoCalls(), soul="s")
+    relay_thread(graph)
+    rec = Recorder()
+    send = {"to": "Sam", "text": "the door code"}
+    action = Action(tool_then("send_message", "Sent it to Sam.", WAITING, args=send),
+                    tool_then("send_message", "Sent it to Sam.", WAITING, args=send),     # what an armed rerun did
+                    words=["It's waiting on your tap before it goes to Sam."], jev=[UNBACKED_ACT])
+    out = run("ok pass it on to sam", graph=graph, action=action, record=rec)
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1
+    assert calls_of(rec.wait(1)[0]) == ["send_message"]            # exactly one approval request
+    assert out == "It's waiting on your tap before it goes to Sam."
+
+
+@pytest.mark.parametrize("outcome_text", [SENT_OK, WAITING, "Not sent: that person isn't on the list of people I "
+                                          "can message; ask the owner.", "Traceback: ConnectionError"])
+def test_any_effectful_call_makes_the_correction_words_only(outcome_text):
+    # Completed, pending, refused or failed: once a send was called, nothing runs again this turn.
+    action = Action(tool_then("send_message", "I've started a home job too.", outcome_text),
+                    tool_then("send_message", "Sent.", SENT_OK), words=["Only the message; no home job."],
+                    jev=[UNBACKED_ACT])
+    run("tell sam and start the job", action=action)
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1, outcome_text
+
+
+def test_only_reads_leave_the_correction_armed():
+    action = Action(tool_then("get_weather", "I've started a home job for it.", "Sunny, high 76."),
+                    "Not started yet.", jev=[UNBACKED_ACT])
+    run("go ahead and start it", action=action)
+    assert len(action.calls) == 2 and action.reply_calls == []

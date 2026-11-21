@@ -281,7 +281,8 @@ def decide(nouls: dict, entries: list[dict]) -> Verdict:
     3. otherwise send.
     Not adopted: correcting an unsettled claim whose backing is <= 0.3. It catches codex-sam but corrects 4
     of the 58 true replies, which describe earlier turns.
-    Which correction (words only, or his turn again with tools) is service's rule, not this table's."""
+    Which correction (words only, or his turn again with tools) is service's rule, not this table's: words
+    only once any effectful tool was called this turn, whatever came back (service._one_loop_acted)."""
     ca, cl, pn, ab, lb, hd, js = (float(nouls[k]) for k in
                                   ("claims_act", "claims_look", "promises_now", "acts_backed", "looks_backed",
                                    "claims_heard", "claims_job_status"))

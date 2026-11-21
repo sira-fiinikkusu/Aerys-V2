@@ -2434,13 +2434,13 @@ def _one_loop_receipts(messages: list) -> list[dict]:
 
 
 def _one_loop_acted(receipts: list[dict]) -> bool:
-    """MAY anything this turn have changed something? Then a correction is words only: running his turn
-    armed again could do it twice. Wider than what backs a claim: an act whose answer isn't clearly a
-    refusal, a failure or a wait counts, confirmed or not (an unknown tool, an unrecognised answer, a write
-    HA took without showing a change), and so does one that failed: a timeout or an error can land
-    halfway ("Not drafted: … timed out; check Gmail before trying again")."""
-    return any(set(r["kinds"]) - {"read"} and r["outcome"] in ("completed", "unconfirmed", "failed")
-               for r in receipts)
+    """Was any effectful tool (a send, a start, a write, a house change; anything that isn't only a read)
+    CALLED this turn, whatever came back? Then a correction is words only, never his turn again with tools.
+    The middleware-ON replay (11/20): after a relay her send came back PENDING his tap, she said "sent", and
+    an armed correction called the send again and raised a SECOND approval button for the same message. A
+    refused, pending or failed act can be repeated, or land halfway ("Not drafted: … timed out; check Gmail
+    before trying again"), as surely as a completed one can run twice. Only reads leave the correction armed."""
+    return any(set(r["kinds"]) - {"read"} for r in receipts)
 
 
 #: Marks on a one-loop row from the honesty judge (honesty_judge.py): a correction pass ran; the judge was
@@ -2553,10 +2553,10 @@ def _text_one_loop_turn(
         * the correction rides the system prompt for that pass (configurable one_loop_correction), never
           the history: his turn stays the latest human turn, so a relay before it still taints, and a
           reach-out still needs his tap;
-        * after anything that may have acted this turn (an act not refused or pending: _one_loop_acted), or
-          for a claim to have heard a sound, the correction is WORDS ONLY (action_graph.reply_only: no tools
-          bound), so nothing can run twice;
-        * with nothing done, the turn may run again, armed, from his same turn;
+        * after any effectful tool was CALLED this turn, whatever its outcome (_one_loop_acted: a pending
+          send asked for twice raised two approval buttons), or for a claim to have heard a sound, the
+          correction is WORDS ONLY (action_graph.reply_only: no tools bound), so nothing can run twice;
+        * with only reads (or nothing) this turn, it may run again, armed, from his same turn;
         * the judge looks again at the corrected reply; still unbacked: emitted with the marker. A correction
           marks the row honesty_corrected.
     - every exit, success or failure, lands one exchange (his words + what he reads) and fires one audit
