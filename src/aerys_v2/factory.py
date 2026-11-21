@@ -2866,6 +2866,10 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     from aerys_v2.dj import store_for
 
     action_graph.dj_store = store_for(settings.database_url)
+    # D79: the honesty judge on her one-loop replies (Jev on the reflex's key; None without one).
+    from aerys_v2.honesty_judge import judge_for
+
+    action_graph.honesty_judge = judge_for(settings)
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else

@@ -952,7 +952,7 @@ _ONE_LOOP_DONE_WORDS = {
     "continue_home_job": ((r"^(?:Updated async subagent|Queued follow-up to async subagent|"
                            r"The continuation was queued)\b", {"start"}),),
     "cancel_async_task": ((r"^Cancelled async subagent task\b", {"stop"}),),
-    "send_file_to_chris": ((r"^SENT:", {"send"}),),
+    "send_file_to_chris": ((r"^(?:ALREADY )?SENT:", {"send"}),),     # already sent: it is in his DM
     "write_file": ((r"^Updated file ", {"record"}),),          # outside_guard's own test of a write
     "edit_file": ((r"^Successfully replaced ", {"record"}),),
 }
@@ -966,38 +966,6 @@ _ONE_LOOP_READ_REFUSED = re.compile(
     r"location request refused|current location is unavailable|give search_for\b|search for at least\b|"
     r"\w+ needs (?:a|an|the|some)\b|[\w ']{0,40}\b(?:failed|is unreachable|unavailable|came back malformed)\b|"
     r"[\w ]{0,30}: not available\b)", re.I)
-#: His message asks about something already done (D79 replay, turn 3426: "how did you send …?").
-_ONE_LOOP_PAST_ASK = re.compile(
-    r"\b(?:did|have|had)\s+you\b(?!\s+(?:want|need|mean)\b)|\bwhat happened\b|\bremind me what\b", re.I)
-#: Her notes of earlier turns, reported (turn 3376: "my notes say I've played it"). Not a time: a time can be
-#: the content ("you ran 5k yesterday"), and not "my notes" alone: that can be where a write went.
-_ONE_LOOP_EARLIER = re.compile(
-    r"\b(?:my notes (?:say|said|show|showed|have it|mention|mentioned)|according to my notes|from my notes|"
-    r"i remember)\b", re.I)
-#: A sentence tied to now is about this turn, whatever else it says; so is a status line ("Logged: …").
-_ONE_LOOP_NOW_ANCHOR = re.compile(
-    r"\b(?:now|just|this turn|a (?:moment|second) ago)\b|^\s*(?:logged|saved|added|done|noted|set|sent|kept):",
-    re.I)
-#: A web search or page read can look anything up ("the Switch price", "the train schedule"): it backs a look
-#: of any kind.
-_ONE_LOOP_ANY_LOOK = frozenset({"search_web", "read_web_page"})
-#: A claimed look names what it looked at; it needs a completed read of that kind (Codex second re-check #3).
-#: No family named: any completed read.
-_ONE_LOOP_READ_FAMILIES = (
-    (re.compile(r"\b(?:weather|forecast|rain|temperature|sunny|storm)\b", re.I),
-     {"get_weather", "search_web", "read_web_page"}),
-    (re.compile(r"\b(?:calendar|schedule|meetings?|appointments?)\b", re.I), {"calendar_events"}),
-    (re.compile(r"\b(?:e-?mails?|inbox|gmail)\b", re.I),
-     {"search_email", "read_email", "search_his_email", "read_his_email"}),
-    (re.compile(r"\b(?:lamps?|lights?|doors?|locks?|thermostat|sensors?|garage|fans?|switch(?:es)?)\b", re.I),
-     {"home_control", "search_entities"}),
-    (re.compile(r"\b(?:home jobs?|jobs?|tasks?|home machine)\b", re.I),
-     {"list_async_tasks", "check_async_task", "manage_list"}),
-    (re.compile(r"\b(?:lists?|to-?dos?|shopping|groceries)\b", re.I), {"manage_list"}),
-    (re.compile(r"\b(?:playlists?|songs?|music|queue|library)\b", re.I), {"music"}),
-    (re.compile(r"\b(?:tickets?|kael)\b", re.I), {"kael_tickets"}),
-    (re.compile(r"\b(?:web|online|internet|news)\b", re.I), {"search_web", "read_web_page"}),
-)
 
 
 def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
@@ -2477,150 +2445,51 @@ def _one_loop_acted(receipts: list[dict]) -> bool:
                for r in receipts)
 
 
-_ONE_LOOP_SEND_VERBS = (
-    r"(?:sent|messaged|delivered|relayed|forwarded|emailed|texted|notified|"
-    r"passed (?:it |that |them )?(?:along|on)|let (?:kael|kayle|cale|kale|kail|cael|him|her|them) know|"
-    r"got it to \w+)"
-)
-_ONE_LOOP_SEND_CLAIM = re.compile(
-    rf"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?{_ONE_LOOP_SEND_VERBS}\b"
-    rf"|(?:^|[.!?]\s+|[\u2014-]\s*){_ONE_LOOP_SEND_VERBS}(?:\s+(?:it|that|this|them|those))?"
-    r"(?:\s+(?:along|over|on|off|through|already|now|just now|for you|to \w+|your way))*\s*(?:[.!?]|$)",
-    re.I)
-_ONE_LOOP_RECORD_CLAIM = re.compile(
-    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:logged|filed|recorded|noted|saved|added|"
-    r"written|wrote|drafted)\b", re.I)
-_ONE_LOOP_DEVICE_CLAIM = re.compile(
-    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:turned|switched|dimmed|brightened|armed|"
-    r"disarmed|played|paused|resumed|skipped|stopped the|locked|unlocked|set (?:it|them|the|a|an|your))\b"
-    r"|\b(?:timer|alarm)\s+(?:is\s+)?set\b", re.I)
-_ONE_LOOP_ACT_CLAIM = re.compile(
-    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:cancel(?:l)?ed|removed|completed|scheduled|"
-    r"queued|posted|shared|booked|ordered)\b"
-    r"|\breminder\s+(?:is\s+)?set\b|^\s*(?:done|all set|taken care of)\b", re.I)
-_ONE_LOOP_READ_CLAIM = re.compile(
-    r"\b(?:i|i've|i have)\s+(?:just\s+|already\s+|now\s+)?(?:checked|looked(?: it)? up|looked at|looked into|"
-    r"searched|read through|pulled up)\b", re.I)
-_ONE_LOOP_LOOK_VERB = re.compile(
-    r"\b(?:check|checking|look|looking|search|searching|read|reading|open|opening|find|finding)\b", re.I)
+#: Marks on a one-loop row from the honesty judge (honesty_judge.py): a correction pass ran; the judge was
+#: unsure (sent, counted, never bounced); the judge was unavailable (sent: an error, never a "no").
+ONE_LOOP_CORRECTED = "honesty_corrected"
 
 
-def _negation_window(text: str, at: int) -> str:
-    """The words just before AT that can negate what starts there (the shared gates' 45-character window,
-    across a sentence end too: the D79 replay measured this, and keeping it in the sentence surfaced false
-    claims like "not by rolling anything. I skipped 17")."""
-    return text[max(0, at - _NEGATION_WINDOW): at]
+def _one_loop_judged(action_graph: object, asked: str, reply: str, receipts: list[dict]):
+    """The honesty judge's verdict on her reply (D79, Chris 11/20 18:51: the word lists go). No judge on the
+    graph, or any failure, is judge_unavailable: the reply is sent with the mark."""
+    from aerys_v2.honesty_judge import UNAVAILABLE, Verdict
+
+    judge = getattr(action_graph, "honesty_judge", None)
+    if judge is None:
+        return Verdict(UNAVAILABLE, reasons=["not armed"])
+    try:
+        return judge(asked, reply, receipts)
+    except Exception as exc:  # noqa: BLE001 -- the judge never blocks a reply
+        return Verdict(UNAVAILABLE, reasons=[type(exc).__name__])
 
 
-def _unnegated(pattern: re.Pattern, text: str) -> bool:
-    return any(not _NEGATION_RE.search(_negation_window(text, m.start())) for m in pattern.finditer(text))
+def _one_loop_check(verdict, reply: str, receipts: list[dict]) -> tuple[str, str, bool] | None:
+    """D79's postconditions on a one-loop reply: (marker, correction, words_only) when it needs a correction,
+    else None.
+    - The honesty judge says correct: she said she heard a sound (always words only: nothing can back it), or
+      said she did or checked something this turn's completed tool calls don't show, or promised to act now
+      with nothing acted. The questions, criteria, thresholds and truth table live in honesty_judge.py; the
+      state it judges is code-written from the receipts, never raw tool output.
+    - How a home job stands needs a completed look at her jobs (D65's status gate, shared with the chat path).
+    Which correction (words only, or his turn again with tools) is the caller's rule (_one_loop_acted)."""
+    from aerys_v2.honesty_judge import CORRECT
 
-
-def _now_promises(text: str) -> list[str]:
-    """The promises to act NOW in her reply (promises_effect_now's rule), as the words that made them."""
-    found = []
-    for pattern in _PROMISE_PATTERNS:
-        for m in pattern.finditer(text):
-            window = _negation_window(text, m.start())
-            end = _SENTENCE_END.search(text, m.end())
-            rest = text[m.end(): end.start() if end else len(text)]
-            starts = [x.end() for x in _SENTENCE_END.finditer(text, 0, m.start())]
-            before = text[starts[-1] if starts else 0: m.start()]
-            deferred = (_DEFERRED_RE.search(rest) or _CONDITION_BEFORE_RE.search(before)) and not _NOW_RE.search(rest)
-            if not _NEGATION_RE.search(window) and not deferred:
-                found.append(m.group(0))
-    return found
-
-
-def _sentence_of(text: str, fragment: str) -> str:
-    """The sentence of TEXT that holds FRAGMENT (for naming what a claim or a promise is about)."""
-    at = text.find(fragment)
-    if at < 0:
-        return text
-    starts = [m.end() for m in _SENTENCE_END.finditer(text, 0, at)]
-    end = _SENTENCE_END.search(text, at + len(fragment))
-    return text[starts[-1] if starts else 0: end.start() if end else len(text)]
-
-
-def _claim_sentences(pattern: re.Pattern, text: str) -> list[str]:
-    """The sentences holding an un-negated match of PATTERN."""
-    return [_sentence_of(text, m.group(0)) for m in pattern.finditer(text)
-            if not _NEGATION_RE.search(_negation_window(text, m.start()))]
-
-
-def _one_loop_looked(sentence: str, read_tools: set) -> bool:
-    """A claimed or promised look in SENTENCE is backed: by a completed read of the kind it names, or, when it
-    names none, by any completed read (Codex second re-check #3: an act is never a look)."""
-    families = [tools for pattern, tools in _ONE_LOOP_READ_FAMILIES if pattern.search(sentence)]
-    if not families or read_tools & _ONE_LOOP_ANY_LOOK:
-        return bool(read_tools)
-    return any(read_tools & tools for tools in families)
-
-
-def _only_asks_about_the_past(asked: str) -> bool:
-    """His message is a question about something already done, and nothing else: every part of it is a
-    question or asks about the past ("did you get that? go ahead and start it" asks for an act too)."""
-    parts = [p.strip() for p in re.split(r"(?<=[.!?\n])", asked or "") if p.strip(" .!?\n")]
-    return (bool(parts) and bool(_ONE_LOOP_PAST_ASK.search(asked))
-            and all(p.endswith("?") or _ONE_LOOP_PAST_ASK.search(p) for p in parts))
-
-
-def _one_loop_present(reply: str, asked: str, attempted: bool = False) -> str:
-    """The part of her reply that speaks about THIS turn (D79 replay, turns 3426 and 3376). A sentence that
-    reports her notes of earlier turns ("my notes say I've played it") is about those turns; so is every
-    sentence of an answer to a question that only asks about the past ("how did you send…?"), when she
-    attempted no act this turn. This turn's receipts can't back those, and earlier turns' receipts aren't in
-    the seed (it carries text only). A sentence tied to now ("just", "now", a status line) always stays."""
-    past = _only_asks_about_the_past(asked) and not attempted
-    kept = [sentence for sentence in re.split(r"(?<=[.!?\n])", reply)
-            if _ONE_LOOP_NOW_ANCHOR.search(sentence)
-            or not (past or _ONE_LOOP_EARLIER.search(sentence))]
-    return "".join(kept)
-
-
-def _one_loop_check(reply: str, receipts: list[dict], *, asked: str = "") -> tuple[str, str, bool] | None:
-    """D79's postconditions on a one-loop reply: (marker, correction, words_only) for the first thing it
-    says that this turn's COMPLETED receipts don't back, else None (Codex 11/20 #3, re-checks #2 and #3):
-    - she says she heard audio: nothing can back that, and it is always corrected in words only;
-    - a start needs a completed start; a send a completed send; a record (Logged:, saved, added) a
-      completed record; a house change (turned, played, a timer set) a completed device act; another act
-      ("done", cancelled, scheduled) any completed act; a claimed look (checked, looked up) a completed read
-      of the kind it names (any read when it names none; a web search or page read backs any kind);
-    - a promise to act now needs a completed act; a promise to look needs a completed read, as above;
-    - how a home job stands needs a completed look at her jobs.
-    Claims about an earlier turn (_one_loop_present; ASKED is his message) aren't this turn's to back.
-    Only the tools' own words for success complete anything; a refused, pending, failed or unrecognised
-    answer backs nothing."""
-    text = _plain_quotes(reply or "")
-    if audio_perception_claim(text):
-        return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
-    done: set = set()
-    for r in receipts:
-        done |= set(r["done"])
-    acts = done - {"read"}
-    read_tools = {r["name"] for r in receipts if "read" in r["done"]}
-    now = _one_loop_present(text, asked, attempted=any(set(r["kinds"]) - {"read"} for r in receipts))
-    unbacked = (
-        (_unnegated(_STARTED_CLAIM_RE, now) and "start" not in done)
-        or (_unnegated(_ONE_LOOP_SEND_CLAIM, now) and "send" not in done)
-        or ((record_action_claim(now) or _unnegated(_ONE_LOOP_RECORD_CLAIM, now)) and "record" not in done)
-        or (_unnegated(_ONE_LOOP_DEVICE_CLAIM, now) and "device" not in done)
-        or (_unnegated(_ONE_LOOP_ACT_CLAIM, now) and not acts)
-        or any(not _one_loop_looked(sentence, read_tools) for sentence in _claim_sentences(_ONE_LOOP_READ_CLAIM, now))
-    )
-    if not unbacked:
-        promises = _now_promises(text)
-        looks_only = promises and all(_ONE_LOOP_LOOK_VERB.search(p) for p in promises)
-        if looks_only:
-            unbacked = any(not _one_loop_looked(_sentence_of(text, p), read_tools) for p in promises)
-        else:
-            unbacked = bool(promises) and not acts
-    if unbacked:
+    if verdict.outcome == CORRECT:
+        if verdict.heard:
+            return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
         return NO_TOOL_ACTION_MARKER, ONE_LOOP_CLAIM_CORRECTION, False
     looked = any(r["ok"] and r["name"] in ONE_LOOP_JOB_LOOKS for r in receipts)
-    if claims_job_running(text) and not looked:
+    if claims_job_running(_plain_quotes(reply or "")) and not looked:
         return STATUS_GATE_MARKER, ONE_LOOP_STATUS_CORRECTION, False
     return None
+
+
+def _one_loop_marks(verdict) -> list[str]:
+    """The row marks for a verdict that sends: honesty_unsure or judge_unavailable (none for send/correct)."""
+    from aerys_v2.honesty_judge import UNAVAILABLE, UNSURE
+
+    return [verdict.outcome] if verdict.outcome in (UNSURE, UNAVAILABLE) else []
 
 
 def _one_loop_done_note(receipts: list[dict]) -> str:
@@ -2672,14 +2541,17 @@ def _text_one_loop_turn(
       full long-term memory and the typed banter overlay in the prompt builder (factory).
     - the seed is the room-gated thread with her own replies, inside the chat graph's 200-message window
       (_action_history_seed, non-specialist), with her old voice tags taken off what she is shown.
-    - postconditions (_one_loop_check), one correction (Codex 11/20 #1, #2):
+    - postconditions (_one_loop_check: the honesty judge, honesty_judge.py, plus D65's job-status gate), one
+      correction (Codex 11/20 #1, #2); the judge's unsure and unavailable verdicts send with a mark:
         * the correction rides the system prompt for that pass (configurable one_loop_correction), never
           the history: his turn stays the latest human turn, so a relay before it still taints, and a
           reach-out still needs his tap;
-        * after anything was done this turn (a send, a start, a write), or for an audio claim, the
-          correction is WORDS ONLY (action_graph.reply_only: no tools bound), so nothing can run twice;
+        * after anything that may have acted this turn (an act not refused or pending: _one_loop_acted), or
+          for a claim to have heard a sound, the correction is WORDS ONLY (action_graph.reply_only: no tools
+          bound), so nothing can run twice;
         * with nothing done, the turn may run again, armed, from his same turn;
-        * still unbacked after that: emitted with the marker.
+        * the judge looks again at the corrected reply; still unbacked: emitted with the marker. A correction
+          marks the row honesty_corrected.
     - every exit, success or failure, lands one exchange (his words + what he reads) and fires one audit
       row carrying every tool call that did run (Codex 11/20 #4).
     The served tier is the conversational model's (standard): deep credits are never spent here, and a
@@ -2740,9 +2612,13 @@ def _text_one_loop_turn(
         turn["messages"] = list(result["messages"])
         reply = _strip_handoff(_reply_text(turn["messages"][-1]))
         receipts = _one_loop_receipts(turn["messages"])
-        check = _one_loop_check(reply, receipts, asked=text)
+        verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+        check = _one_loop_check(verdict, reply, receipts) if verdict is not None else None
+        if check is None and verdict is not None:
+            turn["degraded"].extend(_one_loop_marks(verdict))
         if check is not None:
             marker, correction, words_only = check
+            turn["degraded"].append(ONE_LOOP_CORRECTED)
             if words_only or _one_loop_acted(receipts):
                 # Something already ran (or nothing could back it): words only, nothing runs twice.
                 log.info("one loop: %s after an act — a words-only correction | thread=%s",
@@ -2761,7 +2637,10 @@ def _text_one_loop_turn(
                 turn["messages"] = [*turn["messages"], *list(result["messages"])[len(seed):]]
                 receipts = _one_loop_receipts(turn["messages"])
             reply = _strip_handoff(_reply_text(turn["messages"][-1]))
-            survived = _one_loop_check(reply, receipts, asked=text)
+            again_verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+            survived = _one_loop_check(again_verdict, reply, receipts) if again_verdict is not None else None
+            if survived is None and again_verdict is not None:
+                turn["degraded"].extend(_one_loop_marks(again_verdict))
             if survived is not None:
                 log.warning("one loop: %s survived the correction — emitting with the marker", survived[0])
                 turn["degraded"].append(survived[0])
