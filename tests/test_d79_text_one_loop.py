@@ -1519,3 +1519,101 @@ def test_without_a_completed_start_the_criterion_stays_as_committed(calls):
     from aerys_v2.honesty_judge import QUESTIONS
 
     assert _asked([receipt(n, c, a) for n, a, c in calls]) == QUESTIONS
+
+
+# ---- D79 on the ACTION path (Chris 21:09): action-routed household DMs get the same judge ---------------
+
+def test_an_action_routed_dm_claiming_a_start_after_only_a_list_is_corrected():
+    rec = Recorder()
+    action = Action(tool_then("list_async_tasks", "I've started the home job.", "No async subagent tasks tracked."),
+                    tool_then("start_async_task", "Started it.", LAUNCHED, args={"description": "Fix the skill"}),
+                    jev=[UNBACKED_ACT])
+    out = run("fix the maptap skill on your home machine", action=action, router=route("action"), record=rec)
+    assert len(action.calls) == 2 and action.reply_calls == []          # only a read ran: armed, same turn
+    first, second = action.calls[0][1], action.calls[1][1]
+    assert first["specialist"] is True and second["specialist"] is True and "text_one_loop" not in second
+    assert second["one_loop_correction"] and action.calls[1][0] == action.calls[0][0]   # same seed, no human turn
+    assert out == "Started it."
+    degraded = rec.wait(1)[0]["degraded"] or []
+    assert "honesty_corrected" in degraded
+
+
+def test_an_action_routed_dm_with_a_backed_start_is_sent():
+    action = Action(tool_then("start_async_task", "I've started it.", LAUNCHED, args={"description": "Fix it"}),
+                    jev=[BACKED_ACT])
+    out = run("fix it on your home machine", action=action, router=route("action"))
+    assert out == "I've started it." and len(action.calls) == 1 and action.reply_calls == []
+    assert action.jev.states[0]["this_turn"] == [{"did": "started a home job: Fix it", "outcome": "completed"}]
+
+
+def test_on_the_action_path_a_pending_send_claimed_sent_gets_words_only_and_one_approval():
+    graph = build_graph(NoCalls(), soul="s")
+    relay_thread(graph)
+    rec = Recorder()
+    send = {"to": "Sam", "text": "the door code"}
+    action = Action(tool_then("send_message", "Sent it to Sam.", WAITING, args=send),
+                    tool_then("send_message", "Sent it to Sam.", WAITING, args=send),
+                    words=["It's waiting on your tap before it goes to Sam."], jev=[UNBACKED_ACT])
+    out = run("ok pass it on to sam", graph=graph, action=action, router=route("action"), record=rec)
+    assert len(action.calls) == 1 and len(action.reply_calls) == 1
+    assert action.reply_calls[0][1]["specialist"] is True and action.reply_calls[0][1]["one_loop_correction"]
+    assert calls_of(rec.wait(1)[0]) == ["send_message"]                  # exactly one approval request
+    assert out == "It's waiting on your tap before it goes to Sam."
+
+
+def test_on_the_action_path_a_survived_claim_is_marked_and_marks_are_kept():
+    rec = Recorder()
+    action = Action(tool_then("list_async_tasks", "I've started it.", "No async subagent tasks tracked."),
+                    tool_then("list_async_tasks", "I've started it.", "No async subagent tasks tracked."),
+                    jev=[UNBACKED_ACT, UNBACKED_ACT])
+    run("start it", action=action, router=route("action"), record=rec)
+    degraded = rec.wait(1)[0]["degraded"] or []
+    assert "honesty_corrected" in degraded and "no_tool_action" in degraded
+    rec2 = Recorder()
+    unsure = Action(tool_then("home_control", "lights off", "Done: turn_off light.x", args={"operation": "turn_off"}),
+                    jev=[UNSETTLED])
+    run("lights off", action=unsure, router=route("action"), record=rec2)
+    assert "honesty_unsure" in (rec2.wait(1)[0]["degraded"] or [])
+
+
+@pytest.mark.parametrize("flag,identity", [(False, None), (True, "guild"), (True, "guest")])
+def test_the_action_path_is_unchanged_with_the_switch_off_in_the_guild_and_for_guests(flag, identity):
+    who = {"guild": guild(), "guest": dm(user_id=GUEST)}.get(identity)
+    rec = Recorder()
+    action = Action(tool_then("list_async_tasks", "I've started the home job.", "No async subagent tasks tracked."),
+                    jev=[UNBACKED_ACT])
+    out = run("start it", action=action, router=route("action"), flag=flag, identity=who, record=rec,
+              guest=action if identity == "guest" else None)
+    assert out == "I've started the home job." and len(action.calls) == 1 and action.reply_calls == []
+    assert action.jev.states == []                                       # the judge never ran
+    degraded = rec.wait(1)[0]["degraded"] or []
+    assert not {"honesty_corrected", "honesty_unsure", "judge_unavailable"} & set(degraded)
+
+
+def test_a_failed_correction_on_the_action_path_says_what_went_through():
+    rec = Recorder()
+    action = Action(tool_then("send_message", "I've started the job too.", SENT_OK),
+                    words=[RuntimeError("boom")], jev=[UNBACKED_ACT])
+    out = run("tell sam and start it", action=action, router=route("action"), record=rec)
+    assert "this went through: the message" in out and len(action.calls) == 1
+    assert "honesty_correction_failed" in (rec.wait(1)[0]["degraded"] or [])
+
+
+def test_a_specialist_turn_carries_its_correction_in_the_system_prompt():
+    from aerys_v2 import factory
+
+    build = factory._action_prompt_builder(
+        "SOUL", charter="CHARTER", overlay="", context_fn=None, conversational_context_fn=None,
+        family_notes_fn=None, room_context_fn=None, portable_context_fn=None, presence_fn=None, voice_room_fn=None,
+        shared_surface_ids=None, context_trailing=False)
+    ident = {"user_id": "u", "display_name": "Chris", "privacy_context": "private", "platform": "discord",
+             "channel_kind": "dm"}
+    corrected, specialist, _ = build([HumanMessage(content="start it")], {"configurable": {
+        "thread_id": "person:u", "identity": ident, "specialist": True, "one_loop_correction": "CORRECTION",
+        "one_loop_done": "- send_message (completed): Sent"}})
+    plain, _, _ = build([HumanMessage(content="start it")], {"configurable": {
+        "thread_id": "person:u", "identity": ident, "specialist": True}})
+    assert specialist and corrected[0].content.startswith("CHARTER") and "CORRECTION" in corrected[0].content
+    assert "Already done this turn" in corrected[0].content
+    assert [m.type for m in corrected[1:]] == ["human"]                  # never a turn of its own
+    assert "CORRECTION" not in plain[0].content and "For this reply only" not in plain[0].content

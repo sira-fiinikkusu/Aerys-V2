@@ -1616,6 +1616,9 @@ def ask(
                 record_turn=record_turn, reflex=shadow, started=started,
                 human_privacy=origin_privacy, human_id=turn_msg_id,
                 tier=normalize_tier(decision.tier),
+                # D79 (Chris 11/20 21:09): an action-routed household DM gets the same honesty judge.
+                judged=_action_turn_judged(text_one_loop, decision.route, identity, action_allowlist,
+                                           factory._OWNER_ID),
             )
             _reclassify_if_needed(
                 graph, config, turn_msg_id, text, reply,
@@ -2241,6 +2244,7 @@ def _action_turn(
     tier: str = "standard",
     reflex: _ReflexShadow | None = None,
     seed_hint: str | None = None,
+    judged: bool = False,
 ) -> str:
     """Run the tool subgraph, then land the outcome in the MAIN thread's history.
 
@@ -2281,6 +2285,13 @@ def _action_turn(
             seed,
             {**config, "configurable": {**config["configurable"], "specialist": True, "tier": tier}},
         )
+        if judged:
+            # D79: the honesty judge on this specialist turn's final reply (_judged_action_pass), after the
+            # zero-tool bounce above, which stays as it is.
+            result, judged_marks = _judged_action_pass(
+                action_graph, seed, result,
+                {**config, "configurable": {**config["configurable"], "specialist": True, "tier": tier}}, text)
+            gate_degraded = [*gate_degraded, *(m for m in judged_marks if m not in gate_degraded)]
     except Exception as e:
         # Rail trip / tool-loop blowup on the sequential action path: record the
         # failed turn (classifier_intent='action') before re-raising — or, on a
@@ -2340,6 +2351,84 @@ def _action_turn(
         extra_degraded=degraded or None,
     )
     return final
+
+
+def _action_turn_judged(text_one_loop, route: str, identity: dict, action_allowlist, owner_id: str) -> bool:
+    """D79 on the ACTION path (Chris 11/20 21:09; a side agent found the gap): an action-routed turn is
+    judged when the one-loop switch is on and the caller is eligible for the one loop (household identity on
+    a DM surface). Voice, the lens, the guild and guests never are; switch off is exactly the old path."""
+    if route != "action":
+        return False
+    try:
+        on = text_one_loop() if callable(text_one_loop) else bool(text_one_loop)
+    except Exception:  # noqa: BLE001 -- a switch that can't be read is off
+        return False
+    return bool(on) and text_one_loop_eligible(identity, action_allowlist, owner_id)
+
+
+#: The correction pass on a judged action turn raised: the reply says what already went through.
+ACTION_CORRECTION_FAILED = "honesty_correction_failed"
+
+
+def _judged_action_pass(action_graph: object, seed: list, result: dict, run_config: dict,
+                        text: str) -> tuple[dict, list[str]]:
+    """The one loop's honesty judge, on an action-routed household DM's final reply: the same this_turn
+    (this run's receipts only), truth table, marks and correction rules (_text_one_loop_turn):
+    - any effectful tool called this turn (whatever came back), or a heard sound: one WORDS-ONLY pass
+      (action_graph.reply_only, the same specialist prompt with the correction and what was done in it);
+    - only reads (or nothing): his same specialist turn again, armed, with the correction in the system
+      prompt (never a HumanMessage), through the zero-tool gate as before;
+    - the corrected reply is judged again; still unbacked: the marker. Returns (result, marks); the result's
+      messages end in the reply that goes out."""
+    marks: list[str] = []
+    messages = list(result["messages"])
+
+    def this_run() -> list:
+        return messages[len(seed):]
+
+    try:
+        reply = _strip_handoff(_reply_text(messages[-1])) if messages else ""
+        receipts = _one_loop_receipts(this_run())
+        verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+        _one_loop_mark(marks, verdict)
+        check = _one_loop_check(verdict, reply, receipts) if verdict is not None else None
+    except Exception:  # noqa: BLE001 -- the judge never blocks a reply
+        log.warning("action honesty judge: couldn't judge the reply; sent with the mark", exc_info=True)
+        return result, ["judge_unavailable"]
+    if check is None:
+        return result, marks
+    marker, correction, words_only = check
+    marks.append(ONE_LOOP_CORRECTED)
+    conf = run_config["configurable"]
+    try:
+        if words_only or _one_loop_acted(receipts):
+            log.info("action honesty judge: %s after an act — a words-only correction | thread=%s",
+                     marker, conf.get("thread_id"))
+            note = correction if words_only else ONE_LOOP_REPLY_ONLY_CORRECTION
+            messages.append(action_graph.reply_only(seed, {**run_config, "configurable": {
+                **conf, "one_loop_correction": note, "one_loop_done": _one_loop_done_note(receipts)}}))
+        else:
+            log.info("action honesty judge: %s with only reads — running his turn again | thread=%s",
+                     marker, conf.get("thread_id"))
+            again, again_marks = _run_action_gated(action_graph, seed, {**run_config, "configurable": {
+                **conf, "one_loop_correction": correction}})
+            messages.extend(list(again["messages"])[len(seed):])
+            marks.extend(m for m in again_marks if m not in marks)
+            receipts = _one_loop_receipts(this_run())
+    except Exception as e:
+        honest = _honest_reply_for_failure(e)
+        log.warning("action honesty judge: the correction failed (%s); saying what went through", e, exc_info=True)
+        marks.append(ACTION_CORRECTION_FAILED)
+        messages.append(AIMessage(content=_one_loop_with_evidence(honest or ONE_LOOP_FAILURE_LINE, receipts)))
+        return {**result, "messages": messages}, marks
+    reply = _strip_handoff(_reply_text(messages[-1]))
+    again_verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+    _one_loop_mark(marks, again_verdict)
+    survived = _one_loop_check(again_verdict, reply, receipts) if again_verdict is not None else None
+    if survived is not None and survived[0] not in marks:
+        log.warning("action honesty judge: %s survived the correction — emitting with the marker", survived[0])
+        marks.append(survived[0])
+    return {**result, "messages": messages}, marks
 
 
 def _one_loop_call_kinds(name: str, args: dict) -> frozenset:

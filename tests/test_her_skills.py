@@ -471,6 +471,7 @@ def test_service_ai_writer_inventory():
         ('_voice_parallel_start', '_action_reply'): 2,  # banter success/failure
         ('_finish_handed_off', '_action_reply'): 1,  # banter handed off past HA's wait (#214): late success/failure
         ('finish', '_action_reply'): 1,  # D79 one-loop typed turn: the one exit, success and failure alike
+        ('_judged_action_pass', 'AIMessage'): 1,  # D79 action path: a failed correction's evidence line, landed by _action_turn's _action_reply
     })
 
 

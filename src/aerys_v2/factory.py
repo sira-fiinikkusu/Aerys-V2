@@ -2150,6 +2150,10 @@ def _action_prompt_builder(
                 # D79 (Codex 11/20 #2): a correction for THIS pass rides the system prompt, never the
                 # history, so his turn stays the latest human turn (a relay before it still taints).
                 ack_block += one_loop_note(configurable)
+            elif specialist:
+                # D79 on the action path (service._judged_action_pass): an action-routed household DM's
+                # correction rides the system prompt the same way. Empty on every other specialist turn.
+                ack_block += one_loop_note(configurable)
         else:
             ack_block = ""
         # Lens surface rides on top of (and after) the voice styling so its

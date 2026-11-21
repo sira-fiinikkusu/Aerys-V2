@@ -81,6 +81,46 @@ except Exception as _e:
     _D79.append(False)
     print("#D79 the honesty judge (failed to load):", False)
 try:
+    # D79 on the ACTION path (Chris 21:09): ask() hands action-routed turns the judge flag; only an eligible
+    # household DM with the switch on is judged; a judged turn's unbacked claim after a send is corrected in
+    # words only (the judge here is fed fixed answers: no Jev call is made).
+    import inspect as _in3D79
+    from types import SimpleNamespace as _NSD79
+    from langchain_core.messages import AIMessage as _A3D79, HumanMessage as _H3D79, ToolMessage as _T3D79
+    from aerys_v2 import service as _svD79
+    from aerys_v2.honesty_judge import HonestyJudge as _HJ3D79, QUESTIONS as _Q3D79
+
+    class _JevD79:
+        def system_one(self, *, state, questions, model=None):
+            ans = {"claims_act": 0.95, "acts_backed": 0.05}
+            return _NSD79(answers={k: _NSD79(noul=ans.get(k, 0.0)) for k in questions})
+
+    _own3D79 = "11111111-1111-1111-1111-111111111111"
+    _dm3D79 = {"user_id": _own3D79, "privacy_context": "private", "platform": "discord", "channel_kind": "dm"}
+    _seed3D79 = [_H3D79(content="tell sam and start it")]
+    _graph3D79 = _NSD79(honesty_judge=_HJ3D79(_JevD79()),
+                        reply_only=lambda seed, cfg: _A3D79(content="Only the message went; no job yet."))
+    _res3D79, _marks3D79 = _svD79._judged_action_pass(_graph3D79, _seed3D79, {"messages": [
+        *_seed3D79, _A3D79(content="", tool_calls=[{"id": "c", "name": "send_message", "args": {"to": "Sam"}}]),
+        _T3D79(content="Sent: the signed message went through Discord.", name="send_message", tool_call_id="c"),
+        _A3D79(content="I've sent it and started the job.")]},
+        {"configurable": {"thread_id": "person:x", "specialist": True}}, "tell sam and start it")
+    _D79.append("judged=_action_turn_judged(" in _in3D79.getsource(_svD79.ask)
+                and "judged" in _in3D79.signature(_svD79._action_turn).parameters
+                and _svD79._action_turn_judged(lambda: True, "action", _dm3D79, None, _own3D79)
+                and not _svD79._action_turn_judged(lambda: False, "action", _dm3D79, None, _own3D79)
+                and not _svD79._action_turn_judged(lambda: True, "chat", _dm3D79, None, _own3D79)
+                and not _svD79._action_turn_judged(lambda: True, "action", {**_dm3D79, "channel_kind": "guild"},
+                                                   None, _own3D79)
+                and not _svD79._action_turn_judged(lambda: True, "action", {**_dm3D79, "voice": True}, None, _own3D79)
+                and _res3D79["messages"][-1].content == "Only the message went; no job yet."
+                and "honesty_corrected" in _marks3D79 and len(_Q3D79) == 7)
+    print("#D79 action-routed household DMs are judged too (switch on, eligible only), words-only after a send:",
+          _D79[-1])
+except Exception as _e:
+    _D79.append(False)
+    print("#D79 the action path's judge (failed to load):", False)
+try:
     # The home-job and file tools' success words, as THIS install's deepagents writes them: a version whose
     # wording moved would leave every start unconfirmed.
     import inspect as _inD79
