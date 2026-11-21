@@ -873,8 +873,6 @@ ONE_LOOP_BY_OPERATION = {
     "wake_me": {"arg": "action", "reads": {"list"}, "default": {"record"}},
     "check_back": {"arg": "action", "reads": {"list"}, "default": {"record"}},
 }
-#: A successful call to one of these is a look at her home jobs.
-ONE_LOOP_JOB_LOOKS = frozenset({"check_async_task", "list_async_tasks", "start_async_task", "update_async_task"})
 #: The correction for a claim or promise nothing backs, on a pass that may still use tools (nothing was
 #: done yet this turn).
 ONE_LOOP_CLAIM_CORRECTION = (
@@ -2469,27 +2467,36 @@ def _one_loop_check(verdict, reply: str, receipts: list[dict]) -> tuple[str, str
     else None.
     - The honesty judge says correct: she said she heard a sound (always words only: nothing can back it), or
       said she did or checked something this turn's completed tool calls don't show, or promised to act now
-      with nothing acted. The questions, criteria, thresholds and truth table live in honesty_judge.py; the
-      state it judges is code-written from the receipts, never raw tool output.
-    - How a home job stands needs a completed look at her jobs (D65's status gate, shared with the chat path).
+      with nothing acted, or said how a home job stands without a completed look at her jobs this turn (that
+      correction says to look first). The questions, criteria, thresholds and truth table live in
+      honesty_judge.py; the state it judges is code-written from the receipts, never raw tool output. No word
+      list reads her reply on this path (Codex final #1: D65's claims_job_running stays on the chat path only).
     Which correction (words only, or his turn again with tools) is the caller's rule (_one_loop_acted)."""
     from aerys_v2.honesty_judge import CORRECT
 
-    if verdict.outcome == CORRECT:
-        if verdict.heard:
-            return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
-        return NO_TOOL_ACTION_MARKER, ONE_LOOP_CLAIM_CORRECTION, False
-    looked = any(r["ok"] and r["name"] in ONE_LOOP_JOB_LOOKS for r in receipts)
-    if claims_job_running(_plain_quotes(reply or "")) and not looked:
+    if verdict.outcome != CORRECT:
+        return None
+    if verdict.heard:
+        return AUDIO_CLAIM_MARKER, AUDIO_CLAIM_CORRECTION, True
+    if verdict.status_only:
         return STATUS_GATE_MARKER, ONE_LOOP_STATUS_CORRECTION, False
-    return None
+    return NO_TOOL_ACTION_MARKER, ONE_LOOP_CLAIM_CORRECTION, False
 
 
-def _one_loop_marks(verdict) -> list[str]:
-    """The row marks for a verdict that sends: honesty_unsure or judge_unavailable (none for send/correct)."""
+#: The judge's request was cut to fit its caps (honesty_judge.build_state).
+ONE_LOOP_CLIPPED = "honesty_input_clipped"
+
+
+def _one_loop_mark(degraded: list, verdict) -> None:
+    """Every judge mark lands on the row, whatever else happens to the turn (Codex final #1): honesty_unsure,
+    judge_unavailable, and honesty_input_clipped; each once."""
     from aerys_v2.honesty_judge import UNAVAILABLE, UNSURE
 
-    return [verdict.outcome] if verdict.outcome in (UNSURE, UNAVAILABLE) else []
+    if verdict is None:
+        return
+    marks = ([verdict.outcome] if verdict.outcome in (UNSURE, UNAVAILABLE) else []) + (
+        [ONE_LOOP_CLIPPED] if getattr(verdict, "clipped", False) else [])
+    degraded.extend(m for m in marks if m not in degraded)
 
 
 def _one_loop_done_note(receipts: list[dict]) -> str:
@@ -2613,9 +2620,8 @@ def _text_one_loop_turn(
         reply = _strip_handoff(_reply_text(turn["messages"][-1]))
         receipts = _one_loop_receipts(turn["messages"])
         verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+        _one_loop_mark(turn["degraded"], verdict)
         check = _one_loop_check(verdict, reply, receipts) if verdict is not None else None
-        if check is None and verdict is not None:
-            turn["degraded"].extend(_one_loop_marks(verdict))
         if check is not None:
             marker, correction, words_only = check
             turn["degraded"].append(ONE_LOOP_CORRECTED)
@@ -2638,9 +2644,8 @@ def _text_one_loop_turn(
                 receipts = _one_loop_receipts(turn["messages"])
             reply = _strip_handoff(_reply_text(turn["messages"][-1]))
             again_verdict = _one_loop_judged(action_graph, text, reply, receipts) if reply.strip() else None
+            _one_loop_mark(turn["degraded"], again_verdict)
             survived = _one_loop_check(again_verdict, reply, receipts) if again_verdict is not None else None
-            if survived is None and again_verdict is not None:
-                turn["degraded"].extend(_one_loop_marks(again_verdict))
             if survived is not None:
                 log.warning("one loop: %s survived the correction — emitting with the marker", survived[0])
                 turn["degraded"].append(survived[0])

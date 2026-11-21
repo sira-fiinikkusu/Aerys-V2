@@ -72,7 +72,7 @@ try:
         _hjD79.judge_for(_S2D79()) is not None
     _D79.append(_armedD79 and _stD79["this_turn"] == [{"did": "started a home job that will: Edit the MapTap skill",
                                                        "outcome": "completed"}]
-                and _injD79 not in str(_stD79) and len(_hjD79.QUESTIONS) == 6
+                and _injD79 not in str(_stD79) and len(_hjD79.QUESTIONS) == 7
                 and _okD79(_hjD79.Verdict(_hjD79.CORRECT), "I've started it.", []) is not None
                 and _okD79(_hjD79.Verdict(_hjD79.UNAVAILABLE), "I've started it.", []) is None)
     print("#D79 the honesty judge loads and builds its state from code-written lines, never tool output "

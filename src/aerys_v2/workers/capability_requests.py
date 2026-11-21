@@ -81,7 +81,8 @@ BY_DESIGN_MARKERS = frozenset({"chat_handoff", "escalated_from_chat", "dropped_u
                                "untrusted_read", "voice_owner_assumed",
                                # D79: which path served the turn, and the honesty judge's own counts (a
                                # correction, an unsure send). judge_unavailable stays a gap: Jev was down.
-                               "text_one_loop", "honesty_corrected", "honesty_unsure"})
+                               "text_one_loop", "honesty_corrected", "honesty_unsure",
+                               "honesty_input_clipped"})
 
 # These channels are test rigs whose failures describe the harness, not a
 # missing capability. The skip lives in Python, NOT in the miner's SQL: an
