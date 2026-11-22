@@ -92,6 +92,11 @@ MISSED_PREFIX = "In case you missed what I said:"
 OVERNIGHT_SOURCE = "overnight"        # D74: what the night held, in one quiet text when he wakes
 CARRIED = "carried by"                # a reservation's reason prefix: a carrier holds this row
 OVERNIGHT_CARRIED = "carried by the overnight note"
+# D88 (the owner, 11/22 10:31, "yes this looks good"): a morning brief still waiting when he gets home is
+# taken over by the welcome-home hello, so he's greeted once. What the brief held is freed for the hello
+# (its hold is kept: nothing goes on its own early), with a reason that is NOT a carrier's.
+TAKEN_OVER = "taken over by the welcome-home hello"
+FREED_FOR_CARRIER = "free for a carrier: the brief it waited in was taken over"
 
 
 @dataclass
@@ -353,6 +358,7 @@ class ReachStore(Protocol):
     def decided(self, dedupe_key: str, since: datetime) -> bool: ...
     def withdraw(self, dedupe_key: str, now: datetime, reason: str = ...) -> bool: ...
     def statuses(self, dedupe_key: str) -> set: ...
+    def rows_for(self, dedupe_key: str) -> list[Reach]: ...
     def carried(self, dedupe_key: str, since: datetime) -> str | None: ...
     def add_new(self, event: ReachEvent, now: datetime, *, status: str, reason: str,
                 not_before: datetime | None) -> Reach | None: ...
@@ -423,6 +429,10 @@ class MemoryReachStore:
     def statuses(self, dedupe_key):
         """What became of every record under this key (empty if there's none)."""
         return {r.status for r in self.rows.values() if r.dedupe_key == dedupe_key}
+
+    def rows_for(self, dedupe_key):
+        """Every record under this key, oldest first (D88: when a brief was said, and what it holds)."""
+        return sorted((r for r in self.rows.values() if r.dedupe_key == dedupe_key), key=lambda r: r.id)
 
     def carried(self, dedupe_key, since):
         """A 'folded' marker under this key (since `since`) whose carrier, the row that holds it in
@@ -596,6 +606,12 @@ class PostgresReachStore:
             rows = conn.execute("SELECT DISTINCT status FROM v2_reachouts WHERE dedupe_key = %s",
                                 (dedupe_key,)).fetchall()
         return {r[0] for r in rows}
+
+    def rows_for(self, dedupe_key):
+        with self._connect() as conn:
+            rows = conn.execute(f"SELECT {self.COLUMNS} FROM v2_reachouts WHERE dedupe_key = %s ORDER BY id",
+                                (dedupe_key,)).fetchall()
+        return [self._row(r) for r in rows]
 
     def carried(self, dedupe_key, since):
         with self._connect() as conn:
@@ -1101,6 +1117,37 @@ class ReachDesk:
             if "queued" in states:
                 return "taken" if self.store.withdraw(dedupe_key, now, reason=reason) else "went"
             return "free"
+
+    def take_over_brief(self, dedupe_key: str, now: datetime) -> str:
+        """D88: the welcome-home hello carries a morning brief that is still waiting, so he's greeted
+        once. In ONE step under the delivery lock, like take_back: 'taken' (it waited: withdrawn, and
+        the held items it reserved are freed for the hello to carry, keeping their hold, so nothing
+        goes on its own early), 'went' (it was said, at any time: the caller checks how long ago),
+        'delivering' (it still reads as waiting but a delivery waiting for its record may be it), or
+        'free' (no brief waits under this key)."""
+        with self.lock:
+            rows = self.store.rows_for(dedupe_key)
+            states = {r.status for r in rows}
+            if states & {"sent", "folded"}:
+                return "went"
+            if "queued" in states and self.unrecorded:
+                return "delivering"
+            waiting = [r for r in rows if r.status == "queued"]
+            if not waiting:
+                return "free"
+            if not self.store.withdraw(dedupe_key, now, reason=TAKEN_OVER):
+                return "went"
+            held = {r.id: r for r in self.store.waiting(now - timedelta(days=2))}
+            for brief in waiting:
+                for rid in brief.folds:
+                    r = held.get(rid)
+                    if r is None or not (r.reason or "").startswith(CARRIED):
+                        continue
+                    try:
+                        self.store.mark(rid, now, reason=FREED_FOR_CARRIER)
+                    except Exception:
+                        log.warning("reach %s: couldn't free it from the taken-over brief; it goes at its hold", rid)
+            return "taken"
 
     def _delivered(self, rid: int) -> bool:
         """Delivered (or carried by a delivered brief) but not yet recorded: never send it again."""

@@ -11,8 +11,10 @@ from types import SimpleNamespace
 
 from aerys_v2.brief import Facts, MorningBrief, Reading
 from aerys_v2.followups import Appointment, FollowUps, MemoryFollowupStore, appointments_for
-from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk, ReachEvent, Where
+from aerys_v2.reach import FREED_FOR_CARRIER, TAKEN_OVER, MemoryReachStore, Prefs, ReachDesk, ReachEvent, Where
 from aerys_v2.welcome import (
+    BRIEF_GREETED,
+    JUST_GREETED,
     DATA_ONLY,
     HELLO_FOR,
     WELCOME_PROMPT,
@@ -1127,3 +1129,89 @@ def test_the_composer_gets_the_prompt_that_fits_whether_she_can_look_things_up(m
     monkeypatch.setattr(wakeups_mod, "her_turn_for", lambda settings, graph: (lambda facts: "her turn"))
     welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object())
     assert prompts == [WELCOME_PROMPT_TOOL_FREE, WELCOME_PROMPT]
+
+
+# --- D88: one greeting, not two (the owner, 11/22 10:31, "yes this looks good") -------------------------
+# 11/22: the brief waited for his room, was said at 10:02:27, and the hello went 45 s later on its own.
+
+def brief_row(h, at, status, *, folds=(), delivered=None):
+    r = h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning, here's your day.", brief=True,
+                                    dedupe_key="brief:2026-11-10", folds=tuple(folds), room="office"),
+                         utc(at), status=status, reason="", not_before=None)
+    if delivered is not None:
+        r.delivered_at = utc(delivered)
+    return r
+
+
+def morning_house():
+    return House(MORNING_HOME + timedelta(minutes=5), left=datetime(2026, 11, 10, 7, 30, tzinfo=ET),
+                 home=MORNING_HOME, brief=True)
+
+
+def test_a_brief_said_minutes_ago_means_the_hello_stays_quiet():
+    h = morning_house()
+    brief_row(h, MORNING_HOME - timedelta(minutes=30), "sent", delivered=MORNING_HOME + timedelta(minutes=1))
+    assert h.hello.tick() == "the brief just greeted him"
+    assert h.composed == [] and h.world.spoken == [] and h.world.said == []
+    hello = [r for r in h.desk.store.rows.values() if r.source == "welcome"]
+    assert len(hello) == 1 and hello[0].status == "dropped" and hello[0].reason == JUST_GREETED
+    assert h.hello.tick() == "done"
+
+
+def test_the_window_is_when_the_brief_was_said_not_when_it_was_queued():
+    # Queued hours earlier, said just now when he reached its room: still "just greeted".
+    h = morning_house()
+    brief_row(h, MORNING_HOME - timedelta(hours=2), "sent", delivered=MORNING_HOME + timedelta(minutes=4))
+    assert h.hello.tick() == "the brief just greeted him"
+    # Said longer ago than BRIEF_GREETED: a real welcome home still goes (without the brief).
+    h2 = morning_house()
+    brief_row(h2, MORNING_HOME - timedelta(hours=2), "sent",
+              delivered=MORNING_HOME + timedelta(minutes=5) - BRIEF_GREETED - timedelta(minutes=1))
+    assert h2.hello.tick() == "sent" and h2.composed[0].brief is None and len(h2.world.spoken) == 1
+
+
+def test_a_brief_still_waiting_is_taken_over_and_said_as_one():
+    h = morning_house()
+    held = h.desk.store.add(ReachEvent(source="kael_note", topic="kael", headline="Backup's green."),
+                            utc(datetime(2026, 11, 9, 23, 0, tzinfo=ET)), status="queued",
+                            reason="carried by the morning brief", not_before=utc(datetime(2026, 11, 10, 13, 0, tzinfo=ET)))
+    waiting = brief_row(h, MORNING_HOME - timedelta(minutes=2), "queued", folds=[held.id])
+    h.brief.done = datetime(2026, 11, 10).date()          # the brief process handed it to the desk
+    assert h.hello.tick() == "sent"
+    assert waiting.status == "dropped" and waiting.reason == TAKEN_OVER
+    facts = h.composed[0]
+    assert facts.brief is not None and [r.id for r in facts.brief.held] == [held.id] and facts.held == []
+    assert held.status == "folded"
+    assert len(h.world.spoken) == 1                         # one greeting
+    # The brief, in this process and a fresh one, knows the hello carried it.
+    assert h.brief.tick() == "done"
+    again = MorningBrief(h.desk, read=lambda: Reading(room="office", confirmed=True), gather=h.gather,
+                         compose=h.compose_brief, clock=lambda: h.clock["now"])
+    assert again.tick() == "done" and h.brief_composed == []
+
+
+def test_take_over_brief_answers_free_taken_went_and_delivering():
+    h = morning_house()
+    now = utc(MORNING_HOME)
+    assert h.desk.take_over_brief("brief:2026-11-10", now) == "free"
+    other = h.desk.store.add(ReachEvent(source="kael_note", topic="kael", headline="x"), now, status="queued",
+                             reason="carried by the overnight note", not_before=now + timedelta(hours=3))
+    held = h.desk.store.add(ReachEvent(source="kael_note", topic="kael", headline="y"), now, status="queued",
+                            reason="carried by the morning brief", not_before=now + timedelta(hours=3))
+    waiting = brief_row(h, MORNING_HOME, "queued", folds=[held.id])
+    h.desk.unrecorded[12345] = ({}, ())                     # a delivery waiting for its record may be it
+    assert h.desk.take_over_brief("brief:2026-11-10", now) == "delivering" and waiting.status == "queued"
+    h.desk.unrecorded.clear()
+    assert h.desk.take_over_brief("brief:2026-11-10", now) == "taken" and waiting.status == "dropped"
+    # Its held item is freed for a carrier, keeping its hold; another carrier's reservation is untouched.
+    assert held.reason == FREED_FOR_CARRIER and held.not_before == now + timedelta(hours=3) and held.status == "queued"
+    assert other.reason == "carried by the overnight note"
+    brief_row(h, MORNING_HOME, "sent", delivered=MORNING_HOME)
+    assert h.desk.take_over_brief("brief:2026-11-10", now) == "went"
+
+
+def test_a_brief_being_delivered_right_now_keeps_the_hello_quiet():
+    h = morning_house()
+    brief_row(h, MORNING_HOME, "queued")
+    h.desk.unrecorded[999] = ({}, ())
+    assert h.hello.tick() == "the brief just greeted him" and h.world.spoken == []

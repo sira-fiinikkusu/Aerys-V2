@@ -58,6 +58,12 @@ TITLE_MAX = 120
 KEPT = HELLO_KEPT                            # a held check-in's reason: f"{KEPT} ({arrival key})"
 ASKED = "asked in the welcome-home hello"     # its reason once a hello asked it
 RECONCILE_EVERY = timedelta(minutes=5)
+# D88 (the owner, 11/22 10:31): he's greeted once. 11/22 10:02 he got "good morning" then "welcome home"
+# 45 s apart: the brief was waiting for his room when he got home, and was said first. Now a brief still
+# waiting is taken over by the hello (carried, one message); a brief already said within BRIEF_GREETED
+# (or being delivered right now) means the hello stays quiet: he's been greeted.
+BRIEF_GREETED = timedelta(minutes=15)
+JUST_GREETED = "the morning brief just greeted him"
 ASK, NO_ASK = "ask", "don't ask"                 # how the facts mark what she may ask about
 # D85 (his 11/21 20:17 "yes please"): his stops. On 11/21 the geocoded sensor changed about once a
 # minute while he drove and held for 10 to 56 minutes where he stopped; at home and at a stop it
@@ -422,6 +428,17 @@ class WelcomeHome:
         with self.lock:
             return self._say(key, arrived, left, r.room, now, must_carry=night)
 
+    def _brief_just_greeted(self, now: datetime, brief_key: str) -> bool:
+        """Today's brief was SAID (delivered, not just queued: a brief can wait hours for his room)
+        within BRIEF_GREETED: he's been greeted."""
+        try:
+            rows = self.desk.store.rows_for(brief_key)
+        except Exception:
+            log.warning("welcome home: couldn't read when the brief went; saying hi", exc_info=True)
+            return False
+        return any(r.status == "sent" and r.delivered_at is not None and now - _utc(r.delivered_at) <= BRIEF_GREETED
+                   for r in rows)
+
     def _brief_due(self, now: datetime, day: date) -> bool:
         b = self.brief
         if b is None or b.done == day:
@@ -589,8 +606,26 @@ class WelcomeHome:
         # Never said at night, and not long after he got home (the desk drops it past this).
         expires = min(arrived + HELLO_FOR, next_local(arrived, self.quiet_start_hour))
         store = self.desk.store
+        took = False
+        if self.brief is not None:
+            brief_key = f"brief:{day.isoformat()}"
+            try:
+                outcome = self.desk.take_over_brief(brief_key, now)
+            except Exception:
+                log.warning("welcome home: couldn't check the morning brief; going as if none waits", exc_info=True)
+                outcome = "free"
+            if outcome == "delivering" or (outcome in ("went", "free") and self._brief_just_greeted(now, brief_key)):
+                self._drop(key, now, JUST_GREETED)
+                self._finish(key)
+                return "the brief just greeted him"
+            if outcome == "taken":
+                # The brief process counts today as handed off; reopened, its own tick waits while this
+                # hello carries it and goes on its own if the hello never does (store.carried).
+                self.brief.done = None
+                took = True
+                log.info("welcome home: took over the waiting morning brief, one greeting")
         brief_facts, marker = None, None
-        if self._brief_due(now, day):
+        if took or self._brief_due(now, day):
             # The marker goes first, and the hello carries it in its folds: the brief counts as given
             # only while that hello is queued or said (store.carried), so a hello that never goes, or
             # a restart before it's written, leaves the brief free to go on its own.
