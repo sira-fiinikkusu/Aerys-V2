@@ -13,12 +13,14 @@ So, once per arrival:
      was away (not a sensor gap or an HA restart) for away_minutes or more. The history is the
      durable record: a brain restart while he's settling loses nothing;
   2. the house settles him in a room with a speaker (never the bedroom unless configured) within
-     settle_minutes of getting home. If he never reaches one, D91 (Chris 11/22 17:11, "if she
-     gives up maybe have it go through discord?"): when she gives up, the hello goes to him as a
-     Discord message instead, written for text. It carries nothing (the morning brief and anything
-     held keep waiting for his room), and it still never goes at night or when he muted it. A trip
-     where he did reach a speaker room but she never got to say it (a meeting, a voice hold) is
-     dropped as before (a dropped row says why);
+     settle_minutes of getting home. D91 (Chris 11/22 17:11, "if she gives up maybe have it go
+     through discord?"): when she gives up (he never settled in time, or something held her voice
+     until HELLO_FOR), the hello goes to him as a Discord message instead, written for text. It
+     carries nothing (the morning brief and anything held keep waiting for his room), and it stays
+     quiet when he's been greeted another way (the brief just said it or is still due to; he's
+     talked with her since he got home), at night, or when he muted it. It's decided from durable
+     records, so a restart up to GIVE_UP_GRACE past the hour decides the same way (a dropped row
+     says why when nothing goes);
   3. not in quiet hours (a welcome home the next morning is wrong: it's dropped), and nothing
      holds her voice (a meeting or a nap: it waits, up to HELLO_FOR after he got home). The one
      exception, his D18 #3 (11/09, "ok"): home inside quiet hours with the morning brief still due,
@@ -69,6 +71,11 @@ RECONCILE_EVERY = timedelta(minutes=5)
 # (or being delivered right now) means the hello stays quiet: he's been greeted.
 BRIEF_GREETED = timedelta(minutes=15)
 JUST_GREETED = "the morning brief just greeted him"
+#: D91: why a hello given up on doesn't go to Discord either, and how long after the hour it still may
+#: (a restart then still sends it; past this it's no longer a welcome).
+BRIEF_GREETS = "the morning brief greets him when he reaches its room"
+TALKED = "he's talked with her since he got home"
+GIVE_UP_GRACE = timedelta(minutes=30)
 ASK, NO_ASK = "ask", "don't ask"                 # how the facts mark what she may ask about
 # D85 (his 11/21 20:17 "yes please"): his stops. On 11/21 the geocoded sensor changed about once a
 # minute while he drove and held for 10 to 56 minutes where he stopped; at home and at a stop it
@@ -350,7 +357,6 @@ class WelcomeHome:
         self.left: dict = {}          # arrival key -> when he left (None: not a trip)
         self.arrived: dict = {}       # arrival key -> when he got home
         self.finished: list = []      # arrival keys this process is done with (the last few)
-        self.reached: set = set()     # D91: arrival keys where he did reach a room with her speaker
         self.last_reconcile: datetime | None = None
         if brief is not None:
             brief.defer = self.greeting   # the brief waits while an arrival is still being greeted
@@ -359,7 +365,6 @@ class WelcomeHome:
         self.finished = [*self.finished[-19:], key]
         self.left.pop(key, None)
         self.arrived.pop(key, None)
-        self.reached.discard(key)
 
     def greeting(self, now: datetime) -> bool:
         """True while the hello waits for him to settle after a trip (not finished, inside
@@ -408,10 +413,9 @@ class WelcomeHome:
         if key in self.finished:
             return "done"
         if now - arrived > HELLO_FOR:
-            left = self.left.get(key)
-            if left is not None:                        # a trip this process was waiting to greet
-                if key not in self.reached:
-                    return self._by_text(key, arrived, left, now)       # D91: he never reached her speaker
+            if now - arrived <= HELLO_FOR + GIVE_UP_GRACE:
+                return self._give_up(key, arrived, now)                  # D91: the hour ended unsaid
+            if self.left.get(key) is not None:          # a trip this process was waiting to greet
                 self._drop(key, now, "never got to say it")
             self._finish(key)
             return "too late"
@@ -443,15 +447,10 @@ class WelcomeHome:
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
-        if not self._in_a_speaker_room(r):
+        if not (r.room in self.rooms and r.confirmed):
             if now - arrived > self.settle_for:
-                if key not in self.reached:
-                    return self._by_text(key, arrived, left, now)       # D91: he never reached her speaker
-                self._drop(key, now, "never settled in a room with a speaker")
-                self._finish(key)
-                return "never settled"
+                return self._give_up(key, arrived, now)                  # D91: never settled in time
             return "waiting to settle"
-        self.reached.add(key)
         if night and r.room != self.brief.room:
             self._drop(key, now, "quiet hours")
             self._finish(key)
@@ -462,21 +461,52 @@ class WelcomeHome:
         with self.lock:
             return self._say(key, arrived, left, r.room, now, must_carry=night)
 
-    def _in_a_speaker_room(self, r: HomeReading) -> bool:
-        return r.room in self.rooms and r.confirmed
-
-    def _by_text(self, key: str, arrived: datetime, left: datetime, now: datetime) -> str:
-        """D91 (Chris 11/22 17:11, "if she gives up maybe have it go through discord?"): he never reached a
-        room with her speaker, so the hello goes to him as a Discord message instead of nowhere. The
-        night and his mute still win (the tick's own checks may not have run this pass)."""
+    def _give_up(self, key: str, arrived: datetime, now: datetime) -> str:
+        """D91 (Chris 11/22 17:11, "if she gives up maybe have it go through discord?"): the spoken hello's
+        window closed unsaid (he never settled in a room with her speaker, or something held her voice
+        the whole hour), so it goes to him as a Discord message instead of nowhere. Everything it asks is
+        durable, so a restart decides the same way (Codex review of 1e42a9c): what the desk already holds
+        under this key, the trip from HA's own history. It stays quiet when he's been greeted another way:
+        the morning brief just said it, the brief is still due (it greets him when he reaches its room:
+        one greeting, D88), or he's talked with her since he got home. Never at night, never muted. A read
+        that fails waits for the next pass (inside GIVE_UP_GRACE), never guesses."""
+        store = self.desk.store
+        day = now.astimezone(EASTERN).date()
+        try:
+            if store.decided(key, arrived - timedelta(minutes=1)):      # said, dropped or texted already
+                self._finish(key)
+                return "done"
+            if key not in self.left:                    # a restart: the trip from HA's own history
+                self.left[key] = self.away_since(arrived)
+                self.arrived[key] = arrived
+        except Exception as e:
+            log.warning("welcome home: couldn't check the arrival (%s); trying again", type(e).__name__)
+            return "waiting: couldn't check the arrival"
+        left = self.left[key]
+        if left is None or arrived - left < self.away_for:
+            self._finish(key)
+            return "not a trip" if left is None else "a short trip"
         if self.desk.quiet(now):
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
-        if TOPIC in muted_topics(self.desk.store.prefs(self.desk.budget_default), now):
-            self._drop(key, now, f"you muted {TOPIC}")
+        try:
+            muted = TOPIC in muted_topics(store.prefs(self.desk.budget_default), now)
+            brief_key = f"brief:{day.isoformat()}"
+            greeted = self.brief is not None and self._brief_just_greeted(now, brief_key)
+            brief_waits = not greeted and self._brief_waiting(now, day)
+            replied = getattr(self.desk, "replied_since", None)
+            talked = not (greeted or brief_waits) and replied is not None and bool(replied(arrived))
+        except Exception as e:
+            log.warning("welcome home: couldn't check whether he's been greeted (%s); trying again",
+                        type(e).__name__)
+            return "waiting: couldn't check whether he's been greeted"
+        why = (f"you muted {TOPIC}" if muted else JUST_GREETED if greeted
+               else BRIEF_GREETS if brief_waits else TALKED if talked else None)
+        if why is not None:
+            self._drop(key, now, why)
             self._finish(key)
-            return "muted"
+            return why
         with self.lock:
             outcome = self._say(key, arrived, left, "", now, by_text=True)
         return f"by text: {outcome}"
@@ -487,6 +517,15 @@ class WelcomeHome:
         rows = self.desk.store.rows_for(brief_key)
         return any(r.status == "sent" and r.delivered_at is not None and now - _utc(r.delivered_at) <= BRIEF_GREETED
                    for r in rows)
+
+    def _brief_waiting(self, now: datetime, day: date) -> bool:
+        """D91: today's brief hasn't greeted him yet but will in its room: due to go, or already queued
+        there waiting for him (_brief_due counts a queued brief as gone; for a greeting it isn't yet)."""
+        if self.brief is None:
+            return False
+        if self._brief_due(now, day):
+            return True
+        return any(r.status == "queued" for r in self.desk.store.rows_for(f"brief:{day.isoformat()}"))
 
     def _brief_due(self, now: datetime, day: date) -> bool:
         b = self.brief

@@ -217,9 +217,14 @@ def test_a_meeting_holds_it_and_after_an_hour_it_is_let_go():
     h2 = House()
     h2.meeting = utc(SETTLED + timedelta(hours=2))
     assert h2.hello.tick() == "held: meeting"
-    assert h2.at(HOME + HELLO_FOR + timedelta(minutes=1)).hello.tick() == "too late"
+    # D91: given up at the hour, it goes as a Discord message, which waits out the meeting (and lapses
+    # after its half hour, as this one does): never spoken.
+    assert h2.at(HOME + HELLO_FOR + timedelta(minutes=1)).hello.tick() == "by text: queued"
     row = h2.desk.store.rows[1]
-    assert row.status == "dropped" and row.reason == "never got to say it" and h2.world.spoken == []
+    assert row.status == "queued" and row.text_only and h2.world.spoken == []
+    h2.meeting = None
+    h2.at(SETTLED + timedelta(hours=2, minutes=11)).desk.tick()
+    assert row.status == "dropped" and h2.world.spoken == [] and h2.world.texts == []
 
 
 def test_people_over_it_lands_as_a_notification_not_aloud():
