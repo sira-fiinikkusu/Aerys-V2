@@ -85,6 +85,7 @@ ASK, NO_ASK = "ask", "don't ask"                 # how the facts mark what she m
 # before he left, or at the moment he got home, are home's (and its neighbours'): never a stop.
 STOP_MIN = timedelta(minutes=10)
 NAMING_BUDGET_S = 8.0                           # D92: all of a trip's place look-ups together
+NAMING_WORKERS = 4                              # D92: the look-ups' one shared pool
 FLICKER = timedelta(minutes=5)
 HOME_WINDOW = timedelta(hours=3)
 MAX_STOPS = 6                                   # the longest few, told in the order he made them
@@ -172,6 +173,13 @@ class WelcomeFacts:
 
 def _utc(dt: datetime) -> datetime:
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def names_in(facts) -> bool:
+    """D92 (Codex review of b09f6db): the facts carry a map's place names, i.e. outside text: anyone can
+    name a business. Her turn then runs as one that has read outside text (the wake fence refuses house
+    writes), as after any outside read."""
+    return any(getattr(s, "near", ()) for s in (getattr(facts, "stops", None) or []))
 
 
 def _named(stop) -> str:
@@ -478,8 +486,9 @@ class WelcomeHome:
         held_by = self.desk.voice_held(now)
         if held_by:
             return f"held: {held_by}"
+        stops = self._stops(left, arrived)     # before the brief's lock: naming them can take seconds (D92)
         with self.lock:
-            return self._say(key, arrived, left, r.room, now, must_carry=night)
+            return self._say(key, arrived, left, r.room, now, must_carry=night, stops=stops)
 
     def _give_up(self, key: str, arrived: datetime, now: datetime) -> str:
         """D91 (Chris 11/22 17:11, "if she gives up maybe have it go through discord?"): the spoken hello's
@@ -510,25 +519,44 @@ class WelcomeHome:
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
-        # The brief's own thread speaks only under this lock, so it can't greet him between these reads
-        # and the send (Codex review of c288eee: a brief sent mid-check left him greeted twice).
+        # A first look without the lock, so a give-up that stays quiet costs no place look-ups (D92); then
+        # the stops, named outside the brief's lock (it can take seconds); then the deciding look and the
+        # send under it. The brief's own thread speaks only under that lock, so it can't greet him between
+        # them (Codex review of c288eee: a brief sent mid-check left him greeted twice).
+        quiet = self._quiet_now(key, now, day, arrived)      # a first look: a quiet give-up costs no look-ups
+        if quiet is not None:
+            return quiet
+        stops = self._stops(left, arrived)
         with self.lock:
-            try:
-                muted = TOPIC in muted_topics(store.prefs(self.desk.budget_default), now)
-                brief = self._brief_greets(now, day)
-                replied = getattr(self.desk, "replied_since", None)
-                talked = brief is None and replied is not None and bool(replied(arrived))
-            except Exception as e:
-                log.warning("welcome home: couldn't check whether he's been greeted (%s); trying again",
-                            type(e).__name__)
-                return "waiting: couldn't check whether he's been greeted"
-            why = f"you muted {TOPIC}" if muted else brief or (TALKED if talked else None)
-            if why is not None:
-                self._drop(key, now, why)
-                self._finish(key)
-                return why
-            outcome = self._say(key, arrived, left, "", now, by_text=True)
+            quiet = self._quiet_now(key, now, day, arrived)  # the deciding look, under the lock, then the send
+            if quiet is not None:
+                return quiet
+            outcome = self._say(key, arrived, left, "", now, by_text=True, stops=stops)
         return f"by text: {outcome}"
+
+    def _quiet_now(self, key: str, now: datetime, day: date, arrived: datetime) -> str | None:
+        """The give-up's look at whether to stay quiet: the reason (recorded, and the arrival finished),
+        a wait when the look failed, or None to go ahead."""
+        try:
+            why = self._why_quiet(now, day, arrived)
+        except Exception as e:
+            log.warning("welcome home: couldn't check whether he's been greeted (%s); trying again",
+                        type(e).__name__)
+            return "waiting: couldn't check whether he's been greeted"
+        if why is not None:
+            self._drop(key, now, why)
+            self._finish(key)
+        return why
+
+    def _why_quiet(self, now: datetime, day: date, arrived: datetime) -> str | None:
+        """D91: why a hello given up on doesn't go by Discord either, or None. A failed read raises."""
+        if TOPIC in muted_topics(self.desk.store.prefs(self.desk.budget_default), now):
+            return f"you muted {TOPIC}"
+        brief = self._brief_greets(now, day)
+        if brief is not None:
+            return brief
+        replied = getattr(self.desk, "replied_since", None)
+        return TALKED if replied is not None and replied(arrived) else None
 
     def _brief_just_greeted(self, now: datetime, brief_key: str) -> bool:
         """Today's brief was SAID (delivered, not just queued: a brief can wait hours for his room)
@@ -717,7 +745,7 @@ class WelcomeHome:
             log.warning("welcome home: reconciling held check-ins failed; tried again later", exc_info=True)
 
     def _say(self, key: str, arrived: datetime, left: datetime, room: str, now: datetime, *,
-             must_carry: bool = False, by_text: bool = False) -> str:
+             must_carry: bool = False, by_text: bool = False, stops: list | None = None) -> str:
         day = now.astimezone(EASTERN).date()
         # Never said at night, and not long after he got home (the desk drops it past this).
         expires = min(arrived + HELLO_FOR, next_local(arrived, self.quiet_start_hour))
@@ -793,7 +821,7 @@ class WelcomeHome:
                                                skip_topics=CHECK_IN_TOPICS)
         visits = self._visits(left, arrived, now, key)
         facts = WelcomeFacts(away=arrived - left, room=room, visits=visits, held=[] if marker else held,
-                             stops=self._stops(left, arrived), brief=brief_facts,
+                             stops=self._stops(left, arrived) if stops is None else stops, brief=brief_facts,
                              home_for=(now - arrived) if by_text else None)
         compose = self.compose_text if by_text else self.compose
         text = ""
@@ -938,23 +966,36 @@ def named(stops: list, near) -> list:
     if not todo:
         return stops
     out = list(stops)
-    pool = cf.ThreadPoolExecutor(max_workers=len(todo), thread_name_prefix="stop-names")
-    try:
-        jobs = {pool.submit(near, *s.at): i for i, s in todo}
-        done, late = cf.wait(jobs, timeout=NAMING_BUDGET_S)
-        for job in done:
-            try:
-                found = tuple(job.result() or ())
-            except Exception as e:
-                log.warning("welcome home: a stop couldn't be named (%s); its address goes alone", type(e).__name__)
-                continue
-            i = jobs[job]
-            out[i] = replace(out[i], near=found)
-        if late:
-            log.warning("welcome home: %d stop(s) not named in time; their addresses go alone", len(late))
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    jobs = {_naming_pool().submit(near, *s.at): i for i, s in todo}
+    done, late = cf.wait(jobs, timeout=NAMING_BUDGET_S)
+    for job in done:
+        try:
+            found = tuple(job.result() or ())
+        except Exception as e:
+            log.warning("welcome home: a stop couldn't be named (%s); its address goes alone", type(e).__name__)
+            continue
+        i = jobs[job]
+        out[i] = replace(out[i], near=found)
+    if late:
+        for job in late:
+            job.cancel()                # one that never started never runs; a running one ends at its timeouts
+        log.warning("welcome home: %d stop(s) not named in time; their addresses go alone", len(late))
     return out
+
+
+_POOL: list = []
+_POOL_LOCK = threading.Lock()
+
+
+def _naming_pool():
+    """One small pool for every look-up (Codex review of b09f6db): a look-up that outlives its budget keeps
+    one of NAMING_WORKERS threads until its own timeouts end it, never a new thread per welcome."""
+    import concurrent.futures as cf
+
+    with _POOL_LOCK:
+        if not _POOL:
+            _POOL.append(cf.ThreadPoolExecutor(max_workers=NAMING_WORKERS, thread_name_prefix="stop-names"))
+        return _POOL[0]
 
 
 def visits_for(settings, *, get=None) -> Callable[[datetime, datetime], list]:
@@ -1034,9 +1075,9 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
         desk, read=home_reader_for(settings), away_since=away_since_for(settings),
         compose=composer_for(settings, prompt=WELCOME_PROMPT if turn else WELCOME_PROMPT_TOOL_FREE,
                              text_of=welcome_facts_text, turn=turn,
-                             kind="welcome"),
+                             kind="welcome", outside_of=names_in),
         compose_text=composer_for(settings, prompt=WELCOME_TEXT_PROMPT if turn else WELCOME_TEXT_PROMPT_TOOL_FREE,
-                                  text_of=welcome_facts_text, turn=turn, kind="welcome-text"),
+                                  text_of=welcome_facts_text, turn=turn, kind="welcome-text", outside_of=names_in),
         visits=visits_for(settings), stops=stops_for(settings), rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
         settle_minutes=int(getattr(settings, "welcome_home_settle_minutes", 20)),

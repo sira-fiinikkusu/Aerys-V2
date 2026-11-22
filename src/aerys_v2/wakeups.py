@@ -945,6 +945,9 @@ def wake_fence_middleware():
     def read_outside(request) -> bool:
         from aerys_v2.outside_guard import READERS
 
+        conf = ((getattr(getattr(request, "runtime", None), "config", None) or {}).get("configurable") or {})
+        if (conf.get("outside_text") or {}).get("seed_outside"):        # D92: seeded with outside text
+            return True
         messages = (getattr(request, "state", None) or {}).get("messages") or []
         return any(getattr(m, "type", "") == "tool" and getattr(m, "name", "") in READERS for m in messages)
 
@@ -1050,7 +1053,7 @@ def occurrence_of(w: Wakeup) -> str:
 
 
 def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = "",
-                thread: str | None = None, house_key: str | None = None) -> dict:
+                thread: str | None = None, house_key: str | None = None, seeded_outside: bool = False) -> dict:
     # outside_text and room_sink are made here, by the caller, like ask() does: LangGraph copies
     # configurable shallowly, so the guard's holder is the same dict for the model and the tools.
     identity = wake_identity(owner)
@@ -1059,8 +1062,11 @@ def wake_config(wake_id: int, owner: str, *, steps: int = 40, occurrence: str = 
     thread = thread or f"wake:{wake_id}"
     # The run's house record: its owner's (by the run's key), or one of its own for a direct call.
     sink = attach_house_record(house_key) if house_key else _new_record()
+    # D92 (Codex review of b09f6db): a run whose seed carries outside text (a map's place names) starts as if
+    # it had already read outside text: the fence refuses house writes, and nothing is pinned to go untapped.
+    outside = {"seed_outside": True, "untrusted_read": True} if seeded_outside else {}
     return {"configurable": {"thread_id": thread, "identity": identity, "house_sink": sink,
-                             "outside_text": {}, "room_sink": {}, "specialist": True, "tier": "standard"},
+                             "outside_text": outside, "room_sink": {}, "specialist": True, "tier": "standard"},
             "recursion_limit": int(steps)}
 
 
@@ -1212,8 +1218,9 @@ def her_turn_for(settings, action_graph=None) -> Callable[[str, str], TurnResult
     set_autonomy_blocked(getattr(settings, "autonomy_blocked", ""))   # his list, whatever arms first
     steps = WakeRails.from_settings(settings).steps
 
-    def run(thread: str, seed: str) -> TurnResult:
-        return _one_turn(graph, wake_config(0, str(owner), steps=steps, thread=thread, house_key=thread), seed)
+    def run(thread: str, seed: str, outside: bool = False) -> TurnResult:
+        return _one_turn(graph, wake_config(0, str(owner), steps=steps, thread=thread, house_key=thread,
+                                            seeded_outside=outside), seed)
 
     return run
 

@@ -357,33 +357,48 @@ def test_a_brief_queued_for_his_room_greets_him_instead_one_greeting():
 # --- Codex review of c288eee: the brief can't greet him between the checks and the send ----------
 
 def test_a_brief_delivered_between_reads_still_counts_one_read_decides():
-    # The desk delivers the waiting brief (queued -> sent) right after the hello's first look at it.
-    # Two reads would see "not said yet" then "not waiting any more" and text him too.
+    # The desk delivers the waiting brief (queued -> sent) right after the hello's deciding look reads it
+    # (the one under the lock). Two reads there would see "not said yet" then "not waiting any more" and
+    # text him too.
+    import threading
+
     h = TextHouse(MORNING_HOME + timedelta(minutes=5), left=MORNING_LEFT, home=MORNING_HOME, brief=True)
     assert h.hello.tick() == "waiting to settle"
-    brief = h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning.", brief=True,
-                                        dedupe_key="brief:2026-11-10", room="office"),
-                             utc(MORNING_HOME + timedelta(minutes=40)), status="queued",
-                             reason="waits for him in the office", not_before=None)
+    lock = threading.Lock()
+    h.hello.lock = lock
     real = h.desk.store.rows_for
-    reads = []
+    state = {"flipped": False, "locked_reads": 0, "pending": None}
 
-    def delivered_after_first_look(key):
+    def delivered_after_the_deciding_read(key):
         rows = real(key)
-        if key == "brief:2026-11-10":
-            reads.append(key)
-            if len(reads) == 1:
+        if key == "brief:2026-11-10" and lock.locked():
+            state["locked_reads"] += 1
+            if not state["flipped"] and state["pending"] is not None:
                 snapshot = [type(r)(**vars(r)) for r in rows]
-                brief.status, brief.delivered_at = "sent", utc(MORNING_HOME + HELLO_FOR + timedelta(seconds=50))
+                b = state["pending"]
+                b.status, b.delivered_at = "sent", utc(MORNING_HOME + HELLO_FOR + timedelta(seconds=50))
+                state["flipped"] = True
                 return snapshot
         return rows
 
-    h.desk.store.rows_for = delivered_after_first_look
+    h.desk.store.rows_for = delivered_after_the_deciding_read
+    real_stops = h.hello._stops
+
+    def stops_then_queue(left, arrived):
+        # The brief goes to the desk while the hello names the stops (outside the lock).
+        state["pending"] = h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning.", brief=True,
+                                                       dedupe_key="brief:2026-11-10", room="office"),
+                                            utc(MORNING_HOME + HELLO_FOR), status="queued",
+                                            reason="waits for him in the office", not_before=None)
+        return real_stops(left, arrived)
+
+    h.hello._stops = stops_then_queue
+    h.hello.brief.done = MORNING_HOME.date()      # not due on its own: only the queued row says it waits
     assert h.at(MORNING_HOME + HELLO_FOR + timedelta(minutes=1)).hello.tick() == BRIEF_GREETS
-    assert reads == ["brief:2026-11-10"] and h.world.texts == [] and h.texted == []
+    assert state["flipped"] and state["locked_reads"] == 1 and h.world.texts == [] and h.texted == []
 
 
-def test_the_brief_lock_is_held_from_the_first_check_to_the_send():
+def test_the_brief_lock_is_held_from_the_deciding_check_to_the_send():
     import threading
 
     h = TextHouse(brief=True)
@@ -391,8 +406,11 @@ def test_the_brief_lock_is_held_from_the_first_check_to_the_send():
     lock = threading.Lock()
     h.hello.lock = lock
     held = []
-    real_rows, real_reach = h.desk.store.rows_for, h.desk.reach_out
+    real_rows, real_reach, real_stops = h.desk.store.rows_for, h.desk.reach_out, h.hello._stops
     h.desk.store.rows_for = lambda key: held.append(("rows", lock.locked())) or real_rows(key)
     h.desk.reach_out = lambda ev: held.append(("send", lock.locked())) or real_reach(ev)
+    h.hello._stops = lambda left, arrived: held.append(("stops", lock.locked())) or real_stops(left, arrived)
     assert h.at(GAVE_UP).hello.tick() == "by text: sent"
-    assert ("rows", True) in held and ("send", True) in held and all(locked for _, locked in held)
+    # A first look unlocked (no look-ups for a quiet give-up), the stops named unlocked (D92: it can take
+    # seconds), then the deciding look and the send under the lock.
+    assert held == [("rows", False), ("stops", False), ("rows", True), ("send", True)]

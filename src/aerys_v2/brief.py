@@ -595,12 +595,14 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
 
 def composer_for(settings, *, model=None, prompt: str | None = None,
                  text_of: Callable[[Facts], str] | None = None, turn=None, kind: str = "brief",
-                 wall_s: float = TURN_WALL_S) -> Callable[[Facts], str]:
+                 wall_s: float = TURN_WALL_S, outside_of: Callable[[Facts], bool] | None = None,
+                 ) -> Callable[[Facts], str]:
     """Her words for a brief-like moment. With `turn` (wakeups.her_turn_for, D56) they come from her own
     turn, tools in hand, on a thread of its own (<kind>:<time>); the house changes it made are left on
     compose.house for the caller to report (report_house), also when the turn failed or ran past wall_s,
     which closes it (its later house writes are refused) and gives way to the plain version. Without
-    `turn`, one tool-free call over the facts."""
+    `turn`, one tool-free call over the facts. outside_of(facts) True: the facts carry outside text (D92:
+    a map's place names), so her turn runs as one that has read outside text (no house writes)."""
     from langchain_core.messages import HumanMessage, SystemMessage
 
     def compose(facts: Facts) -> str:
@@ -619,12 +621,13 @@ def composer_for(settings, *, model=None, prompt: str | None = None,
 
     def _her_turn(facts: Facts) -> str:
         seed = (prompt or BRIEF_PROMPT).strip() + TURN_TEACHING + "\n\n" + (text_of or facts_text)(facts)
+        outside = bool(outside_of(facts)) if outside_of is not None else False
         thread = f"{kind}:{datetime.now(EASTERN):%Y-%m-%dT%H:%M:%S}"     # a clean thread each time
         box: dict = {}
 
         def work():
             try:
-                box["out"] = turn(thread, seed)
+                box["out"] = turn(thread, seed, outside=True) if outside else turn(thread, seed)
             except Exception as e:
                 box["err"] = e
 
