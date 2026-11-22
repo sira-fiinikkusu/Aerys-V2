@@ -150,10 +150,11 @@ def test_non_location_reads_unchanged():
     assert out["changes"] == [["8:00 AM", "on"]]
 
 
-def test_welcome_teaches_live_history():
-    assert "may check where he's been" in WELCOME_PROMPT
-    assert "phone's location history in Home Assistant" in WELCOME_PROMPT
-    assert "never guess where he was" not in WELCOME_PROMPT
+def test_welcome_is_handed_his_stops_rather_than_told_to_go_look():
+    # D85 (11/21): the hello reads his stops itself and hands them over as facts (test_welcome_home.py).
+    assert "may check where he's been" not in WELCOME_PROMPT
+    assert "If the facts list where his phone stayed a while" in WELCOME_PROMPT
+    assert "Never guess" in WELCOME_PROMPT
 
 
 @pytest.mark.parametrize("op", ["get_state", "history"])

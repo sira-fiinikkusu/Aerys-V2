@@ -16,6 +16,7 @@ from aerys_v2.welcome import (
     DATA_ONLY,
     HELLO_FOR,
     WELCOME_PROMPT,
+    WELCOME_PROMPT_TOOL_FREE,
     HomeReading,
     Stop,
     Visit,
@@ -1071,3 +1072,53 @@ def test_stops_reader_reads_the_geocoded_sensor_from_before_he_left_to_when_he_g
     assert stops_for(settings(presence_geocoded_entity="")) is None
     assert welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object()).stops is not None
     assert welcome_home_for(settings(), object()).stops is None
+
+
+def test_the_cap_keeps_the_longest_stops_and_tells_them_in_order():
+    # Eight stays of different lengths: 10..45 minutes, longest last but one.
+    lengths = [10, 45, 12, 30, 11, 40, 13, 20]
+    rows, t = [("1 Home St", at(6))], at(9)
+    for i, mins in enumerate(lengths):
+        rows.append((f"Stop {i}", t))
+        t += timedelta(minutes=mins)
+    rows.append(("1 Home St", t))
+    found = stops_from(geo(*rows), at(9), t)
+    # The two shortest (10 and 11 minutes) go; the rest are told in the order he made them.
+    assert [s.place for s in found] == ["Stop 1", "Stop 2", "Stop 3", "Stop 5", "Stop 6", "Stop 7"]
+
+
+def test_a_stay_running_past_his_arrival_is_cut_at_it():
+    trail = geo(("1 Home St", at(11)), ("Late Cafe", at(12, 50)), ("1 Home St", at(14)))
+    found = stops_from(trail, at(12), at(13, 5))
+    assert [(s.place, s.start, s.end) for s in found] == [("Late Cafe", utc(at(12, 50)), utc(at(13, 5)))]
+    assert stops_from(trail, at(12), at(12, 55)) == []              # 5 minutes before he got home: no stop
+
+
+def test_her_words_failing_never_logs_where_he_went(caplog):
+    house = House()
+    house.hello.stops = lambda left, arrived: [Stop("10 Fair Rd", left, arrived)]
+    house.words = RuntimeError("could not say 10 Fair Rd")
+    with caplog.at_level("WARNING"):
+        assert house.hello.tick() == "sent"
+    assert "Fair" not in caplog.text and "RuntimeError" in caplog.text
+    assert house.world.said and "Fair" not in house.world.said[0]          # the plain version names nothing
+
+
+def test_without_her_own_turn_a_street_address_is_never_made_a_place():
+    assert "look-up" in WELCOME_PROMPT and "look-up" not in WELCOME_PROMPT_TOOL_FREE
+    assert "never from a street address alone" in WELCOME_PROMPT_TOOL_FREE
+    assert "Never guess" in WELCOME_PROMPT_TOOL_FREE
+
+
+
+def test_the_composer_gets_the_prompt_that_fits_whether_she_can_look_things_up(monkeypatch):
+    import aerys_v2.brief as brief_mod
+    import aerys_v2.wakeups as wakeups_mod
+
+    prompts = []
+    monkeypatch.setattr(brief_mod, "composer_for", lambda settings, **kw: prompts.append(kw["prompt"]) or (lambda f: ""))
+    monkeypatch.setattr(wakeups_mod, "her_turn_for", lambda settings, graph: None)
+    welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object())
+    monkeypatch.setattr(wakeups_mod, "her_turn_for", lambda settings, graph: (lambda facts: "her turn"))
+    welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object())
+    assert prompts == [WELCOME_PROMPT_TOOL_FREE, WELCOME_PROMPT]

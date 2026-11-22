@@ -88,6 +88,14 @@ WELCOME_PROMPT = (
     "off a screen: no lists, no markdown, no emoji. Reply with ONLY what to say."
 )
 
+#: Without her own turn (no wake graph) her words come from a tool-free model call: nothing can be
+#: looked up, so a street address never becomes a place name (Codex review of D85).
+LOOKUP = "an address alone may need a quick look-up before you name the place. "
+NO_LOOKUP = ("name a place only when the facts themselves say what it is (a business or park name), "
+             "never from a street address alone. ")
+LOOKUP_FACTS = " (and what a look-up of one of his stops tells you)"
+WELCOME_PROMPT_TOOL_FREE = WELCOME_PROMPT.replace(LOOKUP, NO_LOOKUP).replace(LOOKUP_FACTS, "")
+
 
 @dataclass
 class HomeReading:
@@ -620,8 +628,8 @@ class WelcomeHome:
         text = ""
         try:
             text = (self.compose(facts) or "").strip()
-        except Exception:
-            log.warning("welcome home: her words failed; the plain version goes", exc_info=True)
+        except Exception as e:      # the type only: her facts (his calendar, where he went) can be in the text
+            log.warning("welcome home: her words failed (%s); the plain version goes", type(e).__name__)
         if not text:
             text = plain_welcome(facts)
         folds = tuple(h.id for h in held) + ((marker.id,) if marker is not None else ())
@@ -818,7 +826,8 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
     log.info("welcome home armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return WelcomeHome(
         desk, read=home_reader_for(settings), away_since=away_since_for(settings),
-        compose=composer_for(settings, prompt=WELCOME_PROMPT, text_of=welcome_facts_text, turn=turn,
+        compose=composer_for(settings, prompt=WELCOME_PROMPT if turn else WELCOME_PROMPT_TOOL_FREE,
+                             text_of=welcome_facts_text, turn=turn,
                              kind="welcome"),
         visits=visits_for(settings), stops=stops_for(settings), rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
