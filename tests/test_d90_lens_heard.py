@@ -114,3 +114,82 @@ def test_the_state_is_bounded_and_keeps_the_end_of_her_reply():
     assert len(st["she_said"]) <= 601 and st["she_said"].endswith("did you go inside?")
     assert len(st["heard"]) <= 401 and len(st["he_said_before"]) <= 401
     assert set(st) == {"heard", "she_said", "he_said_before"}
+
+
+# ---- Codex review of a533f1e ----------------------------------------------------------------------------
+
+from aerys_v2.router import RouteDecision                                     # noqa: E402
+from aerys_v2.service import CANCEL_ACK, HEARD_BUDGET_S, _said_to_her         # noqa: E402
+from test_d79_text_one_loop import GUEST, WIFE                                # noqa: E402
+
+
+@pytest.mark.parametrize("who", [WIFE, GUEST])
+def test_only_his_own_glasses_are_checked(who):
+    out, action = go("Babe, grab the tickets.", p=0.01, identity=lens(who))
+    assert action.addressed_check.seen == []                                   # never silenced by the check
+
+
+def test_no_owner_configured_means_no_check(monkeypatch):
+    monkeypatch.setattr(factory, "_OWNER_ID", None)
+    out, action = go("Babe, grab the tickets.", p=0.01)
+    assert action.addressed_check.seen == [] and out
+
+
+def test_a_turn_still_pending_is_never_paired_with_an_older_reply():
+    graph = build_graph(fake_model("Sure."), soul="s")
+    graph.update_state({"configurable": {"thread_id": "person:o"}},
+                       {"messages": [HumanMessage(content="Tell me about it."), AIMessage(content="It opened in 1925."),
+                                     HumanMessage(content="and the house next door?")]}, as_node="chat")
+    check = Check(0.01)
+    assert _said_to_her(graph, check, "person:o", "Babe, grab the tickets.") is None and check.seen == []
+
+
+def test_a_slow_history_read_answers_the_turn_inside_the_budget():
+    class SlowGraph:
+        def get_state(self, _config):
+            time.sleep(HEARD_BUDGET_S + 1.0)
+
+    started = time.monotonic()
+    assert _said_to_her(SlowGraph(), Check(0.01), "person:o", "x") is None
+    assert time.monotonic() - started < HEARD_BUDGET_S + 0.5
+
+
+def test_saturation_answers_the_turn():
+    from aerys_v2 import service
+
+    taken = 0
+    while service._HEARD_SLOTS.acquire(blocking=False):
+        taken += 1
+    try:
+        graph = build_graph(fake_model("x"), soul="s")
+        assert _said_to_her(graph, Check(0.01), "person:o", "x") is None
+    finally:
+        for _ in range(taken):
+            service._HEARD_SLOTS.release()
+    chk = AddressedCheck(FakeTS(0.01))
+    held = 0
+    while chk._inflight.acquire(blocking=False):
+        held += 1
+    assert chk("x", "y", "z") is None
+
+
+def test_a_cancel_on_the_glasses_is_handled_before_the_check():
+    graph = build_graph(fake_model("unused"), soul="s")
+    graph.update_state({"configurable": {"thread_id": "person:o"}},
+                       {"messages": [HumanMessage(content="Tell me about it."), AIMessage(content="It opened in 1925.")]},
+                       as_node="chat")
+    action = Action("unused")
+    action.addressed_check = Check(0.01)
+    out = ask(graph, "never mind", identity=lens(), thread_id="person:o",
+              router=lambda _t: RouteDecision(route="chat", ack="", cancelled=True), action_graph=action,
+              action_allowlist=ALLOW, text_one_loop=True, drop_unaddressed=True,
+              activity_registry={"person:o": time.monotonic()})
+    assert out == CANCEL_ACK and action.addressed_check.seen == []
+
+
+def test_a_skipped_snippet_leaves_the_thread_untouched():
+    graph = build_graph(fake_model("unused"), soul="s")
+    before_len = None
+    out, action = go("Babe, grab the tickets.", p=0.05, graph=graph)
+    after = graph.get_state({"configurable": {"thread_id": "person:o"}}).values["messages"]
+    assert out == "" and [m.content for m in after] == ["Tell me about the museum.", "It opened in 1925. Did you two go inside?"]

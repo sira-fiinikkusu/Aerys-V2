@@ -80,3 +80,25 @@ def test_the_lens_one_loop_prompt_carries_the_correction_and_the_lens_style_not_
         assert "DONT DISOWN THE SEARCH" in system and LENS_SURFACE_OVERLAY in system
         assert TEXT_BANTER_OVERLAY not in system
         assert [t for t, _c in log[0]["messages"]].count("human") == 1     # the correction is not a turn
+
+
+# ---- Codex review of a533f1e: the judge really runs on his glasses, on both routes ----------------------------
+
+from test_d79_text_one_loop import LAUNCHED, UNBACKED_ACT, Recorder, route, tool_then   # noqa: E402
+
+
+def test_a_lens_one_loop_reply_claiming_an_act_it_didnt_do_is_corrected():
+    action = Action("I've sent it to Kael.", "I couldn't send that.", jev=[UNBACKED_ACT])
+    out = run("ok pass it on", identity=lens(), action=action)
+    assert len(action.calls) == 2 and action.calls[1][1].get("one_loop_correction")
+    assert out == "I couldn't send that."
+
+
+def test_a_lens_action_reply_claiming_a_start_after_only_a_list_is_corrected():
+    rec = Recorder()
+    action = Action(tool_then("list_async_tasks", "I've started the home job.", "No async subagent tasks tracked."),
+                    tool_then("start_async_task", "Started it.", LAUNCHED, args={"description": "Fix the skill"}),
+                    jev=[UNBACKED_ACT])
+    out = run("fix the skill on your home machine", identity=lens(), action=action, router=route("action"), record=rec)
+    assert len(action.calls) == 2 and action.calls[1][1]["one_loop_correction"]
+    assert out == "Started it." and "honesty_corrected" in (rec.wait(1)[0]["degraded"] or [])

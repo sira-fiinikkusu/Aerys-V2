@@ -1047,24 +1047,50 @@ def _conversation_in_flight(
 LENS_HEARD_SKIP_MARKER = "lens_background_skipped"
 
 
+#: D90: the whole look (reading the thread AND Jev) runs under one deadline, so a slow checkpoint read can't
+#: hold his turn (Codex D89 #3); and at most this many at once. Past either: no answer, so the turn is answered.
+HEARD_BUDGET_S = 1.5
+_HEARD_SLOTS = threading.BoundedSemaphore(8)
+
+
 def _said_to_her(graph: object, check: Callable[[str, str, str], float | None], thread_id: str,
                  heard: str) -> float | None:
-    """D90: the chance the words were said to her, from the thread's own last exchange (her last reply and his
-    turn before it). None when the thread can't be read or the check has no answer: then the turn is answered."""
-    try:
-        state = graph.get_state({"configurable": {"thread_id": thread_id}})
-        messages = list((getattr(state, "values", None) or {}).get("messages") or [])
-    except Exception:  # noqa: BLE001 -- never skip on doubt
+    """D90: the chance the words were said to her, judged against the thread's last COMPLETED exchange: her
+    latest reply (the newest message, with words) and his turn before it. A turn still pending (the newest
+    message is his), a thread that can't be read, a slow read, or no answer: None, and the turn is answered
+    (Codex D89 #2: never pair a pending turn with an older reply)."""
+    box: dict = {}
+    done = threading.Event()
+
+    def work():
+        try:
+            state = graph.get_state({"configurable": {"thread_id": thread_id}})
+            messages = [m for m in ((getattr(state, "values", None) or {}).get("messages") or [])
+                        if getattr(m, "type", "") in ("human", "ai")]
+            if not messages or getattr(messages[-1], "type", "") != "ai":
+                return
+            she_said = _reply_text(messages[-1])
+            if not she_said.strip():
+                return
+            he_said = next((_reply_text(m) for m in reversed(messages[:-1]) if getattr(m, "type", "") == "human"), "")
+            box["p"] = check(heard, she_said, he_said)
+        except Exception:  # noqa: BLE001 -- never skip on doubt
+            pass
+        finally:
+            done.set()
+            _HEARD_SLOTS.release()
+
+    if not _HEARD_SLOTS.acquire(blocking=False):
         return None
-    she_said = next((_reply_text(m) for m in reversed(messages) if getattr(m, "type", "") == "ai"
-                     and _reply_text(m).strip()), "")
-    he_said = next((_reply_text(m) for m in reversed(messages) if getattr(m, "type", "") == "human"), "")
-    if not she_said:
-        return None
+    started = time.monotonic()
     try:
-        return check(heard, she_said, he_said)
+        threading.Thread(target=work, daemon=True).start()
     except Exception:  # noqa: BLE001
+        _HEARD_SLOTS.release()
         return None
+    if not done.wait(HEARD_BUDGET_S) or time.monotonic() - started > HEARD_BUDGET_S:
+        return None
+    return box.get("p")
 
 
 # ── FIX 3: the self-perception gate (gap #33, owner-approved 2026-08-10) ────────
@@ -1638,6 +1664,8 @@ def ask(
         if (
             drop_unaddressed
             and is_lens_surface(identity)
+            and bool(factory._OWNER_ID)
+            and str(identity.get("user_id") or "") == str(factory._OWNER_ID)    # his glasses only (Codex D89 #1)
             and getattr(action_graph, "addressed_check", None) is not None
             and _conversation_in_flight(registry, thread_id, drop_conversation_window_s)
         ):
