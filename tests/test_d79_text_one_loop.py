@@ -246,7 +246,7 @@ def test_the_flag_file_wins_over_the_setting(tmp_path):
     (dm(GUEST), ALLOW, OWNER, False),                        # a DM from someone outside the house
     (guild(), ALLOW, OWNER, False),                          # a shared room, even his
     (dm(voice=True), ALLOW, OWNER, False),                   # voice has its own one loop
-    (dm(surface="lens"), ALLOW, OWNER, False),
+    (dm(surface="lens"), ALLOW, OWNER, True),             # D89: his own glasses turn (see test_d89_lens_one_loop)
     ({"user_id": OWNER, "privacy_context": "private"}, ALLOW, OWNER, False),   # no surface: not a DM
     ({**dm(), "platform": "kael"}, ALLOW, OWNER, False),     # her Kael lane is not a DM
     (dm("discord:123"), None, "", False),                    # dev box, cold caller

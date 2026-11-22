@@ -968,13 +968,20 @@ _ONE_LOOP_READ_REFUSED = re.compile(
 
 def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
     """D79: may this typed turn take the one loop? Only a resolved HOUSEHOLD identity on an actual DM
-    surface (Discord or Telegram, channel_kind 'dm'). Never a shared room, a guest, a cold handle, voice
-    or the lens, or a surface with no platform. Household = the action allowlist (owner + the people Chris
-    added); with no allowlist (a dev box) only the configured owner. Called AFTER ask()'s allowlist gate,
-    and it checks the allowlist itself, so it can never hand a guest the privileged graph (Codex 11/20)."""
+    surface (Discord or Telegram, channel_kind 'dm'). Never a shared room, a guest, a cold handle, voice,
+    or a surface with no platform. Household = the action allowlist (owner + the people Chris added); with
+    no allowlist (a dev box) only the configured owner. Called AFTER ask()'s allowlist gate, and it checks
+    the allowlist itself, so it can never hand a guest the privileged graph (Codex 11/20).
+    D89 (Chris 11/22 13:30, "Yeah"): the OWNER's own glasses turns take it too. 11/22 18:26 the no-tools
+    chat side told him "I can't run web searches in this mode" about searches the action side had just run.
+    The lens arrives on the token-authed /ask (every caller there IS the owner), surface 'lens', no platform:
+    so lens + the configured owner's person id, nothing else (no household member, no guest)."""
     identity = identity or {}
-    if identity.get("voice") or is_lens_surface(identity):
+    if identity.get("voice"):
         return False
+    if is_lens_surface(identity):
+        user = str(identity.get("user_id") or "")
+        return bool(owner_id) and user == str(owner_id)
     if str(identity.get("platform") or "").lower() not in ("discord", "telegram"):
         return False
     if str(identity.get("channel_kind") or "").lower() != "dm":

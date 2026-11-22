@@ -2156,6 +2156,10 @@ def _action_prompt_builder(
                 ack_block += one_loop_note(configurable)
         else:
             ack_block = ""
+            if is_lens_surface(identity) and (one_loop or specialist):
+                # D89: his glasses turn on the one loop (or a judged action pass): the judge's correction rides
+                # the system prompt here too; the lens overlay below still styles the reply.
+                ack_block += one_loop_note(configurable)
         # Lens surface rides on top of (and after) the voice styling so its
         # no-tags/one-paragraph rules win where they conflict — G2 turns are
         # voice turns whose reply is read, not heard.
