@@ -2884,6 +2884,14 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
         log.warning("honesty judge: couldn't build it; one-loop replies go out marked judge_unavailable",
                     exc_info=True)
         action_graph.honesty_judge = None
+    # D90: the lenient "was that for me?" on his glasses' follow-ups (Jev, same key). None = never skips.
+    try:
+        from aerys_v2.addressed_check import check_for
+
+        action_graph.addressed_check = check_for(settings)
+    except Exception:
+        log.warning("addressed check: couldn't build it; glasses follow-ups are all answered", exc_info=True)
+        action_graph.addressed_check = None
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else

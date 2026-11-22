@@ -1043,6 +1043,30 @@ def _conversation_in_flight(
     return last is not None and (time.monotonic() - last) <= window_s
 
 
+#: D90: a glasses follow-up skipped as background speech (addressed_check.py), beside the drop marker.
+LENS_HEARD_SKIP_MARKER = "lens_background_skipped"
+
+
+def _said_to_her(graph: object, check: Callable[[str, str, str], float | None], thread_id: str,
+                 heard: str) -> float | None:
+    """D90: the chance the words were said to her, from the thread's own last exchange (her last reply and his
+    turn before it). None when the thread can't be read or the check has no answer: then the turn is answered."""
+    try:
+        state = graph.get_state({"configurable": {"thread_id": thread_id}})
+        messages = list((getattr(state, "values", None) or {}).get("messages") or [])
+    except Exception:  # noqa: BLE001 -- never skip on doubt
+        return None
+    she_said = next((_reply_text(m) for m in reversed(messages) if getattr(m, "type", "") == "ai"
+                     and _reply_text(m).strip()), "")
+    he_said = next((_reply_text(m) for m in reversed(messages) if getattr(m, "type", "") == "human"), "")
+    if not she_said:
+        return None
+    try:
+        return check(heard, she_said, he_said)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── FIX 3: the self-perception gate (gap #33, owner-approved 2026-08-10) ────────
 # Production incident 2026-08-10: mid voice-outage, Kael told her the satellite fix
 # was applied and she replied "I'm hearing you on the speaker now, yeah. Voice is
@@ -1611,6 +1635,31 @@ def ask(
                 extra_degraded=[DROPPED_UNADDRESSED_MARKER],
             )
             return ""
+        if (
+            drop_unaddressed
+            and is_lens_surface(identity)
+            and getattr(action_graph, "addressed_check", None) is not None
+            and _conversation_in_flight(registry, thread_id, drop_conversation_window_s)
+        ):
+            # D90 (Chris 11/22 13:34, "I just dont want it to be over strict"): mid-conversation on the glasses,
+            # the drop above stands aside, so nearby speech reached her as his turns. One lenient Jev look:
+            # quiet only when it's very sure the words weren't said to her; any doubt answers.
+            said_to_her = _said_to_her(graph, action_graph.addressed_check, thread_id, text)
+            from aerys_v2.addressed_check import skip as _skip_heard
+
+            if _skip_heard(said_to_her):
+                log.info("route decision | thread=%s DROPPED (background speech on the glasses, p=%.2f)",
+                         thread_id, said_to_her)
+                _note_outcome(thread_id, "dropped as background speech")
+                _fire_turn_record(
+                    record_turn, config, text,
+                    int((time.monotonic() - started) * 1000),
+                    reflex=shadow,
+                    classifier_intent="unaddressed",
+                    raw_reply="", emitted_reply="",
+                    extra_degraded=[DROPPED_UNADDRESSED_MARKER, LENS_HEARD_SKIP_MARKER],
+                )
+                return ""
         selected_graph = specialists.get(decision.route)
         if selected_graph is not None:
             config["configurable"]["specialist_route"] = decision.route
