@@ -176,12 +176,14 @@ def test_it_waits_for_him_to_settle_then_lets_it_go():
     assert h.at(HOME + timedelta(minutes=10)).hello.tick() == "waiting to settle"
     h.reading.room, h.reading.confirmed = "office", False               # his phone, not him
     assert h.at(HOME + timedelta(minutes=15)).hello.tick() == "waiting to settle"
-    assert h.at(HOME + timedelta(minutes=21)).hello.tick() == "never settled"
+    # D91 (Chris 11/22): when she gives up, the hello goes to him on Discord instead of nowhere.
+    assert h.at(HOME + timedelta(minutes=21)).hello.tick() == "by text: sent"
     row = h.desk.store.rows[1]
-    assert row.status == "dropped" and row.reason == "never settled in a room with a speaker"
-    assert h.composed == [] and h.world.spoken == []
+    assert row.status == "sent" and row.text_only and row.text_to == "discord" and row.room is None
+    assert h.world.spoken == [] and [t[0] for t in h.world.texts] == ["discord"]
     h.reading.confirmed = True                                          # too late now
     assert h.hello.tick() == "done" and h.make().tick() == "done" and h.world.spoken == []
+    assert len(h.world.texts) == 1
 
 
 def test_quiet_hours_drop_it_rather_than_saying_it_in_the_morning():
@@ -901,7 +903,7 @@ def test_a_hello_that_lets_the_arrival_go_frees_the_brief():
     h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="", confirmed=False)
     assert h.hello.tick() == "waiting to settle"
     h.at(EARLY_HOME + timedelta(minutes=25))                  # never settled in the settle window
-    assert h.hello.tick() == "never settled"
+    assert h.hello.tick() == "quiet hours"                    # D91: given up before nine, no Discord either
     assert h.brief.tick() == "sent"                          # the brief's own reading: the office
 
 
@@ -1128,7 +1130,10 @@ def test_the_composer_gets_the_prompt_that_fits_whether_she_can_look_things_up(m
     welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object())
     monkeypatch.setattr(wakeups_mod, "her_turn_for", lambda settings, graph: (lambda facts: "her turn"))
     welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object())
-    assert prompts == [WELCOME_PROMPT_TOOL_FREE, WELCOME_PROMPT]
+    from aerys_v2.welcome import WELCOME_TEXT_PROMPT, WELCOME_TEXT_PROMPT_TOOL_FREE
+
+    # D91: each arming builds the spoken writer and the Discord one, both fitted to the same tools.
+    assert prompts == [WELCOME_PROMPT_TOOL_FREE, WELCOME_TEXT_PROMPT_TOOL_FREE, WELCOME_PROMPT, WELCOME_TEXT_PROMPT]
 
 
 # --- D88: one greeting, not two (the owner, 11/22 10:31, "yes this looks good") -------------------------

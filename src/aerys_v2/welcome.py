@@ -13,7 +13,12 @@ So, once per arrival:
      was away (not a sensor gap or an HA restart) for away_minutes or more. The history is the
      durable record: a brain restart while he's settling loses nothing;
   2. the house settles him in a room with a speaker (never the bedroom unless configured) within
-     settle_minutes of getting home; if it doesn't, nothing is said (a dropped row says why);
+     settle_minutes of getting home. If he never reaches one, D91 (Chris 11/22 17:11, "if she
+     gives up maybe have it go through discord?"): when she gives up, the hello goes to him as a
+     Discord message instead, written for text. It carries nothing (the morning brief and anything
+     held keep waiting for his room), and it still never goes at night or when he muted it. A trip
+     where he did reach a speaker room but she never got to say it (a meeting, a voice hold) is
+     dropped as before (a dropped row says why);
   3. not in quiet hours (a welcome home the next morning is wrong: it's dropped), and nothing
      holds her voice (a meeting or a nap: it waits, up to HELLO_FOR after he got home). The one
      exception, his D18 #3 (11/09, "ok"): home inside quiet hours with the morning brief still due,
@@ -75,6 +80,9 @@ FLICKER = timedelta(minutes=5)
 HOME_WINDOW = timedelta(hours=3)
 MAX_STOPS = 6                                   # the longest few, told in the order he made them
 PLACE_MAX = 120
+#: D91: the hello she gives up on (he never reached a room with her speaker) goes here instead, as text.
+TEXT_SURFACE = "discord"
+TEXT_HELLO_FOR = timedelta(minutes=30)          # how long that message may wait at the desk (a meeting)
 
 WELCOME_PROMPT = (
     "\n\n[Welcome home] Chris just got home after being out for a while, and the house has him "
@@ -101,6 +109,17 @@ NO_LOOKUP = ("name a place only when the facts themselves say what it is (a busi
              "never from a street address alone. ")
 LOOKUP_FACTS = " (and what a look-up of one of his stops tells you)"
 WELCOME_PROMPT_TOOL_FREE = WELCOME_PROMPT.replace(LOOKUP, NO_LOOKUP).replace(LOOKUP_FACTS, "")
+
+#: D91: the same hello, written as a Discord message because he never reached a room with her speaker.
+SPOKEN_OPENING = ("Chris just got home after being out for a while, and the house has him settled in a room "
+                  "with you. Say hi, out loud:")
+TEXT_OPENING = ("Chris got home a while ago after being out, but he hasn't come by a room with your speaker, "
+                "so this hello goes to him as a Discord message instead. Say hi in writing:")
+SPOKEN_CLOSING = "Reply with ONLY what to say."
+TEXT_CLOSING = "Reply with ONLY the message."
+WELCOME_TEXT_PROMPT = WELCOME_PROMPT.replace(SPOKEN_OPENING, TEXT_OPENING).replace(SPOKEN_CLOSING, TEXT_CLOSING)
+WELCOME_TEXT_PROMPT_TOOL_FREE = (WELCOME_PROMPT_TOOL_FREE.replace(SPOKEN_OPENING, TEXT_OPENING)
+                                 .replace(SPOKEN_CLOSING, TEXT_CLOSING))
 
 
 @dataclass
@@ -134,6 +153,7 @@ class WelcomeFacts:
     held: list = field(default_factory=list)     # Reach rows held for him while he was out
     stops: list = field(default_factory=list)    # Stop: where his phone stayed a while (D85)
     brief: Facts | None = None                   # the morning brief's facts, when it comes along
+    home_for: timedelta | None = None            # D91: set when it goes as a Discord message: how long he's been home
 
 
 def _utc(dt: datetime) -> datetime:
@@ -249,7 +269,11 @@ def stops_from(history: list, left: datetime, arrived: datetime) -> list:
 def welcome_facts_text(facts: WelcomeFacts) -> str:
     """The facts as the model reads them, framed as data: a calendar title can come from anyone
     who sends him an invite."""
-    lines = [f"He was out for {how_long(facts.away)}; he's in the {facts.room or 'house'} now."]
+    if facts.home_for is not None:
+        lines = [f"He was out for {how_long(facts.away)} and got home {how_long(facts.home_for)} ago. He hasn't "
+                 "come by a room with your speaker, so this goes to him as a Discord message."]
+    else:
+        lines = [f"He was out for {how_long(facts.away)}; he's in the {facts.room or 'house'} now."]
     if facts.visits:
         lines.append("On his calendar while he was out:")
         lines += [f"- [{ASK if v.ask else NO_ASK}] {v.when}: {v.title}" for v in facts.visits]
@@ -311,8 +335,10 @@ class WelcomeHome:
                  stops: Callable[[datetime, datetime], list] | None = None,
                  rooms: tuple = ("office", "kitchen"), brief=None, followups=None,
                  away_minutes: int = 30, settle_minutes: int = 20, quiet_start_hour: int = 21,
-                 clock: Callable[[], datetime] | None = None):
+                 clock: Callable[[], datetime] | None = None,
+                 compose_text: Callable[[WelcomeFacts], str] | None = None):
         self.desk, self.read, self.away_since, self.compose, self.visits = desk, read, away_since, compose, visits
+        self.compose_text = compose_text or compose     # D91: her words for the Discord hello
         self.stops = stops
         self.rooms = tuple(r.strip().lower() for r in rooms if r.strip())
         self.brief, self.followups = brief, followups
@@ -324,6 +350,7 @@ class WelcomeHome:
         self.left: dict = {}          # arrival key -> when he left (None: not a trip)
         self.arrived: dict = {}       # arrival key -> when he got home
         self.finished: list = []      # arrival keys this process is done with (the last few)
+        self.reached: set = set()     # D91: arrival keys where he did reach a room with her speaker
         self.last_reconcile: datetime | None = None
         if brief is not None:
             brief.defer = self.greeting   # the brief waits while an arrival is still being greeted
@@ -332,6 +359,7 @@ class WelcomeHome:
         self.finished = [*self.finished[-19:], key]
         self.left.pop(key, None)
         self.arrived.pop(key, None)
+        self.reached.discard(key)
 
     def greeting(self, now: datetime) -> bool:
         """True while the hello waits for him to settle after a trip (not finished, inside
@@ -380,7 +408,10 @@ class WelcomeHome:
         if key in self.finished:
             return "done"
         if now - arrived > HELLO_FOR:
-            if self.left.get(key) is not None:          # a trip this process was waiting to greet
+            left = self.left.get(key)
+            if left is not None:                        # a trip this process was waiting to greet
+                if key not in self.reached:
+                    return self._by_text(key, arrived, left, now)       # D91: he never reached her speaker
                 self._drop(key, now, "never got to say it")
             self._finish(key)
             return "too late"
@@ -412,12 +443,15 @@ class WelcomeHome:
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
-        if r.room not in self.rooms or not r.confirmed:
+        if not self._in_a_speaker_room(r):
             if now - arrived > self.settle_for:
+                if key not in self.reached:
+                    return self._by_text(key, arrived, left, now)       # D91: he never reached her speaker
                 self._drop(key, now, "never settled in a room with a speaker")
                 self._finish(key)
                 return "never settled"
             return "waiting to settle"
+        self.reached.add(key)
         if night and r.room != self.brief.room:
             self._drop(key, now, "quiet hours")
             self._finish(key)
@@ -427,6 +461,25 @@ class WelcomeHome:
             return f"held: {held_by}"
         with self.lock:
             return self._say(key, arrived, left, r.room, now, must_carry=night)
+
+    def _in_a_speaker_room(self, r: HomeReading) -> bool:
+        return r.room in self.rooms and r.confirmed
+
+    def _by_text(self, key: str, arrived: datetime, left: datetime, now: datetime) -> str:
+        """D91 (Chris 11/22 17:11, "if she gives up maybe have it go through discord?"): he never reached a
+        room with her speaker, so the hello goes to him as a Discord message instead of nowhere. The
+        night and his mute still win (the tick's own checks may not have run this pass)."""
+        if self.desk.quiet(now):
+            self._drop(key, now, "quiet hours")
+            self._finish(key)
+            return "quiet hours"
+        if TOPIC in muted_topics(self.desk.store.prefs(self.desk.budget_default), now):
+            self._drop(key, now, f"you muted {TOPIC}")
+            self._finish(key)
+            return "muted"
+        with self.lock:
+            outcome = self._say(key, arrived, left, "", now, by_text=True)
+        return f"by text: {outcome}"
 
     def _brief_just_greeted(self, now: datetime, brief_key: str) -> bool:
         """Today's brief was SAID (delivered, not just queued: a brief can wait hours for his room)
@@ -597,13 +650,17 @@ class WelcomeHome:
             log.warning("welcome home: reconciling held check-ins failed; tried again later", exc_info=True)
 
     def _say(self, key: str, arrived: datetime, left: datetime, room: str, now: datetime, *,
-             must_carry: bool = False) -> str:
+             must_carry: bool = False, by_text: bool = False) -> str:
         day = now.astimezone(EASTERN).date()
         # Never said at night, and not long after he got home (the desk drops it past this).
         expires = min(arrived + HELLO_FOR, next_local(arrived, self.quiet_start_hour))
+        if by_text:
+            # D91: given up on as a spoken hello, it goes now as a message; never into the night.
+            expires = min(now + TEXT_HELLO_FOR, next_local(now, self.quiet_start_hour))
         store = self.desk.store
         took = False
-        if self.brief is not None:
+        # D91: a Discord hello carries nothing: the brief (made to be said) keeps waiting for his room.
+        if self.brief is not None and not by_text:
             brief_key = f"brief:{day.isoformat()}"
             try:
                 outcome = self.desk.take_over_brief(brief_key, now, _at(day, self.brief.start_hour))
@@ -625,7 +682,7 @@ class WelcomeHome:
                 took = True
                 log.info("welcome home: took over the waiting morning brief, one greeting")
         brief_facts, marker = None, None
-        carrying = took or self._brief_due(now, day)
+        carrying = not by_text and (took or self._brief_due(now, day))
         if carrying:
             # The marker goes first, and the hello carries it in its folds: the brief counts as given
             # only while that hello is queued or said (store.carried), so a hello that never goes, or
@@ -662,24 +719,29 @@ class WelcomeHome:
                 log.warning("welcome home: the brief's day couldn't be gathered; going with what she holds",
                             exc_info=True)
                 brief_facts = Facts(held=held, quiet=quiet)
+        elif by_text:
+            held = []                    # D91: what was held keeps waiting for his room, as it would have
         else:
             held = self.desk.reserve_for_brief(left, expires, reason="carried by the welcome-home hello",
                                                skip_topics=CHECK_IN_TOPICS)
         visits = self._visits(left, arrived, now, key)
         facts = WelcomeFacts(away=arrived - left, room=room, visits=visits, held=[] if marker else held,
-                             stops=self._stops(left, arrived), brief=brief_facts)
+                             stops=self._stops(left, arrived), brief=brief_facts,
+                             home_for=(now - arrived) if by_text else None)
+        compose = self.compose_text if by_text else self.compose
         text = ""
         try:
-            text = (self.compose(facts) or "").strip()
+            text = (compose(facts) or "").strip()
         except Exception as e:      # the type only: her facts (his calendar, where he went) can be in the text
             log.warning("welcome home: her words failed (%s); the plain version goes", type(e).__name__)
         if not text:
             text = plain_welcome(facts)
         folds = tuple(h.id for h in held) + ((marker.id,) if marker is not None else ())
-        report_house(self.desk, getattr(self.compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
+        report_house(self.desk, getattr(compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
         outcome = self.desk.reach_out(ReachEvent(
-            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=room, brief=True,
-            folds=folds, dedupe_key=key, expires_at=expires))
+            source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=None if by_text else room,
+            brief=True, folds=folds, dedupe_key=key, expires_at=expires, text_only=by_text,
+            text_to=TEXT_SURFACE if by_text else None))
         for v in visits:
             if v.claim is None or outcome in ("queued", "duplicate"):   # queued: settled by _reconcile
                 continue
@@ -691,7 +753,8 @@ class WelcomeHome:
             except Exception:
                 log.warning("welcome home: follow-up %s: settling it failed; reconciled later", v.claim, exc_info=True)
         self._finish(key)
-        log.info("welcome home: %s (%d held, %d on the calendar, brief %s)", outcome, len(held), len(visits),
+        log.info("welcome home: %s%s (%d held, %d on the calendar, brief %s)", outcome,
+                 " by Discord (he never reached a speaker room)" if by_text else "", len(held), len(visits),
                  "carried" if marker is not None else "not carried")
         return outcome
 
@@ -872,6 +935,8 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
         compose=composer_for(settings, prompt=WELCOME_PROMPT if turn else WELCOME_PROMPT_TOOL_FREE,
                              text_of=welcome_facts_text, turn=turn,
                              kind="welcome"),
+        compose_text=composer_for(settings, prompt=WELCOME_TEXT_PROMPT if turn else WELCOME_TEXT_PROMPT_TOOL_FREE,
+                                  text_of=welcome_facts_text, turn=turn, kind="welcome-text"),
         visits=visits_for(settings), stops=stops_for(settings), rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
         settle_minutes=int(getattr(settings, "welcome_home_settle_minutes", 20)),
