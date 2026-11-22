@@ -10,7 +10,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from aerys_v2.service import text_one_loop_eligible
 from aerys_v2.factory import build_graph
-from test_d79_text_one_loop import ALLOW, GUEST, OWNER, WIFE, Action, NoCalls, need, run
+import aerys_v2.factory as factory
+from test_d79_text_one_loop import ALLOW, GUEST, OWNER, WIFE, Action, fake_model, need, run
+
+
+@pytest.fixture(autouse=True)
+def owner(monkeypatch):
+    """Production sets factory._OWNER_ID from settings.owner_person_id at startup (cli.py)."""
+    monkeypatch.setattr(factory, "_OWNER_ID", OWNER)
 
 
 def lens(user_id=OWNER, **extra):
@@ -40,17 +47,17 @@ def test_a_chat_shaped_lens_turn_runs_on_the_one_loop():
 
 
 def test_with_the_switch_off_a_lens_turn_is_unchanged():
-    graph = build_graph(NoCalls(), soul="s")
+    graph = build_graph(fake_model("a chat reply"), soul="s")
     action = Action("main graph!")
-    run("whose house is that", identity=lens(), graph=graph, action=action, flag=False)
-    assert action.calls == []
+    out = run("whose house is that", identity=lens(), graph=graph, action=action, flag=False)
+    assert out == "a chat reply" and action.calls == []
 
 
 def test_a_household_members_lens_turn_stays_off_the_one_loop():
-    graph = build_graph(NoCalls(), soul="s")
+    graph = build_graph(fake_model("hi there"), soul="s")
     action = Action("main graph!")
-    run("hi", identity=lens(WIFE), graph=graph, action=action)
-    assert action.calls == []
+    out = run("hi", identity=lens(WIFE), graph=graph, action=action)
+    assert out == "hi there" and action.calls == []
 
 
 def test_the_lens_one_loop_prompt_carries_the_correction_and_the_lens_style_not_the_dm_banter():
