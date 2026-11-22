@@ -1076,7 +1076,8 @@ def test_stops_reader_reads_the_geocoded_sensor_from_before_he_left_to_when_he_g
     url = unquote(asked[0])
     assert "filter_entity_id=sensor.phone_geocoded_location" in url
     assert utc(TRIP[0] - timedelta(hours=3)).isoformat() in url and utc(TRIP[1]).isoformat() in url
-    assert "minimal_response" in url and "no_attributes" in url
+    # D92: the sensor's attributes now come too (its own location, for naming the stops).
+    assert "minimal_response" not in url and "no_attributes" not in url
     assert stops_for(settings()) is None                                         # not configured: off
     assert stops_for(settings(presence_geocoded_entity="")) is None
     assert welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object()).stops is not None

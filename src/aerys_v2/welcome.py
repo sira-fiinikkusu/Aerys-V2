@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable
 
@@ -52,6 +52,7 @@ from aerys_v2.followups import (CHECK_IN_TOPICS, CHECKIN_FOR, CHECKIN_LOCK, DATA
                                 appointment_key)
 from aerys_v2.followups import SOURCE as FOLLOWUP_SOURCE
 from aerys_v2.followups import TOPIC as FOLLOWUP_TOPIC
+from aerys_v2.places import coords, places_near_for
 from aerys_v2.reach import EASTERN, ReachEvent, local_day_start, muted_topics, next_local, told_quietly
 
 log = logging.getLogger(__name__)
@@ -83,6 +84,7 @@ ASK, NO_ASK = "ask", "don't ask"                 # how the facts mark what she m
 # one address, with interruptions of FLICKER or less folded back in. Addresses seen in HOME_WINDOW
 # before he left, or at the moment he got home, are home's (and its neighbours'): never a stop.
 STOP_MIN = timedelta(minutes=10)
+NAMING_BUDGET_S = 8.0                           # D92: all of a trip's place look-ups together
 FLICKER = timedelta(minutes=5)
 HOME_WINDOW = timedelta(hours=3)
 MAX_STOPS = 6                                   # the longest few, told in the order he made them
@@ -99,7 +101,10 @@ WELCOME_PROMPT = (
     "he went, but you asked already, he'd rather you didn't, or it can wait. If nothing was on his calendar while he was out, you may "
     "ask one light, curious question about what he got up to. If the facts list where his phone "
     "stayed a while, you may mention where he went lightly and ask how it went, the way a friend "
-    "who noticed would; an address alone may need a quick look-up before you name the place. "
+    "who noticed would; when a stop lists named places, the one that fits how long he stayed and the time "
+    "of day is most likely it: name it the way a friend who noticed would and ask (\"a long lunch at the noodle "
+    "place, then the hardware store?\"); it's a guess from a map, so say it like one; an address alone may need a quick look-up before "
+    "you name the place. "
     "Never guess: if it isn't clear, just ask. Never pry, and it's fine if he doesn't say. If things came in while he was out, say so in a few "
     "words; the details are in his messages. If his morning brief is included, give it after the "
     "hello in two to four more short sentences: the weather, what's left on today's calendar "
@@ -150,6 +155,8 @@ class Stop:
     place: str                        # the address his phone gave (data: never logged)
     start: datetime
     end: datetime
+    at: tuple | None = None           # D92: where his phone sat (lat, lon), from the sensor's own location
+    near: tuple = ()                  # D92: places.Place named there, nearest first (data: never logged)
 
 
 @dataclass
@@ -165,6 +172,13 @@ class WelcomeFacts:
 
 def _utc(dt: datetime) -> datetime:
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def _named(stop) -> str:
+    """D92: the places named where his phone sat, as part of one line of data."""
+    if not stop.near:
+        return ""
+    return "; named places there: " + "; ".join(f"{p.name} ({p.kind})" if p.kind else p.name for p in stop.near)
 
 
 def _clock(dt: datetime) -> str:
@@ -232,33 +246,36 @@ def stops_from(history: list, left: datetime, arrived: datetime) -> list:
             t = _utc(datetime.fromisoformat(str(s.get("last_changed")).replace("Z", "+00:00")))
         except ValueError:
             continue
-        rows.append((t, _place(s.get("state"))))
+        rows.append((t, _place(s.get("state")), coords((s.get("attributes") or {}).get("location"))
+                     if isinstance(s.get("attributes"), dict) else None))
     rows.sort(key=lambda r: r[0])
-    home = {p for t, p in rows if left - HOME_WINDOW <= t < left}   # an address taken up AS he left is the trip's
-    before_left = [p for t, p in rows if t <= left - HOME_WINDOW]
+    home = {p for t, p, _ in rows if left - HOME_WINDOW <= t < left}   # an address taken up AS he left is the trip's
+    before_left = [p for t, p, _ in rows if t <= left - HOME_WINDOW]
     if before_left:
         home.add(before_left[-1])          # the address in effect as the window opened
-    at_home = [p for t, p in rows if t <= arrived]
+    at_home = [p for t, p, _ in rows if t <= arrived]
     if at_home:
         home.add(at_home[-1])
     home.discard("")
-    runs: list = []                        # [place, start, end], clipped to the trip
-    for i, (t, place) in enumerate(rows):
+    runs: list = []                        # [place, start, end, where], clipped to the trip
+    for i, (t, place, where) in enumerate(rows):
         end = rows[i + 1][0] if i + 1 < len(rows) else arrived
         a, b = max(t, left), min(end, arrived)
         if b <= a:
             continue
         if runs and runs[-1][0] == place:
             runs[-1][2] = b
+            runs[-1][3] = runs[-1][3] or where
         else:
-            runs.append([place, a, b])
+            runs.append([place, a, b, where])
     merged: list = []
-    for place, a, b in runs:
+    for place, a, b, where in runs:
         between, folded = timedelta(0), False
         if place:
             for j in range(len(merged) - 1, -1, -1):
                 if merged[j][0] == place:
                     merged[j][2] = b
+                    merged[j][3] = merged[j][3] or where
                     del merged[j + 1:]
                     folded = True
                     break
@@ -266,8 +283,8 @@ def stops_from(history: list, left: datetime, arrived: datetime) -> list:
                 if between > FLICKER:
                     break
         if not folded:
-            merged.append([place, a, b])
-    stops = [Stop(place=p, start=a, end=b) for p, a, b in merged
+            merged.append([place, a, b, where])
+    stops = [Stop(place=p, start=a, end=b, at=w) for p, a, b, w in merged
              if p and p not in home and b - a >= STOP_MIN]
     longest = sorted(stops, key=lambda s: s.end - s.start, reverse=True)[:MAX_STOPS]
     return sorted(longest, key=lambda s: s.start)
@@ -289,7 +306,10 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
     if facts.stops:
         lines.append("Where his phone stayed a while (addresses from his phone; an address isn't a place "
                      "name until it's looked up):")
-        lines += [f"- {_clock(s.start)} to {_clock(s.end)}: {s.place}" for s in facts.stops]
+        lines += [f"- {_clock(s.start)} to {_clock(s.end)}: {s.place}" + _named(s) for s in facts.stops]
+        if any(s.near for s in facts.stops):
+            lines.append("(Named places come from a map look-up around where his phone sat, nearest first, then "
+                         "the best-known close by: he was most likely at one of them, but not certainly.)")
     if facts.held:
         lines.append("Came in while he was out (the details are in his messages):")
         lines += [f"- {stamped(r)}" for r in facts.held]
@@ -876,11 +896,14 @@ def away_since_for(settings, *, get=None) -> Callable[[datetime], datetime | Non
     return away_since
 
 
-def stops_for(settings, *, get=None) -> Callable[[datetime, datetime], list] | None:
+def stops_for(settings, *, get=None, near=None) -> Callable[[datetime, datetime], list] | None:
     """D85: where his phone stayed a while, from HA's recorder for his phone's geocoded sensor
-    (presence_geocoded_entity: geocoded on the phone, no third-party service), read from
-    HOME_WINDOW before he left (to tell home's addresses apart) to when he got home. None when no
-    geocoded sensor is configured. get(url, headers) is the test seam."""
+    (presence_geocoded_entity: geocoded on the phone), read from HOME_WINDOW before he left (to tell
+    home's addresses apart) to when he got home. None when no geocoded sensor is configured.
+    D92: with the sensor's attributes (its `location`), and each stop named from Google Places
+    (places.places_near_for, when its key is set): the look-ups run together, bounded by
+    NAMING_BUDGET_S; one that fails or runs late costs only that stop's names. get(url, headers) and
+    near(lat, lon) are the test seams."""
     import httpx
     from urllib.parse import quote, urlencode
 
@@ -893,15 +916,45 @@ def stops_for(settings, *, get=None) -> Callable[[datetime, datetime], list] | N
     def read(left: datetime, arrived: datetime) -> list:
         start = left - HOME_WINDOW
         url = (f"{base}/api/history/period/{quote(start.isoformat())}?"
-               + urlencode({"filter_entity_id": entity, "end_time": arrived.isoformat()})
-               + "&minimal_response&no_attributes")
+               + urlencode({"filter_entity_id": entity, "end_time": arrived.isoformat()}))
         r = fetch(url, headers)
         r.raise_for_status()
         data = r.json()
         rows = data[0] if isinstance(data, list) and data and isinstance(data[0], list) else []
-        return stops_from(rows, left, arrived)
+        return named(stops_from(rows, left, arrived), namer)
 
+    namer = near if near is not None else places_near_for(settings)
     return read
+
+
+def named(stops: list, near) -> list:
+    """D92: each stop with the places named where his phone sat. All at once, NAMING_BUDGET_S in all; a
+    look-up that fails or is still running then costs only its stop's names (logged by type, never where)."""
+    if near is None or not stops:
+        return stops
+    import concurrent.futures as cf
+
+    todo = [(i, s) for i, s in enumerate(stops) if s.at is not None]
+    if not todo:
+        return stops
+    out = list(stops)
+    pool = cf.ThreadPoolExecutor(max_workers=len(todo), thread_name_prefix="stop-names")
+    try:
+        jobs = {pool.submit(near, *s.at): i for i, s in todo}
+        done, late = cf.wait(jobs, timeout=NAMING_BUDGET_S)
+        for job in done:
+            try:
+                found = tuple(job.result() or ())
+            except Exception as e:
+                log.warning("welcome home: a stop couldn't be named (%s); its address goes alone", type(e).__name__)
+                continue
+            i = jobs[job]
+            out[i] = replace(out[i], near=found)
+        if late:
+            log.warning("welcome home: %d stop(s) not named in time; their addresses go alone", len(late))
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return out
 
 
 def visits_for(settings, *, get=None) -> Callable[[datetime, datetime], list]:

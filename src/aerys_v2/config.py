@@ -377,6 +377,9 @@ class Settings(BaseSettings):
     presence_person_entity: str = "person.chris"
     presence_timezone_entity: str = ""  # Companion current-zone sensor; empty disables travel time.
     presence_geocoded_entity: str = ""  # Optional companion geocoded sensor; allowlisted fields only.
+    # D92 (11/22): the welcome-home names his stops with Google Places nearby search (places.py). The key
+    # lives in the rack environment only; unset = off (stops go as addresses, as in D85).
+    google_places_api_key: SecretStr | None = None
     # Where the nearby tool reads GPS from (the HA person carries the phone's tracker). The
     # presence entity above may be a settled home/away sensor with no coordinates.
     presence_coords_entity: str = "person.chris"
