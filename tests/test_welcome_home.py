@@ -1087,11 +1087,16 @@ def test_the_cap_keeps_the_longest_stops_and_tells_them_in_order():
     assert [s.place for s in found] == ["Stop 1", "Stop 2", "Stop 3", "Stop 5", "Stop 6", "Stop 7"]
 
 
-def test_a_stay_running_past_his_arrival_is_cut_at_it():
-    trail = geo(("1 Home St", at(11)), ("Late Cafe", at(12, 50)), ("1 Home St", at(14)))
-    found = stops_from(trail, at(12), at(13, 5))
-    assert [(s.place, s.start, s.end) for s in found] == [("Late Cafe", utc(at(12, 50)), utc(at(13, 5)))]
-    assert stops_from(trail, at(12), at(12, 55)) == []              # 5 minutes before he got home: no stop
+def test_nothing_after_he_got_home_counts():
+    # The address he got home to is home's; anything the phone reports after that isn't this trip.
+    trail = geo(("1 Home St", at(11)), ("Cafe", at(12, 20)), ("1 Home St", at(13, 5)),
+                ("Evening Bar", at(13, 30)), ("1 Home St", at(15)))
+    assert [(s.place, s.start, s.end) for s in stops_from(trail, at(12), at(13, 5))] == [
+        ("Cafe", utc(at(12, 20)), utc(at(13, 5)))]
+    # If the phone still says the cafe at the moment he got home, the cafe reads as home: left out
+    # (saying nothing beats naming home as somewhere he went).
+    cut = geo(("1 Home St", at(11)), ("Cafe", at(12, 20)))
+    assert stops_from(cut, at(12), at(12, 50)) == []
 
 
 def test_her_words_failing_never_logs_where_he_went(caplog):
