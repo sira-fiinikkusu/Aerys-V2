@@ -610,10 +610,12 @@ class WelcomeHome:
         if self.brief is not None:
             brief_key = f"brief:{day.isoformat()}"
             try:
-                outcome = self.desk.take_over_brief(brief_key, now)
-            except Exception:
-                log.warning("welcome home: couldn't check the morning brief; going as if none waits", exc_info=True)
-                outcome = "free"
+                outcome = self.desk.take_over_brief(brief_key, now, _at(day, self.brief.start_hour))
+            except Exception as e:
+                # Never on an uncertain takeover: the brief may still go, so the hello waits and asks
+                # again next pass (Codex review of 5bdaab9).
+                log.warning("welcome home: couldn't check the morning brief (%s); trying again", type(e).__name__)
+                return "waiting: couldn't check the morning brief"
             if outcome == "delivering" or (outcome in ("went", "free") and self._brief_just_greeted(now, brief_key)):
                 self._drop(key, now, JUST_GREETED)
                 self._finish(key)
@@ -635,6 +637,12 @@ class WelcomeHome:
                                    reason="carried by the welcome-home hello", not_before=None)
             except Exception:
                 log.warning("welcome home: couldn't mark the brief as carried; it goes on its own", exc_info=True)
+        if took and marker is None:
+            # Taken over but it couldn't be marked carried: the brief, reopened above, goes on its own
+            # (store.carried sees no carrier), so the hello stays quiet rather than greet him twice.
+            self._drop(key, now, "couldn't carry the morning brief it took over; the brief goes on its own")
+            self._finish(key)
+            return "the brief goes on its own"
         if must_carry and marker is None:
             # Before 9 it's said only as the brief's carrier (D18 #3); the brief went meanwhile, or
             # couldn't be marked: a plain hello stays out of quiet hours.

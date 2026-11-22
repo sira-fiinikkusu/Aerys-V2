@@ -1143,6 +1143,9 @@ def brief_row(h, at, status, *, folds=(), delivered=None):
     return r
 
 
+SINCE = utc(datetime(2026, 11, 10, 7, 0, tzinfo=ET))
+
+
 def morning_house():
     return House(MORNING_HOME + timedelta(minutes=5), left=datetime(2026, 11, 10, 7, 30, tzinfo=ET),
                  home=MORNING_HOME, brief=True)
@@ -1193,21 +1196,21 @@ def test_a_brief_still_waiting_is_taken_over_and_said_as_one():
 def test_take_over_brief_answers_free_taken_went_and_delivering():
     h = morning_house()
     now = utc(MORNING_HOME)
-    assert h.desk.take_over_brief("brief:2026-11-10", now) == "free"
+    assert h.desk.take_over_brief("brief:2026-11-10", now, SINCE) == "free"
     other = h.desk.store.add(ReachEvent(source="kael_note", topic="kael", headline="x"), now, status="queued",
                              reason="carried by the overnight note", not_before=now + timedelta(hours=3))
     held = h.desk.store.add(ReachEvent(source="kael_note", topic="kael", headline="y"), now, status="queued",
                             reason="carried by the morning brief", not_before=now + timedelta(hours=3))
     waiting = brief_row(h, MORNING_HOME, "queued", folds=[held.id])
     h.desk.unrecorded[12345] = ({}, ())                     # a delivery waiting for its record may be it
-    assert h.desk.take_over_brief("brief:2026-11-10", now) == "delivering" and waiting.status == "queued"
+    assert h.desk.take_over_brief("brief:2026-11-10", now, SINCE) == "delivering" and waiting.status == "queued"
     h.desk.unrecorded.clear()
-    assert h.desk.take_over_brief("brief:2026-11-10", now) == "taken" and waiting.status == "dropped"
+    assert h.desk.take_over_brief("brief:2026-11-10", now, SINCE) == "taken" and waiting.status == "dropped"
     # Its held item is freed for a carrier, keeping its hold; another carrier's reservation is untouched.
     assert held.reason == FREED_FOR_CARRIER and held.not_before == now + timedelta(hours=3) and held.status == "queued"
     assert other.reason == "carried by the overnight note"
     brief_row(h, MORNING_HOME, "sent", delivered=MORNING_HOME)
-    assert h.desk.take_over_brief("brief:2026-11-10", now) == "went"
+    assert h.desk.take_over_brief("brief:2026-11-10", now, SINCE) == "went"
 
 
 def test_a_brief_being_delivered_right_now_keeps_the_hello_quiet():
@@ -1215,3 +1218,56 @@ def test_a_brief_being_delivered_right_now_keeps_the_hello_quiet():
     brief_row(h, MORNING_HOME, "queued")
     h.desk.unrecorded[999] = ({}, ())
     assert h.hello.tick() == "the brief just greeted him" and h.world.spoken == []
+
+
+# Codex review of 5bdaab9: recovery paths where a takeover could still greet him twice.
+
+def test_an_orphaned_marker_doesnt_stop_the_takeover_of_a_replacement_brief():
+    # A hello that carried the brief was dropped (a restart); the brief queued again on its own.
+    h = morning_house()
+    t = utc(MORNING_HOME - timedelta(minutes=20))
+    marker = h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="(carried by the welcome-home hello)",
+                                         brief=True, dedupe_key="brief:2026-11-10"), t, status="folded",
+                              reason="carried by the welcome-home hello", not_before=None)
+    h.desk.store.add(ReachEvent(source="welcome", topic="welcome", headline="Hi!", brief=True, folds=(marker.id,),
+                                dedupe_key="welcome:earlier"), t, status="dropped", reason="gave up", not_before=None)
+    replacement = brief_row(h, MORNING_HOME - timedelta(minutes=2), "queued")
+    h.brief.done = datetime(2026, 11, 10).date()
+    assert h.hello.tick() == "sent"
+    assert replacement.status == "dropped" and replacement.reason == TAKEN_OVER
+    assert h.composed[0].brief is not None and len(h.world.spoken) == 1
+
+
+def test_an_uncertain_takeover_never_speaks_and_the_brief_stays_free():
+    h = morning_house()
+    waiting = brief_row(h, MORNING_HOME - timedelta(minutes=2), "queued")
+    real = h.desk.store.rows_for
+
+    def boom(*a, **k):
+        raise RuntimeError("db")
+
+    h.desk.store.rows_for = boom
+    assert h.hello.tick().startswith("waiting") and h.world.spoken == [] and waiting.status == "queued"
+    # A read that fails after the brief rows were read (before anything is withdrawn) changes nothing either.
+    h.desk.store.rows_for = real
+    h.desk.store.waiting = boom
+    assert h.hello.tick().startswith("waiting") and h.world.spoken == [] and waiting.status == "queued"
+
+
+def test_a_takeover_that_cant_be_marked_carried_lets_the_brief_go_alone():
+    h = morning_house()
+    waiting = brief_row(h, MORNING_HOME - timedelta(minutes=2), "queued")
+    h.brief.done = datetime(2026, 11, 10).date()
+    real_add = h.desk.store.add
+
+    def add(event, now, **kw):
+        if event.source == "brief" and kw.get("status") == "folded":
+            raise RuntimeError("db")
+        return real_add(event, now, **kw)
+
+    h.desk.store.add = add
+    assert h.hello.tick() == "the brief goes on its own"
+    assert waiting.status == "dropped" and h.world.spoken == [] and h.brief.done is None
+    h.desk.store.add = real_add
+    assert h.brief.tick() == "sent"                       # the brief, reopened, greets him: once
+    assert len(h.world.spoken) == 1 and h.hello.tick() == "done"

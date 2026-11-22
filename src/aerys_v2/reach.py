@@ -1118,26 +1118,37 @@ class ReachDesk:
                 return "taken" if self.store.withdraw(dedupe_key, now, reason=reason) else "went"
             return "free"
 
-    def take_over_brief(self, dedupe_key: str, now: datetime) -> str:
+    def take_over_brief(self, dedupe_key: str, now: datetime, since: datetime) -> str:
         """D88: the welcome-home hello carries a morning brief that is still waiting, so he's greeted
-        once. In ONE step under the delivery lock, like take_back: 'taken' (it waited: withdrawn, and
-        the held items it reserved are freed for the hello to carry, keeping their hold, so nothing
-        goes on its own early), 'went' (it was said, at any time: the caller checks how long ago),
-        'delivering' (it still reads as waiting but a delivery waiting for its record may be it), or
-        'free' (no brief waits under this key)."""
+        once. In ONE step under the delivery lock, like take_back:
+          'went'       a brief under this key was said (at any time: the caller checks how long ago),
+                       or a LIVE hello already said it carried (store.carried == 'sent');
+          'delivering' a live hello carrying it still waits, or a delivery waiting for its record may
+                       be it: someone else greets him;
+          'taken'      it waited: withdrawn, and the held items it reserved are freed for the hello to
+                       carry (their hold kept, so nothing goes on its own early);
+          'free'       nothing waits under this key.
+        A 'folded' marker whose carrier died (a hello that was dropped or never written) is ignored, as
+        the brief itself ignores it (Codex review of 5bdaab9). Everything is read BEFORE the brief is
+        withdrawn, so a failed read changes nothing; once withdrawn, a held item that can't be freed
+        still goes on its own at its hold."""
         with self.lock:
             rows = self.store.rows_for(dedupe_key)
-            states = {r.status for r in rows}
-            if states & {"sent", "folded"}:
+            if any(r.status == "sent" for r in rows):
                 return "went"
-            if "queued" in states and self.unrecorded:
+            carried = self.store.carried(dedupe_key, since)
+            if carried == "sent":
+                return "went"
+            if carried == "pending":
                 return "delivering"
             waiting = [r for r in rows if r.status == "queued"]
             if not waiting:
                 return "free"
-            if not self.store.withdraw(dedupe_key, now, reason=TAKEN_OVER):
-                return "went"
+            if self.unrecorded:
+                return "delivering"
             held = {r.id: r for r in self.store.waiting(now - timedelta(days=2))}
+            if not self.store.withdraw(dedupe_key, now, reason=TAKEN_OVER):
+                return "delivering"          # it moved under us: whoever moved it says it
             for brief in waiting:
                 for rid in brief.folds:
                     r = held.get(rid)
