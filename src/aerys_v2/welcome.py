@@ -193,7 +193,7 @@ def stops_from(history: list, left: datetime, arrived: datetime) -> list:
             continue
         rows.append((t, _place(s.get("state"))))
     rows.sort(key=lambda r: r[0])
-    home = {p for t, p in rows if left - HOME_WINDOW <= t <= left}
+    home = {p for t, p in rows if left - HOME_WINDOW <= t < left}   # an address taken up AS he left is the trip's
     before_left = [p for t, p in rows if t <= left - HOME_WINDOW]
     if before_left:
         home.add(before_left[-1])          # the address in effect as the window opened
