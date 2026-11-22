@@ -1271,3 +1271,37 @@ def test_a_takeover_that_cant_be_marked_carried_lets_the_brief_go_alone():
     h.desk.store.add = real_add
     assert h.brief.tick() == "sent"                       # the brief, reopened, greets him: once
     assert len(h.world.spoken) == 1 and h.hello.tick() == "done"
+
+
+# Codex review of 73acf79.
+
+def test_a_failed_read_of_when_the_brief_went_means_the_hello_waits():
+    h = morning_house()
+    brief_row(h, MORNING_HOME, "sent", delivered=MORNING_HOME + timedelta(minutes=4))
+    real, calls = h.desk.store.rows_for, []
+
+    def second_read_fails(key):
+        calls.append(key)
+        if len(calls) == 2:
+            raise RuntimeError("db")
+        return real(key)
+
+    h.desk.store.rows_for = second_read_fails
+    assert h.hello.tick().startswith("waiting") and h.world.spoken == []
+    h.desk.store.rows_for = real
+    assert h.hello.tick() == "the brief just greeted him" and h.world.spoken == []
+
+
+def test_a_due_brief_that_cant_be_marked_carried_goes_alone_not_twice():
+    h = morning_house()                                   # no brief row yet: the brief is due, not queued
+    real_add = h.desk.store.add
+
+    def add(event, now, **kw):
+        if event.source == "brief" and kw.get("status") == "folded":
+            raise RuntimeError("db")
+        return real_add(event, now, **kw)
+
+    h.desk.store.add = add
+    assert h.hello.tick() == "the brief goes on its own" and h.world.spoken == []
+    h.desk.store.add = real_add
+    assert h.brief.tick() == "sent" and len(h.world.spoken) == 1 and h.hello.tick() == "done"

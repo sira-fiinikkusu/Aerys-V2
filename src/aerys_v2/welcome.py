@@ -430,12 +430,8 @@ class WelcomeHome:
 
     def _brief_just_greeted(self, now: datetime, brief_key: str) -> bool:
         """Today's brief was SAID (delivered, not just queued: a brief can wait hours for his room)
-        within BRIEF_GREETED: he's been greeted."""
-        try:
-            rows = self.desk.store.rows_for(brief_key)
-        except Exception:
-            log.warning("welcome home: couldn't read when the brief went; saying hi", exc_info=True)
-            return False
+        within BRIEF_GREETED: he's been greeted. A failed read raises: the caller waits, never guesses."""
+        rows = self.desk.store.rows_for(brief_key)
         return any(r.status == "sent" and r.delivered_at is not None and now - _utc(r.delivered_at) <= BRIEF_GREETED
                    for r in rows)
 
@@ -611,12 +607,14 @@ class WelcomeHome:
             brief_key = f"brief:{day.isoformat()}"
             try:
                 outcome = self.desk.take_over_brief(brief_key, now, _at(day, self.brief.start_hour))
+                greeted = outcome == "delivering" or (outcome in ("went", "free")
+                                                      and self._brief_just_greeted(now, brief_key))
             except Exception as e:
-                # Never on an uncertain takeover: the brief may still go, so the hello waits and asks
-                # again next pass (Codex review of 5bdaab9).
+                # Never on an uncertain answer: the brief may still go, or may just have gone, so the
+                # hello waits and asks again next pass (Codex reviews of 5bdaab9 and 73acf79).
                 log.warning("welcome home: couldn't check the morning brief (%s); trying again", type(e).__name__)
                 return "waiting: couldn't check the morning brief"
-            if outcome == "delivering" or (outcome in ("went", "free") and self._brief_just_greeted(now, brief_key)):
+            if greeted:
                 self._drop(key, now, JUST_GREETED)
                 self._finish(key)
                 return "the brief just greeted him"
@@ -627,7 +625,8 @@ class WelcomeHome:
                 took = True
                 log.info("welcome home: took over the waiting morning brief, one greeting")
         brief_facts, marker = None, None
-        if took or self._brief_due(now, day):
+        carrying = took or self._brief_due(now, day)
+        if carrying:
             # The marker goes first, and the hello carries it in its folds: the brief counts as given
             # only while that hello is queued or said (store.carried), so a hello that never goes, or
             # a restart before it's written, leaves the brief free to go on its own.
@@ -637,10 +636,11 @@ class WelcomeHome:
                                    reason="carried by the welcome-home hello", not_before=None)
             except Exception:
                 log.warning("welcome home: couldn't mark the brief as carried; it goes on its own", exc_info=True)
-        if took and marker is None:
-            # Taken over but it couldn't be marked carried: the brief, reopened above, goes on its own
-            # (store.carried sees no carrier), so the hello stays quiet rather than greet him twice.
-            self._drop(key, now, "couldn't carry the morning brief it took over; the brief goes on its own")
+        if carrying and marker is None:
+            # Meant to carry the brief but it couldn't be marked carried: the brief (reopened if it was
+            # taken over) goes on its own, as store.carried sees no carrier, so the hello stays quiet
+            # rather than greet him twice (Codex review of 73acf79: the same on the brief-due path).
+            self._drop(key, now, "couldn't carry the morning brief; the brief goes on its own")
             self._finish(key)
             return "the brief goes on its own"
         if must_carry and marker is None:
