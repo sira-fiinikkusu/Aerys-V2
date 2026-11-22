@@ -352,3 +352,47 @@ def test_a_brief_queued_for_his_room_greets_him_instead_one_greeting():
                      not_before=None)
     assert h.at(MORNING_HOME + HELLO_FOR + timedelta(minutes=1)).hello.tick() == BRIEF_GREETS
     assert h.world.texts == [] and h.texted == []
+
+
+# --- Codex review of c288eee: the brief can't greet him between the checks and the send ----------
+
+def test_a_brief_delivered_between_reads_still_counts_one_read_decides():
+    # The desk delivers the waiting brief (queued -> sent) right after the hello's first look at it.
+    # Two reads would see "not said yet" then "not waiting any more" and text him too.
+    h = TextHouse(MORNING_HOME + timedelta(minutes=5), left=MORNING_LEFT, home=MORNING_HOME, brief=True)
+    assert h.hello.tick() == "waiting to settle"
+    brief = h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning.", brief=True,
+                                        dedupe_key="brief:2026-11-10", room="office"),
+                             utc(MORNING_HOME + timedelta(minutes=40)), status="queued",
+                             reason="waits for him in the office", not_before=None)
+    real = h.desk.store.rows_for
+    reads = []
+
+    def delivered_after_first_look(key):
+        rows = real(key)
+        if key == "brief:2026-11-10":
+            reads.append(key)
+            if len(reads) == 1:
+                snapshot = [type(r)(**vars(r)) for r in rows]
+                brief.status, brief.delivered_at = "sent", utc(MORNING_HOME + HELLO_FOR + timedelta(seconds=50))
+                return snapshot
+        return rows
+
+    h.desk.store.rows_for = delivered_after_first_look
+    assert h.at(MORNING_HOME + HELLO_FOR + timedelta(minutes=1)).hello.tick() == BRIEF_GREETS
+    assert reads == ["brief:2026-11-10"] and h.world.texts == [] and h.texted == []
+
+
+def test_the_brief_lock_is_held_from_the_first_check_to_the_send():
+    import threading
+
+    h = TextHouse(brief=True)
+    assert h.hello.tick() == "waiting to settle"
+    lock = threading.Lock()
+    h.hello.lock = lock
+    held = []
+    real_rows, real_reach = h.desk.store.rows_for, h.desk.reach_out
+    h.desk.store.rows_for = lambda key: held.append(("rows", lock.locked())) or real_rows(key)
+    h.desk.reach_out = lambda ev: held.append(("send", lock.locked())) or real_reach(ev)
+    assert h.at(GAVE_UP).hello.tick() == "by text: sent"
+    assert ("rows", True) in held and ("send", True) in held and all(locked for _, locked in held)

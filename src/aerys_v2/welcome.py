@@ -490,24 +490,23 @@ class WelcomeHome:
             self._drop(key, now, "quiet hours")
             self._finish(key)
             return "quiet hours"
-        try:
-            muted = TOPIC in muted_topics(store.prefs(self.desk.budget_default), now)
-            brief_key = f"brief:{day.isoformat()}"
-            greeted = self.brief is not None and self._brief_just_greeted(now, brief_key)
-            brief_waits = not greeted and self._brief_waiting(now, day)
-            replied = getattr(self.desk, "replied_since", None)
-            talked = not (greeted or brief_waits) and replied is not None and bool(replied(arrived))
-        except Exception as e:
-            log.warning("welcome home: couldn't check whether he's been greeted (%s); trying again",
-                        type(e).__name__)
-            return "waiting: couldn't check whether he's been greeted"
-        why = (f"you muted {TOPIC}" if muted else JUST_GREETED if greeted
-               else BRIEF_GREETS if brief_waits else TALKED if talked else None)
-        if why is not None:
-            self._drop(key, now, why)
-            self._finish(key)
-            return why
+        # The brief's own thread speaks only under this lock, so it can't greet him between these reads
+        # and the send (Codex review of c288eee: a brief sent mid-check left him greeted twice).
         with self.lock:
+            try:
+                muted = TOPIC in muted_topics(store.prefs(self.desk.budget_default), now)
+                brief = self._brief_greets(now, day)
+                replied = getattr(self.desk, "replied_since", None)
+                talked = brief is None and replied is not None and bool(replied(arrived))
+            except Exception as e:
+                log.warning("welcome home: couldn't check whether he's been greeted (%s); trying again",
+                            type(e).__name__)
+                return "waiting: couldn't check whether he's been greeted"
+            why = f"you muted {TOPIC}" if muted else brief or (TALKED if talked else None)
+            if why is not None:
+                self._drop(key, now, why)
+                self._finish(key)
+                return why
             outcome = self._say(key, arrived, left, "", now, by_text=True)
         return f"by text: {outcome}"
 
@@ -518,14 +517,23 @@ class WelcomeHome:
         return any(r.status == "sent" and r.delivered_at is not None and now - _utc(r.delivered_at) <= BRIEF_GREETED
                    for r in rows)
 
-    def _brief_waiting(self, now: datetime, day: date) -> bool:
-        """D91: today's brief hasn't greeted him yet but will in its room: due to go, or already queued
-        there waiting for him (_brief_due counts a queued brief as gone; for a greeting it isn't yet)."""
+    def _brief_greets(self, now: datetime, day: date) -> str | None:
+        """D91: has today's brief greeted him, or will it in its room? From ONE read of its rows, so a
+        delivery (queued -> sent, under the desk's lock) can't slip between two reads; called under
+        self.lock, so the brief's own thread can't put a new one out meanwhile (Codex review of c288eee).
+        JUST_GREETED (said within BRIEF_GREETED), BRIEF_GREETS (queued in its room, or still due), or None.
+        A failed read raises: the caller waits, never guesses."""
         if self.brief is None:
-            return False
-        if self._brief_due(now, day):
-            return True
-        return any(r.status == "queued" for r in self.desk.store.rows_for(f"brief:{day.isoformat()}"))
+            return None
+        rows = self.desk.store.rows_for(f"brief:{day.isoformat()}")
+        if any(r.status == "sent" and r.delivered_at is not None and now - _utc(r.delivered_at) <= BRIEF_GREETED
+               for r in rows):
+            return JUST_GREETED
+        if any(r.status == "queued" for r in rows):
+            return BRIEF_GREETS
+        if any(r.status == "sent" for r in rows):
+            return None                     # it went earlier today: nothing still to come
+        return BRIEF_GREETS if self._brief_due(now, day) else None
 
     def _brief_due(self, now: datetime, day: date) -> bool:
         b = self.brief
