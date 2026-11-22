@@ -218,7 +218,9 @@ def test_the_facts_list_the_names_as_data_nearest_first_and_say_what_they_are():
 
 def test_every_writer_is_told_to_name_the_likeliest_and_ask():
     for prompt in (WELCOME_PROMPT, WELCOME_PROMPT_TOOL_FREE, WELCOME_TEXT_PROMPT, WELCOME_TEXT_PROMPT_TOOL_FREE):
-        assert "when a stop lists named places" in prompt and "say it like one" in prompt and "and ask" in prompt
+        assert "when a stop lists named places" in prompt and "and ask about it" in prompt
+        # Chris 11/22 18:22 ("shows her work a little"): the place by name, never how she knows it.
+        assert "Never mention addresses, maps or how you know" in prompt and "as a question, not a claim" in prompt
 
 
 def test_a_stop_whose_first_sample_has_no_location_takes_the_next_one():
