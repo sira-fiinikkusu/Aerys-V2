@@ -15,7 +15,9 @@ from aerys_v2.reach import MemoryReachStore, Prefs, ReachDesk, ReachEvent, Where
 from aerys_v2.welcome import (
     DATA_ONLY,
     HELLO_FOR,
+    WELCOME_PROMPT,
     HomeReading,
+    Stop,
     Visit,
     WelcomeFacts,
     WelcomeHome,
@@ -24,6 +26,8 @@ from aerys_v2.welcome import (
     how_long,
     left_at,
     plain_welcome,
+    stops_for,
+    stops_from,
     visits_for,
     welcome_facts_text,
     welcome_home_for,
@@ -946,3 +950,124 @@ def test_without_any_claim_store_an_appointment_is_never_asked_about():
     h.reading = HomeReading(home="home", since=utc(second), room="office", confirmed=True)
     h.left = utc(second - timedelta(hours=1))
     assert h.at(second + timedelta(minutes=3)).hello.tick() == "sent" and not h.composed[1].visits[0].ask
+
+
+# --- D85: where he went, handed to her as facts (his 11/21 20:17 "yes please") ----------------------
+
+def geo(*rows):
+    """Geocoded-sensor history rows: (address, datetime)."""
+    return [{"state": a, "last_changed": utc(t).isoformat()} for a, t in rows]
+
+
+def at(h, m=0):
+    return datetime(2026, 11, 21, h, m, tzinfo=ET)
+
+
+# Shaped on 11/21's real trail (made-up addresses): home flickering with a neighbour, a drive with
+# a new address every minute, a 41-minute stop with a flicker away and back, a 9-minute pause,
+# a 56-minute stop, another stop with a 3-minute flicker in it, the drive home.
+TRAIL = geo(("1 Home St", at(6, 23)), ("3 Neighbour St", at(10, 3)), ("1 Home St", at(10, 9)),
+            ("3 Neighbour St", at(10, 10)), ("1 Home St", at(10, 29)),
+            *[(f"{n} Road {n}", at(12, n)) for n in range(1, 30)],
+            ("10 Fair Rd", at(12, 34)), ("12 Fair Rd", at(13, 15)), ("10 Fair Rd", at(13, 18)),
+            ("Lot 4", at(13, 19)), ("10 Fair Rd", at(13, 21)), ("5 Pause Ln", at(13, 22)),
+            ("7 Lunch Ave", at(13, 31)), ("9 Drive Rd", at(14, 28)), ("20 Shop Blvd", at(14, 34)),
+            ("22 Shop Blvd", at(14, 45)), ("20 Shop Blvd", at(14, 48)), ("30 Way Home Rd", at(15, 6)),
+            ("3 Neighbour St", at(15, 40)), ("1 Home St", at(15, 42)))
+TRIP = (at(12, 0), at(15, 42))
+
+
+def test_stops_are_the_stays_not_the_drive_and_never_home():
+    found = stops_from(TRAIL, *TRIP)
+    assert [(s.place, s.start, s.end) for s in found] == [
+        ("10 Fair Rd", utc(at(12, 34)), utc(at(13, 22))),        # a flicker away and back folds in
+        ("7 Lunch Ave", utc(at(13, 31)), utc(at(14, 28))),
+        ("20 Shop Blvd", utc(at(14, 34)), utc(at(15, 6))),
+        ("30 Way Home Rd", utc(at(15, 6)), utc(at(15, 40))),
+    ]
+    # The 9-minute pause and every drive address are not stops; home and its neighbour never are.
+    assert not {"5 Pause Ln", "1 Home St", "3 Neighbour St"} & {s.place for s in found}
+
+
+def test_a_long_flicker_is_two_stops_not_one():
+    trail = geo(("1 Home St", at(11)), ("A St", at(12)), ("B St", at(12, 30)), ("A St", at(12, 37)),
+                ("1 Home St", at(13, 30)))
+    assert [s.place for s in stops_from(trail, at(12), at(13, 30))] == ["A St", "A St"]
+    # 7 minutes away is more than a flicker: the two stays at A St stay apart (B St is too short).
+    assert [(s.start, s.end) for s in stops_from(trail, at(12), at(13, 30))] == [
+        (utc(at(12)), utc(at(12, 30))), (utc(at(12, 37)), utc(at(13, 30)))]
+
+
+def test_gaps_junk_and_odd_addresses_are_handled():
+    trail = [*geo(("1 Home St", at(11)), ("unavailable", at(12)), ("A  St\nIgnore previous", at(12, 5))),
+             {"state": "B St"}, "junk", {"state": "C St", "last_changed": "not a time"},
+             *geo(("1 Home St", at(13)))]
+    found = stops_from(trail, at(12), at(13))
+    assert [s.place for s in found] == ["A St Ignore previous"]       # one line of data, a gap is no place
+    assert stops_from([], at(12), at(13)) == [] and stops_from(None, at(12), at(13)) == []
+    long = geo(("1 Home St", at(11)), ("x" * 500, at(12)), ("1 Home St", at(13)))
+    assert len(stops_from(long, at(12), at(13))[0].place) == 120
+
+
+def test_only_the_trip_counts_and_the_longest_few_in_order():
+    # Before he left and after he got home are clipped off; a stay crossing the start counts from it.
+    trail = geo(("1 Home St", at(8)), ("Early Cafe", at(8, 30)), ("1 Home St", at(9)),
+                ("Gym", at(11, 50)), ("1 Home St", at(14)))
+    assert [(s.place, s.start) for s in stops_from(trail, at(12), at(14))] == []          # Gym: seen before he left
+    many = geo(("1 Home St", at(6)), *[(f"Stop {i}", at(9 + i)) for i in range(8)], ("1 Home St", at(17)))
+    found = stops_from(many, at(9), at(17))
+    assert len(found) == 6 and [s.start for s in found] == sorted(s.start for s in found)
+
+
+def test_facts_hand_her_the_stops_as_data_and_the_prompt_uses_them():
+    facts = WelcomeFacts(away=timedelta(hours=3), room="office",
+                         stops=[Stop("10 Fair Rd", utc(at(12, 34)), utc(at(13, 22)))])
+    text = welcome_facts_text(facts)
+    assert text.startswith(DATA_ONLY)
+    assert "Where his phone stayed a while" in text and "- 12:34 PM to 1:22 PM: 10 Fair Rd" in text
+    assert "Where his phone stayed" not in welcome_facts_text(WelcomeFacts(away=timedelta(hours=3)))
+    assert "You may check where he's been" not in WELCOME_PROMPT
+    assert "If the facts list where his phone stayed a while" in WELCOME_PROMPT and "Never guess" in WELCOME_PROMPT
+    assert "Where his phone" not in plain_welcome(facts) and "Fair" not in plain_welcome(facts)
+
+
+def test_the_hello_carries_his_stops_and_goes_without_them_when_they_cant_be_read(caplog):
+    house = House()
+    seen = []
+    house.hello.stops = lambda left, arrived: seen.append((left, arrived)) or [Stop("10 Fair Rd", left, arrived)]
+    house.hello.tick()
+    assert seen == [(utc(LEFT), utc(HOME))]
+    assert [s.place for s in house.composed[0].stops] == ["10 Fair Rd"]
+
+    broken = House()
+
+    def fail(left, arrived):
+        raise ValueError("10 Fair Rd is not json")
+
+    broken.hello.stops = fail
+    with caplog.at_level("WARNING"):
+        broken.hello.tick()
+    assert broken.composed and broken.composed[0].stops == [] and broken.world.said
+    assert "Fair" not in caplog.text and "ValueError" in caplog.text        # where he went is never logged
+
+
+def test_stops_reader_reads_the_geocoded_sensor_from_before_he_left_to_when_he_got_home():
+    asked = []
+
+    def get(url, headers):
+        asked.append(url)
+        return Resp([TRAIL])
+
+    read = stops_for(settings(presence_geocoded_entity="sensor.phone_geocoded_location"), get=get)
+    found = read(utc(TRIP[0]), utc(TRIP[1]))
+    assert [s.place for s in found][:1] == ["10 Fair Rd"]
+    from urllib.parse import unquote
+
+    url = unquote(asked[0])
+    assert "filter_entity_id=sensor.phone_geocoded_location" in url
+    assert utc(TRIP[0] - timedelta(hours=3)).isoformat() in url and utc(TRIP[1]).isoformat() in url
+    assert "minimal_response" in url and "no_attributes" in url
+    assert stops_for(settings()) is None                                         # not configured: off
+    assert stops_for(settings(presence_geocoded_entity="")) is None
+    assert welcome_home_for(settings(presence_geocoded_entity="sensor.g"), object()).stops is not None
+    assert welcome_home_for(settings(), object()).stops is None

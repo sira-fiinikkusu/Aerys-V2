@@ -23,10 +23,12 @@ So, once per arrival:
 She composes it from facts only: how long he was out; what was on his personal calendars while
 he was out (she asks how it went unless a check-in already asked, he muted appointments, or his
 check-in dial is used up today); what was held for him; and the morning brief's facts when that's
-still due. It goes to the desk pinned to that room and outside the budget, like the briefs;
+still due; and (D85, 11/21: "yes please") where his phone stayed a while (his stops, from his
+phone's own geocoded sensor over the trip), handed to her as facts rather than left for her to
+go and find. It goes to the desk pinned to that room and outside the budget, like the briefs;
 company mode turns it into a notification. If her words can't be had, a plain version goes.
 
-What she says, and what his calendar says, is the private part: never logged.
+What she says, what his calendar says, and where he went are the private part: never logged.
 """
 
 from __future__ import annotations
@@ -57,6 +59,16 @@ KEPT = HELLO_KEPT                            # a held check-in's reason: f"{KEPT
 ASKED = "asked in the welcome-home hello"     # its reason once a hello asked it
 RECONCILE_EVERY = timedelta(minutes=5)
 ASK, NO_ASK = "ask", "don't ask"                 # how the facts mark what she may ask about
+# D85 (his 11/21 20:17 "yes please"): his stops. On 11/21 the geocoded sensor changed about once a
+# minute while he drove and held for 10 to 56 minutes where he stopped; at home and at a stop it
+# flickers to a neighbour's address for a minute or three. A stop is a stay of STOP_MIN or more at
+# one address, with interruptions of FLICKER or less folded back in. Addresses seen in HOME_WINDOW
+# before he left, or at the moment he got home, are home's (and its neighbours'): never a stop.
+STOP_MIN = timedelta(minutes=10)
+FLICKER = timedelta(minutes=5)
+HOME_WINDOW = timedelta(hours=3)
+MAX_STOPS = 6                                   # the longest few, told in the order he made them
+PLACE_MAX = 120
 
 WELCOME_PROMPT = (
     "\n\n[Welcome home] Chris just got home after being out for a while, and the house has him "
@@ -64,15 +76,15 @@ WELCOME_PROMPT = (
     "person, your own voice. If the facts list something from his calendar marked [ask], ask "
     "lightly how it went: one question. Never ask about anything marked [don't ask]: you may know "
     "he went, but you asked already, he'd rather you didn't, or it can wait. If nothing was on his calendar while he was out, you may "
-    "ask one light, curious question about what he got up to. You may check where he's been "
-    "(his phone's location history in Home Assistant) and, when it's clear, mention it lightly "
-    "and ask how it went, the way a friend who noticed would; never guess, and if it isn't clear, "
-    "just ask. Never pry, and it's fine if he doesn't say. If things came in while he was out, say so in a few "
+    "ask one light, curious question about what he got up to. If the facts list where his phone "
+    "stayed a while, you may mention where he went lightly and ask how it went, the way a friend "
+    "who noticed would; an address alone may need a quick look-up before you name the place. "
+    "Never guess: if it isn't clear, just ask. Never pry, and it's fine if he doesn't say. If things came in while he was out, say so in a few "
     "words; the details are in his messages. If his morning brief is included, give it after the "
     "hello in two to four more short sentences: the weather, what's left on today's calendar "
     "(work meetings: how many and when, never what they're about), anything that came in "
     "overnight. He's been up and out, so never talk as if he just woke up. Use ONLY the facts "
-    "below and never add any. Say times the way people say them (\"ten thirty\"). Nothing to read "
+    "below (and what a look-up of one of his stops tells you) and never add any. Say times the way people say them (\"ten thirty\"). Nothing to read "
     "off a screen: no lists, no markdown, no emoji. Reply with ONLY what to say."
 )
 
@@ -94,11 +106,19 @@ class Visit:
 
 
 @dataclass
+class Stop:
+    place: str                        # the address his phone gave (data: never logged)
+    start: datetime
+    end: datetime
+
+
+@dataclass
 class WelcomeFacts:
     away: timedelta
     room: str = ""
     visits: list = field(default_factory=list)   # Visit: his personal calendar while he was out
     held: list = field(default_factory=list)     # Reach rows held for him while he was out
+    stops: list = field(default_factory=list)    # Stop: where his phone stayed a while (D85)
     brief: Facts | None = None                   # the morning brief's facts, when it comes along
 
 
@@ -149,6 +169,69 @@ def left_at(history: list, arrived: datetime, window_start: datetime) -> datetim
     return min(start, window_start) if away and start is not None else None
 
 
+def _place(state) -> str:
+    """One address, as one line of data: whitespace collapsed, capped; a gap state is no place."""
+    text = " ".join(str(state if state is not None else "").split())
+    return "" if text.lower() in GAP_STATES else text[:PLACE_MAX]
+
+
+def stops_from(history: list, left: datetime, arrived: datetime) -> list:
+    """Where his phone stayed a while between `left` and `arrived` (D85), from the geocoded
+    sensor's history (which may start before he left: that part tells home's addresses apart).
+    Stays shorter than STOP_MIN don't count (driving, a red light); a FLICKER-or-shorter run of
+    other addresses between two stays at the same one is folded into it; home's addresses
+    (HOME_WINDOW before he left, and the one he got home to) never count. At most MAX_STOPS, the
+    longest ones, in the order he made them."""
+    left, arrived = _utc(left), _utc(arrived)
+    rows = []
+    for s in history or []:
+        if not isinstance(s, dict):
+            continue
+        try:
+            t = _utc(datetime.fromisoformat(str(s.get("last_changed")).replace("Z", "+00:00")))
+        except ValueError:
+            continue
+        rows.append((t, _place(s.get("state"))))
+    rows.sort(key=lambda r: r[0])
+    home = {p for t, p in rows if left - HOME_WINDOW <= t <= left}
+    before_left = [p for t, p in rows if t <= left - HOME_WINDOW]
+    if before_left:
+        home.add(before_left[-1])          # the address in effect as the window opened
+    at_home = [p for t, p in rows if t <= arrived]
+    if at_home:
+        home.add(at_home[-1])
+    home.discard("")
+    runs: list = []                        # [place, start, end], clipped to the trip
+    for i, (t, place) in enumerate(rows):
+        end = rows[i + 1][0] if i + 1 < len(rows) else arrived
+        a, b = max(t, left), min(end, arrived)
+        if b <= a:
+            continue
+        if runs and runs[-1][0] == place:
+            runs[-1][2] = b
+        else:
+            runs.append([place, a, b])
+    merged: list = []
+    for place, a, b in runs:
+        between, folded = timedelta(0), False
+        if place:
+            for j in range(len(merged) - 1, -1, -1):
+                if merged[j][0] == place:
+                    merged[j][2] = b
+                    del merged[j + 1:]
+                    folded = True
+                    break
+                between += merged[j][2] - merged[j][1]
+                if between > FLICKER:
+                    break
+        if not folded:
+            merged.append([place, a, b])
+    stops = [Stop(place=p, start=a, end=b) for p, a, b in merged
+             if p and p not in home and b - a >= STOP_MIN]
+    longest = sorted(stops, key=lambda s: s.end - s.start, reverse=True)[:MAX_STOPS]
+    return sorted(longest, key=lambda s: s.start)
+
+
 def welcome_facts_text(facts: WelcomeFacts) -> str:
     """The facts as the model reads them, framed as data: a calendar title can come from anyone
     who sends him an invite."""
@@ -158,6 +241,10 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
         lines += [f"- [{ASK if v.ask else NO_ASK}] {v.when}: {v.title}" for v in facts.visits]
     else:
         lines.append("On his calendar while he was out: nothing")
+    if facts.stops:
+        lines.append("Where his phone stayed a while (addresses from his phone; an address isn't a place "
+                     "name until it's looked up):")
+        lines += [f"- {_clock(s.start)} to {_clock(s.end)}: {s.place}" for s in facts.stops]
     if facts.held:
         lines.append("Came in while he was out (the details are in his messages):")
         lines += [f"- {stamped(r)}" for r in facts.held]
@@ -199,17 +286,20 @@ class WelcomeHome:
     """tick() -> what happened this pass (logged, never the words). Every leg is injected:
     read() -> HomeReading; away_since(arrived) -> when he left, or None (not a trip);
     visits(left, arrived) -> the Appointments on his personal calendars in between;
-    compose(WelcomeFacts) -> her words. brief: the MorningBrief, when armed (its lock is shared,
+    compose(WelcomeFacts) -> her words; stops(left, arrived) -> where his phone stayed a while
+    (D85), or None (not armed). brief: the MorningBrief, when armed (its lock is shared,
     so the two never compose at once). followups: the follow-up store, when armed."""
 
     def __init__(self, desk, *, read: Callable[[], HomeReading],
                  away_since: Callable[[datetime], datetime | None],
                  compose: Callable[[WelcomeFacts], str],
                  visits: Callable[[datetime, datetime], list] | None = None,
+                 stops: Callable[[datetime, datetime], list] | None = None,
                  rooms: tuple = ("office", "kitchen"), brief=None, followups=None,
                  away_minutes: int = 30, settle_minutes: int = 20, quiet_start_hour: int = 21,
                  clock: Callable[[], datetime] | None = None):
         self.desk, self.read, self.away_since, self.compose, self.visits = desk, read, away_since, compose, visits
+        self.stops = stops
         self.rooms = tuple(r.strip().lower() for r in rooms if r.strip())
         self.brief, self.followups = brief, followups
         self.away_for = timedelta(minutes=away_minutes)
@@ -364,6 +454,17 @@ class WelcomeHome:
             return None
         return had.id
 
+    def _stops(self, left: datetime, arrived: datetime) -> list:
+        """Where his phone stayed a while (D85). A read that fails costs only the stops: the hello
+        goes without them, and nothing about where he went is logged (the error's type only)."""
+        if self.stops is None:
+            return []
+        try:
+            return list(self.stops(left, arrived) or [])
+        except Exception as e:
+            log.warning("welcome home: his stops couldn't be read (%s); going without them", type(e).__name__)
+            return []
+
     def _visits(self, left: datetime, arrived: datetime, now: datetime, key: str) -> list:
         """His personal calendar while he was out. She may ask about ONE of them (the one that ended
         last), if appointments aren't muted, his check-in dial has room today, and no check-in
@@ -515,7 +616,7 @@ class WelcomeHome:
                                                skip_topics=CHECK_IN_TOPICS)
         visits = self._visits(left, arrived, now, key)
         facts = WelcomeFacts(away=arrived - left, room=room, visits=visits, held=[] if marker else held,
-                             brief=brief_facts)
+                             stops=self._stops(left, arrived), brief=brief_facts)
         text = ""
         try:
             text = (self.compose(facts) or "").strip()
@@ -614,6 +715,34 @@ def away_since_for(settings, *, get=None) -> Callable[[datetime], datetime | Non
     return away_since
 
 
+def stops_for(settings, *, get=None) -> Callable[[datetime, datetime], list] | None:
+    """D85: where his phone stayed a while, from HA's recorder for his phone's geocoded sensor
+    (presence_geocoded_entity: geocoded on the phone, no third-party service), read from
+    HOME_WINDOW before he left (to tell home's addresses apart) to when he got home. None when no
+    geocoded sensor is configured. get(url, headers) is the test seam."""
+    import httpx
+    from urllib.parse import quote, urlencode
+
+    entity = str(getattr(settings, "presence_geocoded_entity", "") or "").strip()
+    if not entity:
+        return None
+    base, headers = _ha(settings)
+    fetch = get or (lambda url, hdrs: httpx.get(url, headers=hdrs, timeout=10.0))
+
+    def read(left: datetime, arrived: datetime) -> list:
+        start = left - HOME_WINDOW
+        url = (f"{base}/api/history/period/{quote(start.isoformat())}?"
+               + urlencode({"filter_entity_id": entity, "end_time": arrived.isoformat()})
+               + "&minimal_response&no_attributes")
+        r = fetch(url, headers)
+        r.raise_for_status()
+        data = r.json()
+        rows = data[0] if isinstance(data, list) and data and isinstance(data[0], list) else []
+        return stops_from(rows, left, arrived)
+
+    return read
+
+
 def visits_for(settings, *, get=None) -> Callable[[datetime, datetime], list]:
     """Timed events on his PERSONAL calendars (brief_calendars, never owner_meeting_calendars)
     that overlap the time he was out, keyed as the follow-ups key them. A calendar that can't be
@@ -691,7 +820,7 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
         desk, read=home_reader_for(settings), away_since=away_since_for(settings),
         compose=composer_for(settings, prompt=WELCOME_PROMPT, text_of=welcome_facts_text, turn=turn,
                              kind="welcome"),
-        visits=visits_for(settings), rooms=rooms, brief=brief, followups=followups,
+        visits=visits_for(settings), stops=stops_for(settings), rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
         settle_minutes=int(getattr(settings, "welcome_home_settle_minutes", 20)),
         quiet_start_hour=int(getattr(settings, "owner_quiet_start_hour", 21)))
