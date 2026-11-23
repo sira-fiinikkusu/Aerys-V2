@@ -457,7 +457,7 @@ def kael_note_for(
                 route = followup_router_for(settings)
                 if route is None:
                     raise RuntimeError("followup router unarmed (no ha_token)")
-                route(text, device_id)
+                route(text, device_id, chime=bool(getattr(settings, "reach_chime", True)))   # D93: unsolicited
             elif surface == "telegram":
                 _telegram_send(tg_token.get_secret_value(), chat_id, text, silent=in_meeting)
             else:
@@ -720,7 +720,7 @@ def owner_reach_for(settings, *, send=None, lookup_surface=None, lookup_chat_id=
                 route = followup_router_for(settings)
                 if route is None:
                     raise RuntimeError("followup router unarmed (no ha_token)")
-                route(text, device_id)
+                route(text, device_id, chime=bool(getattr(settings, "reach_chime", True)))   # D93: unsolicited
             elif surface == "telegram":
                 _telegram_send(tg_token.get_secret_value(), chat_id, text, silent=quiet)
             else:
@@ -1167,7 +1167,7 @@ def reach_desk_for(settings, graph):
         if route is None:
             raise RuntimeError("followup router unarmed (no ha_token)")
         try:
-            route(text, device_id)
+            route(text, device_id, chime=bool(getattr(settings, "reach_chime", True)))   # D93: unsolicited
         except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError) as e:
             raise AmbiguousDelivery(type(e).__name__) from e       # HA took it and is (likely) speaking it
 

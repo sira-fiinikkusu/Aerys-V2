@@ -444,7 +444,10 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
     redirect = speaker_redirect_for(settings)
     toggle = ToggleReader(settings)
 
-    def route(text: str, device_id: str | None) -> None:
+    def route(text: str, device_id: str | None, *, chime: bool = False) -> None:
+        # chime (D93, his 11/22 20:21): her UNSOLICITED lines open with HA's chime, which wakes a speaker that
+        # slept through the quiet (#253: the office Pebbles lost her first word) and tells him she's about to
+        # speak. Answers in a conversation and DJ breaks (their own path) stay without it.
         from .spoken import spoken
 
         # What's SPOKEN is plain speech (D55: never cut by length; brevity is taught); a display gets
@@ -480,14 +483,14 @@ def followup_router_for(settings: Settings) -> Callable[[str, str | None], None]
                 log.info("follow-up: hushed on %s since this turn began; not announcing it", device_id)
                 return
             # Questions can open the mic; all other speech keeps the announce path.
-            # preannounce=False preserves the existing no-chime behavior.
+            # No chime unless the caller asks for one (D93: her unsolicited lines).
             r = httpx.post(
                 f"{base}/api/services/assist_satellite/"
                 + ("start_conversation" if open_mic else "announce"),
                 headers=headers,
                 json={"entity_id": satellite_map[device_id],
                       ("start_message" if open_mic else "message"): text,
-                      "preannounce": False},
+                      "preannounce": bool(chime)},
                 # HA answers only once she has finished speaking; with no length cut (D55) a long
                 # answer outlasts 15 s. This runs off the turn's thread, so waiting costs nothing.
                 timeout=httpx.Timeout(90.0, connect=5.0),

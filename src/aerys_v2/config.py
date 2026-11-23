@@ -716,6 +716,9 @@ class Settings(BaseSettings):
     # fallback. Owner ask 2026-08-08: the Sticky rendered her ack but her
     # final reply only reached speaking surfaces.
     ha_display_followups: str = ""
+    # D93 (11/22 20:21): her unsolicited spoken lines (the reach desk, Kael notes, owner reach) open with HA's
+    # chime: it wakes a speaker that slept through the quiet and says she's about to speak. Off: as before.
+    reach_chime: bool = True
     # csv of ConversationInput.device_ids that are SHARED HOUSEHOLD surfaces
     # (the Stickies): turns from them carry a speaker-may-not-be-the-owner
     # prompt block. The Bearer still authenticates the DEVICE as owner infra —
