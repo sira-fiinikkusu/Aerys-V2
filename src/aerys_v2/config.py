@@ -511,6 +511,12 @@ class Settings(BaseSettings):
     # the work ones are owner_meeting_calendars (times only). Entity ids stay in the
     # environment. Off unless morning_brief is true.
     morning_brief: bool = False
+    # D100 (Chris 11/25 12:48, "yes to both Tidy and Reflect"): her sleep, nightly at 03:30 Eastern in the
+    # --serve process (sleep.py). Tidy only PROPOSES (v2_memory_proposals; he approves on the dashboard,
+    # Kael applies with `python -m aerys_v2.workers sleep-apply`); Reflect writes her note to v2_reflections,
+    # which feeds nothing until he has read the first week. her_sleep_judgements caps Jev questions a night.
+    her_sleep: bool = True
+    her_sleep_judgements: int = 600
     brief_room: str = "office"
     brief_start_hour: int = 5
     brief_solo_hour: int = 8
