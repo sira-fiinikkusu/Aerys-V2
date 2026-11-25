@@ -10,8 +10,10 @@ Now a mined fact whose quote is not found in one of the messages the model was
 shown is skipped, counted (`unquoted`, and `skipped` on the live path) and logged by
 its key only. The match is on words and forgives what copying changes: case, runs of
 whitespace, punctuation (apostrophes and commas he left out or the model added), curly
-quotes, the transcript's own "[Speaker]: " prefix. It does not forgive changed words. The explicit remember tool is not affected: when he says
-"remember that...", his words are the source.
+quotes, the transcript's own "[Speaker]: " prefix. It does not forgive changed words.
+A quote found only inside his question or supposition is not his claim either
+(`quote_in_question`; see test_question_facts.py). The explicit remember tool is not
+affected: when he says "remember that...", his words are the source.
 
 All fixtures are synthetic.
 """
@@ -207,3 +209,59 @@ def test_the_prompt_asks_for_an_exact_quote_and_says_what_happens_without_one():
     assert "copied exactly from one message" in prompt
     assert "never paraphrase" in prompt
     assert "A fact you cannot quote this way is not kept" in prompt
+
+
+# --- rejections need a voice too (Codex review round 1) -------------------------------
+# The stall alarm resets whenever the watermark moves, and a quote or question refusal
+# moves it, so a model that paraphrases every quote would stop memory formation with
+# nothing but per-pass log lines. A separate streak watches the refusals that can hide a
+# real fact (question-shaped, unquoted, quoted from inside a question). Location, secret
+# and test refusals are intended and never count: counting them would repeat the 10/04
+# false alarm over an evening of test chatter.
+
+def pass_summary(*, observations=0, unquoted=0, asked=0, rejected=None):
+    return {"inserted_total": 0, "sources": {"v2_turns": {
+        "rows": 5, "observations": observations, "unquoted": unquoted, "quote_in_question": asked,
+        "rejected": rejected or {}, "watermark": "w"}}}
+
+
+@pytest.fixture
+def wm(monkeypatch):
+    from aerys_v2.workers import __main__ as module
+    sent = []
+    monkeypatch.setattr(module, "_stall_alarm", sent.append)
+    monkeypatch.setattr(module, "_reject_streak", 0)
+    module.sent = sent
+    return module
+
+
+def test_a_pass_that_rejects_most_candidates_warns_with_counts_only(wm, caplog):
+    caplog.set_level(logging.WARNING, logger=wm.log.name)
+    wm._check_rejections(pass_summary(observations=3, unquoted=2, rejected={"question": 1}))
+    assert "rejected most" in caplog.text and '"candidates": 4' in caplog.text
+    assert wm.sent == []                                       # one pass is a warning, not an alarm
+
+
+def test_sustained_rejection_reaches_the_desk_first_then_sparsely(wm):
+    bad = pass_summary(observations=2, unquoted=1, asked=1)
+    for _ in range(wm.REJECT_PASSES * 8 + 2):
+        wm._check_rejections(bad)
+    assert len(wm.sent) == 3 and all("rejecting most" in s for s in wm.sent)
+
+
+def test_idle_passes_neither_count_nor_reset_and_a_healthy_pass_resets(wm):
+    bad = pass_summary(observations=2, unquoted=2)
+    wm._check_rejections(bad)
+    wm._check_rejections(pass_summary())                       # nothing proposed: idle
+    wm._check_rejections(pass_summary(observations=1, unquoted=1))   # below the floor: idle
+    wm._check_rejections(bad)
+    assert wm._reject_streak == 2
+    wm._check_rejections(pass_summary(observations=4, unquoted=1))
+    assert wm._reject_streak == 0
+
+
+def test_intended_refusals_never_count_as_rejections(wm, caplog):
+    caplog.set_level(logging.WARNING, logger=wm.log.name)
+    for _ in range(wm.REJECT_PASSES * 2):
+        wm._check_rejections(pass_summary(observations=1, rejected={"location": 2, "secret": 1, "test": 3}))
+    assert wm._reject_streak == 0 and wm.sent == [] and "rejected most" not in caplog.text

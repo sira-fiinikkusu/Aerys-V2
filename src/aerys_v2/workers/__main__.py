@@ -125,6 +125,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                 )
     log.info("extraction pass (%s): %s", "live" if live else "shadow", json.dumps(summary))
     _check_stalled(summary)
+    _check_rejections(summary)
     return summary
 
 
@@ -209,6 +210,55 @@ def _check_stalled(summary: dict) -> None:
         "extraction stalled: %s",
         detail,
     )
+
+
+#: Consecutive passes that refused most of what the model proposed, before the desk hears.
+REJECT_PASSES = 3
+#: Below this many proposals a pass is too small to judge: it neither counts nor resets.
+REJECT_MIN_CANDIDATES = 2
+_reject_streak = 0
+
+
+def _rejection_counts(summary: dict) -> tuple[int, int, dict]:
+    """(proposed, lost, by_source): what the model proposed, and how much of it was
+    refused for a reason that can hide a real fact — a question-shaped value, context or
+    quote, a quote not in his messages, or a quote from inside his question. Location,
+    secret and test refusals are intended and are not counted as lost."""
+    proposed = lost = 0
+    by_source = {}
+    for name, s in (summary.get("sources") or {}).items():
+        s = s or {}
+        refused = s.get("rejected") or {}
+        source_lost = refused.get("question", 0) + s.get("unquoted", 0) + s.get("quote_in_question", 0)
+        source_proposed = s.get("observations", 0) + sum(refused.values())
+        proposed, lost = proposed + source_proposed, lost + source_lost
+        by_source[name] = {"proposed": source_proposed, "lost": source_lost}
+    return proposed, lost, by_source
+
+
+def _check_rejections(summary: dict) -> None:
+    """Say it when the extractor keeps throwing away most of what it finds.
+
+    Codex review round 1 (2026-11-24): _check_stalled resets whenever the watermark moves,
+    and a refused fact moves it, so a model that paraphrased every quote would stop memory
+    formation with nothing louder than per-pass log lines. This is its own streak: every
+    pass that loses more than half its proposals logs a WARNING (counts only, never the
+    facts), and a run of REJECT_PASSES goes to Kael's desk, then at ~12 h and ~24 h in,
+    like the stall alarm. A pass with fewer than REJECT_MIN_CANDIDATES proposals is idle.
+    """
+    global _reject_streak
+    proposed, lost, by_source = _rejection_counts(summary)
+    if proposed < REJECT_MIN_CANDIDATES:
+        return
+    if lost * 2 <= proposed:
+        _reject_streak = 0
+        return
+    _reject_streak += 1
+    detail = json.dumps({"consecutive_passes": _reject_streak, "candidates": proposed, "rejected": lost,
+                         "by_source": by_source})
+    log.warning("extraction rejected most candidates: %s", detail)
+    if _stall_alarm is not None and _reject_streak in (REJECT_PASSES, REJECT_PASSES * 4, REJECT_PASSES * 8):
+        _stall_alarm(f"[aerys-extractor] extraction rejecting most candidates: {detail}")
 
 
 def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:

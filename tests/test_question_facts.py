@@ -13,6 +13,12 @@ alone never confirms one; and the existing checks on the extracted values
 itself a question. Probe-shaped turns ("do you remember my birthday") are still
 dropped before the model, exactly as before.
 
+Codex review round 1 found the hole in that: a quote can be his words without being
+his claim. "Could my birthday be April 12?" contains "my birthday be April 12", which
+is not itself question-shaped. So the quote's span is judged by the clause around it,
+in his punctuation (extraction.source_quote_status): a clause that asks, supposes or
+doubts is not asserted, while a clause stated beside a question still is.
+
 All fixtures are synthetic.
 """
 import json
@@ -63,11 +69,68 @@ def test_the_truck_inside_the_question_becomes_a_memory():
     assert inserts[0]["content"].startswith("user.vehicle: Just bought a new truck")
 
 
-def test_quoting_the_whole_question_still_loses_the_fact():
+def test_quoting_the_whole_question_still_loses_the_fact_and_says_so():
     """Why the prompt asks for only the stating words: the check on the extracted
-    quote is unchanged, and a quote that carries the question mark is a question."""
+    quote is unchanged, and a quote that carries the question mark is a question.
+    Codex review round 1: that loss was invisible (observations, skipped and
+    unquoted all 0). The parser's refusal is counted now, by reason."""
     summary, inserts, _ = live(TRUCK_MESSAGE, [obs("Just bought a new truck", TRUCK_MESSAGE)])
     assert summary["inserted_total"] == 0 and inserts == []
+    assert summary["sources"]["prod_chat"]["rejected"] == {"question": 1}
+
+
+def test_a_paraphrased_quote_is_counted_not_silent():
+    summary, inserts, _ = live(TRUCK_MESSAGE, [obs("Just bought a new truck", "I just purchased a new truck")])
+    assert inserts == [] and summary["sources"]["prod_chat"]["unquoted"] == 1
+
+
+# A guessed answer is not a fact (Codex review round 1, the blocker): the quote's words
+# are in the message, but inside a question or a supposition. Message, quote, value, key.
+NOT_ASSERTED = [
+    ("Could my birthday be April 12?", "my birthday be April 12", "Birthday is April 12", "basic.birth_date"),
+    ("Is my birthday April 12?", "my birthday April 12", "Birthday is April 12", "basic.birth_date"),
+    ("My birthday might be April 12", "My birthday might be April 12", "Birthday is April 12",
+     "basic.birth_date"),
+    ("Maybe my birthday is April 12", "my birthday is April 12", "Birthday is April 12", "basic.birth_date"),
+    ("I wonder if my birthday is April 12", "my birthday is April 12", "Birthday is April 12",
+     "basic.birth_date"),
+    ("My birthday is April 12, right?", "My birthday is April 12", "Birthday is April 12", "basic.birth_date"),
+    ("If I get the job, I'll move to Exampleville", "I'll move to Exampleville", "Moving to Exampleville",
+     "event.move"),
+    ("Tell me if the package came", "the package came", "The package arrived", "event.package"),
+    (WEATHER, "the weather tomorrow", "Wants to know the weather tomorrow", "interest.weather"),
+]
+
+
+@pytest.mark.parametrize("message,quote,value,key", NOT_ASSERTED)
+def test_a_quote_from_inside_a_question_or_supposition_never_becomes_a_memory(message, quote, value, key):
+    summary, inserts, _ = live(message, [obs(value, quote, key=key)])
+    stats = summary["sources"]["prod_chat"]
+    assert inserts == [] and summary["inserted_total"] == 0
+    assert stats["quote_in_question"] == 1 and stats["skipped"] == 1 and stats["unquoted"] == 0
+
+
+# What a request reveals, or what is said beside a question, is still asserted.
+ASSERTED = [
+    (TRUCK_MESSAGE, TRUCK_QUOTE),
+    ("I just bought a new truck, any tips?", TRUCK_QUOTE),
+    ("I just bought a new truck\nthoughts on synthetic oil?", TRUCK_QUOTE),     # a line break ends it
+    ("I just bought a new truck what oil should I use?", TRUCK_QUOTE),          # no comma at all
+    ("Is the oil change due? I just bought a new truck", TRUCK_QUOTE),
+    ("[Portable observation time: 2026-11-20T10:00:00Z] I just bought a new truck, any tips?", TRUCK_QUOTE),
+    ("Can you remind me Thursday, my blood test is Friday", "my blood test is Friday"),
+    ("I would like you to call me Captain from now on", "I would like you to call me Captain"),
+    ("May 3 is the appointment with the vet", "May 3 is the appointment with the vet"),
+    ("When I moved to Exampleville I got a dog", "I got a dog"),
+    ("I only eat eggs if they're scrambled", "I only eat eggs if they're scrambled"),
+    ("Is it true my truck is red? My truck is red, I checked.", "my truck is red"),   # asked, then said
+]
+
+
+@pytest.mark.parametrize("message,quote", ASSERTED)
+def test_an_asserted_clause_is_kept_even_beside_a_question(message, quote):
+    summary, inserts, _ = live(message, [obs("A fact he stated", quote, key="user.note")])
+    assert len(inserts) == 1, summary["sources"]["prod_chat"]
 
 
 @pytest.mark.parametrize("reply", [
@@ -81,18 +144,6 @@ def test_a_pure_question_yields_nothing(reply):
     summary, inserts, llm = live(WEATHER, reply)
     assert len(llm.calls) == 1                     # it is asked now, not dropped unseen
     assert summary["inserted_total"] == 0 and inserts == []
-
-
-def test_known_gap_a_fragment_lifted_from_a_pure_question_is_kept():
-    """PINNED GAP, not a goal (flagged to Chris 2026-11-24). A quote that is a
-    fragment of a question ("the weather tomorrow") is not itself question-shaped,
-    so nothing in code stops it; only the prompt does. A clause-level check would
-    also refuse the facts a request reveals ("what oil does my 2019 pickup take?"
-    says he has a 2019 pickup), so it is not built. If this starts failing because
-    the gap was closed on purpose, update it."""
-    _, inserts, _ = live(WEATHER, [obs("Wants to know the weather tomorrow", "the weather tomorrow",
-                                       key="interest.weather")])
-    assert len(inserts) == 1
 
 
 def test_a_memory_probe_is_still_dropped_before_the_model():
