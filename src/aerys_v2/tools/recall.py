@@ -113,10 +113,10 @@ def build_search_history_tool(turns_db: ConnFactory, *, test_bodies: Sequence[st
         q = " ".join((query or "").split())[:QUERY_CAP]
         try:
             start, end = parse_day(since), parse_day(until, end=True)
-        except ValueError:
+            if start and end and end <= start:
+                start, end = parse_day(until), parse_day(since, end=True)
+        except (ValueError, OverflowError):   # Codex: "9999-12-31" + a day overflowed
             return "Couldn't search: give since and until as dates like 2026-11-03."
-        if start and end and end <= start:
-            start, end = parse_day(until), parse_day(since, end=True)
         if not q and not (start or end):
             return "search_history needs a query, or a since/until date range."
         try:
