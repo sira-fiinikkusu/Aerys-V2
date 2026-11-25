@@ -162,8 +162,12 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Session-specific decisions: "parking this bug", "let's do X next"
 - Meta-commentary about the system: "the bot is broken", "that workflow failed"
 - Timestamps without facts: "it's late", "been a long day"
-- Questions, requests for information, and observations derived only from questions (never infer an answer)
+- The question itself, and anything only a question suggests: a question never confirms a fact, so never infer its answer ("is my birthday in April?" says nothing about their birthday)
 - Greetings and smalltalk: "hey", "what's up", "how are you"
+
+## Facts inside questions and requests:
+- A request or question often reveals a fact worth keeping. "I just bought a new truck, what oil should I use?" asks about oil, and also states that they just bought a new truck: extract the truck.
+- Keep only what the speaker STATES. The asking part is never a fact, and never infer an answer from it.
 
 ## Current location privacy (overrides all other extraction rules):
 - Never save Chris's current location, whereabouts, address or coordinates, whether from the presence block, the nearby tool, or anything he says about where he is right now.
@@ -189,7 +193,8 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Examples: basic.location, user.vehicle, interest.game, event.trip, preference.communication
 
 ## source_text rules:
-- Include source_text: the exact declarative source sentence supporting each fact. Never use a question as evidence.
+- Include source_text: the speaker's own words supporting each fact, copied exactly from one message. Never use a question as evidence.
+- Quote only the words that state the fact, stopping before any question: for "I just bought a new truck, what oil should I use?" the source_text is "I just bought a new truck".
 
 ## value_text rules:
 - Write naturally, as a human would remember it -- NOT as a database entry
@@ -202,6 +207,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - 1 sentence max, captures the conversational moment
 - Include for interests, events, preferences. Skip for basic identity facts.
 - BAD: "mentioned in conversation"  GOOD: "came up while joking about RAM prices"
+- Write it as a statement, never a question. BAD: "which oil should he use"  GOOD: "came up while asking which oil to use"
 - If the conversation is mundane, context is null
 
 ## privacy_level rules:
@@ -466,7 +472,8 @@ def values_similar(a: str, b: str, *, threshold: float = VALUE_SIMILARITY_THRESH
 
 
 # Keep this gate independent of the extraction model's phrasing. Log only the
-# verdict, never the testimony. Source questions are filtered before LLM calls too.
+# verdict, never the testimony. Source questions DO reach the model (2026-11-24: a fact
+# said inside a question is still a fact); this gate is what keeps the question out.
 # A yes/no question opens with the auxiliary itself — "do you know my birthday",
 # "is the pool guy coming". No declarative sentence does that, so the opening word
 # alone is enough here.
@@ -1054,13 +1061,24 @@ def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | Non
     counts only the case where the watermark is genuinely stuck and someone
     should look.
     """
-    messages = [m for m in group['messages']
-                if not question_shaped(m['content']) and not test_shaped(m['content'])]
+    messages = model_messages(group)
     if len(messages) != len(group['messages']):
-        log.warning("memory skipped: question-shaped or test-shaped source message")
+        log.warning("memory skipped: test-shaped source message")
     if not messages:
         return [], LlmReply("[]", False)
     return _extract_messages(llm, messages, stats)
+
+
+def model_messages(group: dict) -> list[dict]:
+    """The group's messages the extraction model is shown: all but probes of her memory.
+
+    2026-11-24: question-shaped messages reach the model now. Dropping them here
+    threw away the facts said inside a question ("I just bought a new truck, what
+    oil should I use?" lost the truck). A question still never becomes a fact: the
+    prompt says so, and parse_observations / triage_memory refuse any extracted
+    value, context or quote that is itself a question.
+    """
+    return [m for m in group['messages'] if not test_shaped(m['content'])]
 
 
 def _extract_messages(llm: Llm, messages: list[dict], stats: dict) -> tuple[list[dict] | None, LlmReply]:
