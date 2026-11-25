@@ -31,6 +31,7 @@ from test_memory_hygiene import PERSON
 
 RANDOM = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"           # 36 mixed characters, no meaning
 PUNCTUATED = "Xk9!mP2v#L8qR4$nT6w&"                          # 20, with password punctuation
+INSIDE = "Xk9mP2vL8qR4nT6w7Zb3c"                             # 21; one quote mark inside makes 22
 HEX = "0123456789abcdef" * 3
 
 SECRETS = [
@@ -74,6 +75,13 @@ SECRETS = [
     ("labelled secret", "pwd=" + PUNCTUATED),
     ("labelled secret", "key: " + RANDOM),                             # a bare "key" with : or =
     ("labelled secret", "SOME_SERVICE_KEY=" + RANDOM),
+    # Codex review round 2: a quote mark or backtick INSIDE a bare value is part of it;
+    # only at the value's start does it open a quoted run. 22 characters each.
+    ("labelled secret", "the password is " + INSIDE[:10] + "'" + INSIDE[10:]),
+    ("labelled secret", "the password is " + INSIDE[:10] + '"' + INSIDE[10:]),
+    ("labelled secret", "the password is " + INSIDE[:10] + "`" + INSIDE[10:]),
+    ("labelled secret", "password: `" + INSIDE + "`"),                 # a backtick-quoted value
+    ("labelled secret", "password: '" + INSIDE[:6] + "'" + INSIDE[6:]),   # a quote that closes early
     # PINNED (reported 2026-11-24): words and a year after a password label still count;
     # only after a bare "key" does a dashed word identifier pass.
     ("labelled secret", "the wifi password is Sunshine-Garden-2024"),

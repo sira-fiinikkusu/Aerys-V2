@@ -123,8 +123,12 @@ _API_KEYS = [(re.compile(p), needs_random) for p, needs_random in (
 )]
 #: The value after a label, read WHOLE (Codex review round 1: a password with "!" in it
 #: was cut at the "!" and then too short to count): a quoted run, or a bare run up to
-#: whitespace. Never across whitespace, even quoted.
-_VALUE = r"""(?:"([^"\s]{1,200})"|'([^'\s]{1,200})'|([^\s"'`]{1,200}))"""
+#: whitespace. Never across whitespace, even quoted. A quote mark or backtick opens a
+#: quoted run only at the value's START and only if it closes at the value's end
+#: (round 2: one inside a bare value used to end it early); otherwise it is part of it.
+_VALUE_END = r"""(?=[\s.,;:!?)\]}>]|$)"""
+_VALUE = (r"""(?:(?:"([^"\s]{1,200})"|'([^'\s]{1,200})'|`([^`\s]{1,200})`)""" + _VALUE_END
+          + r"|(\S{1,200}))")
 #: Labels whose value IS a credential: "my token is ...", "password: ...", "API_KEY=...".
 _LABEL = (r"(?:api[ _-]?key|access[ _-]?key|secret[ _-]?key|private[ _-]?key|client[ _-]?secret"
           r"|secret|token|bearer|password|passwd|passphrase|pwd)")
@@ -138,8 +142,8 @@ _TRAILING = ".,;:)]}>"
 
 
 def _whole_value(match: re.Match) -> str:
-    quoted = match.group(1) or match.group(2)
-    return quoted if quoted else match.group(3).rstrip(_TRAILING)
+    quoted = match.group(1) or match.group(2) or match.group(3)
+    return quoted if quoted else match.group(4).rstrip(_TRAILING)
 
 
 def _structured(value: str) -> bool:
