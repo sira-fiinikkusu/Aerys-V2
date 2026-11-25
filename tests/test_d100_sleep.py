@@ -195,10 +195,11 @@ class V2:
 
 
 class Rows:
-    """The prod side for apply: memory and claim rows by id."""
+    """The prod side for apply: memory and claim rows by id. changed_by_someone_else: retire updates that touch 0
+    rows (another writer got there between the check and the update)."""
 
-    def __init__(self, memories=None, claims=None):
-        self.memories, self.claims, self.calls = dict(memories or {}), dict(claims or {}), []
+    def __init__(self, memories=None, claims=None, rowcount=1):
+        self.memories, self.claims, self.calls, self.rowcount = dict(memories or {}), dict(claims or {}), [], rowcount
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
@@ -208,7 +209,7 @@ class Rows:
             row = self.claims.get(params["id"])
         else:
             row = None
-        return SimpleNamespace(fetchone=lambda: row)
+        return SimpleNamespace(fetchone=lambda: row, rowcount=self.rowcount)
 
 
 def db(conn):
@@ -234,7 +235,9 @@ def retires(rows):
 def test_an_approved_proposal_that_still_reads_as_judged_is_retired_and_marked_applied():
     v2, rows = V2([approved()]), Rows({A: LIVE_A, B: LIVE_B})
     (r,) = sl.apply_approved(db(v2), db(rows))
-    assert r["status"] == "applied" and retires(rows) == [{"id": A, "person_id": ME, "tag": "tidy:duplicate"}]
+    assert r["status"] == "applied" and retires(rows) == [{"id": A, "person_id": ME, "tag": "tidy:duplicate",
+                                                           "receipt": "tidy-proposal:7"}]
+    assert "FOR UPDATE" in sl.MEMORY_ROW_SQL and "FOR UPDATE" in sl.CLAIM_ROW_SQL
     assert (sl.MARK_SQL, {"status": "applied", "id": 7}) in v2.calls
 
 
@@ -250,9 +253,12 @@ def test_anything_changed_since_it_was_judged_marks_it_stale_and_touches_nothing
     assert (sl.MARK_SQL, {"status": "stale", "id": 7}) in v2.calls
 
 
-def test_a_row_this_tidy_already_retired_counts_as_applied_without_a_second_write():
-    done = ("pet.a", "pet.a: Has a cat named Pip", False, ["tidy:duplicate"])
-    v2, rows = V2([approved()]), Rows({A: done, B: LIVE_B})
+def test_a_row_this_proposal_already_retired_counts_as_applied_without_a_second_write():
+    """Codex 11/25: the retire committed but the proposal's own mark didn't; then the kept row changed. The
+    receipt on the retired row still says this proposal did it, so the retry finishes the mark."""
+    done = ("pet.a", "pet.a: Has a cat named Pip", False, ["tidy:duplicate", "tidy-proposal:7"])
+    changed_keeper = ("pet.b", "pet.b: Has a 13-year-old cat named Pip and a dog", True, [])
+    v2, rows = V2([approved()]), Rows({A: done, B: changed_keeper})
     (r,) = sl.apply_approved(db(v2), db(rows))
     assert r["status"] == "applied" and retires(rows) == []
 
@@ -444,3 +450,38 @@ def test_a_failed_apply_never_stops_the_night(monkeypatch):
                     reflect_with=lambda day: {"status": "saved"},
                     clock=lambda: datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc))
     assert s.tick() == "tidy: 0 proposed; reflect: saved"
+
+
+
+def test_a_change_past_the_first_500_characters_is_still_a_change():
+    """Codex 11/25 BLOCKER: the snapshot and the re-check compare the WHOLE text; only Jev's input is cut."""
+    long = "pet.a: " + "x" * 600
+    snap = {A: long, B: "pet.b: Has a 13-year-old cat named Pip"}
+    v2 = V2([approved(snapshot=snap)])
+    rows = Rows({A: ("pet.a", long + " and then something new", True, []), B: LIVE_B})
+    (r,) = sl.apply_approved(db(v2), db(rows))
+    assert r["status"] == "stale" and retires(rows) == []
+    mem = Mem([fact(A, "pet.a", "y" * 900, 50), fact(B, "pet.b", "y" * 900 + "!", 10)], [(A, B, 0.1)])
+    out, j = run(mem, lambda q, s: .95)
+    assert len(out[0].snapshot[A]) > 900                           # the whole text is kept for the re-check
+    assert all(len(s["a"]) <= sl.VALUE_MAX for q, s in j.client.asked if q == "same")
+
+
+def test_a_retire_that_touches_no_row_rolls_the_proposal_back_as_stale():
+    """Codex 11/25 BLOCKER: another writer between the check and the update; the rows are locked FOR UPDATE, and
+    an update that changes anything but exactly one row aborts the whole proposal."""
+    v2, rows = V2([approved()]), Rows({A: LIVE_A, B: LIVE_B}, rowcount=0)
+    (r,) = sl.apply_approved(db(v2), db(rows))
+    assert r["status"] == "stale" and (sl.MARK_SQL, {"status": "stale", "id": 7}) in v2.calls
+
+
+def test_a_plan_judged_still_current_is_asked_again_after_three_days():
+    """Codex 11/25: a Dec 1 plan judged current in November must be judged again once Dec 1 has passed; nothing
+    else that's clear (and nothing rejected) is ever asked again."""
+    old = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    rows = [("plan-key", "clear", "stale_plan", old), ("dup-key", "clear", "duplicate", old),
+            ("rej-key", "rejected", "stale_plan", old), ("new-plan", "clear", "stale_plan", NOW)]
+    known = sl.known_keys(rows, TODAY)
+    assert "plan-key" not in known and known["dup-key"] == "clear" and known["rej-key"] == "rejected"
+    assert known["new-plan"] == "clear"
+    assert "WHERE v2_memory_proposals.status = 'clear'" in sl.SAVE_SQL   # only a clear row is ever overwritten
