@@ -1054,3 +1054,165 @@ def test_his_starts_stay_out_of_her_project_but_an_unsure_voice_goes_to_whoever_
     assert not b.store.rows and not b.approval_store.rows
     assert not b.gate.home_job(UNSURE, OWNER_THREAD, "start_async_task", MEMBER_START).go   # waits for a tap
     assert next(iter(b.approval_store.rows.values())).approvers == ["1", "2"]
+
+
+# --- G1: an approved action cut off mid-run is never stuck forever --------------------------------
+
+
+def _approved_and_claimed(b, *, claimed_at=None):
+    """His voice start, approved, then claimed by a watcher that died before finishing (a crash or a
+    restart mid-run): the row is 'running' and nothing will ever finish it."""
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    if claimed_at is not None:
+        b.clock["now"] = claimed_at
+    (row,) = b.store.rows.values()
+    assert b.store.claim(row.id)
+    return row
+
+
+def test_an_action_cut_off_mid_run_is_marked_failed_and_he_is_told_never_redone():
+    told = []
+    b = Box()
+    b.watcher.owner_notice = lambda key, text: told.append((key, text))
+    row = _approved_and_claimed(b)
+    b.clock["now"] = NOW + timedelta(minutes=1)
+    assert b.watcher.tick() == {"done": 0, "failed": 0, "dropped": 0}     # first seen running: not yet
+    b.clock["now"] = NOW + timedelta(minutes=20)
+    b.watcher.tick()
+    assert row.status == "running" and not told                           # still inside the threshold
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+    assert b.watcher.tick()["failed"] == 1
+    assert row.status == "failed" and row.outcome == hands_gate.INTERRUPTED
+    assert row.finished_at == b.clock["now"]
+    assert not b.done, "the action itself is never run again"
+    assert "didn't go through" in b.notes[-1][1] and "may have run" in b.notes[-1][1]
+    assert len(told) == 1 and told[0][0] == f"approved-failed:{row.id}" and "may have run" in told[0][1]
+    b.clock["now"] += timedelta(hours=1)
+    b.watcher.tick()
+    assert not b.done and len(told) == 1 and row.status == "failed"
+
+
+def test_after_the_sweep_she_is_no_longer_told_it_is_being_done():
+    b = Box()
+    _approved_and_claimed(b)
+    stuck = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not stuck.go and "being done now" in stuck.text
+    b.clock["now"] = NOW + timedelta(minutes=1)
+    b.watcher.tick()
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+    b.watcher.tick()
+    again = b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    assert not again.go and "being done now" not in again.text and "Waiting for Chris" in again.text
+    assert len(b.approval_store.rows) == 2 and not b.done        # a new button, his call; nothing redone
+
+
+def test_a_message_cut_off_mid_run_unblocks_the_contact_with_the_may_have_gone_card():
+    b = Box()
+    first = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hello there", TEXT)
+    assert not first.go
+    b.tap()
+    (row,) = b.store.rows.values()
+    assert b.store.claim(row.id)
+    blocked = b.gate.message(OWNER_THREAD, "discord", "sam_42", "another note", TEXT)
+    assert not blocked.go and "being done now" in blocked.text
+    b.clock["now"] = NOW + timedelta(minutes=1)
+    b.watcher.tick()
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+    b.watcher.tick()
+    assert row.status == "failed" and not b.done
+    resend = b.gate.message(OWNER_THREAD, "discord", "sam_42", "hello there", TEXT)
+    assert not resend.go and "Waiting for Chris" in resend.text
+    assert "may have gone through" in b.approval_store.rows[max(b.approval_store.rows)].summary
+
+
+def test_a_late_claim_after_a_long_outage_is_not_swept_while_it_runs():
+    """His tap was hours ago (every watcher was down); a watcher claims it now. Its approval is old, but
+    nobody has seen it running for the threshold, so another watcher's sweep leaves it to finish."""
+    b = Box()
+    row = _approved_and_claimed(b, claimed_at=NOW + timedelta(hours=3))
+    other = HandsWatcher(b.gate)
+    other.tick()
+    b.clock["now"] += timedelta(minutes=5)
+    other.tick()
+    assert row.status == "running"
+    assert b.store.finish(row.id, "done", "started", b.clock["now"])   # the claiming watcher finishes it
+    b.clock["now"] += hands_gate.STUCK_AFTER
+    other.tick()
+    assert row.status == "done" and row.outcome == "started"
+
+
+def test_two_watchers_sweeping_the_same_row_tell_him_once():
+    told = []
+    b = Box()
+    b.watcher.owner_notice = lambda key, text: told.append(key)
+    other = HandsWatcher(b.gate, note=lambda thread, text: b.notes.append((thread, text)),
+                         owner_notice=lambda key, text: told.append(key))
+    row = _approved_and_claimed(b)
+    b.clock["now"] = NOW + timedelta(minutes=1)
+    b.watcher.tick()
+    other.tick()
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+    stale = list(b.store.running())          # the other watcher read the running rows before this one marked
+    assert b.watcher.tick()["failed"] == 1 and row.status == "failed"
+    b.store.running = lambda: stale
+    assert other.tick()["failed"] == 0, "the compare-and-set lets only one watcher mark it"
+    assert row.status == "failed" and row.outcome == hands_gate.INTERRUPTED
+    assert sum("may have run" in text for _, text in b.notes) == 1
+    assert set(told) == {f"approved-failed:{row.id}"}    # one key: the desk keeps one row per key
+
+
+def test_an_outcome_that_couldnt_be_recorded_is_recorded_on_a_later_pass_not_called_interrupted():
+    """finish() failing used to leave the row 'running' forever. The watcher that ran it knows what
+    happened: it records that on a later pass instead of the sweep's 'may have run'."""
+    told = []
+    b = Box()
+    b.watcher.owner_notice = lambda key, text: told.append(key)
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    real_finish, broken = b.store.finish, {"n": 2}        # the run's own finish, and the same pass's retry
+
+    def flaky(*args, **kwargs):
+        if broken["n"]:
+            broken["n"] -= 1
+            raise ConnectionError("nas")
+        return real_finish(*args, **kwargs)
+
+    b.store.finish = flaky
+    assert b.watcher.tick()["done"] == 1 and len(b.done) == 1
+    (row,) = b.store.rows.values()
+    assert row.status == "running"
+    b.watcher.tick()
+    assert row.status == "done" and "t-1" in row.outcome and not told
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER * 3
+    b.watcher.tick()
+    assert row.status == "done" and len(b.done) == 1 and not told
+
+
+def test_postgres_sweep_is_a_compare_and_set_on_running_and_the_decision_age(monkeypatch):
+    from aerys_v2.hands_gate import PostgresGatedActionStore
+
+    calls = []
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def execute(self, sql, args):
+            calls.append((" ".join(sql.split()), args))
+            return SimpleNamespace(fetchone=lambda: (7,), fetchall=lambda: [])
+
+    store = PostgresGatedActionStore("unused")
+    monkeypatch.setattr(store, "_connect", Conn)
+    assert store.running() == []
+    assert "WHERE status = 'running'" in calls[-1][0]
+    cutoff = NOW - hands_gate.STUCK_AFTER
+    assert store.interrupt(7, hands_gate.INTERRUPTED, NOW, cutoff) is True
+    sql, args = calls[-1]
+    assert sql.startswith("UPDATE v2_gated_actions") and "status = 'failed'" in sql
+    assert "status = 'running'" in sql and "v2_approvals" in sql and "decided_at < %s" in sql
+    assert args == (hands_gate.INTERRUPTED, NOW, 7, cutoff)
+    assert store.finish(7, "done", "ok", NOW) is True
