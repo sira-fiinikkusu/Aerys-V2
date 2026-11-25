@@ -12,8 +12,12 @@ ToolNode contract). No network, no real mailbox.
 
 import pytest
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.prebuilt import ToolRuntime
+
 from aerys_v2.tools.email_tool import (
     BODY_TRUNCATE_AT,
+    DRAFT_NOT_SHOWN_REFUSAL,
     SEARCH_LIMIT_MAX,
     UNCONFIRMED_REFUSAL,
     build_email_tools,
@@ -126,6 +130,24 @@ class CountingFactory:
 
 def known_people(platform, address):
     return [{"person_id": "known-person", "address": address}] if address == "real.person@company.io" else []
+
+
+THREAD = "person:test-owner"
+
+
+def turn(thread=THREAD, messages=None, holder=None, call_id="call-1", **configurable):
+    """The runtime a tool gets on a turn: his message is the turn's start; anything after it is this turn."""
+    return ToolRuntime(state={"messages": messages if messages is not None else [HumanMessage(content="yes, send it")]},
+                       context=None, stream_writer=lambda *_: None, tool_call_id=call_id, store=None,
+                       config={"configurable": {"thread_id": thread, "outside_text": {} if holder is None else holder,
+                                                **configurable}})
+
+
+def shown(draft, mail, thread=THREAD):
+    """draft_email on an EARLIER turn of this thread (what he was shown)."""
+    out = draft.invoke({**mail, "runtime": turn(thread, [HumanMessage(content="email them")])})
+    assert out.startswith("DRAFT (not sent):"), out
+    return out
 
 
 def make_tools(imap=None, smtp=None):
@@ -380,13 +402,10 @@ def test_send_stringly_false_is_still_refused():
 
 def test_send_confirmed_true_sends_as_self_address():
     smtp = FakeSMTP()
-    _, _, _, send, _, smtp_f = make_tools(smtp=smtp)
-    out = send.invoke({
-        "to": "real.person@company.io",
-        "subject": "Résumé attached",
-        "body": "Hi — see below. — Chris",
-        "confirmed": True,
-    })
+    _, _, draft, send, _, smtp_f = make_tools(smtp=smtp)
+    mail = {"to": "real.person@company.io", "subject": "Résumé attached", "body": "Hi — see below. — Chris"}
+    shown(draft, mail)
+    out = send.invoke({**mail, "confirmed": True, "runtime": turn()})
     assert out.startswith("Sent:")
     assert smtp_f.calls == 1
     assert len(smtp.sent) == 1
@@ -408,9 +427,10 @@ def test_send_confirmed_refuses_placeholder_address_without_sending():
 
 
 def test_send_smtp_failure_is_honest_string_not_exception():
-    _, _, _, send, _, _ = make_tools(smtp=FakeSMTP(fail=True))
+    _, _, draft, send, _, _ = make_tools(smtp=FakeSMTP(fail=True))
+    shown(draft, {"to": "real.person@company.io", "subject": "s", "body": "b"})
     out = send.invoke({
-        "to": "real.person@company.io", "subject": "s", "body": "b", "confirmed": True,
+        "to": "real.person@company.io", "subject": "s", "body": "b", "confirmed": True, "runtime": turn(),
     })
     assert out.startswith("NOT SENT:") and "550" in out
 
@@ -421,8 +441,9 @@ def test_send_dead_smtp_factory_is_honest_string():
         smtp_factory=CountingFactory(raise_on_call=True),
         self_address=SELF, people=known_people,
     )
+    shown(draft_t, {"to": "real.person@company.io", "subject": "s", "body": "b"})
     out = send.invoke({
-        "to": "real.person@company.io", "subject": "s", "body": "b", "confirmed": True,
+        "to": "real.person@company.io", "subject": "s", "body": "b", "confirmed": True, "runtime": turn(),
     })
     assert out.startswith("NOT SENT:") and "unreachable" in out
 
@@ -478,13 +499,10 @@ def test_send_multiline_subject_never_raises_and_collapses_to_one_line():
     surface as an honest string (or a clean send), never a raise out of the
     tool (review finding, reproduced empirically)."""
     smtp = FakeSMTP()
-    _, _, _, send, _, _ = make_tools(smtp=smtp)
-    out = send.invoke({
-        "to": "real.person@company.io",
-        "subject": "line one\nline two\r\nline three",
-        "body": "hello",
-        "confirmed": True,
-    })
+    _, _, draft, send, _, _ = make_tools(smtp=smtp)
+    mail = {"to": "real.person@company.io", "subject": "line one\nline two\r\nline three", "body": "hello"}
+    shown(draft, mail)
+    out = send.invoke({**mail, "confirmed": True, "runtime": turn()})
     assert out.startswith("Sent:")
     assert smtp.sent[0]["Subject"] == "line one line two line three"
 
@@ -525,3 +543,130 @@ def test_unknown_recipient_and_unreadable_people_never_open_smtp():
                                     self_address=SELF, people=lookup)
         out = send.invoke({'to': 'unknown@company.io', 'subject': 's', 'body': 'b', 'confirmed': True})
         assert out.startswith('NOT SENT:') and smtp.calls == 0
+
+
+# ---- G3: a clean-turn send must be the draft he was shown, word for word ------------------------
+# Before, with no outside text read, send_email went on her own confirmed=true plus a known recipient:
+# draft_email kept nothing, so nothing checked that he had seen what went out.
+
+MAIL = {"to": "real.person@company.io", "subject": "Dinner Friday", "body": "Bringing wine.\nSee you at 7."}
+
+
+def _send(send, mail=None, **turn_kw):
+    return send.invoke({**(mail or MAIL), "confirmed": True, "runtime": turn(**turn_kw)})
+
+
+def test_a_send_with_no_draft_shown_is_refused_and_never_opens_smtp():
+    _, _, _, send, _, smtp_f = make_tools()
+    assert _send(send) == DRAFT_NOT_SHOWN_REFUSAL
+    assert send.invoke({**MAIL, "confirmed": True}) == DRAFT_NOT_SHOWN_REFUSAL      # no thread at all
+    assert smtp_f.calls == 0
+    assert DRAFT_NOT_SHOWN_REFUSAL.startswith("NOT SENT:") and "draft_email" in DRAFT_NOT_SHOWN_REFUSAL
+
+
+@pytest.mark.parametrize("change", [{"body": "Bringing beer.\nSee you at 7."}, {"subject": "Dinner Saturday"},
+                                    {"to": "other.person@company.io"}])
+def test_a_send_that_differs_from_the_draft_he_saw_is_refused(change):
+    people = lambda platform, address: [{"person_id": address, "address": address}]
+    smtp = CountingFactory(FakeSMTP())
+    *_, draft, send = build_email_tools(imap_factory=CountingFactory(FakeIMAP()), smtp_factory=smtp,
+                                       self_address=SELF, people=people)
+    shown(draft, MAIL)
+    assert _send(send, {**MAIL, **change}) == DRAFT_NOT_SHOWN_REFUSAL and smtp.calls == 0
+
+
+def test_the_draft_he_saw_goes_and_the_record_says_why():
+    smtp = FakeSMTP()
+    _, _, draft, send, _, _ = make_tools(smtp=smtp)
+    shown(draft, MAIL)
+    holder = {}
+    assert _send(send, holder=holder, call_id="send-1").startswith("Sent:")
+    assert smtp.sent[0].get_content().strip() == MAIL["body"]
+    assert holder["basis"] == {"send-1": "confirmed_draft"}
+
+
+def test_the_confirmed_flag_still_decides_even_with_the_draft_shown():
+    _, _, draft, send, _, smtp_f = make_tools()
+    shown(draft, MAIL)
+    assert send.invoke({**MAIL, "confirmed": False, "runtime": turn()}) == UNCONFIRMED_REFUSAL
+    assert smtp_f.calls == 0
+
+
+def test_a_draft_made_this_same_turn_hasnt_been_shown_yet():
+    """Drafting and sending in one turn (in sequence, or side by side in one step) means he never saw it."""
+    _, _, draft, send, _, smtp_f = make_tools()
+    his = HumanMessage(content="email them about dinner")
+    call = {"name": "draft_email", "args": MAIL, "id": "d1"}
+    drafting = AIMessage(content="", tool_calls=[call])
+    made = draft.invoke({**MAIL, "runtime": turn(messages=[his, drafting])})
+    sequence = [his, drafting, ToolMessage(content=made, name="draft_email", tool_call_id="d1"),
+                AIMessage(content="", tool_calls=[{"name": "send_email", "args": MAIL, "id": "s1"}])]
+    assert _send(send, messages=sequence) == DRAFT_NOT_SHOWN_REFUSAL
+    side_by_side = [his, AIMessage(content="", tool_calls=[call, {"name": "send_email", "args": MAIL, "id": "s1"}])]
+    assert _send(send, messages=side_by_side) == DRAFT_NOT_SHOWN_REFUSAL
+    assert smtp_f.calls == 0
+    # his next message is a new turn: now it was shown
+    later = [*sequence, AIMessage(content=made), HumanMessage(content="yes send it")]
+    assert _send(send, messages=later).startswith("Sent:") and smtp_f.calls == 1
+
+
+def test_a_correction_pass_still_counts_from_his_own_message():
+    """D79: a correction appends a human-shaped line after his turn; his turn is where turn_human_index says."""
+    _, _, draft, send, _, smtp_f = make_tools()
+    his = HumanMessage(content="email them about dinner")
+    drafting = AIMessage(content="", tool_calls=[{"name": "draft_email", "args": MAIL, "id": "d1"}])
+    made = draft.invoke({**MAIL, "runtime": turn(messages=[his, drafting])})
+    rerun = [his, drafting, ToolMessage(content=made, name="draft_email", tool_call_id="d1"),
+             AIMessage(content="Sent it!"), HumanMessage(content="Answer again from what your tools did.")]
+    assert _send(send, messages=rerun, turn_human_index=0) == DRAFT_NOT_SHOWN_REFUSAL
+    assert smtp_f.calls == 0
+
+
+def test_only_the_last_draft_on_this_thread_counts():
+    _, _, draft, send, _, smtp_f = make_tools()
+    shown(draft, MAIL)
+    shown(draft, {**MAIL, "body": "Running late, start without me."})
+    assert _send(send) == DRAFT_NOT_SHOWN_REFUSAL                         # the earlier draft is superseded
+    assert shown(draft, MAIL, thread="person:someone-else")
+    assert _send(send, thread="person:another-thread") == DRAFT_NOT_SHOWN_REFUSAL
+    assert smtp_f.calls == 0
+    assert _send(send, {**MAIL, "body": "Running late, start without me."}).startswith("Sent:")
+
+
+def test_how_the_model_copies_the_draft_doesnt_matter_only_what_it_says():
+    smtp = FakeSMTP()
+    people = lambda platform, address: known_people(platform, address.lower())   # the real lookup ignores case
+    *_, draft, send = build_email_tools(imap_factory=CountingFactory(FakeIMAP()), smtp_factory=CountingFactory(smtp),
+                                       self_address=SELF, people=people)
+    shown(draft, MAIL)
+    copied = {"to": " Real.Person@Company.io ", "subject": " Dinner\nFriday ",
+              "body": "Bringing wine.  \r\nSee you at 7.\n"}
+    assert _send(send, copied).startswith("Sent:")
+
+
+def test_a_sent_draft_is_spent_but_a_failed_send_can_go_again():
+    smtp = FakeSMTP(fail=True)
+    _, _, draft, send, _, _ = make_tools(smtp=smtp)
+    shown(draft, MAIL)
+    assert "550" in _send(send)
+    smtp.fail = False
+    assert _send(send).startswith("Sent:")
+    assert _send(send) == DRAFT_NOT_SHOWN_REFUSAL and len(smtp.sent) == 1     # never twice off one yes
+
+
+def test_his_tap_after_outside_text_is_the_confirmation_no_draft_needed():
+    """D28: after outside text the Approve button showed this exact mail; the watcher sends it, once."""
+    from types import SimpleNamespace
+    from aerys_v2.outside_guard import action_executor
+    smtp = FakeSMTP()
+    _, _, _, send, _, _ = make_tools(smtp=smtp)
+    row = SimpleNamespace(thread_id=THREAD, args={"tool": "send_email", "tool_args": dict(MAIL), "identity": {}})
+    ok, said = action_executor([send])(row)
+    assert ok and said.startswith("Sent:") and len(smtp.sent) == 1
+    assert _send(send) == DRAFT_NOT_SHOWN_REFUSAL and len(smtp.sent) == 1     # the tap covers that send only
+
+
+def test_the_models_view_of_the_tools_is_unchanged():
+    _, _, draft, send, *_ = make_tools()
+    assert set(draft.args) == {"to", "subject", "body"}
+    assert set(send.args) == {"to", "subject", "body", "confirmed"}

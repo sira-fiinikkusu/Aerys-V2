@@ -34,12 +34,18 @@ Contracts every tool here obeys (same as tools/home_control.py, tools/web_search
    whole action turn (the V1 failed-webhook-kills-execution outage mode). A
    dead IMAP server, a malformed message, an SMTP refusal — all come back as
    honest words.
-2. DRAFT-THEN-CONFIRM — draft_email has ZERO side effects; it exists so the
-   fully-formatted draft lands in the conversation where the owner can read it.
-   send_email refuses unless confirmed=true, and its description spells out the
-   concrete trigger ("the owner has seen this exact draft and explicitly said
-   to send it in their most recent message") — the V1 lesson that generic
-   instructions get skipped but unmistakable triggers get followed.
+2. DRAFT-THEN-CONFIRM — draft_email has ZERO side effects on the mailbox; it
+   exists so the fully-formatted draft lands in the conversation where the
+   owner can read it. send_email refuses unless confirmed=true, and its
+   description spells out the concrete trigger ("the owner has seen this exact
+   draft and explicitly said to send it in their most recent message") — the
+   V1 lesson that generic instructions get skipped but unmistakable triggers
+   get followed. G3 (11/24): the model's own flag isn't the only check. Each
+   draft shown is remembered for its thread (a digest, in process), and a send
+   must be the last draft shown there, made on an EARLIER turn (so he has seen
+   it), word for word; else it refuses with DRAFT_NOT_SHOWN_REFUSAL. After
+   outside text, his Approve button (which shows the exact mail) is the
+   confirmation instead (outside_guard.action_executor sets APPROVED_MAIL).
 3. ANTI-PLACEHOLDER — the presence-gate-placeholder-trap lesson: a model that
    must fill a `to` field will invent one. Both draft_email and send_email
    describe-and-enforce "never invent an address": descriptions say to ASK when
@@ -49,15 +55,21 @@ Contracts every tool here obeys (same as tools/home_control.py, tools/web_search
    the inbox can never flip \\Seen flags or otherwise change anything.
 """
 
+import contextvars
 import email
 import email.policy
+import hashlib
 import logging
+import threading
 import time
+from collections import OrderedDict
 from email.header import decode_header, make_header
 from email.message import EmailMessage
 from typing import Any, Callable
 
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
+from langgraph.prebuilt import ToolRuntime
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +103,79 @@ UNCONFIRMED_REFUSAL = (
     "draft (use draft_email) and get an explicit yes in their most recent "
     "message before setting confirmed=true."
 )
+
+# G3: what send_email says when its mail isn't the last draft shown on this thread
+# on an earlier turn (no draft, a different one, or one made this same turn).
+DRAFT_NOT_SHOWN_REFUSAL = (
+    "NOT SENT: send_email only sends the last draft the owner was shown in this "
+    "conversation, exactly as shown. Show him the exact draft first (use "
+    "draft_email), and send it only after he says yes to it in a later message."
+)
+
+# How many conversations' last drafts are remembered (oldest forgotten first).
+DRAFTS_KEPT = 256
+
+# Set by outside_guard.action_executor to the digest of the exact mail his Approve
+# button showed: that tap is the confirmation (D28), so no draft is needed for it.
+# A context variable: the model can never set it.
+APPROVED_MAIL: contextvars.ContextVar = contextvars.ContextVar("approved_mail", default=None)
+
+
+def mail_digest(to: str, subject: str, body: str) -> str:
+    """What a draft said, as a digest: the recipients (case aside), the subject on
+    one line (as send collapses it) and the body without its line-end or edge
+    whitespace. How the model copies the draft doesn't matter; what it says does."""
+    addrs = ", ".join(a.strip().lower() for a in (to or "").split(",") if a.strip())
+    subj = " ".join((subject or "").split())
+    text = "\n".join(line.rstrip() for line in (body or "").replace("\r\n", "\n").split("\n")).strip()
+    return hashlib.sha256("\x00".join((addrs, subj, text)).encode("utf-8")).hexdigest()
+
+
+def _thread(runtime) -> str:
+    try:
+        return str(((runtime.config or {}).get("configurable") or {}).get("thread_id") or "")
+    except Exception:
+        return ""
+
+
+def _drafted_this_turn(runtime) -> bool:
+    """Did this turn (from his message on) ask for a draft? Then he hasn't seen it yet.
+    A correction pass says where his message is (turn_human_index); unreadable: True."""
+    try:
+        messages = list(runtime.state["messages"])
+        conf = (runtime.config or {}).get("configurable") or {}
+        start = conf.get("turn_human_index")
+        if not (isinstance(start, int) and not isinstance(start, bool) and 0 <= start < len(messages)
+                and isinstance(messages[start], HumanMessage)):
+            start = next((i for i in range(len(messages) - 1, -1, -1)
+                          if isinstance(messages[i], HumanMessage)), 0)
+        return any(isinstance(m, AIMessage) and any(c.get("name") == "draft_email" for c in m.tool_calls or [])
+                   for m in messages[start:])
+    except Exception:
+        return True
+
+
+class _DraftsShown:
+    """The last draft shown on each thread (a digest), in this process."""
+
+    def __init__(self, keep: int = DRAFTS_KEPT):
+        self.keep, self.rows, self.lock = keep, OrderedDict(), threading.Lock()
+
+    def show(self, thread: str, digest: str) -> None:
+        with self.lock:
+            self.rows.pop(thread, None)
+            self.rows[thread] = digest
+            while len(self.rows) > self.keep:
+                self.rows.popitem(last=False)
+
+    def last(self, thread: str) -> str | None:
+        with self.lock:
+            return self.rows.get(thread)
+
+    def spend(self, thread: str, digest: str) -> None:
+        with self.lock:
+            if self.rows.get(thread) == digest:
+                del self.rows[thread]
 
 # Anti-placeholder backstop (reference_presence_gate_placeholder_trap): the
 # classic invented addresses a model reaches for when it was never given one.
@@ -209,6 +294,7 @@ def build_email_tools(
         # a bogus self address is a wiring bug, caught here, not at first send.
         raise ValueError("build_email_tools needs a real self_address (got %r)" % self_address)
     sender = self_address.strip()
+    drafts = _DraftsShown()
 
     def _uid_search(imap: Any, query: str) -> list[bytes]:
         """UID SEARCH: Gmail X-GM-RAW first (full gmail search syntax), plain
@@ -375,7 +461,7 @@ def build_email_tools(
         return _read_with_retry("read", _read)
 
     @tool
-    def draft_email(to: str, subject: str, body: str) -> str:
+    def draft_email(to: str, subject: str, body: str, runtime: ToolRuntime = None) -> str:
         """Compose an email DRAFT. This tool NEVER sends anything — zero side effects.
 
         CALL THIS TOOL whenever the user asks to email someone, reply to a
@@ -399,6 +485,9 @@ def build_email_tools(
         text = (body or "").strip()
         if not text:
             return "DRAFT NOT CREATED: the body is empty — there is nothing to say yet."
+        thread = _thread(runtime)
+        if thread:
+            drafts.show(thread, mail_digest(to, subject, body))   # G3: what send_email must match
         return (
             "DRAFT (not sent):\n"
             f"From: {sender}\n"
@@ -413,7 +502,8 @@ def build_email_tools(
         )
 
     @tool
-    def send_email(to: str, subject: str, body: str, confirmed: bool = False) -> str:
+    def send_email(to: str, subject: str, body: str, confirmed: bool = False,
+                   runtime: ToolRuntime = None) -> str:
         """SEND an email from the owner's own address. IRREVERSIBLE — real mail goes out.
 
         HARD RULE — confirmed: only set confirmed=true after the owner has SEEN
@@ -462,6 +552,17 @@ def build_email_tools(
         if not text:
             return "NOT SENT: the body is empty — draft the message first."
 
+        # G3: the mail must be the one he saw: his Approve button's (after outside
+        # text), or else the last draft shown on this thread on an earlier turn.
+        digest = mail_digest(to, subject, body)
+        thread = ""
+        if APPROVED_MAIL.get() != digest:
+            thread = _thread(runtime)
+            if not thread or drafts.last(thread) != digest or _drafted_this_turn(runtime):
+                return DRAFT_NOT_SHOWN_REFUSAL
+            from aerys_v2.outside_guard import note_basis
+            note_basis(runtime.config, getattr(runtime, "tool_call_id", None), "confirmed_draft")
+
         # Header assembly must sit inside the tool's never-raise contract:
         # msg['Subject'] raises ValueError on embedded CR/LF ('Header values
         # may not contain linefeed...'), and a raising ToolNode kills the whole
@@ -486,6 +587,8 @@ def build_email_tools(
             return f"NOT SENT: the mail server refused the message ({e})."
         finally:
             _close_quietly(smtp, ("quit", "close"))
+        if thread:
+            drafts.spend(thread, digest)        # one yes, one send: another needs the draft shown again
         # No WRITE_OK_PREFIX here on purpose: an email send has no visible device
         # effect, so the spoken/text confirmation IS the feedback channel (the
         # timer-START reasoning, not the light-toggle one).
