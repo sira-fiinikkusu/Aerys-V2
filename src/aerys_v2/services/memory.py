@@ -161,7 +161,8 @@ def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = No
       4. per line: display = text after the FIRST ':' (rest rejoined, so values
          containing colons — URLs, timestamps — survive), else full content;
          then '[source_platform]' if present, then '(YYYY-MM-DD, Nd ago)'
-    Returns '' for zero rows (caller injects nothing into the prompt).
+    Returns ('', False) for zero rows (caller injects nothing into the prompt); the flag is
+    True only when an aerys.* row (her own words, D97) made it into the block.
 
     Date added vs the n8n Format node (which emitted only '(Nd ago)'): "when
     did X happen?" questions need the calendar date, and the model can't
