@@ -115,9 +115,18 @@ def fake_embedder(text):
     return [0.1, 0.2, 0.3]
 
 
-OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Exampleville, Vermont",
+#: Since 2026-11-24 a mined fact must quote the speaker (no quote, no memory:
+#: extraction.quoted_observations), so a canned observation carries the words its row
+#: said. The place is made up: this repository is public.
+OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Exampleville",
                    "context": None, "event_date": None, "privacy_level": "public",
-                   "asserted_by": "self", "confidence": 0.9}])
+                   "asserted_by": "self", "confidence": 0.9,
+                   "source_text": "I live in Exampleville"}])
+
+
+def obs_quoting(source_text):
+    """OBS, quoting what ITS row said, for tests about plumbing rather than places."""
+    return json.dumps([{**json.loads(OBS)[0], "source_text": source_text}])
 
 
 # --- grouping ----------------------------------------------------------------
@@ -131,7 +140,7 @@ def test_groups_by_person_before_extraction():
         row(CHRIS, "and I live in Exampleville"),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS])
+    llm = FakeLlm([OBS, obs_quoting("I collect SNES games")])
     run_extraction(prod, staging, llm, fake_embedder)
 
     assert len(llm.calls) == 2
@@ -269,7 +278,8 @@ def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
         row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS, cut_off("not json at all -- truncated"), cut_off("still cut off")])
+    llm = FakeLlm([obs_quoting("I drive a Dodge Ram"), obs_quoting("I collect SNES games"),
+                   cut_off("not json at all -- truncated"), cut_off("still cut off")])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     # both successful groups still staged — one failure doesn't block the rest
@@ -439,7 +449,7 @@ def test_limit_boundary_tie_is_trimmed_not_split():
         row(CHRIS, "tied-b", id="3", at=tie_at, raw=tie_raw),
     ])])
     staging = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+    summary = run_extraction(prod, staging, FakeLlm([obs_quoting("first")]), fake_embedder, batch_limit=2)
 
     # only the untied first row was processed this pass
     assert summary["sources"]["prod_chat"]["rows"] == 1
@@ -461,7 +471,8 @@ def test_limit_boundary_no_tie_processes_the_full_overfetch_headroom():
         row(CHRIS, "only one row", id="1", at=T0, raw="2026-07-03 12:00:00.000000+00"),
     ])])
     staging = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+    summary = run_extraction(prod, staging, FakeLlm([obs_quoting("only one row")]), fake_embedder,
+                             batch_limit=2)
     assert summary["sources"]["prod_chat"]["rows"] == 1
     assert summary["inserted_total"] == 1
 
@@ -499,7 +510,8 @@ def test_v2_turns_read_from_staging_conn_with_thread_provenance():
             privacy="private", thread="voice:beta", raw="2026-07-03 09:00:00.5+00"),
     ])])
     prod = FakeConn()
-    run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)  # prod empty -> 1 call
+    run_extraction(prod, staging, FakeLlm([obs_quoting("my Even G2 glasses arrive next week")]),
+                   fake_embedder)  # prod empty -> 1 call
 
     assert not any("v2_turns" in s for s, _ in prod.calls)  # her turns never hit prod
     params = next(p for s, p in staging.calls if "v2_memories_staging" in s)
@@ -805,9 +817,11 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
 
     two_obs = json.dumps([
         {"key_label": "basic.location", "value_text": "Lives in Exampleville", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "I live in Exampleville"},
         {"key_label": "interest.game", "value_text": "Collects SNES games", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "collect SNES"},
     ])
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville and collect SNES")])])
     staging = lease_conn(holder="brain")
@@ -827,9 +841,11 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     skipped tally, not silently vanish as if nothing was extracted at all."""
     bad_obs = json.dumps([
         {"key_label": None, "value_text": "no label at all", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "mumble mumble"},
         {"key_label": "basic.location", "value_text": "", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "mumble mumble"},
     ])
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "mumble mumble")])])
     staging = lease_conn(holder="brain")
@@ -841,6 +857,7 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     assert summary["replaced_total"] == 0
     assert summary["skipped_total"] == 2
     assert summary["sources"]["prod_chat"]["skipped"] == 2
+    assert summary["sources"]["prod_chat"]["unquoted"] == 0   # refused by triage, not the quote gate
     assert not any(
         s.lstrip().upper().startswith(("INSERT", "UPDATE")) for s, _ in prod_write.calls
     )
@@ -1070,7 +1087,8 @@ def test_a_group_still_truncated_plain_is_split_and_both_halves_land():
         row(CHRIS, "and I live in Exampleville", id="b", at=T0 + timedelta(seconds=1), raw=raws[1]),
     ])])
     staging = FakeConn([("last_processed_at", [("2026-07-03 11:00:00+00",)])])
-    llm = FakeLlm([cut_off('[{"key_label": "vehic'), cut_off('[{"key_label": "vehi'), OBS, OBS])
+    llm = FakeLlm([cut_off('[{"key_label": "vehic'), cut_off('[{"key_label": "vehi'),
+                   obs_quoting("I drive a Dodge Ram"), OBS])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     assert [c[2:] for c in llm.calls] == [(), ("plain",), (), ()]
@@ -1079,6 +1097,7 @@ def test_a_group_still_truncated_plain_is_split_and_both_halves_land():
     assert "Exampleville" in halves[1] and "Dodge Ram" not in halves[1]
     stats = summary["sources"]["prod_chat"]
     assert (stats["splits"], stats["parse_failures"], stats["observations"]) == (1, 0, 2)
+    assert len([s for s, _ in staging.calls if "v2_memories_staging" in s]) == 2   # both landed
     save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
     assert save["raw"] == raws[1], "advanced past the split group"
 

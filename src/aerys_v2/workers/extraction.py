@@ -83,6 +83,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from html import escape
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -91,6 +92,7 @@ from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from ..services.location_guard import address_shaped, location_shaped
+from ..services.secret_guard import secret_kind
 from ..test_bodies import DEFAULT_PATTERNS as DEFAULT_TEST_BODY_PATTERNS
 from ..services.memory import Embedder, embedding_to_pgvector
 
@@ -190,6 +192,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 
 ## source_text rules:
 - Include source_text: the exact declarative source sentence supporting each fact. Never use a question as evidence.
+- Copy the words exactly from one message; never paraphrase, shorten or join two messages. A fact you cannot quote this way is not kept, so leave it out.
 
 ## value_text rules:
 - Write naturally, as a human would remember it -- NOT as a database entry
@@ -664,6 +667,12 @@ def triage_memory(
     """
     if any(location_shaped(v) or address_shaped(v) for v in (key_label, value_text, content, context, source_text, event_date)):
         return "skipped"
+    # Keys and card numbers never become memories (services/secret_guard). Kind only in the log.
+    kind = next(filter(None, map(secret_kind, (key_label, value_text, content, context, source_text,
+                                               event_date))), None)
+    if kind:
+        log.warning("memory skipped: secret-shaped observation (%s)", kind)
+        return "skipped"
     if key_label is None or not key_label.strip():
         return "skipped"
     if not value_text.strip():
@@ -895,7 +904,7 @@ def batch_date(latest_created_at: datetime) -> str:
     return f"{local.strftime('%b')} {local.day}"   # no %-d: portable day-without-zero
 
 
-def parse_observations(text: str) -> list[dict] | None:
+def parse_observations(text: str, rejected: dict | None = None) -> list[dict] | None:
     """The parse half of "Parse Observations": strip code fences, tolerate garbage.
 
     Returns [] for a GENUINE empty extraction (the model looked and found
@@ -914,7 +923,15 @@ def parse_observations(text: str) -> list[dict] | None:
     if we treated it as an empty. Garbage items *inside* an otherwise-valid
     array (non-dict entries) are still dropped silently — the array parsed
     fine, so that's noise, not a batch failure.
+
+    REJECTED, when given, counts each refused observation by reason ('location',
+    'secret', 'question', 'test'): a refusal used to leave no trace in the pass
+    summary at all (Codex review round 1).
     """
+    def refuse(reason: str) -> None:
+        if rejected is not None:
+            rejected[reason] = rejected.get(reason, 0) + 1
+
     cleaned = re.sub(r"^```(?:json)?\n?", "", text.strip(), flags=re.M)
     cleaned = re.sub(r"\n?```$", "", cleaned, flags=re.M).strip()
     try:
@@ -930,9 +947,18 @@ def parse_observations(text: str) -> list[dict] | None:
         # Inspect decoded fields so escaped newlines cannot bypass the guard.
         if any(location_shaped(v) or address_shaped(v) for v in obs.values() if isinstance(v, str)):
             log.warning("memory skipped: location-shaped observation")
+            refuse("location")
+            continue
+        # Non-string values are read as their JSON: a bare number is still a card number.
+        kind = next(filter(None, (secret_kind(v if isinstance(v, str) else json.dumps(v))
+                                  for v in obs.values())), None)
+        if kind:
+            log.warning("memory skipped: secret-shaped observation (%s)", kind)
+            refuse("secret")
             continue
         if any(question_shaped(obs.get(k)) for k in ("value_text", "source_text", "context")):
             log.warning("memory skipped: question-shaped observation")
+            refuse("question")
             continue
         source = obs.get("source_text") or obs.get("value_text") or ""
         if test_shaped(source) or (
@@ -940,6 +966,7 @@ def parse_observations(text: str) -> list[dict] | None:
             and _test_only_observation(obs.get("key_label"), obs.get("value_text") or "")
         ):
             log.warning("memory skipped: test-shaped observation")
+            refuse("test")
             continue
         obs["key_label"] = canonical_key(obs.get("key_label"), obs.get("value_text") or "")
         result.append(obs)
@@ -1054,13 +1081,94 @@ def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | Non
     counts only the case where the watermark is genuinely stuck and someone
     should look.
     """
-    messages = [m for m in group['messages']
-                if not question_shaped(m['content']) and not test_shaped(m['content'])]
+    messages = model_messages(group)
     if len(messages) != len(group['messages']):
         log.warning("memory skipped: question-shaped or test-shaped source message")
     if not messages:
         return [], LlmReply("[]", False)
     return _extract_messages(llm, messages, stats)
+
+
+def model_messages(group: dict) -> list[dict]:
+    """The group's messages the extraction model is shown: never a question, never a
+    probe of her memory. The quote gate (quoted_observations) matches against exactly
+    these. (A fact said inside a question, "I just bought a truck, what oil should I
+    use?", is lost here by design for now; 2026-11-25 it was scoped out of this batch,
+    to come back as a model judgment of whether his message states it as true.)"""
+    return [m for m in group['messages']
+            if not question_shaped(m['content']) and not test_shaped(m['content'])]
+
+
+#: Curly quotes and primes fold to straight ones: copying a quote changes them freely.
+_QUOTE_FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+                             "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"'})
+#: The transcript's own "[Speaker]: " line prefix (build_transcript) is ours, not his words.
+_SPEAKER_PREFIX = re.compile(r"^\[[^\]\n]{1,80}\]:\s*")
+_PUNCTUATION = re.compile(r"[^\w\s]")
+#: A key label as it may appear in a log line; anything else is logged as a placeholder.
+_LOGGABLE_KEY = re.compile(r"[a-z][a-z0-9_]{0,30}(?:\.[a-z0-9_]{1,40}){1,3}")
+
+
+def _fold_for_quote(text: str | None) -> str:
+    """Case, width, invisible characters, curly quotes and runs of whitespace: the
+    differences copying makes. Words and their order are untouched."""
+    text = unicodedata.normalize("NFKC", text if isinstance(text, str) else "")
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return " ".join(text.translate(_QUOTE_FOLD).casefold().split())
+
+
+def _quote_words(folded: str) -> str:
+    """The words alone, in order: apostrophes dropped ("don't" is "dont", as he often
+    types it), every other punctuation mark a space."""
+    return " ".join(_PUNCTUATION.sub(" ", folded.replace("'", "")).split())
+
+
+def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
+    """Is QUOTE present, word for word, in ONE of MESSAGES?
+
+    Presence only. It does not check that the message supports the fact the quote
+    was attached to: an exact quote about a gray tabby can carry a fact about a dog,
+    and "I never said my birthday is April 12" contains "my birthday is April 12".
+    Whether a message states a fact as true is a judgment for a later model check
+    (2026-11-25), not for this gate.
+
+    Compared on words: forgiven are case, whitespace, curly quotes, punctuation
+    (an added or dropped apostrophe or comma, a wrapping quote mark, a trailing full
+    stop) and the transcript's "[Speaker]: " prefix. Not forgiven: a changed,
+    dropped or added word, or a quote stitched across two messages. Whole words
+    only ("my truck" is not in "my trucks"). A missing quote, or one that is only
+    punctuation, is never found: the empty string is in every message.
+    """
+    needle = _quote_words(_SPEAKER_PREFIX.sub("", _fold_for_quote(quote)))
+    if not needle:
+        return False
+    pattern = re.compile(r"(?<!\w)" + re.escape(needle) + r"(?!\w)")
+    return any(pattern.search(_quote_words(_fold_for_quote(m.get("content")))) for m in messages)
+
+
+def quoted_observations(observations: list[dict], group: dict, stats: dict) -> list[dict]:
+    """No quote, no memory (2026-11-24). Keep only the observations whose source_text
+    is present in a message the model was shown (source_quote_found).
+
+    The model is asked for that quote; before, a quote that was not there became
+    None and the fact was written anyway, so a fact the model made up landed with no
+    quote of his present behind it, and a thin memory is worse than none. The
+    guarantee is quote PRESENCE, not that he said the fact (see source_quote_found).
+    Each skip is counted (stats["unquoted"]) and logged by its key only, never the
+    fact. Runs in both loops and before the portable review inbox, which is a writer
+    too. The explicit remember tool never passes through here: his words are the source.
+    """
+    sent = model_messages(group)
+    kept = []
+    for obs in observations:
+        if source_quote_found(obs.get("source_text"), sent):
+            kept.append(obs)
+            continue
+        stats["unquoted"] = stats.get("unquoted", 0) + 1
+        key = obs.get("key_label")
+        log.warning("memory skipped: source quote not found in the speaker's messages (key %s)",
+                    key if isinstance(key, str) and _LOGGABLE_KEY.fullmatch(key) else "(unrecognized key)")
+    return kept
 
 
 def _extract_messages(llm: Llm, messages: list[dict], stats: dict) -> tuple[list[dict] | None, LlmReply]:
@@ -1077,7 +1185,8 @@ def _extract_messages(llm: Llm, messages: list[dict], stats: dict) -> tuple[list
         f"{build_transcript(messages)}"
     )
     reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt)
-    observations = parse_observations(reply.text)
+    rejected = stats.setdefault("rejected", {})
+    observations = parse_observations(reply.text, rejected)
     if observations is not None:
         return observations, reply
     if reply.truncated:
@@ -1094,7 +1203,7 @@ def _extract_messages(llm: Llm, messages: list[dict], stats: dict) -> tuple[list
         log.warning("extraction reply truncated under response_format — retrying plain (group of %d)",
                     len(messages))
         reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt, plain=True)
-        observations = parse_observations(reply.text)
+        observations = parse_observations(reply.text, rejected)
         if observations is None and reply.truncated and len(messages) > 1:
             stats["splits"] = stats.get("splits", 0) + 1
             mid = len(messages) // 2
@@ -1112,7 +1221,7 @@ def _extract_messages(llm: Llm, messages: list[dict], stats: dict) -> tuple[list
 
     stats["format_retries"] += 1
     reply = _call_llm(llm, EXTRACTION_SYSTEM_PROMPT, prompt + _FORMAT_CORRECTION)
-    observations = parse_observations(reply.text)
+    observations = parse_observations(reply.text, rejected)
     if observations is not None or reply.truncated:
         return observations, reply
 
@@ -1172,6 +1281,10 @@ def run_extraction(
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
             "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0, "splits": 0,
+            # unquoted: observations whose source quote was not in his messages
+            # (quoted_observations) — never staged. rejected: the parser's refusals
+            # by reason. The watermark still moves.
+            "unquoted": 0, "rejected": {},
         }
         summary["sources"][name] = stats
         if not rows:
@@ -1192,6 +1305,7 @@ def run_extraction(
                 failed_row_ids.update(m["id"] for m in group["messages"])
                 continue
             stats["observations"] += len(observations)
+            observations = quoted_observations(observations, group, stats)
             fallback = batch_date(group["latest"]["created_at"])
 
             for obs in observations:
@@ -1336,6 +1450,10 @@ def run_live_extraction(
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
             "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0, "splits": 0,
+            # unquoted: observations whose source quote was not in his messages
+            # (quoted_observations). Also counted in skipped. rejected: the parser's
+            # refusals by reason. The watermark moves.
+            "unquoted": 0, "rejected": {},
         }
         summary["sources"][name] = stats
         if not rows:
@@ -1354,6 +1472,11 @@ def run_live_extraction(
                 failed_row_ids.update(m["id"] for m in group["messages"])
                 continue
             stats["observations"] += len(observations)
+            # No quote, no memory — before the review inbox too, which is a writer.
+            quoted = quoted_observations(observations, group, stats)
+            stats["skipped"] += len(observations) - len(quoted)
+            summary["skipped_total"] += len(observations) - len(quoted)
+            observations = quoted
             fallback = batch_date(group["latest"]["created_at"])
 
             for obs in observations:
@@ -1383,9 +1506,8 @@ def run_live_extraction(
                     created_at=group["latest"]["created_at_raw"],
                     category=list(PORTABLE_FALLBACK_CATEGORY) if portable else None,
                     mined_from_turn=True,
-                    source_text=obs.get("source_text") if any(
-                        obs.get("source_text") and obs["source_text"] in m["content"]
-                        for m in group["messages"]) else None,
+                    # found in his messages: quoted_observations kept only those
+                    source_text=obs.get("source_text"),
                 )
                 stat_key = _TRIAGE_STAT_KEYS[action]
                 stats[stat_key] += 1

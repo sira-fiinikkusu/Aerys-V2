@@ -35,6 +35,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from aerys_v2.services.location_guard import location_memory_blocked, LOCATION_REFUSAL
+from aerys_v2.services.secret_guard import SECRET_REFUSAL, secret_kind
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config
 from aerys_v2.workers.extraction import KEY_LABEL_PATTERN, question_shaped
 
@@ -143,6 +144,12 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
         text = (fact or "").strip()
         if location_memory_blocked(text):
             return LOCATION_REFUSAL
+        # Before the length check (TOO_LONG asks her to split it, and a key in pieces
+        # loses the shape that marks it) and before the key labeler (a model call).
+        kind = secret_kind(text)
+        if kind:
+            log.warning("remember refused: secret-shaped fact (%s)", kind)
+            return SECRET_REFUSAL
         if not text:
             return EMPTY
         if len(text) > FACT_LIMIT:
