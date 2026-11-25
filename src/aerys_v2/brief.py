@@ -30,6 +30,7 @@ What she says is the private part: never logged.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -92,6 +93,8 @@ class Facts:
     personal: int = 0                             # events from his personal calendars
     wet: bool = False                             # rain (or worse) in the forecast
     complete: bool = True                         # every source answered (else "quiet" may be a gap)
+    promises: list = field(default_factory=list)  # #259: her open promises to him, newest first (<= 3)
+    closed: list = field(default_factory=list)    # D101: closes he hasn't been told about: {"id", "text", "how"}
 
 
 def _at(day: date, hour: int) -> datetime:
@@ -120,6 +123,55 @@ def plain_brief(facts: Facts) -> str:
     return " ".join(parts)
 
 
+#: D101: how many closed promises the brief names before it counts the rest.
+CLOSED_SHOWN = 3
+
+
+def closed_promises_line(facts: Facts) -> str:
+    """D101 (Chris 11/25 12:54): what she closed since yesterday's brief, said by code after her words so it is
+    never left out. Empty when she closed nothing."""
+    closed = [c for c in (facts.closed or []) if isinstance(c, dict) and c.get("text")]
+    if not closed:
+        return ""
+    shown = "; ".join(f"{_in_her_voice(c['text'])} ({c.get('how') or 'closed'})" for c in closed[:CLOSED_SHOWN])
+    more = len(closed) - CLOSED_SHOWN
+    return f"Promises I closed since yesterday: {shown}" + (f"; and {more} more." if more > 0 else ".")
+
+
+#: The extractor writes her promises about her ("Aerys promised to tell him…"); the brief says them as hers.
+_ABOUT_HER = re.compile(r"^aerys (?:promised|said (?:she(?:'d| would| will)|she'll))\s+(?:to\s+)?", re.I)
+
+
+def _in_her_voice(text: str) -> str:
+    text = " ".join(str(text or "").split()).rstrip(".")
+    return _ABOUT_HER.sub("", text, count=1) or text
+
+
+#: The desk took the line: an owed text is durable once queued, so these count as told.
+TOLD_OUTCOMES = ("sent", "queued", "duplicate")
+
+
+def tell_closed_promises(desk, facts: Facts, told: Callable[[list], None] | None, *, key: str) -> str:
+    """D101: the promises she closed reach him as their own owed text at the brief, the way report_house
+    carries her house changes: never riding on a brief that might expire unsaid. Marked told only once the
+    desk took it; a refusal leaves them untold for the next brief. Returns the desk's outcome ('' if none)."""
+    line = closed_promises_line(facts)
+    if not line:
+        return ""
+    try:
+        outcome = desk.reach_out(ReachEvent(source=SOURCE, topic=TOPIC, owed=True, text_only=True,
+                                            headline=line, dedupe_key=f"{key}:promises"))
+    except Exception:
+        log.warning("brief: telling him her closed promises failed; they stay untold", exc_info=True)
+        return "failed"
+    if outcome in TOLD_OUTCOMES and told is not None:
+        try:
+            told([c["id"] for c in facts.closed if isinstance(c, dict) and c.get("id")])
+        except Exception:
+            log.warning("brief: marking her closed promises told failed; they may be named again", exc_info=True)
+    return outcome
+
+
 def stamped(row) -> str:
     """A held note as she reads it: when it happened, then what it said (D56: a note is how things
     stood then)."""
@@ -138,6 +190,10 @@ def facts_text(facts: Facts) -> str:
         lines += [f"- {stamped(r)}" for r in [*facts.held, *facts.quiet]]
     else:
         lines.append("Came in overnight: nothing (say nothing about it)")
+    if facts.promises:
+        lines.append("Things you said you'd do for him (yours; mention one only if it's due today or clearly "
+                     "useful now, never list them all, and never as though he asked again):")
+        lines += [f"- {p}" for p in facts.promises]
     return "\n".join(lines)
 
 
@@ -173,7 +229,8 @@ class MorningBrief:
                  compose: Callable[[Facts], str],
                  replied_since: Callable[[datetime], bool] | None = None,
                  room: str = "office", start_hour: int = 5, solo_hour: int = 8, cutoff_hour: int = 13,
-                 clock: Callable[[], datetime] | None = None):
+                 clock: Callable[[], datetime] | None = None,
+                 promises_told: Callable[[list], None] | None = None):
         if not (0 <= start_hour <= solo_hour <= cutoff_hour <= 24):
             raise ValueError("brief hours must run start <= solo <= cutoff")
         self.desk, self.read, self.gather, self.compose = desk, read, gather, compose
@@ -188,6 +245,7 @@ class MorningBrief:
         # defer(now) -> True while the welcome-home hello waits for him to settle after a trip (welcome.py
         # sets it): the hello carries the brief, so the brief doesn't race it to his room.
         self.defer: Callable[[datetime], bool] | None = None
+        self.promises_told = promises_told    # D101: marks the closes the brief named
 
     def _up(self, reading: Reading, since: datetime) -> bool:
         if reading.woke_at is not None and reading.woke_at >= since:
@@ -269,6 +327,7 @@ class MorningBrief:
         outcome = self.desk.reach_out(ReachEvent(
             source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=self.room,
             brief=True, folds=tuple(r.id for r in held), dedupe_key=key, expires_at=cutoff))
+        tell_closed_promises(self.desk, facts, self.promises_told, key=key)   # D101: never left to her words
         self.done = day        # whatever the desk said, once a day: never a model call a minute
         log.info("brief %s: %s (%d held, %d quiet)", day, outcome, len(held), len(quiet))
         return outcome
@@ -585,10 +644,49 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
             log.warning("brief: the forecast read failed (%s); going without it", type(e).__name__)
             failed.append(weather_entity)
         found = events(start_at, target, failed)
+        promised = open_promises_for_brief(now) if day is None else []
+        closed = closed_promises_for_brief(now) if day is None else []
         timed = [t for t, line, _ in found if not line.startswith("all day")]
         return Facts(weather=weather, events=[line for _, line, _ in found], held=held, quiet=quiet,
                      first_at=min(timed) if timed else None, personal=sum(1 for *_, mine in found if mine),
-                     wet=wet, complete=not failed)
+                     wet=wet, complete=not failed, promises=promised, closed=closed)
+
+    def open_promises_for_brief(now: datetime) -> list[str]:
+        """#259 step 4: up to 3 of her open promises to the owner from the last 14 days. Fails open."""
+        url, owner = getattr(settings, "memories_database_url", None), getattr(settings, "owner_person_id", None)
+        if not url or owner is None:
+            return []
+        try:
+            import psycopg
+
+            from aerys_v2.tools.promises import open_promises
+
+            with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+                conn.read_only = True
+                found = open_promises(conn, str(owner), limit=10)
+        except Exception as e:
+            log.warning("brief: reading her promises failed (%s); going without them", type(e).__name__)
+            return []
+        recent = [p for p in found if isinstance(p["at"], datetime) and now - p["at"] <= timedelta(days=14)]
+        return [(f"(for {p['date']}) " if p["date"] else "") + p["text"] for p in recent[:3]]
+
+    def closed_promises_for_brief(now: datetime) -> list[dict]:
+        """D101: the promises she closed (kept or dropped) that he hasn't been told about. Fails open: they stay
+        untold for the next brief, and the dashboard's "retired this week" has them."""
+        url, owner = getattr(settings, "memories_database_url", None), getattr(settings, "owner_person_id", None)
+        if not url or owner is None:
+            return []
+        try:
+            import psycopg
+
+            from aerys_v2.tools.promises import closed_promises
+
+            with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+                conn.read_only = True
+                return closed_promises(conn, str(owner))
+        except Exception as e:
+            log.warning("brief: reading her closed promises failed (%s); going without them", type(e).__name__)
+            return []
 
     return gather
 
@@ -678,6 +776,23 @@ def evening_heads_up_for(settings, desk, *, action_graph=None) -> EveningHeadsUp
         quiet_start_hour=int(getattr(settings, "owner_quiet_start_hour", 21)))
 
 
+def promises_told_for(settings) -> Callable[[list], None] | None:
+    """D101: marks closed promises as told (the brief named them). None without the memories database."""
+    url, owner = getattr(settings, "memories_database_url", None), getattr(settings, "owner_person_id", None)
+    if not url or owner is None:
+        return None
+
+    def told(ids: list) -> None:
+        import psycopg
+
+        from aerys_v2.tools.promises import mark_told
+
+        with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+            mark_told(conn, str(owner), ids)
+
+    return told
+
+
 def morning_brief_for(settings, desk, *, replied_since=None, action_graph=None) -> MorningBrief | None:
     """None unless armed: morning_brief on, a desk, HA, and a speaker in the brief's room."""
     if not getattr(settings, "morning_brief", False) or desk is None or getattr(settings, "ha_token", None) is None:
@@ -694,7 +809,7 @@ def morning_brief_for(settings, desk, *, replied_since=None, action_graph=None) 
     log.info("morning brief armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return MorningBrief(
         desk, read=reader_for(settings), gather=gatherer_for(settings),
-        compose=composer_for(settings, turn=turn, kind="brief"),
+        compose=composer_for(settings, turn=turn, kind="brief"), promises_told=promises_told_for(settings),
         replied_since=replied_since or getattr(desk, "replied_since", None), room=room,
         start_hour=int(getattr(settings, "brief_start_hour", 5)),
         solo_hour=int(getattr(settings, "brief_solo_hour", 8)),

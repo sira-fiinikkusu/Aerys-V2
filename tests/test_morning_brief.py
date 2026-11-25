@@ -477,3 +477,28 @@ def test_a_quiet_night_goes_unsaid():
     assert "- Came in overnight, each with the time it happened: nothing (say nothing about it)" in quiet
     busy = welcome_facts_text(WelcomeFacts(away=timedelta(hours=2), brief=Facts(weather="sun", quiet=[note])))
     assert "- Came in overnight, each with the time it happened: Your package came." in busy
+
+
+# --- D101 (Chris 11/25 12:54): the promises she closed are always named -------------------------------
+
+def test_the_promises_she_closed_go_as_their_own_text_at_the_brief_and_are_marked_told():
+    closed = [{"id": "p1", "text": "Aerys promised to tell him when the audio research finishes", "how": "kept"}]
+    told = []
+    h = House()
+    h.brief.gather = lambda now, held, quiet_rows: Facts(weather="sunny", held=held, quiet=quiet_rows, closed=closed)
+    h.brief.promises_told = told.append
+    assert h.brief.tick() == "sent"
+    assert h.world.spoken[-1][0] == h.words                         # her words stay hers
+    line = "Promises I closed since yesterday: tell him when the audio research finishes (kept)."
+    assert h.world.texts == [("discord", line, True)]               # its own text, delivered
+    assert told == [["p1"]]
+
+
+def test_a_morning_with_no_brief_tells_nothing_and_marks_nothing():
+    told = []
+    h = House()
+    h.reading = Reading(room="bedroom", confirmed=True, woke_at=h.reading.woke_at)
+    h.brief.gather = lambda now, held, quiet_rows: Facts(closed=[{"id": "p1", "text": "x", "how": "kept"}])
+    h.brief.promises_told = told.append
+    assert h.brief.tick() == "not in the office"
+    assert told == []                                               # still untold: tomorrow's brief names it

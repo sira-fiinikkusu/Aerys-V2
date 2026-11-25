@@ -141,6 +141,9 @@ WORDS = {
     "write_file": lambda a: f"wrote the file {_a(a, 'file_path')} on her home machine",
     "edit_file": lambda a: f"edited the file {_a(a, 'file_path')} on her home machine",
     "remember": lambda a: f"saved to her memory: {_a(a, 'fact')}",
+    "promises": lambda a: ("read her open promises" if _op(a, "action") in ("", "list")
+                           else f"marked her promise {_a(a, 'which')} {_op(a, 'action')}"
+                           + (f" (their words: {_a(a, 'their_words')})" if _a(a, "their_words") else "")),
     "log_gap": lambda a: f"logged a gap report: {_a(a, 'summary')}",
     "sticky_note": lambda a: f"put a note on the sticky displays: {_a(a, 'message')}",
     "save_contact_email": lambda a: f"saved {_a(a, 'email')} on {_a(a, 'name') or 'a contact'}'s record",

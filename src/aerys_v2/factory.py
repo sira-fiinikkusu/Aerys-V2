@@ -1228,6 +1228,22 @@ def read_only_db(url: str, *, timeout_s: int = 5):
     return connect
 
 
+def write_db(url: str, *, timeout_s: int = 5):
+    """A zero-argument factory of short READ-WRITE connections (bounded timeouts); the `with` commits on a
+    clean exit and rolls back on an error. For the few tools that close or change one of her own rows."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connect():
+        import psycopg
+
+        with psycopg.connect(url, connect_timeout=timeout_s,
+                             options=f"-c statement_timeout={int(timeout_s * 1000)}") as conn:
+            yield conn
+
+    return connect
+
+
 def recall_tools_for(settings: Settings) -> list:
     """D95-A: search_memory (prod memories, when armed) and search_history (aerys_v2 v2_turns, when
     armed). Scoping lives in services/recall_search.py; the factories here only open read-only
@@ -2660,6 +2676,12 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         # and her past conversations, scoped by the caller's identity and room
         # (services/recall_search.py). Household graph only for now; read-only connections.
         tools.extend(recall_tools_for(settings))
+        # PROMISES (#259 step 4, 2026-11-25): her open promises (D97's aerys.promised.* memories) and closing
+        # one, kept or dropped, scoped to the caller. Same database as the remember writer.
+        if settings.memories_database_url:
+            from aerys_v2.tools.promises import build_promises_tool
+
+            tools.append(build_promises_tool(write_db(settings.memories_database_url)))
         # CONTACTS (D29, 2026-11-11): his words attach an email address to a person's record, which is
         # what the email tool's known-recipient check reads. Owner-only; the guard holds it after outside text.
         if settings.memories_database_url and settings.owner_person_id is not None:

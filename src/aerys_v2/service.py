@@ -872,6 +872,7 @@ ONE_LOOP_BY_OPERATION = {
     "my_pending_requests": {"arg": "action", "reads": {"list"}, "default": {"record"}},
     "wake_me": {"arg": "action", "reads": {"list"}, "default": {"record"}},
     "check_back": {"arg": "action", "reads": {"list"}, "default": {"record"}},
+    "promises": {"arg": "action", "reads": {"list"}, "default": {"record"}},
 }
 #: The correction for a claim or promise nothing backs, on a pass that may still use tools (nothing was
 #: done yet this turn).
@@ -925,6 +926,7 @@ _ONE_LOOP_DONE_WORDS = {
     "message_kael": ((r"^Delivered\b", {"send"}),
                      (r"^NOT DELIVERED YET:.*\bsaved as ticket\b", {"record"})),   # kept, not delivered
     "remember": ((r"^(?:Kept|Already kept):", {"record"}),),
+    "promises": ((r"^Marked (?:kept|dropped):", {"record"}),),
     "log_gap": ((r"^Logged\b", {"record"}),),
     "sticky_note": ((r"^Note is up\b", {"record"}),),
     "save_contact_email": ((r"^Saved:", {"record"}),),
