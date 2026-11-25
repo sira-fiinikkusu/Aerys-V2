@@ -48,6 +48,7 @@ from typing import Callable, Iterable, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -296,7 +297,7 @@ def start_checkins(settings) -> threading.Thread | None:
     None unless the database and Kael's line are both configured."""
     if not settings.database_url or not settings.kael_desk_url or settings.kael_desk_token is None:
         return None
-    watcher = CheckinWatcher(PostgresCheckinStore(settings.database_url),
+    watcher = CheckinWatcher(PostgresCheckinStore(db_url(settings.database_url)),
                              lane_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value()))
     thread = threading.Thread(target=watcher.run_forever, daemon=True, name="kael-checkins")
     thread.start()

@@ -32,6 +32,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -469,7 +470,7 @@ def approvals_for(settings) -> Approvals | None:
     if notify is None:
         log.warning("approvals: no HA notify service (REACH_NOTIFY_SERVICE / STORM_NOTIFY_SERVICE); not armed")
         return None
-    return Approvals(PostgresApprovalStore(settings.database_url), notify=notify)
+    return Approvals(PostgresApprovalStore(db_url(settings.database_url)), notify=notify)
 
 
 # --- the button (the Discord gateway: the soak container) ---------------------------------

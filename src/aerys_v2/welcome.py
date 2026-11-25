@@ -54,6 +54,7 @@ from aerys_v2.followups import SOURCE as FOLLOWUP_SOURCE
 from aerys_v2.followups import TOPIC as FOLLOWUP_TOPIC
 from aerys_v2.places import coords, places_near_for
 from aerys_v2.reach import EASTERN, ReachEvent, local_day_start, muted_topics, next_local, told_quietly
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -1069,7 +1070,7 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
     if getattr(settings, "database_url", None):
         from aerys_v2.followups import PostgresFollowupStore
 
-        followups = PostgresFollowupStore(settings.database_url)
+        followups = PostgresFollowupStore(db_url(settings.database_url))
     turn = her_turn_for(settings, action_graph)
     log.info("welcome home armed | %s", "her own turn" if turn else "tool-free words (no wake graph)")
     return WelcomeHome(

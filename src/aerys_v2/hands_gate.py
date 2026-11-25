@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 
 from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for, person_id_for
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_lens_surface, is_voice_turn
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -935,7 +936,7 @@ def people_lookup_for(settings) -> Callable[[str, str], list[dict]] | None:
     """Her people records (prod persons + platform_identities), read-only: who an address is.
     A Discord or Telegram account by its id or username; an email by persons.email; else, by the
     name he gave them, anyone with that name who has an address on that platform."""
-    db = getattr(settings, "memories_database_url", None)
+    db = db_url(getattr(settings, "memories_database_url", None))
     if not db:
         return None
 
@@ -988,7 +989,7 @@ def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], tup
     from aerys_v2.config import home_job_member_map
 
     read_only = [a for a in str(getattr(settings, "home_read_only_agents", "") or "").split(",") if a.strip()]
-    gate = HandsGate(approvals, PostgresGatedActionStore(settings.database_url),
+    gate = HandsGate(approvals, PostgresGatedActionStore(db_url(settings.database_url)),
                      owner_person_id=str(settings.owner_person_id), people=people_lookup_for(settings),
                      executors=executors, read_only_agents=read_only,
                      members=home_job_member_map(settings),

@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
 from aerys_v2.reach import ReachEvent, muted_topics, EASTERN
+from aerys_v2.config import db_url
 
 
 class ReachQueue:
@@ -32,7 +33,7 @@ def relay_queue_for(settings):
     if not settings.messages_as_herself or not settings.database_url or settings.owner_person_id is None:
         return None
     from aerys_v2.reach import PostgresReachStore
-    return ReachQueue(PostgresReachStore(settings.database_url),
+    return ReachQueue(PostgresReachStore(db_url(settings.database_url)),
                       budget_default=int(getattr(settings, 'reach_daily_budget', 3)))
 
 
@@ -168,4 +169,4 @@ def relay_for(settings, desk):
     queue = desk if isinstance(desk, ReachQueue) else ReachQueue(desk.store, clock=desk.clock,
                                                                         budget_default=desk.budget_default)
     return Relay(sender.gate.owner, sender.people, queue,
-                 person_name_lookup(getattr(settings, 'memories_database_url', None)))
+                 person_name_lookup(db_url(getattr(settings, 'memories_database_url', None))))
