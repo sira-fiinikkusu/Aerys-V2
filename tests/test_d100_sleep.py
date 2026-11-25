@@ -24,18 +24,22 @@ NOW = datetime(2026, 11, 26, 8, tzinfo=timezone.utc)
 
 
 class Jev:
-    """TypeSafe faked: answer(qid, state) -> a probability, or an exception to raise."""
+    """TypeSafe faked: answer(qid, state) -> a probability, or an exception to raise. One request may carry
+    several questions; asked records each (qid, state), requests counts the calls."""
 
     def __init__(self, answer):
-        self.answer, self.asked = answer, []
+        self.answer, self.asked, self.requests = answer, [], 0
 
     def system_one(self, *, state, questions, model=None):
-        (qid,) = questions
-        self.asked.append((qid, state))
-        v = self.answer(qid, state)
-        if isinstance(v, BaseException):
-            raise v
-        return SimpleNamespace(answers={qid: SimpleNamespace(noul=v)})
+        self.requests += 1
+        out = {}
+        for qid in questions:
+            self.asked.append((qid, state))
+            v = self.answer(qid, state)
+            if isinstance(v, BaseException):
+                raise v
+            out[qid] = SimpleNamespace(noul=v)
+        return SimpleNamespace(answers=out)
 
 
 class Mem:
@@ -109,10 +113,10 @@ def test_a_stale_plan_is_proposed_only_when_plan_shaped_old_and_passed():
     mem = Mem([fact(A, "event.market", "Plans to go to the farmers market Oct 29", 40),
                fact(B, "interest.market", "Likes farmers markets", 40),
                fact(C, "decision.trip", "Going to book the trip tomorrow", 0)])
-    out, j = run(mem, lambda q, s: .93)
+    out, j = run(mem, lambda q, s: .1 if q == "lasting" else .93)
     (p,) = proposed(out)
-    assert (p.kind, p.retire_ids) == ("stale_plan", [A])
-    asked = [s["memory"] for q, s in j.client.asked if q == "plan_passed"]
+    assert (p.kind, p.retire_ids, p.careful) == ("stale_plan", [A], False)
+    asked = [s["line"] for q, s in j.client.asked if q == "plan_passed"]
     assert asked == ["Plans to go to the farmers market Oct 29"]   # not shaped like a plan / said today: never asked
     assert j.client.asked[0][1]["today"] == "2026-11-26"
 
@@ -120,9 +124,32 @@ def test_a_stale_plan_is_proposed_only_when_plan_shaped_old_and_passed():
 def test_an_old_momentary_claim_is_proposed_for_the_claims_table():
     mem = Mem(claims=[(C, "session.status", "Restarted the system; doing final checks", T0),
                       (D, "basic.kids", "Has two kids", T0)])
-    out, _ = run(mem, lambda q, s: .9 if "Restarted" in s["claim"] else .05)
+    out, _ = run(mem, lambda q, s: .05 if q == "lasting" else (.9 if "Restarted" in s["line"] else .05))
     assert [(p.kind, p.retire_table, p.retire_ids, p.status) for p in out] == [
         ("old_claim", "core_claim", [C], "proposed"), ("old_claim", "core_claim", [D], "clear")]
+
+
+def test_a_line_that_also_holds_something_lasting_is_proposed_but_marked_careful():
+    """A side agent's catch (11/25): "recently married or about to be", a name tied to an old trip plan and a
+    launch he watched were among the first proposals. Still his to decide, never approved in bulk."""
+    mem = Mem([fact(A, "relationship.status", "Recently married or about to be married, upcoming honeymoon", 200),
+               fact(B, "decision.bed", "Going to bed", 30)],
+              claims=[(C, "event.launch", "Watched the launch from home", T0)])
+    lasting = {"Recently married or about to be married, upcoming honeymoon": .93, "Going to bed": .04,
+               "Watched the launch from home": .88}
+    out, j = run(mem, lambda q, s: lasting[s["line"]] if q == "lasting" else .95)
+    marks = {p.retire_ids[0]: p.careful for p in proposed(out)}
+    assert marks == {A: True, B: False, C: True}
+    assert all("read it before approving" in p.reason for p in proposed(out) if p.careful)
+    assert j.client.requests == 3                     # the lasting question rides in the same request
+    assert all(p.row(ME)["careful"] is p.careful for p in out)
+
+
+def test_no_lasting_answer_counts_as_careful():
+    mem = Mem([fact(A, "decision.bed", "Going to bed", 30)])
+    out, _ = run(mem, lambda q, s: .95 if q == "plan_passed" else None)   # Jev left "lasting" unanswered
+    (p,) = proposed(out)
+    assert p.careful is True
 
 
 def test_judged_and_busy_rows_are_never_asked_again():

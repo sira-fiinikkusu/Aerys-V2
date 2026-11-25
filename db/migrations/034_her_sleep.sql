@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS v2_memory_proposals (
     score        REAL,
     status       TEXT NOT NULL DEFAULT 'proposed'
                  CHECK (status IN ('proposed', 'approved', 'rejected', 'applied', 'stale', 'clear')),
+    -- careful: the line may also hold something lasting about him; the dashboard's "Approve all" skips it.
+    careful      BOOLEAN NOT NULL DEFAULT false,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     decided_at   TIMESTAMPTZ,
     applied_at   TIMESTAMPTZ
