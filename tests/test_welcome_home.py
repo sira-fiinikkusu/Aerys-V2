@@ -1324,3 +1324,20 @@ def test_a_due_brief_that_cant_be_marked_carried_goes_alone_not_twice():
     assert h.hello.tick() == "the brief goes on its own" and h.world.spoken == []
     h.desk.store.add = real_add
     assert h.brief.tick() == "sent" and len(h.world.spoken) == 1 and h.hello.tick() == "done"
+
+
+def test_a_hello_that_carries_the_brief_carries_what_she_closed_too():
+    """D101 (Codex 11/25): when the welcome-home hello carries the morning brief, the brief never runs that day,
+    so the hello hands the closed promises to the desk under the brief's own key, and marks them told."""
+    h = House(MORNING_HOME + timedelta(minutes=5), left=datetime(2026, 11, 10, 7, 30, tzinfo=ET),
+              home=MORNING_HOME, brief=True)
+    told = []
+    base = h.brief.gather
+    h.brief.gather = lambda now, held, quiet: Facts(**{**base(now, held, quiet).__dict__,
+                                                      "closed": [{"id": "p1", "text": "track his flight", "how": "kept"}]})
+    h.brief.promises_told = told.append
+    assert h.hello.tick() == "sent"
+    rows = [r for r in h.desk.store.rows.values() if r.dedupe_key == "brief:2026-11-10:promises"]
+    assert len(rows) == 1 and rows[0].owed and rows[0].headline == \
+        "Promises I closed since yesterday: track his flight (kept)."
+    assert told == [["p1"]]

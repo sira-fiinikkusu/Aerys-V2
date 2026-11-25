@@ -836,6 +836,13 @@ class WelcomeHome:
             text = plain_welcome(facts)
         folds = tuple(h.id for h in held) + ((marker.id,) if marker is not None else ())
         report_house(self.desk, getattr(compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
+        if marker is not None and brief_facts is not None:
+            # D101 (Codex 11/25): the hello carries the brief, so it carries what she closed too, under the
+            # brief's own key (the brief itself won't run again today).
+            from aerys_v2.brief import tell_closed_promises
+
+            tell_closed_promises(self.desk, brief_facts, getattr(self.brief, "promises_told", None),
+                                 key=f"brief:{day.isoformat()}")
         outcome = self.desk.reach_out(ReachEvent(
             source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=None if by_text else room,
             brief=True, folds=folds, dedupe_key=key, expires_at=expires, text_only=by_text,
