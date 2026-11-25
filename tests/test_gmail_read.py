@@ -208,7 +208,9 @@ def test_actual_engine_read_then_draft_and_send(reader):
     result = graph.invoke({'messages': [HumanMessage(content='Read my mail and draft a reply')]},
                           {'configurable': {'identity': {'user_id': OWNER, 'platform': 'discord', 'privacy_context': 'private', 'channel_kind': 'dm'}, 'thread_id': 'owner:test', 'outside_text': {}}})
     receipts = [m.content for m in result['messages'] if isinstance(m, ToolMessage)]
-    assert any(r.startswith(gmail.DATA_HEADER) for r in receipts)
+    # G4: the read reaches her wrapped as outside text, with his mailbox's own notice kept inside.
+    from aerys_v2.outside_guard import OUTSIDE_NOTICE, unwrap_outside
+    assert any(r.startswith(OUTSIDE_NOTICE) and unwrap_outside(r).startswith(gmail.DATA_HEADER) for r in receipts)
     assert any(r.startswith('Drafted:') for r in receipts)
     assert any('Not sent' in r and 'Approve' in r for r in receipts)
 

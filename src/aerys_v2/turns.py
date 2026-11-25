@@ -233,8 +233,11 @@ def _first_line(content: object) -> str:
     'Contents of <file>:\\n\\n<body>' and web_search success is '\\n'.join(results),
     so third-party/attacker text riding in those payloads lands on line 2+ and can
     never be substring-matched into a forged failure. Every real tool failure keeps
-    its sentinel on line 1, so true-positive detection is unchanged."""
-    return str(content).split("\n", 1)[0].lower()
+    its sentinel on line 1, so true-positive detection is unchanged. A reader's answer
+    wrapped as outside text (G4) is read inside the wrapper: the tool's own line 1."""
+    from aerys_v2.outside_guard import unwrap_outside
+
+    return str(unwrap_outside(content)).split("\n", 1)[0].lower()
 
 
 def classify_tool_result(content: str, status: object) -> str | None:
