@@ -171,3 +171,39 @@ def test_no_key_builds_no_check():
         typesafe_api_key = None
 
     assert lb.looking_back_for(S()) is None
+
+
+# ---- what a room search brings back (advisor 11/25) ------------------------------------------
+
+def _rt(identity, sink):
+    from types import SimpleNamespace
+    return SimpleNamespace(config={"configurable": {"identity": identity, "room_sink": sink,
+                                                    "thread_id": f"person:{identity.get('user_id')}"}})
+
+
+def test_other_peoples_lines_from_a_room_search_count_as_outside_text():
+    """D98 keeps her own past chats tap-free; a guest's line pulled into a tool-armed turn gets the same
+    mark the room's recent activity gets, so it can inform the turn but never authorize a reach-out."""
+    from types import SimpleNamespace
+
+    from aerys_v2.outside_guard import sources_for
+    from test_recall_search import ALEX, ROOM, guild as room_identity, history_tool, strict_conn, turn
+
+    sink = {}
+    rows = [turn("room talk about the attic fan", channel="guild", channel_id=ROOM, person=ALEX, name="Alex")]
+    out = history_tool(strict_conn(rows)).func(runtime=_rt(room_identity(), sink), query="attic")
+    assert "attic fan" in out and sink == {"outside": True}
+    request = SimpleNamespace(runtime=SimpleNamespace(config={"configurable": {"room_sink": sink}}),
+                              state={"messages": []})
+    assert "room" in sources_for(request)
+
+
+def test_the_callers_own_lines_leave_the_turn_unmarked():
+    from test_recall_search import ROOM, dm as dm_identity, guild as room_identity, history_tool, strict_conn, turn
+
+    sink = {}
+    own = [turn("my attic fan is loud", channel="guild", channel_id=ROOM)]
+    history_tool(strict_conn(own)).func(runtime=_rt(room_identity(), sink), query="attic")
+    assert sink == {}
+    history_tool(strict_conn([turn()])).func(runtime=_rt(dm_identity(), sink), query="attic")
+    assert sink == {}                                  # D98: his own past chats need no tap

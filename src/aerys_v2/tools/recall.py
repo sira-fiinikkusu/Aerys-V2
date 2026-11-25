@@ -85,6 +85,17 @@ def build_search_memory_tool(memories_db: ConnFactory, *, turns_db: ConnFactory 
     return search_memory
 
 
+def _other_peoples_words(runtime) -> None:
+    """D99 (advisor 11/25): a room search can bring back other people's lines, guests' included, into a turn
+    that holds house tools. D98 keeps her own past chats tap-free; other people's words get the same mark the
+    room's recent activity already gets (factory's room block sets room_sink["outside"] when anyone but the
+    caller is in it), so they can inform the turn but never authorize a reach-out (outside_guard.sources_for)."""
+    conf = (getattr(runtime, "config", None) or {}).get("configurable") or {}
+    sink = conf.get("room_sink")
+    if isinstance(sink, dict):
+        sink["outside"] = True
+
+
 def build_search_history_tool(turns_db: ConnFactory, *, test_bodies: Sequence[str] = (),
                               sealed_ids: Iterable[str] = (), shared_surfaces: Iterable[str] = ()):
     surfaces = frozenset(str(s) for s in shared_surfaces or ())
@@ -130,6 +141,8 @@ def build_search_history_tool(turns_db: ConnFactory, *, test_bodies: Sequence[st
         except Exception:
             log.warning("search_history failed for person %s", scope.person_id, exc_info=True)
             return HISTORY_FAILED
+        if any(str(r.get("person_id") or "") != scope.person_id for r in rows):
+            _other_peoples_words(runtime)
         return format_history(rows, q, scope)
 
     return search_history
