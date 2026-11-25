@@ -32,6 +32,7 @@ from test_memory_hygiene import PERSON
 RANDOM = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"           # 36 mixed characters, no meaning
 PUNCTUATED = "Xk9!mP2v#L8qR4$nT6w&"                          # 20, with password punctuation
 INSIDE = "Xk9mP2vL8qR4nT6w7Zb3c"                             # 21; one quote mark inside makes 22
+TAIL = "mP2vL8qR4nT6w7Z"                                     # 15; after a quoted 3 and "!" makes 21
 HEX = "0123456789abcdef" * 3
 
 SECRETS = [
@@ -82,6 +83,12 @@ SECRETS = [
     ("labelled secret", "the password is " + INSIDE[:10] + "`" + INSIDE[10:]),
     ("labelled secret", "password: `" + INSIDE + "`"),                 # a backtick-quoted value
     ("labelled secret", "password: '" + INSIDE[:6] + "'" + INSIDE[6:]),   # a quote that closes early
+    # Codex review round 3: a closing quote then punctuation then more of the value; the
+    # quoted run must end the WHOLE value. 21 characters each.
+    ("labelled secret", "the password is 'Xk9'!" + TAIL),
+    ("labelled secret", 'the password is "Xk9"!' + TAIL),
+    ("labelled secret", "the password is `Xk9`!" + TAIL),
+    ("labelled secret", 'password: "' + INSIDE + '".'),              # a sentence's full stop after the quote
     # PINNED (reported 2026-11-24): words and a year after a password label still count;
     # only after a bare "key" does a dashed word identifier pass.
     ("labelled secret", "the wifi password is Sunshine-Garden-2024"),
@@ -116,6 +123,7 @@ ORDINARY = [
     "The key is part-number-2026-revision-2",
     "key: part-number-2026-revision-2", "key: part-number-2026-revision-v2",
     "my password is " + PUNCTUATED[:11],                              # short: the short-password line holds
+    'my password is "Xk9".',                                          # quoted and short, then a full stop
     "Token of appreciation for 20 years of service",
     "",
 ]

@@ -126,7 +126,9 @@ _API_KEYS = [(re.compile(p), needs_random) for p, needs_random in (
 #: whitespace. Never across whitespace, even quoted. A quote mark or backtick opens a
 #: quoted run only at the value's START and only if it closes at the value's end
 #: (round 2: one inside a bare value used to end it early); otherwise it is part of it.
-_VALUE_END = r"""(?=[\s.,;:!?)\]}>]|$)"""
+#: "Ends the value" means only sentence punctuation may follow before whitespace or the
+#: end (round 3: '"Xk9"!mP2...' used to stop at the quote and leave the rest unread).
+_VALUE_END = r"""(?=[.,;:!?)\]}>]*(?:\s|$))"""
 _VALUE = (r"""(?:(?:"([^"\s]{1,200})"|'([^'\s]{1,200})'|`([^`\s]{1,200})`)""" + _VALUE_END
           + r"|(\S{1,200}))")
 #: Labels whose value IS a credential: "my token is ...", "password: ...", "API_KEY=...".
