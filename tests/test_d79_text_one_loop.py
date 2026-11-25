@@ -974,6 +974,14 @@ def test_an_unconfirmed_act_never_runs_his_turn_armed_again():
     ("read_my_code", "Not available: only Chris's turns and my own wake-ups can read my code."),
     ("where_is_chris_nearby", "Location request refused: I can only tell him where he is."),
     ("analyze_image", "The vision service is unreachable right now (timeout)."),
+    # D95-A: every refusal the two searches can give (tools/recall.py), word for word.
+    ("search_memory", "Not available: I can only search for someone I know; I don't know who this is."),
+    ("search_memory", "Couldn't search your long-term memory just now; say so rather than guessing."),
+    ("search_memory", "search_memory needs a query: a name, a topic or a phrase to look for."),
+    ("search_history", "Not available: I can only search for someone I know; I don't know who this is."),
+    ("search_history", "Couldn't search your past conversations just now; say so rather than guessing."),
+    ("search_history", "Couldn't search: give since and until as dates like 2026-11-03."),
+    ("search_history", "search_history needs a query, or a since/until date range."),
 ])
 def test_a_read_that_failed_is_not_a_look(name, content):
     from aerys_v2.service import _one_loop_done_kinds

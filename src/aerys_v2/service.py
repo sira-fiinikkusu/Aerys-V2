@@ -848,7 +848,7 @@ ONE_LOOP_READ_ONLY = frozenset({
     "analyze_image", "calendar_events", "get_weather", "messages_sent", "no_action", "read_document",
     "read_email", "read_his_email", "read_my_code", "read_web_page", "search_email", "search_entities",
     "search_his_email", "search_web", "where_is_chris_nearby", "youtube_summary", "check_async_task",
-    "list_async_tasks", "files_sent_to_chris", "ls", "read_file",
+    "list_async_tasks", "files_sent_to_chris", "ls", "read_file", "search_memory", "search_history",
 })
 #: Tools that keep a record (memory, a note, a list, a draft, a link) and no other kind of act.
 ONE_LOOP_RECORD = frozenset({"remember", "log_gap", "sticky_note", "save_contact_email", "draft_email",

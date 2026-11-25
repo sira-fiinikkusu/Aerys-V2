@@ -89,6 +89,36 @@ def _speaker(display_name: object, person_id: object) -> str:
     return f"person·{pid[-4:]}" if pid else "Someone"
 
 
+#: Who is in a shared room, for recall widened to "that space" (D95-A, Chris 11/24: "if she
+#: needs to recall in guild chat or something where there are multiple entities then we would
+#: need to widen it in that space in particular"). The people present are the resolved people
+#: who spoke to her IN THIS public room lately, read from the turns table, never from anything
+#: the model says. Same public-surface whitelist as the room block, so a DM can't name anyone.
+ROOM_PEOPLE_DAYS = 30
+ROOM_PEOPLE_LIMIT = 8
+ROOM_PEOPLE_SQL = """\
+SELECT person_id::text, max(created_at) AS last_seen
+FROM v2_turns
+WHERE channel_id = %(channel_id)s AND channel = %(channel)s
+  AND channel IN ('guild', 'telegram_group')
+  AND person_id IS NOT NULL
+  AND created_at > NOW() - make_interval(days => %(days)s)
+GROUP BY person_id
+ORDER BY last_seen DESC
+LIMIT %(limit)s
+"""
+
+
+def people_in_room(conn, channel_id: str, channel: str, *, days: int = ROOM_PEOPLE_DAYS,
+                   limit: int = ROOM_PEOPLE_LIMIT) -> list[str]:
+    """Person ids who spoke to her in this PUBLIC room lately, most recent first; [] otherwise."""
+    if conn is None or not channel_id or channel not in PUBLIC_CHANNELS:
+        return []
+    rows = conn.execute(ROOM_PEOPLE_SQL, {"channel_id": str(channel_id), "channel": channel,
+                                          "days": int(days), "limit": int(limit)}).fetchall()
+    return [str(r[0]) for r in rows if r and r[0]]
+
+
 #: Her own lines in the live room block keep this much (Chris, 2026-10-22): a post made in
 #: her name by a script, such as a scheduled digest, is not one of her turns, so the room
 #: block is the only place she sees it, and at _FIELD_CAP a digest was cut after its first item.

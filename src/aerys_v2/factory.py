@@ -1211,6 +1211,48 @@ def memory_key_labeler_for(settings: Settings):
     return lambda fact: key_label_for(fact, llm=llm)
 
 
+def read_only_db(url: str, *, timeout_s: int = 5):
+    """A zero-argument factory of short READ-ONLY connections (connect and statement timeouts
+    bounded), for the tools that only look. The database itself refuses a write on these."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def connect():
+        import psycopg
+
+        with psycopg.connect(url, connect_timeout=timeout_s,
+                             options=f"-c statement_timeout={int(timeout_s * 1000)}") as conn:
+            conn.read_only = True
+            yield conn
+
+    return connect
+
+
+def recall_tools_for(settings: Settings) -> list:
+    """D95-A: search_memory (prod memories, when armed) and search_history (aerys_v2 v2_turns, when
+    armed). Scoping lives in services/recall_search.py; the factories here only open read-only
+    connections. search_memory's room widening also reads v2_turns, so it needs database_url too."""
+    from aerys_v2.services.recall_search import sealed_ids_from
+    from aerys_v2.test_bodies import patterns_for
+    from aerys_v2.tools.recall import build_search_history_tool, build_search_memory_tool
+
+    shared = tuple(_parse_shared_surfaces(settings.ha_shared_surface_ids))
+    turns_db = read_only_db(settings.database_url) if settings.database_url else None
+    tools: list = []
+    if settings.memories_database_url:
+        from aerys_v2.services.context import embedder_from_settings
+
+        tools.append(build_search_memory_tool(read_only_db(settings.memories_database_url),
+                                              turns_db=turns_db,
+                                              embed=embedder_from_settings(settings),
+                                              shared_surfaces=shared))
+    if turns_db is not None:
+        tools.append(build_search_history_tool(turns_db, test_bodies=patterns_for(settings),
+                                               sealed_ids=sealed_ids_from(settings.discord_sealed_channel_ids),
+                                               shared_surfaces=shared))
+    return tools
+
+
 def remember_writer_for(settings: Settings):
     """The house back end of the remember tool: triage_memory over the prod memories DB.
 
@@ -1646,6 +1688,22 @@ REMEMBER_OVERLAY = (
     "worth keeping. Say it was kept ONLY when the tool replied 'Kept:'; if it "
     "did not, say so plainly. Recalling what you already know needs no tool."
 )
+
+
+def search_recall_overlay(*, memory: bool, history: bool) -> str:
+    """D95-A (Chris 11/24): the two searches past the recalled handful, naming only the armed ones."""
+    tools = [t for t, armed in (("search_history for past conversations word for word", history),
+                                ("search_memory for long-term facts", memory)) if armed]
+    if not tools:
+        return ""
+    return (
+        "What this prompt shows you about a person is only the few facts recalled for this message, "
+        "and the conversation in front of you is only the recent part. When they ask about something "
+        "that isn't there (what you told them, what they said on a day, an older plan, a name or a "
+        f"detail you can't see) look before answering: {', '.join(tools)}. Quote and date from what "
+        "comes back, and if nothing comes back, say you don't find it rather than guessing."
+    )
+
 
 MESSAGE_KAEL_OVERLAY = (
     "You have a DIRECT LINE to Kael (the owner's coding agent): the "
@@ -2598,6 +2656,10 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             from aerys_v2.tools.remember import build_remember_tool
 
             tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings)))
+        # SEARCH (D95-A, Chris 11/24): she looks past the recalled handful, at her long-term facts
+        # and her past conversations, scoped by the caller's identity and room
+        # (services/recall_search.py). Household graph only for now; read-only connections.
+        tools.extend(recall_tools_for(settings))
         # CONTACTS (D29, 2026-11-11): his words attach an email address to a person's record, which is
         # what the email tool's known-recipient check reads. Owner-only; the guard holds it after outside text.
         if settings.memories_database_url and settings.owner_person_id is not None:
@@ -2784,6 +2846,11 @@ def action_overlay_for(settings: Settings, *, guest: bool = False) -> str:
         parts.append(LOG_GAP_OVERLAY)
     if not guest and settings.memories_database_url is not None and settings.embeddings_api_key is not None:
         parts.append(REMEMBER_OVERLAY)
+    if not guest:
+        recall = search_recall_overlay(memory=bool(settings.memories_database_url),
+                                       history=bool(settings.database_url))
+        if recall:
+            parts.append(recall)
     if not guest and settings.kael_desk_url and settings.kael_desk_token is not None:
         parts.append(MESSAGE_KAEL_OVERLAY)
     if not guest and settings.database_url:
