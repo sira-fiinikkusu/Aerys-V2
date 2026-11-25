@@ -145,6 +145,11 @@ def retrieve_memories(
 
 
 def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> str:
+    """The prompt-ready memory block (see format_memory_context_flagged for the pipeline)."""
+    return format_memory_context_flagged(rows, now=now)[0]
+
+
+def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = None) -> tuple[str, bool]:
     """Build the prompt-ready memory block — the "Format Memory Context" Code node.
 
     Pipeline preserved exactly:
@@ -168,6 +173,7 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
     now = now or datetime.now(timezone.utc)
     seen: set[str] = set()
     lines: list[str] = []
+    her_shown = False   # D97: an aerys.* row made it into the block (by its key, never by its text)
     for row in rows:
         content = row.get("content")
         if content is None:
@@ -191,6 +197,7 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
         if key.startswith("aerys."):
             # D97 (2026-11-25): her own words, never to be read as a fact about him.
             display = f"{HER_WORDS_LABEL} {display}"
+            her_shown = True
 
         parts = [f"* {display}"]
         if row.get("source_platform"):
@@ -201,7 +208,7 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
 
         if len(lines) >= CONTEXT_CAP:
             break
-    return "\n".join(lines)
+    return "\n".join(lines), her_shown
 
 
 def _age_days(created_at: datetime, now: datetime) -> int:

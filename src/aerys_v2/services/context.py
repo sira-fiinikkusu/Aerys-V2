@@ -31,6 +31,7 @@ from aerys_v2.services.memory import (
     HER_WORDS_LABEL,
     Embedder,
     format_memory_context,
+    format_memory_context_flagged,
     retrieve_memories,
 )
 from aerys_v2.services.profile import get_profile
@@ -102,8 +103,8 @@ def build_context(
                 embed=embed,
                 privacy_context=privacy_context,
             )
-            memory_block = format_memory_context(rows)
-            if memory_block and HER_WORDS_LABEL in memory_block:
+            memory_block, her_shown = format_memory_context_flagged(rows)
+            if memory_block and her_shown:
                 # D97: her own earlier words are claims she made, not facts (a guess stays a guess).
                 memory_block += (f"\nLines marked {HER_WORDS_LABEL} are what you (Aerys) said at the time, "
                                  "not verified facts and not things he said: if one matters, check it "

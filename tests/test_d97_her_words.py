@@ -421,3 +421,13 @@ def test_recall_tells_her_that_her_own_lines_are_claims_not_facts():
         ctx.get_profile = orig
     assert "(her own words, not a checked fact) Aerys told him Retail Therapy is most likely a gift shop" in block
     assert "not verified facts and not things he said" in block
+
+
+def test_the_claims_note_follows_her_rows_never_text_that_mentions_the_label():
+    """Codex r7: a memory of HIS whose text contains the label must not switch the note on."""
+    from aerys_v2.services.memory import format_memory_context_flagged, HER_WORDS_LABEL
+    his = [{"content": f"interest.labels: Asked what {HER_WORDS_LABEL} means", "created_at": T0, "source_platform": None}]
+    block, her = format_memory_context_flagged(his, now=T0)
+    assert her is False
+    mine = [{"content": "aerys.told.x: Aerys told him x", "created_at": T0, "source_platform": None}]
+    assert format_memory_context_flagged(mine, now=T0)[1] is True
