@@ -1101,7 +1101,7 @@ _QUOTE_FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201
                              "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"'})
 #: The transcript's own "[Speaker]: " line prefix (build_transcript) is ours, not his words.
 _SPEAKER_PREFIX = re.compile(r"^\[[^\]\n]{1,80}\]:\s*")
-_EDGE_PUNCTUATION = re.compile(r"^[\W_]+|[\W_]+$")
+_PUNCTUATION = re.compile(r"[^\w\s]")
 #: A key label as it may appear in a log line; anything else is logged as a placeholder.
 _LOGGABLE_KEY = re.compile(r"[a-z][a-z0-9_]{0,30}(?:\.[a-z0-9_]{1,40}){1,3}")
 
@@ -1114,20 +1114,27 @@ def _fold_for_quote(text: str | None) -> str:
     return " ".join(text.translate(_QUOTE_FOLD).casefold().split())
 
 
+def _quote_words(folded: str) -> str:
+    """The words alone, in order: apostrophes dropped ("don't" is "dont", as he often
+    types it), every other punctuation mark a space."""
+    return " ".join(_PUNCTUATION.sub(" ", folded.replace("'", "")).split())
+
+
 def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
     """Is QUOTE the speaker's own words, found whole in ONE of MESSAGES?
 
-    Forgiven: case, whitespace, punctuation at the quote's edges, curly quotes, the
-    transcript's "[Speaker]: " prefix. Not forgiven: a changed, dropped or added
-    word, or a quote stitched across two messages. The match is on whole words
-    ("my truck" is not in "my trucks"). A missing quote, or one that is only
+    Compared on words: forgiven are case, whitespace, curly quotes, punctuation
+    (an added or dropped apostrophe or comma, a wrapping quote mark, a trailing full
+    stop) and the transcript's "[Speaker]: " prefix. Not forgiven: a changed,
+    dropped or added word, or a quote stitched across two messages. Whole words
+    only ("my truck" is not in "my trucks"). A missing quote, or one that is only
     punctuation, is never found: the empty string is in every message.
     """
-    needle = _EDGE_PUNCTUATION.sub("", _SPEAKER_PREFIX.sub("", _fold_for_quote(quote)))
+    needle = _quote_words(_SPEAKER_PREFIX.sub("", _fold_for_quote(quote)))
     if not needle:
         return False
     pattern = re.compile(r"(?<!\w)" + re.escape(needle) + r"(?!\w)")
-    return any(pattern.search(_fold_for_quote(m.get("content"))) for m in messages)
+    return any(pattern.search(_quote_words(_fold_for_quote(m.get("content")))) for m in messages)
 
 
 def quoted_observations(observations: list[dict], group: dict, stats: dict) -> list[dict]:

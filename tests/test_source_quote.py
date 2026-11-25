@@ -8,9 +8,9 @@ ever said behind it. A thin memory is worse than none.
 
 Now a mined fact whose quote is not found in one of the messages the model was
 shown is skipped, counted (`unquoted`, and `skipped` on the live path) and logged by
-its key only. The match forgives what copying changes: case, runs of whitespace,
-edge punctuation, curly quotes, the transcript's own "[Speaker]: " prefix. It does
-not forgive changed words. The explicit remember tool is not affected: when he says
+its key only. The match is on words and forgives what copying changes: case, runs of
+whitespace, punctuation (apostrophes and commas he left out or the model added), curly
+quotes, the transcript's own "[Speaker]: " prefix. It does not forgive changed words. The explicit remember tool is not affected: when he says
 "remember that...", his words are the source.
 
 All fixtures are synthetic.
@@ -94,6 +94,20 @@ def test_curly_apostrophes_match_straight_ones():
                             [obs("I\u2019m allergic to shellfish", value="Allergic to shellfish",
                                  key="basic.allergy")])
     assert len(inserts) == 1
+
+
+@pytest.mark.parametrize("message,source", [
+    ("i dont drink coffee anymore", "I don't drink coffee anymore"),     # the model adds an apostrophe
+    ("I don't drink coffee anymore", "I dont drink coffee anymore"),     # or drops one
+    ("yes, my truck is a 2019 and its red", "Yes my truck is a 2019, and it's red"),   # inner commas
+    ("the trip is 11/28-12/02 with the kids", "the trip is 11/28 - 12/02 with the kids"),
+])
+def test_punctuation_inside_a_quote_is_forgiven_but_not_words(message, source):
+    """He often types without apostrophes or commas; a model copying him tends to
+    tidy them. Same words in the same order still match."""
+    assert ex.source_quote_found(source, [{"content": message}])
+    assert not ex.source_quote_found(source.replace("coffee", "tea").replace("truck", "car")
+                                     .replace("trip", "flight"), [{"content": message}])
 
 
 @pytest.mark.parametrize("source", [
