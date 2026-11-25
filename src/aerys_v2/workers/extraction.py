@@ -194,7 +194,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 ## value_text rules:
 - Write naturally, as a human would remember it -- NOT as a database entry
 - BAD: "Dodge Ram"  GOOD: "Interested in a Dodge Ram truck"
-- BAD: "Rotonda West"  GOOD: "Lives in Rotonda West, Florida"
+- BAD: "Exampleville"  GOOD: "Lives in Exampleville, Vermont"
 - For interests, include what makes it notable: "Collects retro games, especially SNES titles"
 - ABSOLUTIZE TIME: convert every relative time word using the "Conversation date" line at the top of the transcript. BAD: "surgery tomorrow"  GOOD: "surgery on Aug 6". BAD: "started new job last week"  GOOD: "started new job around Jul 30". The words tomorrow/yesterday/tonight/next week must NEVER appear in value_text -- they freeze at extraction time and rot.
 

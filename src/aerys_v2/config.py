@@ -446,7 +446,7 @@ class Settings(BaseSettings):
 
     # The house's weather entity — get_weather reads current conditions and
     # forecasts from it (weather.get_forecasts). Local weather must come from
-    # HERE, not web search (the Rotonda-Switzerland incident, 2026-07-19).
+    # HERE, not web search (the town-in-Switzerland incident, 2026-07-19).
     ha_weather_entity: str = "weather.forecast_home"
 
     # ---- KAEL DESK LINE (gap #14 — her own ask, 2026-07-25) ------------------

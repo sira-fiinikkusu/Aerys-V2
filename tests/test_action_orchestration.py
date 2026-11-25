@@ -708,7 +708,7 @@ def test_action_graph_injects_profile_context_block():
 
     def fake_context(person_id, query_text, privacy_context="private"):
         seen.append((person_id, query_text))
-        return "• basic.location: Rotonda West, Florida"
+        return "• basic.location: Exampleville, Vermont"
 
     graph = build_action_graph(model, soul="persona", tools=[home_tool()], context_fn=fake_context)
     graph.invoke(
@@ -717,7 +717,7 @@ def test_action_graph_injects_profile_context_block():
     )
     system = model.prompts[0][0].content
     assert "[What you know about this person]" in system
-    assert "Rotonda West" in system
+    assert "Exampleville" in system
     # called with the caller's id and the latest human text
     assert seen[0] == (CHRIS["user_id"], "enough charge to reach Tampa from home?")
 

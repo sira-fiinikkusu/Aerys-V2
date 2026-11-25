@@ -2408,7 +2408,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                 strip_push=build_timer_strip(settings.panel_state_url),
             )
         )
-        # WEATHER (2026-07-19, the Rotonda-Switzerland incident): local weather
+        # WEATHER (2026-07-19, the town-in-Switzerland incident): local weather
         # reads the house's own HA entity, never search_web — same read-only HA
         # door, armed whenever HA is.
         from aerys_v2.tools.weather import build_weather_tool

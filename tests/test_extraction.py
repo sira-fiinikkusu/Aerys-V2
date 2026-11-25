@@ -115,7 +115,7 @@ def fake_embedder(text):
     return [0.1, 0.2, 0.3]
 
 
-OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Rotonda West, Florida",
+OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Exampleville, Vermont",
                    "context": None, "event_date": None, "privacy_level": "public",
                    "asserted_by": "self", "confidence": 0.9}])
 
@@ -128,7 +128,7 @@ def test_groups_by_person_before_extraction():
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram"),
         row(ROBIN, "I collect SNES games"),
-        row(CHRIS, "and I live in Rotonda West"),
+        row(CHRIS, "and I live in Exampleville"),
     ])])
     staging = FakeConn()
     llm = FakeLlm([OBS, OBS])
@@ -138,7 +138,7 @@ def test_groups_by_person_before_extraction():
     transcripts = [user for _, user in llm.calls]
     chris_t = next(t for t in transcripts if "Dodge Ram" in t)
     robin_t = next(t for t in transcripts if "SNES" in t)
-    assert "SNES" not in chris_t and "Rotonda West" in chris_t  # no cross-person bleed
+    assert "SNES" not in chris_t and "Exampleville" in chris_t  # no cross-person bleed
     assert "Dodge Ram" not in robin_t
     assert all(system == EXTRACTION_SYSTEM_PROMPT for system, _ in llm.calls)
 
@@ -178,7 +178,7 @@ def test_watermark_picks_newest_by_timestamp_not_string():
 
 
 def test_prod_conn_gets_selects_only_and_writes_go_to_staging():
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville")])])
     staging = FakeConn()
     run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)
 
@@ -196,7 +196,7 @@ def test_prod_conn_gets_selects_only_and_writes_go_to_staging():
 def test_memory_created_at_is_message_time_and_provenance_flows():
     raw = "2026-07-01 08:30:00.000001+00"
     prod = FakeConn([("FROM n8n_chat_histories",
-                      [row(CHRIS, "I live in Rotonda West", at=T0 - timedelta(days=2), raw=raw)])])
+                      [row(CHRIS, "I live in Exampleville", at=T0 - timedelta(days=2), raw=raw)])])
     staging = FakeConn()
     run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)
 
@@ -204,7 +204,7 @@ def test_memory_created_at_is_message_time_and_provenance_flows():
     assert params["created_at"] == raw            # original message time, not now()
     assert params["source_thread"] == "v1:n8n_chat_histories"
     assert params["embedding"] == "[0.1,0.2,0.3]"  # pgvector text format
-    assert params["content"].startswith("basic.location: Lives in Rotonda West")
+    assert params["content"].startswith("basic.location: Lives in Exampleville")
 
 
 # --- empty window ------------------------------------------------------------
@@ -328,7 +328,7 @@ def test_complete_prose_reply_retries_once_then_counts_as_empty():
 def test_corrective_retry_that_complies_stages_normally():
     """The common recovery: told its reply was the wrong shape, the model complies."""
     prod = FakeConn([("FROM n8n_chat_histories",
-                      [row(CHRIS, "I live in Rotonda West", id="a")])])
+                      [row(CHRIS, "I live in Exampleville", id="a")])])
     staging = FakeConn()
     llm = FakeLlm([PROSE, OBS])
     summary = run_extraction(prod, staging, llm, fake_embedder)
@@ -554,25 +554,25 @@ def lease_conn(holder=None, *, mutex_acquired=True, routes=()):
 
 
 def test_values_similar_exact_and_fuzzy_and_different():
-    assert values_similar("Lives in Rotonda West, Florida", "Lives in Rotonda West, Florida")
-    assert values_similar("Lives in Rotonda West, Florida", "lives in rotonda west, florida")  # case
+    assert values_similar("Lives in Exampleville, Vermont", "Lives in Exampleville, Vermont")
+    assert values_similar("Lives in Exampleville, Vermont", "lives in exampleville, vermont")  # case
     assert values_similar("Interested in a Dodge Ram truck", "Interested in a Dodge Ram")  # restated
-    assert not values_similar("Lives in Rotonda West, Florida", "Lives in Austin, Texas")  # genuinely new
+    assert not values_similar("Lives in Exampleville, Vermont", "Lives in Austin, Texas")  # genuinely new
 
 
 def test_value_text_from_content_strips_label_context_and_date():
-    content = "basic.location: Lives in Rotonda West, Florida -- came up casually (Jul 2)"
-    assert _value_text_from_content(content) == "Lives in Rotonda West, Florida"
+    content = "basic.location: Lives in Exampleville, Vermont -- came up casually (Jul 2)"
+    assert _value_text_from_content(content) == "Lives in Exampleville, Vermont"
     # no context, no date
-    assert _value_text_from_content("basic.location: Lives in Rotonda West, Florida") == \
-        "Lives in Rotonda West, Florida"
+    assert _value_text_from_content("basic.location: Lives in Exampleville, Vermont") == \
+        "Lives in Exampleville, Vermont"
 
 
 def test_triage_inserts_when_no_existing_row():
     conn = FakeConn([("FROM memories", [])])  # dedup check finds nothing live
     action = triage_memory(
-        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West",
-        content="basic.location: Lives in Rotonda West", context=None, event_date=None,
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Exampleville",
+        content="basic.location: Lives in Exampleville", context=None, event_date=None,
         embedding="[0.1,0.2,0.3]", source_platform="discord", privacy_level="public",
         created_at="2026-07-03 12:00:00+00",
     )
@@ -583,10 +583,10 @@ def test_triage_inserts_when_no_existing_row():
 
 
 def test_triage_updates_when_value_restated():
-    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Exampleville")])])
     action = triage_memory(
-        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
-        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Exampleville, VT",
+        content="basic.location: Lives in Exampleville, VT", context=None, event_date=None,
         embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="public",
         created_at="2026-07-03 12:00:00+00",
     )
@@ -599,7 +599,7 @@ def test_triage_updates_when_value_restated():
 
 
 def test_triage_replaces_when_value_changed():
-    conn = FakeConn([("FROM memories", [("old-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("old-id", "basic.location: Lives in Exampleville")])])
     action = triage_memory(
         conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Austin, Texas",
         content="basic.location: Lives in Austin, Texas", context=None, event_date=None,
@@ -625,7 +625,7 @@ def test_triage_skips_blank_value_text_never_reaches_replace():
     # Cross-review bug: a blank value_text scored 0.0 similarity against ANY
     # existing value, forcing REPLACE — soft-deleting the real memory and
     # inserting a blank "key_label: " row in its place.
-    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Exampleville")])])
     action = triage_memory(
         conn, person_id=CHRIS, key_label="basic.location", value_text="",
         content="basic.location: ", context=None, event_date=None,
@@ -637,7 +637,7 @@ def test_triage_skips_blank_value_text_never_reaches_replace():
 
 
 def test_triage_skips_whitespace_only_value_text():
-    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Exampleville")])])
     action = triage_memory(
         conn, person_id=CHRIS, key_label="basic.location", value_text="   ",
         content="basic.location:    ", context=None, event_date=None,
@@ -685,10 +685,10 @@ def test_triage_update_writes_privacy_level_param_for_sql_side_tightening():
     itself lives in SQL (no real DB here to execute it against), so what's
     provable offline is the SHAPE: the column is in the SET list and the
     incoming privacy_level rides the params, every single time."""
-    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Exampleville")])])
     action = triage_memory(
-        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
-        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Exampleville, VT",
+        content="basic.location: Lives in Exampleville, VT", context=None, event_date=None,
         embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="private",
         created_at="2026-07-03 12:00:00+00",
     )
@@ -704,10 +704,10 @@ def test_triage_update_case_only_tightens_toward_private_in_sql_text():
     # and otherwise fall back to the EXISTING row's privacy_level column
     # (never blindly assign the incoming 'public') — asserted on the SQL text
     # itself since there's no real Postgres here to execute the CASE against.
-    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Rotonda West")])])
+    conn = FakeConn([("FROM memories", [("existing-id", "basic.location: Lives in Exampleville")])])
     triage_memory(
-        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West, FL",
-        content="basic.location: Lives in Rotonda West, FL", context=None, event_date=None,
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Exampleville, VT",
+        content="basic.location: Lives in Exampleville, VT", context=None, event_date=None,
         embedding="[0.4,0.5,0.6]", source_platform="discord", privacy_level="public",
         created_at="2026-07-03 12:00:00+00",
     )
@@ -778,7 +778,7 @@ def test_live_refuses_when_write_mutex_already_held():
 
 
 def test_live_proceeds_and_triages_when_lease_held_by_brain_and_n8n_inactive():
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])  # nothing existing -> insert
     summary = run_live_extraction(
@@ -804,12 +804,12 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
         return [float(calls["n"])]
 
     two_obs = json.dumps([
-        {"key_label": "basic.location", "value_text": "Lives in Rotonda West", "context": None,
+        {"key_label": "basic.location", "value_text": "Lives in Exampleville", "context": None,
          "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
         {"key_label": "interest.game", "value_text": "Collects SNES games", "context": None,
          "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
     ])
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West and collect SNES")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville and collect SNES")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])
     run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder)
@@ -977,8 +977,8 @@ from aerys_v2.workers.extraction import soft_delete_memory, V2_TURNS_SQL  # noqa
 def test_triage_with_channel_and_category_records_provenance_after_insert():
     conn = FakeConn([("FROM memories", [])])
     action = triage_memory(
-        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Rotonda West",
-        content="basic.location: Lives in Rotonda West", context=None, event_date=None,
+        conn, person_id=CHRIS, key_label="basic.location", value_text="Lives in Exampleville",
+        content="basic.location: Lives in Exampleville", context=None, event_date=None,
         embedding="[0.1,0.2,0.3]", source_platform="portable", privacy_level="private",
         created_at="2026-09-06 12:00:00+00", channel="body-1", category=["trust:owner"],
     )
@@ -1067,7 +1067,7 @@ def test_a_group_still_truncated_plain_is_split_and_both_halves_land():
     raws = ["2026-07-03 12:00:00.000001+00", "2026-07-03 12:00:01.000001+00"]
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raws[0]),
-        row(CHRIS, "and I live in Rotonda West", id="b", at=T0 + timedelta(seconds=1), raw=raws[1]),
+        row(CHRIS, "and I live in Exampleville", id="b", at=T0 + timedelta(seconds=1), raw=raws[1]),
     ])])
     staging = FakeConn([("last_processed_at", [("2026-07-03 11:00:00+00",)])])
     llm = FakeLlm([cut_off('[{"key_label": "vehic'), cut_off('[{"key_label": "vehi'), OBS, OBS])
@@ -1075,8 +1075,8 @@ def test_a_group_still_truncated_plain_is_split_and_both_halves_land():
 
     assert [c[2:] for c in llm.calls] == [(), ("plain",), (), ()]
     halves = [c[1] for c in llm.calls[2:]]
-    assert "Dodge Ram" in halves[0] and "Rotonda" not in halves[0]
-    assert "Rotonda" in halves[1] and "Dodge Ram" not in halves[1]
+    assert "Dodge Ram" in halves[0] and "Exampleville" not in halves[0]
+    assert "Exampleville" in halves[1] and "Dodge Ram" not in halves[1]
     stats = summary["sources"]["prod_chat"]
     assert (stats["splits"], stats["parse_failures"], stats["observations"]) == (1, 0, 2)
     save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)

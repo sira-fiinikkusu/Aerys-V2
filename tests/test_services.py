@@ -185,7 +185,7 @@ def test_pinned_identity_claims_beat_high_confidence_ephemera():
     # Prod failure mode: 20 claims at 1.0 confidence rank ahead of location
     # (unlocked here — no manual-lock crutch) and partner at 0.93.
     rows = ephemera(20) + [
-        claim_row("basic.location", "basic.location: Rotonda West, Florida", confidence=0.93),
+        claim_row("basic.location", "basic.location: Exampleville, Vermont", confidence=0.93),
         claim_row("relationship.partner", "In a relationship with Robin", confidence=0.93),
     ]
     selected = select_claims(claims_of(rows))
@@ -198,11 +198,11 @@ def test_pinned_identity_claims_beat_high_confidence_ephemera():
 def test_pinning_survives_into_formatted_lines_via_get_profile():
     rows = ephemera(30) + [
         claim_row("basic.name", "Preferred name: Chris", confidence=0.5),
-        claim_row("basic.location", "basic.location: Rotonda West, Florida", confidence=0.5),
+        claim_row("basic.location", "basic.location: Exampleville, Vermont", confidence=0.5),
     ]
     conn = FakeConn([rows])
     profile = get_profile(conn, PERSON)["profile"]
-    assert any("Rotonda West" in line for line in profile["lines"])
+    assert any("Exampleville" in line for line in profile["lines"])
     # display_name comes from the pinned name claim even though pure confidence
     # ranking would have dropped it.
     assert profile["display_name"] == "Chris"

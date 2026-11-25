@@ -1,4 +1,4 @@
-"""get_weather — the house's own forecast (the Rotonda-Switzerland fix).
+"""get_weather — the house's own forecast (the town-in-Switzerland fix).
 
 Offline proof against a fake HA: current conditions, daily/today/tomorrow,
 hourly, the no-invented-percentages rule (precipitation inches only), span

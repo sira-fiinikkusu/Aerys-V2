@@ -19,12 +19,12 @@ def human(text, said=None, mid=None, **kw):
     return HumanMessage(content=text, id=mid, additional_kwargs=kwargs)
 
 
-def test_the_venice_line_is_read_against_monday():
-    history = [human("i have a doctor's appointment in venice tomorrow", MONDAY, "h1"),
+def test_the_fairview_line_is_read_against_monday():
+    history = [human("i have a doctor's appointment in fairview tomorrow", MONDAY, "h1"),
                AIMessage(content="Tomorrow in the area looks cloudy, 69 to 83.", id="a1"),
                human("I scheduled the tattoo appointment", "2026-11-11T19:22:00+00:00", "h2")]
     shown = with_said_dates(history, WEDNESDAY)
-    assert shown[0].content == "[said Mon Nov 9, 2:39 PM] i have a doctor's appointment in venice tomorrow"
+    assert shown[0].content == "[said Mon Nov 9, 2:39 PM] i have a doctor's appointment in fairview tomorrow"
     assert shown[0].id == "h1" and shown[0].additional_kwargs == history[0].additional_kwargs
     assert shown[1] is history[1]                     # her own reply: never labelled (she'd copy it)
     assert shown[2] is history[2]                     # the current turn: never labelled

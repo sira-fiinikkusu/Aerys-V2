@@ -150,7 +150,7 @@ def test_gate_hides_secret_bearing_dm_turn_from_public():
     # surface in a public room. The keyword backstop tags it private regardless of the
     # LLM judge, so redaction drops it.
     for secret in ("the garage code is 4482", "wifi password is guest1234",
-                   "my home address is 12 Rotonda Blvd", "the pin is 9931"):
+                   "my home address is 12 Example Blvd", "the pin is 9931"):
         assert keyword_verdict(secret) == "private", secret
         history = [_tagged(secret, "private"), AIMessage(content="got it"),
                    _tagged("hey everyone", "public")]

@@ -1,6 +1,6 @@
 """When each line in her thread was said (ticket T-6, 2026-11-11).
 
-The owner said on Monday "i have a doctor's appointment in venice tomorrow"; on Wednesday, by voice,
+The owner said on Monday "i have a doctor's appointment in fairview tomorrow"; on Wednesday, by voice,
 she read that line back out of the thread and told him the appointment was tomorrow. The thread's
 messages carried no time, so "tomorrow" was read against today. Her long-term memories already carry
 their dates (services/memory.py); conversation history did not.

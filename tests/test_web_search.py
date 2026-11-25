@@ -78,15 +78,15 @@ def test_max_results_defaults_to_five_and_clamps():
 
 def test_formats_answer_then_numbered_sources():
     fake = FakeTavily(payload={
-        "answer": "Rotonda West sees scattered storms this weekend.",
+        "answer": "Exampleville sees scattered storms this weekend.",
         "results": [
             {"title": "Weather.gov", "url": "https://weather.gov/x", "content": "Saturday: 30% rain, high 89."},
             {"title": "Weather Channel", "url": "https://weather.com/y", "content": "Sunday: sunny, high 91."},
         ],
     })
-    out = make_tool(fake).invoke({"query": "Rotonda West weekend weather"})
+    out = make_tool(fake).invoke({"query": "Exampleville weekend weather"})
     # the answer leads
-    assert out.startswith("Rotonda West sees scattered storms this weekend.")
+    assert out.startswith("Exampleville sees scattered storms this weekend.")
     # then the sources, numbered, pipe-delimited
     assert "Sources:" in out
     assert "1. Weather.gov | https://weather.gov/x | Saturday: 30% rain, high 89." in out

@@ -186,7 +186,7 @@ def test_appointments_read_from_personal_calendars_only():
         calls.append(url)
         return Resp([
             {"uid": "u1", "summary": "Dentist", "start": {"dateTime": "2026-11-10T12:30:00-05:00"},
-             "end": {"dateTime": "2026-11-10T13:15:00-05:00"}, "location": "Port Charlotte"},
+             "end": {"dateTime": "2026-11-10T13:15:00-05:00"}, "location": "Riverton"},
             {"uid": "u2", "summary": "Too recent", "start": {"dateTime": "2026-11-10T13:00:00-05:00"},
              "end": {"dateTime": "2026-11-10T13:45:00-05:00"}},
             {"uid": "u3", "summary": "Old", "start": {"dateTime": "2026-11-10T09:00:00-05:00"},
@@ -201,7 +201,7 @@ def test_appointments_read_from_personal_calendars_only():
     found = appointments_for(settings(), get=get)(DAY)
     assert all("calendar.work" not in u for u in calls) and len(calls) == 1          # personal only
     assert [(a.title, a.repeats) for a in found] == [("Dentist", False), ("Therapy", True)]
-    assert found[0].key == "appt:calendar.home:u1:2026-11-10T17:30:00+00:00" and found[0].location == "Port Charlotte"
+    assert found[0].key == "appt:calendar.home:u1:2026-11-10T17:30:00+00:00" and found[0].location == "Riverton"
     assert found[1].key.endswith(":u6:20261110T120000")
 
 

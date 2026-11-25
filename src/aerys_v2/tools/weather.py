@@ -1,7 +1,7 @@
 """weather — the house's own forecast, never a web search.
 
 Born from a receipt (2026-07-19): "is it gonna rain today?" went to search_web,
-Tavily resolved "Rotonda" to Rotonda, SWITZERLAND, and the model — honesty
+Tavily resolved his town's name to a same-named place in SWITZERLAND, and the model — honesty
 gates working — refused the 14.8°C garbage and had nothing better to offer.
 Local weather is not a search problem: Home Assistant sits on the same action
 graph with a weather entity configured for THIS house. This tool reads it.

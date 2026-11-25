@@ -503,8 +503,8 @@ def test_a_safety_warning_speaks_through_the_night_without_looping():
                                       text=lambda *a: None),
                      quiet=lambda t: True, meeting_hold=lambda: DAY, clock=lambda: NIGHT,
                      safety_voice_at_night=True)
-    assert desk.reach_out(ev(urgency="safety", headline="Tornado warning for Rotonda.")) == "sent"
-    assert spoken == ["Tornado warning for Rotonda."]
+    assert desk.reach_out(ev(urgency="safety", headline="Tornado warning for Exampleville.")) == "sent"
+    assert spoken == ["Tornado warning for Exampleville."]
 
 
 def test_a_detail_that_keeps_failing_is_still_tried_after_an_hour():
