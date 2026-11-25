@@ -92,6 +92,7 @@ from typing import Any, Callable, NamedTuple, Sequence
 from zoneinfo import ZoneInfo
 
 from ..services.location_guard import address_shaped, location_shaped
+from ..services.secret_guard import secret_kind
 from ..test_bodies import DEFAULT_PATTERNS as DEFAULT_TEST_BODY_PATTERNS
 from ..services.memory import Embedder, embedding_to_pgvector
 
@@ -673,6 +674,12 @@ def triage_memory(
     """
     if any(location_shaped(v) or address_shaped(v) for v in (key_label, value_text, content, context, source_text, event_date)):
         return "skipped"
+    # Keys and card numbers never become memories (services/secret_guard). Kind only in the log.
+    kind = next(filter(None, map(secret_kind, (key_label, value_text, content, context, source_text,
+                                               event_date))), None)
+    if kind:
+        log.warning("memory skipped: secret-shaped observation (%s)", kind)
+        return "skipped"
     if key_label is None or not key_label.strip():
         return "skipped"
     if not value_text.strip():
@@ -939,6 +946,12 @@ def parse_observations(text: str) -> list[dict] | None:
         # Inspect decoded fields so escaped newlines cannot bypass the guard.
         if any(location_shaped(v) or address_shaped(v) for v in obs.values() if isinstance(v, str)):
             log.warning("memory skipped: location-shaped observation")
+            continue
+        # Non-string values are read as their JSON: a bare number is still a card number.
+        kind = next(filter(None, (secret_kind(v if isinstance(v, str) else json.dumps(v))
+                                  for v in obs.values())), None)
+        if kind:
+            log.warning("memory skipped: secret-shaped observation (%s)", kind)
             continue
         if any(question_shaped(obs.get(k)) for k in ("value_text", "source_text", "context")):
             log.warning("memory skipped: question-shaped observation")
