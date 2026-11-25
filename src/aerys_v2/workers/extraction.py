@@ -373,7 +373,7 @@ ON CONFLICT (source) DO UPDATE
 # aerys.) hold several live rows (D97). ORDER BY + LIMIT 1 picks the newest.
 # D97: an append key may have several live rows; each is compared on its own.
 TRIAGE_SELECT_ALL_SQL = """\
-SELECT id, content FROM memories
+SELECT id, content, event_date FROM memories
 WHERE person_id = %(person_id)s::uuid AND key_label = %(key_label)s
   AND deleted_at IS NULL
 ORDER BY created_at DESC
@@ -799,10 +799,15 @@ def triage_memory(
     if append:
         # D97: events, interests and her own words add up. A near-identical restatement
         # refreshes its row; anything else is a new row beside the others.
-        for row_id, row_content in conn.execute(TRIAGE_SELECT_ALL_SQL,
-                                                {"person_id": person_id, "key_label": key_label}).fetchall():
+        for found in conn.execute(TRIAGE_SELECT_ALL_SQL,
+                                  {"person_id": person_id, "key_label": key_label}).fetchall():
+            row_id, row_content = found[0], found[1]
+            row_date = found[2] if len(found) > 2 else None
             row_value = _value_text_from_content(row_content)
-            if values_similar(row_value, value_text):
+            # Codex r4: the same description on two DIFFERENT dates is two occurrences (a concert on
+            # Nov 1 and again on Nov 20), never a restatement of one.
+            dated_apart = bool(row_date and event_date) and str(row_date).strip().lower() != str(event_date).strip().lower()
+            if values_similar(row_value, value_text) and not dated_apart:
                 if mined_from_turn and not (source_text and source_text.strip()) and not at_least_as_specific(value_text, row_value):
                     log.warning("memory skipped: weaker same-key observation")
                     return "skipped"

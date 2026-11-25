@@ -169,7 +169,8 @@ def test_a_second_distinct_event_is_added_beside_the_first():
 
 
 def test_a_restated_event_refreshes_its_own_row():
-    conn = FakeConn([("SELECT id, content FROM memories", [("e1", "event.concert: Saw Bruno Mars at the Arena")])])
+    conn = FakeConn([("SELECT id, content, event_date FROM memories",
+                      [("e1", "event.concert: Saw Bruno Mars at the Arena", None)])])
     assert _triage(conn, "event.concert", "Saw Bruno Mars at the Arena", append=True) == "update"
     updates = [p for s, p in conn.calls if s.lstrip().startswith("UPDATE memories")]
     assert updates and updates[0]["id"] == "e1"
@@ -283,7 +284,8 @@ def test_append_prefixes_agree_between_recall_and_extraction():
 
 def test_a_replace_never_retires_two_rows():
     """r1 #2: retiring basic.job must not ALSO retire the live work.role the new fact lands on."""
-    conn = FakeConn([("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
+    conn = FakeConn([("SELECT id, content, event_date FROM memories", [("w9", "work.role: Team lead", None)]),
+                     ("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
                      ("RETURNING id, key_label", [("k1",)]), ("RETURNING id", [("n1",)])])
     action = _triage(conn, "work.role", "Automation engineer on the apps team", replace_id="k1")
     retires = [p for s, p in conn.calls if "RETURNING id, key_label" in s]
@@ -341,7 +343,8 @@ def test_a_single_valued_interest_can_be_replaced_either_way(known_key, new_key)
 def test_an_unhonoured_replace_is_counted_as_ignored_even_when_triage_replaces_another_row():
     prod = FakeConn([("FROM memories m", [("k1", "basic.job", "basic.job: Team lead")]),
                      ("FROM n8n_chat_histories", [row(CHRIS, "I'm an automation engineer now")])])
-    write = FakeConn([("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
+    write = FakeConn([("SELECT id, content, event_date FROM memories", [("w9", "work.role: Team lead", None)]),
+                      ("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
                       ("RETURNING id, key_label", [("k1",)]), ("RETURNING id", [("n1",)])])
     summary = run_live_extraction(prod, lease_conn(holder="brain"), write, FakeLlm([json.dumps(
         [obs("work.role", "Automation engineer", "I'm an automation engineer now", replaces="k1")])]), lambda t: [0.5])
@@ -358,3 +361,25 @@ def test_the_prompt_names_exactly_the_code_state_and_append_prefixes():
     assert {f"{w.strip()}." for w in state.split(",")} == set(ex.STATE_PREFIXES)
     assert "Never for an event or an aerys item" in line
     assert set(ex.APPEND_PREFIXES) == {"event.", "aerys."}
+
+
+def _triage_dated(conn, value, date):
+    return triage_memory(conn, person_id=CHRIS, key_label="event.concert", value_text=value,
+                         content=f"event.concert: {value} ({date})", context=None, event_date=date, embedding="[0.1]",
+                         source_platform="discord_dm", privacy_level="private",
+                         created_at="2026-11-20 15:00:00+00", mined_from_turn=True, source_text=value)
+
+
+def test_the_same_event_on_another_date_is_a_second_occurrence():
+    """Codex r4: Bruno Mars on Nov 1 and again on Nov 20 are two concerts, not one updated."""
+    conn = FakeConn([("SELECT id, content, event_date FROM memories",
+                      [("e1", "event.concert: Saw Bruno Mars at the Arena (Nov 1)", "Nov 1")]),
+                     ("RETURNING id", [("e2",)])])
+    assert _triage_dated(conn, "Saw Bruno Mars at the Arena", "Nov 20") == "insert"
+    assert not [p for s, p in conn.calls if s.lstrip().startswith("UPDATE memories")]
+
+
+def test_the_same_event_on_the_same_date_refreshes_its_row():
+    conn = FakeConn([("SELECT id, content, event_date FROM memories",
+                      [("e1", "event.concert: Saw Bruno Mars at the Arena (Nov 1)", "Nov 1")])])
+    assert _triage_dated(conn, "Saw Bruno Mars at the Arena", "Nov 1") == "update"
