@@ -90,6 +90,9 @@ class Verdict:
     # The approval system itself failed (approvals unreadable, the button couldn't be raised, a lookup
     # down), as opposed to a wait or a no. Telemetry only: the answer is the same refusal either way.
     infra: bool = False
+    # G5: on a go, the branch that let it (message(): to_owner, to_owner_carve_out_D58, confirmed_contact),
+    # for the turn's record. Telemetry only.
+    basis: str = ""
 
 
 GO = Verdict(True)
@@ -536,7 +539,7 @@ class HandsGate:
         # D58 (11/15 20:22): to him, outside text changes nothing; his button would only show him these
         # same words ("so it protects nothing"). Discord, the one platform the message tool sends on.
         if pid == str(self.owner) and (not tainted or platform == "discord"):
-            return GO
+            return Verdict(True, basis="to_owner_carve_out_D58" if tainted else "to_owner")
         address = str(p.get("address") or "").strip()
         if not address:
             return Verdict(False, f"Not sent: I don't have a {label} address for {p.get('name') or to}. Ask Chris.")
@@ -577,7 +580,7 @@ class HandsGate:
                                  summary=f"Send again to {name} · {label}: {handle} (the last try may have gone through)",
                                  detail=f"{to_line}\nThe last try may have gone through; this sends the same "
                                         f"words again.\n\nWhat she'd send again:\n{text}", what=what)
-            return GO
+            return Verdict(True, basis="confirmed_contact")
         what = f"your first message to {name} ({label}: {handle})"
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
                          {"platform": platform, "address": address, "person_id": str(pid), "name": name,

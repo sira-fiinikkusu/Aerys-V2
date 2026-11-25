@@ -575,3 +575,121 @@ def test_every_other_home_job_case_still_waits_for_his_tap(who):
     req = _home_job_request(identity, messages, name='update_async_task' if who == 'adjusting' else 'start_async_task')
     out = outside_guard(req, lambda r: pytest.fail('went straight'), gate=None if who == 'no gate' else b.gate)
     assert isinstance(out, ToolMessage)                       # held: a card, a wait or a no
+
+
+# --- G5: why a reach-out went straight is written on its receipt and into the turn's tool_calls ------
+# No behavior change: the same calls go and wait as before; only the record says which branch let one go.
+
+def _receipt(content, call_id='send', name='remember'):
+    return ToolMessage(content=content, name=name, tool_call_id=call_id)
+
+
+def _basis(result):
+    return (getattr(result, 'response_metadata', None) or {}).get('basis')
+
+
+def test_a_clean_turn_reach_out_records_clean_turn_in_the_turns_tool_calls():
+    from aerys_v2.turns import extract_tool_calls
+    req = request([HumanMessage(content='remember this')], name='remember', args={'fact': 'x'})
+    out = outside_guard(req, lambda r: _receipt('Kept: x'))
+    assert out.content == 'Kept: x' and _basis(out) == 'clean_turn'
+    asked = AIMessage(content='', tool_calls=[{'name': 'remember', 'args': {}, 'id': 'send'}])
+    assert extract_tool_calls([asked, out]) == [
+        {'name': 'remember', 'ok': True, 'error_class': None, 'basis': 'clean_turn'}]
+    assert extract_tool_calls([asked, _receipt('Kept: x')]) == [
+        {'name': 'remember', 'ok': True, 'error_class': None}]        # no basis, no key (old rows unchanged)
+
+
+def test_each_carve_out_records_its_own_branch():
+    b = Box()
+    jobs = [ToolMessage(content='[]', name='list_async_tasks', tool_call_id='r')]
+    d29 = request(jobs, name='remember', args={'fact': 'x'})
+    assert _basis(outside_guard(d29, lambda r: _receipt('Kept: x'), gate=b.gate)) == 'own_home_job_results_D29'
+    d62 = outside_guard(_kael_request(TEXT), lambda r: _receipt('Delivered', name='message_kael'), gate=b.gate)
+    assert _basis(d62) == 'owner_carve_out_D62'
+    d64 = outside_guard(_home_job_request(TEXT), lambda r: _receipt('started', name='start_async_task'),
+                        gate=b.gate)
+    assert _basis(d64) == 'owner_carve_out_D64'
+    assert not b.approval_store.rows
+
+
+def test_a_command_result_carries_the_basis_on_its_own_tool_message():
+    from langgraph.types import Command
+    req = _home_job_request(TEXT, messages=[HumanMessage(content='start it')])
+    other = ToolMessage(content='elsewhere', name='x', tool_call_id='other')
+    out = outside_guard(req, lambda r: Command(update={'messages': [_receipt('started', name='start_async_task'),
+                                                                    other]}))
+    mine, theirs = out.update['messages']
+    assert _basis(mine) == 'clean_turn' and mine.content == 'started' and _basis(theirs) is None
+
+
+def test_reads_refusals_and_non_reach_outs_record_no_basis():
+    read = request([], name='read_email', args={})
+    assert _basis(outside_guard(read, lambda r: _receipt('mail', name='read_email'))) is None
+    house = request([], name='home_control', args={})
+    assert _basis(outside_guard(house, lambda r: _receipt('done', name='home_control'))) is None
+    held = request([ToolMessage(content='outside', name='read_email', tool_call_id='r')])
+    out = outside_guard(held, lambda r: pytest.fail('sent'))
+    assert 'Not sent' in out.content and _basis(out) is None
+
+
+def test_a_tools_own_basis_is_read_back_onto_its_receipt():
+    """send_message decides through D12 itself; the branch it took rides back through the turn's holder."""
+    from aerys_v2.outside_guard import note_basis
+    req = request([], name='send_message', args={'to': 'chris_h', 'text': 'hi'})
+
+    def tool_ran(r):
+        note_basis(r.runtime.config, 'send', 'to_owner')
+        return _receipt('Sent: the signed message went through Discord.', name='send_message')
+
+    assert _basis(outside_guard(req, tool_ran)) == 'to_owner'
+    both = request([], name='remember', args={'fact': 'x'})
+
+    def remembered(r):
+        note_basis(r.runtime.config, 'send', 'own_reason')
+        return _receipt('Kept: x')
+
+    assert _basis(outside_guard(both, remembered)) == 'clean_turn+own_reason'
+    plain = request([], name='send_message', args={'to': 'chris_h', 'text': 'hi'})
+    assert _basis(outside_guard(plain, lambda r: _receipt('Not sent: no.', name='send_message'))) is None
+
+
+def test_the_async_path_records_the_same_basis(monkeypatch):
+    import aerys_v2.outside_guard as guard
+
+    async def immediate(fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(guard.asyncio, 'to_thread', immediate)
+
+    async def handler(req):
+        return _receipt('Kept: x')
+
+    req = request([HumanMessage(content='remember')], name='remember', args={'fact': 'x'})
+    coroutine = guard.outside_middleware().awrap_tool_call(req, handler)
+    with pytest.raises(StopIteration) as done:
+        coroutine.send(None)
+    assert _basis(done.value.value) == 'clean_turn'
+
+
+def test_the_basis_reaches_the_turns_tool_calls_through_the_real_engine():
+    from aerys_v2.factory import build_action_graph
+    from aerys_v2.turns import extract_tool_calls
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    @tool('remember')
+    def target(fact: str) -> str:
+        """A test write."""
+        return f'Kept: {fact}'
+
+    replies = [AIMessage(content='', tool_calls=[{'name': 'remember', 'args': {'fact': 'x'}, 'id': 'w'}]),
+               AIMessage(content='done')]
+    b = Box()
+    graph = build_action_graph(GenericFakeChatModel(messages=iter(replies)), 'test', [target],
+                               outside_gate=b.gate, guard_owner=OWNER)
+    out = graph.invoke({'messages': [HumanMessage(content='remember x')]}, {'configurable': {
+        'thread_id': OWNER_THREAD, 'identity': TEXT, 'outside_text': {}}})
+    receipt = next(m for m in out['messages'] if isinstance(m, ToolMessage))
+    assert receipt.content == 'Kept: x'                    # what the model sees is unchanged
+    assert extract_tool_calls(out['messages']) == [
+        {'name': 'remember', 'ok': True, 'error_class': None, 'basis': 'clean_turn'}]

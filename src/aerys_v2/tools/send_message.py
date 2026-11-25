@@ -13,7 +13,7 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
 
 from aerys_v2.hands_gate import MESSAGE
-from aerys_v2.outside_guard import sources_for
+from aerys_v2.outside_guard import note_basis, sources_for
 from aerys_v2.state import is_voice_turn
 
 log = logging.getLogger(__name__)
@@ -232,7 +232,8 @@ class MessageSender:
         return self._deliver(str(args.get('person_id') or ''), args.get('platform'),
                              args.get('address'), str(args.get('text') or ''))
 
-    def send(self, to, text, platform, identity, thread, sources):
+    def send(self, to, text, platform, identity, thread, sources, *, note_basis=None):
+        """note_basis(code), when given, hears the D12 branch that let the message go (G5: the turn's record)."""
         if str(identity.get('user_id') or '') != str(self.gate.owner) or str(thread).startswith('kael:'):
             return 'Not sent: only the owner can ask me to message someone.'
         if str(platform).strip().lower() != 'discord':
@@ -254,6 +255,7 @@ class MessageSender:
                     return "Not sent: that person isn't on the list of people I can message; ask the owner."
             # D42: a wake turn's only outside source is being unattended; the message he asked for when
             # it was set is his word already, so for exactly that send the wake-up isn't outside text.
+            pinned = None
             if tuple(sources) == ('unattended wake-up',) and identity.get('unattended'):
                 pinned = self._wake_pin(thread, identity, destinations, text)
                 if pinned is not None:
@@ -266,6 +268,11 @@ class MessageSender:
                 return verdict.text
             if len(destinations) != 1 or not address:
                 return 'Not sent: I need an unambiguous Discord address. Ask the owner.'
+            if note_basis is not None:
+                try:                                   # telemetry only: never changes whether it's sent
+                    note_basis(('wake_pin_D42+' if pinned is not None else '') + (verdict.basis or 'message_gate'))
+                except Exception:
+                    log.debug('send_message: the turn record missed this send\'s basis', exc_info=True)
             ok, reason = self._deliver(pid, 'discord', address, words)
             return 'Sent: the signed message went through Discord.' if ok else f'Not sent: {reason}.'
         except Exception:
@@ -284,7 +291,8 @@ def build_send_message_tool(sender):
         try:
             conf = runtime.config.get('configurable') or {}
             sources = sources_for(SimpleNamespace(runtime=runtime, state=runtime.state))
-            return sender.send(to, text, platform, conf.get('identity') or {}, conf.get('thread_id', ''), sources)
+            return sender.send(to, text, platform, conf.get('identity') or {}, conf.get('thread_id', ''), sources,
+                               note_basis=lambda code: note_basis(runtime.config, getattr(runtime, 'tool_call_id', None), code))
         except Exception:
             return 'Not sent: I could not check the outside-text guard.'
     return send_message

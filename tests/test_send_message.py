@@ -342,3 +342,26 @@ def test_unsure_voice_to_a_confirmed_contact_waits_for_his_tap():
     assert 'Waiting' in call(sender, 'see you at six', sources=tuple(sources), identity=UNSURE)
     assert not sent
     assert call(sender, 'see you at six').startswith('Sent:') and len(sent) == 1
+
+
+def test_the_d12_branch_is_handed_to_the_turn_record():
+    """G5: the tool passes the branch that let the message go to note_basis (the turn's holder)."""
+    b, sender, sent, ledger = setup()
+    noted = []
+    to_him = sender.send('chris_h', 'hi', 'discord', TEXT, OWNER_THREAD, (), note_basis=noted.append)
+    assert to_him.startswith('Sent:') and noted == ['to_owner']
+    assert 'Waiting' in sender.send('sam', 'first', 'discord', TEXT, OWNER_THREAD, (), note_basis=noted.append)
+    assert noted == ['to_owner']                                   # a wait records nothing
+    b.tap(); b.watcher.tick()
+    assert sender.send('sam', 'next', 'discord', TEXT, OWNER_THREAD, (), note_basis=noted.append).startswith('Sent:')
+    assert noted == ['to_owner', 'confirmed_contact']
+
+
+def test_a_broken_basis_note_never_changes_the_send():
+    b, sender, sent, ledger = setup()
+
+    def broken(code):
+        raise RuntimeError('holder gone')
+
+    assert sender.send('chris_h', 'hi', 'discord', TEXT, OWNER_THREAD, (), note_basis=broken).startswith('Sent:')
+    assert len(sent) == 1

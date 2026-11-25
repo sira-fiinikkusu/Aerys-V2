@@ -27,6 +27,13 @@ HOME_JOB_READERS = frozenset({'check_async_task', 'list_async_tasks'})
 TRUSTED_AFTER_HOME_JOBS = frozenset({'remember', 'message_kael'})
 OUTSIDE_ACTION = 'outside_action'
 REFUSAL = 'Not done: I could not check the outside-text guard, so nothing happened.'
+#: G5: why a reach-out was let through, named for the branch of _decide that let it (written on its receipt
+#: as response_metadata['basis'], and from there into the turn's tool_calls). A tool that decides for itself
+#: (send_message, through D12) adds its own with note_basis; both together read 'clean_turn+confirmed_draft'.
+CLEAN_TURN = 'clean_turn'
+D29_OWN_JOB_RESULTS = 'own_home_job_results_D29'
+D62_CARVE_OUT = 'owner_carve_out_D62'
+D64_CARVE_OUT = 'owner_carve_out_D64'
 
 
 def origin_sources(identity, thread_id, owner, shared_surface_ids=(), members=None):
@@ -93,15 +100,15 @@ def _refusal(request, text):
 
 
 def _answer(request, verdict, conf):
-    """The gate's verdict as the tool result. A refusal that is the approval system failing (infra)
+    """The gate's verdict as (refusal, basis). A refusal that is the approval system failing (infra)
     marks the turn guard_error, so it mines as outside_guard_failed; a wait or a no doesn't."""
     if verdict.go:
-        return None
+        return None, getattr(verdict, 'basis', '') or 'hands_gate'
     if getattr(verdict, 'infra', False):
         holder = conf.get('outside_text')
         if holder is not None:
             holder['guard_error'] = True
-    return _refusal(request, verdict.text)
+    return _refusal(request, verdict.text), None
 
 
 def _owner_typed_on_discord(conf, gate):
@@ -115,6 +122,8 @@ def _owner_typed_on_discord(conf, gate):
 
 
 def _decide(request, gate):
+    """(refusal, basis): a ToolMessage when the call is refused or waits; else None and, for a reach-out,
+    the G5 basis code naming the branch that let it go (None for anything that isn't a reach-out)."""
     sources = sources_for(request)
     conf = request.runtime.config.get('configurable') or {}
     holder = conf.get('outside_text')
@@ -134,9 +143,11 @@ def _decide(request, gate):
     # The message tool reads this same snapshot through ToolRuntime and calls D12 itself.
     # Its button shows the resolved identity and signed words, not an outside_action wrapper.
     if name == 'send_message':
-        return None
-    if not sources or not reaches:
-        return None
+        return None, None
+    if not reaches:
+        return None, None
+    if not sources:
+        return None, CLEAN_TURN
     if name in ('write_file', 'edit_file'):
         # 11/19 (Chris tapped Approve on a home-skill edit that could never land, and nobody told him): a
         # write to anything but her own /skills/ shelf asks nobody and runs nothing. It's refused HERE, in
@@ -146,36 +157,36 @@ def _decide(request, gate):
         path = str(args.get('file_path') or '')
         if not writable_skill_path(path):
             return _refusal(request, HOME_SKILL_REFUSAL if path.startswith(BODY_SKILLS) else
-                            'Not saved: I can only write my own skills, under /skills/<name>/. Nothing changed.')
+                            'Not saved: I can only write my own skills, under /skills/<name>/. Nothing changed.'), None
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
-        return None
+        return None, D29_OWN_JOB_RESULTS
     # D62 (Chris 11/18 10:20: "she shouldnt be hitting privacy gates when i message her on discord"):
     # after reading outside text, her note to Kael goes straight when HE asked in his own typed words
     # on Discord, as D58 lets her Discord message to him go. Kael reads her notes as observations,
     # never as instructions. Only her own reads taint it here; another asker, a voice, a shared
     # surface, a relayed message, a room or an unattended run still waits for his tap.
     if name == 'message_kael' and set(sources) <= READERS and _owner_typed_on_discord(conf, gate):
-        return None
+        return None, D62_CARVE_OUT
     # D64 (Chris 11/18 11:24, "a"): the same for starting a home job. 11:22 she listed her home jobs
     # (their reports carry web text), and starting the MapTap he asked for raised a card he "shouldnt
     # really need at home". The D10 gate, next in line, still decides who may start one. Adjusting a
     # running job (update_async_task), another asker, a voice, Telegram, a relay or an unattended run
     # still waits for his tap.
     if name == 'start_async_task' and set(sources) <= READERS and _owner_typed_on_discord(conf, gate):
-        return None
+        return None, D64_CARVE_OUT
     if name == 'send_email':
         # D28 (11/11, the follow-through): after outside text an email waits for his tap. The button
         # shows the exact mail; his tap is the confirmation, and the watcher sends exactly that, once
         # (action_executor). Her `confirmed` flag never rides along: the tap decides.
         if gate is None:
             return _refusal(request, 'Not sent: after reading outside text, email needs the owner’s '
-                            'Approve button, which is unavailable. Nothing was sent.')
+                            'Approve button, which is unavailable. Nothing was sent.'), None
         # Shown exactly as send_email will send it (it collapses the subject and trims the body;
         # Codex review 11/11): what he approves is what goes.
         mail = {'to': str(args.get('to') or '').strip(), 'subject': ' '.join(str(args.get('subject') or '').split()),
                 'body': str(args.get('body') or '').strip()}
         if not mail['to'] or not mail['body']:
-            return _refusal(request, 'Not sent: I need who it is to and what it says before asking the owner.')
+            return _refusal(request, 'Not sent: I need who it is to and what it says before asking the owner.'), None
         identity, thread = conf.get('identity') or {}, conf.get('thread_id', '')
         from aerys_v2.hands_gate import _key
         payload = {'tool': name, 'tool_args': mail, 'identity': identity,
@@ -188,7 +199,7 @@ def _decide(request, gate):
         return _answer(request, verdict, conf)
     if gate is None:
         return _refusal(request, 'Not done: after reading outside text this needs the owner’s '
-                        'Approve button, which is unavailable. Nothing happened.')
+                        'Approve button, which is unavailable. Nothing happened.'), None
     identity, thread = conf.get('identity') or {}, conf.get('thread_id', '')
     if name in ('start_async_task', 'update_async_task'):
         verdict = gate.home_job(identity, thread, name, args, request.state, tainted=sources)
@@ -203,10 +214,10 @@ def _decide(request, gate):
     return _answer(request, verdict, conf)
 
 
-def outside_guard(request, handler, *, gate=None):
-    """Shared guard for ToolNode and AgentMiddleware. Its own errors never escape."""
+def _checked(request, gate):
+    """_decide, failing closed: (refusal, basis). Its own errors never escape."""
     try:
-        refused = _decide(request, gate)
+        return _decide(request, gate)
     except Exception:
         try:
             holder = request.runtime.config.get('configurable', {}).get('outside_text')
@@ -217,8 +228,54 @@ def outside_guard(request, handler, *, gate=None):
                 holder['guard_error'] = True
         except Exception:
             pass
-        return _refusal(request, REFUSAL)
-    return handler(request) if refused is None else refused
+        return _refusal(request, REFUSAL), None
+
+
+def note_basis(config, tool_call_id, code):
+    """G5: a tool that decides for itself (send_message through D12) says which branch let it go. Kept on
+    the turn's holder by call id; the guard writes it onto that call's receipt. Never raises."""
+    try:
+        holder = ((config or {}).get('configurable') or {}).get('outside_text')
+        if holder is not None and tool_call_id and code:
+            holder.setdefault('basis', {})[str(tool_call_id)] = str(code)
+    except Exception:
+        pass
+
+
+def _with_basis(message, code):
+    return message.model_copy(update={'response_metadata': {**(message.response_metadata or {}), 'basis': code}})
+
+
+def _after(request, result, basis):
+    """What the tool returned, with its G5 basis on this call's receipt (a ToolMessage, or the ToolMessage
+    for this call inside a Command). Anything else passes through unchanged; so does a result on error."""
+    try:
+        call_id = request.tool_call.get('id')
+        holder = ((request.runtime.config or {}).get('configurable') or {}).get('outside_text') or {}
+        own = (holder.get('basis') or {}).get(str(call_id)) if isinstance(holder, dict) else None
+        code = '+'.join(b for b in (basis, own) if b)
+        if not code:
+            return result
+        if isinstance(result, ToolMessage) and result.tool_call_id == call_id:
+            return _with_basis(result, code)
+        from langgraph.types import Command
+        update = result.update if isinstance(result, Command) else None
+        if isinstance(update, dict) and isinstance(update.get('messages'), list):
+            import dataclasses
+            messages = [_with_basis(m, code) if isinstance(m, ToolMessage) and m.tool_call_id == call_id else m
+                        for m in update['messages']]
+            return dataclasses.replace(result, update={**update, 'messages': messages})
+    except Exception:
+        pass
+    return result
+
+
+def outside_guard(request, handler, *, gate=None):
+    """Shared guard for ToolNode and AgentMiddleware. Its own errors never escape."""
+    refused, basis = _checked(request, gate)
+    if refused is not None:
+        return refused
+    return _after(request, handler(request), basis)
 
 
 def outside_middleware(gate=None):
@@ -230,8 +287,10 @@ def outside_middleware(gate=None):
 
         async def awrap_tool_call(self, request, handler):
             # Same decision function, without blocking the event loop on approval I/O.
-            result = await asyncio.to_thread(outside_guard, request, lambda r: None, gate=gate)
-            return await handler(request) if result is None else result
+            refused, basis = await asyncio.to_thread(_checked, request, gate)
+            if refused is not None:
+                return refused
+            return _after(request, await handler(request), basis)
 
     return OutsideTextGuard()
 

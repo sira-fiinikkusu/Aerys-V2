@@ -319,7 +319,12 @@ def extract_tool_calls(messages: list) -> list[dict]:
             )
             name = "unknown"
         error_class = classify_tool_result(content, getattr(m, "status", None))
-        calls.append({"name": name, "ok": error_class is None, "error_class": error_class})
+        call = {"name": name, "ok": error_class is None, "error_class": error_class}
+        # G5: why a reach-out was let through (outside_guard writes it on the receipt); absent otherwise.
+        basis = (getattr(m, "response_metadata", None) or {}).get("basis")
+        if isinstance(basis, str) and basis:
+            call["basis"] = basis
+        calls.append(call)
     return calls
 
 

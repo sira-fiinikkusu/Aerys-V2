@@ -1216,3 +1216,19 @@ def test_postgres_sweep_is_a_compare_and_set_on_running_and_the_decision_age(mon
     assert "status = 'running'" in sql and "v2_approvals" in sql and "decided_at < %s" in sql
     assert args == (hands_gate.INTERRUPTED, NOW, 7, cutoff)
     assert store.finish(7, "done", "ok", NOW) is True
+
+
+# --- G5: the branch that let a message go is on the verdict ----------------------------------------
+
+
+def test_a_message_that_goes_says_which_branch_let_it():
+    b = Box()
+    assert b.gate.message(OWNER_THREAD, "discord", "chris_h", "hi", TEXT).basis == "to_owner"
+    assert b.gate.message(OWNER_THREAD, "discord", "chris_h", "hi", TEXT,
+                          tainted=("read_web_page",)).basis == "to_owner_carve_out_D58"
+    first = b.gate.message(OWNER_THREAD, "discord", "sam_42", "first", TEXT)
+    assert not first.go and first.basis == ""
+    b.tap()
+    b.watcher.tick()
+    later = b.gate.message(OWNER_THREAD, "discord", "sam_42", "later", TEXT)
+    assert later.go and later.basis == "confirmed_contact"
