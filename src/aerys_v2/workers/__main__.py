@@ -79,6 +79,17 @@ def extraction_llm(settings):
     )
 
 
+def stated_check(settings):
+    """M1: the Jev check that lets a fact he states inside a question be kept. None (the old rule:
+    nothing from a question line) without the TypeSafe key or with EXTRACTION_FACTS_IN_QUESTIONS off."""
+    from .extraction import jev_stated_check
+
+    key = getattr(settings, "typesafe_api_key", None)
+    if not key or not getattr(settings, "extraction_facts_in_questions", True):
+        return None
+    return jev_stated_check(key.get_secret_value())
+
+
 def _run_once(settings: Settings, *, live: bool = False) -> dict:
     """One pass: shadow staging by default, or prod triage when --live."""
     import psycopg
@@ -111,6 +122,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                         batch_limit=settings.extraction_batch_limit,
                         sealed_rooms=sealed_rooms,
                         test_bodies=test_body_patterns(settings),
+                        stated=stated_check(settings),
                     )
             else:
                 summary = run_extraction(

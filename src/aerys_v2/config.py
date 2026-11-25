@@ -787,6 +787,9 @@ class Settings(BaseSettings):
     # Reuses embeddings_api_key (it's an OpenRouter key) for the extraction LLM.
     # Where the extractor's model runs: "anthropic" (default since 2026-10-07, the
     # plan's monthly API credit covers it) or "openrouter" (extraction_model below).
+    # M1 (2026-11-25, #259): a fact he states inside a question is kept when Jev says he states it
+    # as true (>= 0.7). Off = the old rule (nothing from a question-shaped line). Needs TYPESAFE_API_KEY.
+    extraction_facts_in_questions: bool = True
     extraction_backend: str = "anthropic"
     extraction_anthropic_model: str = "claude-haiku-5-5"
     extraction_model: str = "anthropic/claude-haiku-5.5"  # v1's extractor, via OpenRouter
