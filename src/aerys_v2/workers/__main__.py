@@ -659,7 +659,7 @@ def _sleep_main(settings: Settings, args) -> int:
                 found = tidy(mem, owner, judge, known={}, busy=set(), today=today)
             for p in found:
                 if p.status == "proposed":
-                    print(f"[{p.kind}] p={p.score:.2f} retire={p.retire_ids} keep={p.keep_ids} :: "
+                    print(f"[{p.kind}{' CAREFUL' if p.careful else ''}] p={p.score:.2f} retire={p.retire_ids} keep={p.keep_ids} :: "
                           + " || ".join(f"{k[:8]} {v}" for k, v in p.snapshot.items()))
             print(f"tidy (dry run): {sum(p.status == 'proposed' for p in found)} proposed, "
                   f"{sum(p.status == 'clear' for p in found)} clear, {judge.asked} asked, {judge.over} over the cap")

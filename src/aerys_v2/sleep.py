@@ -98,7 +98,7 @@ QUESTIONS = {
     },
     "plan_passed": {
         "type": "noul",
-        "instructions": "Is `memory` a plan, an expectation or an upcoming event whose time has clearly passed "
+        "instructions": "Is `line` a plan, an expectation or an upcoming event whose time has clearly passed "
                         "by `today`?",
         "criteria": {
             "true": "It was about a time that is now over (\"plans to go to the market on Oct 29\" when today "
@@ -109,7 +109,7 @@ QUESTIONS = {
     },
     "momentary": {
         "type": "noul",
-        "instructions": "Does `claim` describe a passing moment or a temporary situation, rather than "
+        "instructions": "Does `line` describe a passing moment or a temporary situation, rather than "
                         "something lasting about him?",
         "criteria": {
             "true": "A moment or a short-lived state (\"restarted the system and is doing final checks\", "
@@ -119,6 +119,25 @@ QUESTIONS = {
         },
     },
 }
+
+#: Asked in the same request as plan_passed / momentary (speculatively; code reads it only when the line would be
+#: proposed). A line that also carries something lasting is still proposed, but marked careful: read it first,
+#: and "Approve all" on the dashboard skips it (a side agent's catch, 11/25: "recently married or about to be",
+#: a name tied to an old trip plan, a launch he watched).
+QUESTIONS["lasting"] = {
+    "type": "noul",
+    "instructions": "Besides any plan or passing moment, does `line` also say something lasting about him that "
+                    "would be lost if the line were removed: who he is, who he knows, what he likes, or something "
+                    "he did?",
+    "criteria": {
+        "true": "Removing it would lose a lasting fact (\"recently married or about to be\" says he is married; "
+                "\"knows someone named Sam, planned to leave at 9 with Sam\" says he knows Sam; \"watched the "
+                "launch from home\" is something he did).",
+        "false": "It is only the plan or the moment (\"going to bed\", \"plans to visit the hardware store "
+                 "after work\", \"tired today\").",
+    },
+}
+LASTING_AT = 0.5           # erring toward careful: a coin flip is read by him, never approved in bulk
 
 LIVE_FACTS_SQL = """\
 SELECT id::text, key_label, content, created_at, embedding IS NOT NULL
@@ -160,11 +179,14 @@ WHERE person_id = %(person_id)s::uuid AND status IN ('proposed', 'approved')
 """
 SAVE_SQL = """\
 INSERT INTO v2_memory_proposals
-  (proposal_key, person_id, kind, retire_table, retire_ids, keep_ids, snapshot, reason, score, status)
+  (proposal_key, person_id, kind, retire_table, retire_ids, keep_ids, snapshot, reason, score, status, careful)
 VALUES (%(proposal_key)s, %(person_id)s::uuid, %(kind)s, %(retire_table)s, %(retire_ids)s::text[],
-        %(keep_ids)s::text[], %(snapshot)s::jsonb, %(reason)s, %(score)s, %(status)s)
+        %(keep_ids)s::text[], %(snapshot)s::jsonb, %(reason)s, %(score)s, %(status)s, %(careful)s)
 ON CONFLICT (proposal_key) DO NOTHING
 """
+
+
+_CAREFUL = " It may also hold something lasting about him: read it before approving."
 
 
 def _value(key: str | None, content: str | None) -> str:
@@ -197,12 +219,13 @@ class Proposal:
     score: float | None
     status: str = "proposed"          # or 'clear': judged, nothing to propose
     key: str = ""
+    careful: bool = False             # holds something lasting too: read it, never approve it in bulk
 
     def row(self, person_id: str) -> dict:
         return {"proposal_key": self.key, "person_id": person_id, "kind": self.kind,
                 "retire_table": self.retire_table, "retire_ids": list(self.retire_ids),
                 "keep_ids": list(self.keep_ids), "snapshot": json.dumps(self.snapshot), "reason": self.reason,
-                "score": self.score, "status": self.status}
+                "score": self.score, "status": self.status, "careful": bool(self.careful)}
 
 
 class Judge:
@@ -215,19 +238,24 @@ class Judge:
         self.over = 0
 
     def ask(self, qid: str, state: dict) -> float | None:
+        return self.ask_many((qid,), state).get(qid)
+
+    def ask_many(self, qids: tuple, state: dict) -> dict:
+        """Several questions over one state in ONE request (one unit of the budget). Missing or bad answers are
+        left out of the result."""
         if self.asked >= self.budget:
             self.over += 1
-            return None
+            return {}
         self.asked += 1
         try:
-            response = self.client.system_one(state=state, questions={qid: QUESTIONS[qid]}, model=self.model)
-            v = response.answers[qid].noul
+            response = self.client.system_one(state=state, questions={q: QUESTIONS[q] for q in qids},
+                                              model=self.model)
+            answers = {q: response.answers[q].noul for q in qids if q in response.answers}
         except Exception:  # noqa: BLE001 -- a failed look proposes nothing
-            log.warning("sleep: Jev %s failed", qid, exc_info=True)
-            return None
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (0.0 <= float(v) <= 1.0):
-            return None
-        return float(v)
+            log.warning("sleep: Jev %s failed", "+".join(qids), exc_info=True)
+            return {}
+        return {q: float(v) for q, v in answers.items()
+                if not isinstance(v, bool) and isinstance(v, (int, float)) and 0.0 <= float(v) <= 1.0}
 
 
 def judge_for(settings) -> Judge | None:
@@ -318,13 +346,16 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
         key = proposal_key("stale_plan", [row_id], [], [snap[row_id]])
         if key in known:
             continue
-        p = judge.ask("plan_passed", {"memory": f["value"], "written_on": f["at"].date().isoformat(),
-                                      "today": today.isoformat()})
+        got = judge.ask_many(("plan_passed", "lasting"), {"line": f["value"], "written_on": f["at"].date().isoformat(),
+                                                          "today": today.isoformat()})
+        p = got.get("plan_passed")
         if p is None:
             continue
+        careful = p >= PLAN_PASSED_AT and got.get("lasting", 1.0) >= LASTING_AT   # no answer: careful
         add(Proposal("stale_plan", "memories", [row_id], [], snap,
-                     "A plan whose time has passed." if p >= PLAN_PASSED_AT else "Still current.", p,
-                     status="proposed" if p >= PLAN_PASSED_AT else "clear", key=key))
+                     ("A plan whose time has passed." + (_CAREFUL if careful else "")) if p >= PLAN_PASSED_AT
+                     else "Still current.", p,
+                     status="proposed" if p >= PLAN_PASSED_AT else "clear", key=key, careful=careful))
 
     # Old claims: the frozen core_claim table, still injected into every reply.
     for core_id, key_label, text, at in mem_conn.execute(CLAIMS_SQL, {"person_id": person_id}).fetchall():
@@ -335,13 +366,16 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
         key = proposal_key("old_claim", [core_id], [], [line])
         if key in known:
             continue
-        p = judge.ask("momentary", {"claim": " ".join(str(text or "").split())[:VALUE_MAX],
-                                    "written_on": at.date().isoformat() if at else "unknown"})
+        got = judge.ask_many(("momentary", "lasting"), {"line": " ".join(str(text or "").split())[:VALUE_MAX],
+                                                        "written_on": at.date().isoformat() if at else "unknown"})
+        p = got.get("momentary")
         if p is None:
             continue
+        careful = p >= MOMENTARY_AT and got.get("lasting", 1.0) >= LASTING_AT
         add(Proposal("old_claim", "core_claim", [core_id], [], snap,
-                     "Reads as a passing moment, not who he is." if p >= MOMENTARY_AT else "Lasting.", p,
-                     status="proposed" if p >= MOMENTARY_AT else "clear", key=key))
+                     ("Reads as a passing moment, not who he is." + (_CAREFUL if careful else ""))
+                     if p >= MOMENTARY_AT else "Lasting.", p,
+                     status="proposed" if p >= MOMENTARY_AT else "clear", key=key, careful=careful))
     if judge.over:
         log.warning("sleep: tidy hit its nightly cap (%d asked); %d questions wait for tomorrow night",
                     judge.asked, judge.over)
