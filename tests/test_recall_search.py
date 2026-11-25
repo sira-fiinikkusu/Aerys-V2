@@ -418,6 +418,13 @@ def test_bad_or_missing_search_terms_are_said_plainly():
     assert tool.func(runtime=runtime(dm())).startswith("search_history needs a query")
 
 
+def test_a_date_at_the_end_of_the_calendar_is_a_plain_refusal_never_a_raise():
+    """Codex: until='9999-12-31' + a day overflowed past the ValueError handler."""
+    tool = history_tool(Conn())
+    assert tool.func(runtime=runtime(dm()), query="attic", until="9999-12-31").startswith("Couldn't search")
+    assert tool.func(runtime=runtime(dm()), query="attic", since="9999-12-31", until="2026-11-03").startswith("Couldn't search")
+
+
 def test_a_reversed_range_is_read_the_right_way_round():
     conn = Conn()
     history_tool(conn).func(runtime=runtime(dm()), since="2026-11-05", until="2026-11-03")
