@@ -593,3 +593,21 @@ def test_a_wake_up_never_carries_them_and_her_own_past_chats_need_no_tap():
     assert "search_history" not in READERS and "search_memory" not in READERS
     assert "read_web_page" in READERS   # the web still counts as outside text
     assert {"search_memory", "search_history"} <= service.ONE_LOOP_READ_ONLY
+
+
+def test_her_own_words_in_a_memory_search_read_as_hers_and_as_claims():
+    """D97 parity: search_memory marks her aerys.* rows exactly as recall does, by key, never by text."""
+    from datetime import datetime, timezone
+    from aerys_v2.services.memory import HER_WORDS_LABEL
+    scope = rs.scope_for(dm(), "discord:dm:1")
+    when = datetime(2026, 11, 20, tzinfo=timezone.utc)
+    rows = [{"person_id": scope.person_id, "key_label": "aerys.told.shop", "content": "aerys.told.shop: Aerys told him it is most likely a gift shop",
+             "created_at": when, "source_platform": "discord_dm"},
+            {"person_id": scope.person_id, "key_label": "interest.labels", "content": f"interest.labels: Asked what {HER_WORDS_LABEL} means",
+             "created_at": when, "source_platform": "discord_dm"}]
+    out = rs.format_memories(rows, "shop", scope)
+    assert f"{HER_WORDS_LABEL} Aerys told him it is most likely a gift shop" in out
+    assert out.count(HER_WORDS_LABEL) == 3   # her line, his line's own text, and the note
+    assert "not verified facts and not things he said" in out
+    plain = rs.format_memories(rows[1:], "labels", scope)
+    assert "not verified facts" not in plain   # his text mentioning the label never switches the note on

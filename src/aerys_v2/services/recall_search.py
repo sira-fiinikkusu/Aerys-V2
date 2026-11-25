@@ -453,11 +453,20 @@ def format_memories(rows: list[dict], query: str, scope: RecallScope) -> str:
     if not rows:
         where = "" if scope.own else " that is fine to share here"
         return f'Nothing in your long-term memory{where} matches "{query}".'
+    from aerys_v2.services.memory import HER_WORDS_LABEL
+
+    hers = False
+
     def line(row: dict, who: str = "") -> str:
+        nonlocal hers
         created = row.get("created_at")
         day = created.date().isoformat() if isinstance(created, datetime) else "?"
         src = f" [{row['source_platform']}]" if row.get("source_platform") else ""
-        return f"- {day} · {who}{_fact(row)}{src}"
+        # D97: her own earlier words read as hers and as claims, by their key, never by their text.
+        mark = ""
+        if str(row.get("key_label") or "").startswith("aerys."):
+            mark, hers = f"{HER_WORDS_LABEL} ", True
+        return f"- {day} · {who}{mark}{_fact(row)}{src}"
     own = [line(r) for r in rows if str(r.get("person_id")) == scope.person_id]
     others = [line(r, _label(r.get("display_name"), "Someone") + ": ")
               for r in rows if str(r.get("person_id")) != scope.person_id]
@@ -468,4 +477,7 @@ def format_memories(rows: list[dict], query: str, scope: RecallScope) -> str:
     if others:
         out.append(ROOM_PEOPLE_HEADER)
         out.extend(others)
+    if hers:
+        out.append(f"Lines marked {HER_WORDS_LABEL} are what you (Aerys) said at the time, not verified "
+                   "facts and not things he said: if one matters, check it before repeating it as settled.")
     return "\n".join(out)
