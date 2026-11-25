@@ -348,3 +348,13 @@ def test_an_unhonoured_replace_is_counted_as_ignored_even_when_triage_replaces_a
     stats = summary["sources"]["prod_chat"]
     assert stats.get("replaces_used", 0) == 0 and stats["replaces_ignored"] == 1
     assert not [p for s, p in write.calls if "RETURNING id, key_label" in s]
+
+
+def test_the_prompt_names_exactly_the_code_state_and_append_prefixes():
+    """Codex r3: the prompt once forbade a replace the code allowed. The two lists must agree."""
+    import re
+    line = next(l for l in EXTRACTION_SYSTEM_PROMPT.splitlines() if l.startswith('- "replaces"'))
+    state = re.search(r"current-state facts \(([^)]*)\)", line).group(1)
+    assert {f"{w.strip()}." for w in state.split(",")} == set(ex.STATE_PREFIXES)
+    assert "Never for an event or an aerys item" in line
+    assert set(ex.APPEND_PREFIXES) == {"event.", "aerys."}
