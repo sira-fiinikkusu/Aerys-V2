@@ -19,6 +19,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
 from aerys_v2.rooms import his_private_read, runtime_identity
+from aerys_v2.config import db_url
 
 NAMESPACE = ("aerys", "skills")
 WRITE_TOOLS = frozenset({"write_file", "edit_file"})
@@ -61,7 +62,7 @@ def store_for(settings):
     """One long-lived, reconnecting connection per process; never migrate at boot."""
     if not settings.database_url:
         raise ValueError("Skills require a database.")
-    return _postgres_store(settings.database_url, settings.checkpoint_pool_open_timeout_s)
+    return _postgres_store(db_url(settings.database_url), settings.checkpoint_pool_open_timeout_s)
 
 
 def backend_for(store):
@@ -207,7 +208,7 @@ def feed_loader(settings, timeout=5):
     def load():
         import psycopg
 
-        with psycopg.connect(settings.database_url, connect_timeout=timeout) as conn:
+        with psycopg.connect(db_url(settings.database_url), connect_timeout=timeout) as conn:
             return rows_from_feed(conn.execute(FEED_SKILLS_SQL).fetchall())
     return load
 

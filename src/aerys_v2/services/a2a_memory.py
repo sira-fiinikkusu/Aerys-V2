@@ -36,6 +36,7 @@ from typing import Callable
 from aerys_v2.services.location_guard import location_shaped
 from aerys_v2.services.memory import embedding_to_pgvector, openrouter_embedder
 from aerys_v2.workers.extraction import test_shaped
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def a2a_memory_writer_for(
     # The memories table lives in the PROD aerys database, not the v2 spine —
     # the same split the retrieval seam and live extraction honor. Caught live
     # on first deploy: database_url pointed at v2, "relation does not exist".
-    database_url = settings.memories_database_url
+    database_url = db_url(settings.memories_database_url)
     owner = settings.owner_person_id
     key = settings.embeddings_api_key
     if not (database_url and owner and key):

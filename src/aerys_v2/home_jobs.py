@@ -63,6 +63,7 @@ from aerys_v2.hands_gate import (
     home_job_middleware,
 )
 from aerys_v2.state import identity_from_config, is_voice_turn
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -760,12 +761,12 @@ def home_jobs_for(settings, *, environ=None) -> HomeJobs | None:
     deliver = deliver_for(settings)
     if deliver is not None:     # #183: he gets the files her home jobs make, in his DM
         owner = str(settings.owner_person_id)
-        sends = PostgresFileSends(settings.database_url)    # #187: the record, and the resend guard
+        sends = PostgresFileSends(db_url(settings.database_url))    # #187: the record, and the resend guard
         files = send_file_middleware(build_send_file_tool(home_url=url, home_token=token.get_secret_value(),
                                                           owner_person_id=owner, deliver=deliver, ledger=sends),
                                      owner, sent_tool=build_files_sent_tool(ledger=sends, owner_person_id=owner))
     jobs = build_home_jobs(url=url, token=token.get_secret_value(),
-                           ledger=PostgresHomeTaskLedger(settings.database_url),
+                           ledger=PostgresHomeTaskLedger(db_url(settings.database_url)),
                            owner_person_id=str(settings.owner_person_id),
                            gate_factory=lambda executors: hands_gate_for(settings, executors=executors),
                            files=files, projects=projects)

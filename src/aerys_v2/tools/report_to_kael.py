@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timezone
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolRuntime
+from aerys_v2.config import db_url
 
 SUCCESS = "Sent to Kael as your report. He'll look at what actually happened and fix it if it's broken."
 
@@ -76,7 +77,7 @@ def reports_for(settings, relay):
     from aerys_v2.tickets import PostgresTicketStore, line_sender
     store = sender = None
     if settings.database_url and settings.kael_desk_url and settings.kael_desk_token is not None:
-        store = PostgresTicketStore(settings.database_url)
+        store = PostgresTicketStore(db_url(settings.database_url))
         sender = line_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value(),
                              preserve_lines=True)
     return Reports(relay, store, sender, store.recent_turn_ids if store else None)

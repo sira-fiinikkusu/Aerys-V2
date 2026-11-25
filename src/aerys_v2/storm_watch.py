@@ -43,6 +43,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -523,7 +524,7 @@ def start_storm_watch(settings, desk=None) -> threading.Thread | None:
         return None
     store = None
     if settings.database_url:
-        store = StormSeenStore(settings.database_url)
+        store = StormSeenStore(db_url(settings.database_url))
     discord_leg, phone_leg = _legs_for(settings)
     watcher = StormWatcher(
         point=point,

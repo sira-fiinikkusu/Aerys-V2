@@ -48,6 +48,7 @@ from zoneinfo import ZoneInfo
 
 from aerys_v2.approvals import DEFAULT_FOR, DETAIL_CHARS, approvals_for, person_id_for
 from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY, identity_from_config, is_lens_surface, is_voice_turn
+from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ class Verdict:
     # The approval system itself failed (approvals unreadable, the button couldn't be raised, a lookup
     # down), as opposed to a wait or a no. Telemetry only: the answer is the same refusal either way.
     infra: bool = False
+    # G5: on a go, the branch that let it (message(): to_owner, to_owner_carve_out_D58, confirmed_contact),
+    # for the turn's record. Telemetry only.
+    basis: str = ""
 
 
 GO = Verdict(True)
@@ -224,8 +228,22 @@ class MemoryGatedActionStore:
 
     def finish(self, action_id, status, outcome, now):
         r = self.rows.get(action_id)
-        if r is not None and r.status == "running":
-            r.status, r.outcome, r.finished_at = status, outcome, now
+        if r is None or r.status != "running":
+            return False
+        r.status, r.outcome, r.finished_at = status, outcome, now
+        return True
+
+    def running(self):
+        return sorted((r for r in self.rows.values() if r.status == "running"), key=lambda r: r.id)
+
+    def interrupt(self, action_id, outcome, now, decided_before):
+        """A row cut off mid-run becomes 'failed', only while it's still running. This store holds no
+        approvals, so the decision age is the caller's check (HandsWatcher reads it just before)."""
+        r = self.rows.get(action_id)
+        if r is None or r.status != "running":
+            return False
+        r.status, r.outcome, r.finished_at = "failed", outcome, now
+        return True
 
     def drop(self, action_id, outcome, now):
         r = self.rows.get(action_id)
@@ -306,8 +324,22 @@ class PostgresGatedActionStore:
                          "RETURNING id", (action_id,)) is not None
 
     def finish(self, action_id, status, outcome, now):
-        self._one("UPDATE v2_gated_actions SET status = %s, outcome = %s, finished_at = %s "
-                  "WHERE id = %s AND status = 'running' RETURNING id", (status, outcome, now, action_id))
+        return self._one("UPDATE v2_gated_actions SET status = %s, outcome = %s, finished_at = %s "
+                         "WHERE id = %s AND status = 'running' RETURNING id",
+                         (status, outcome, now, action_id)) is not None
+
+    def running(self):
+        return self._all(f"SELECT {self.COLUMNS} FROM v2_gated_actions WHERE status = 'running' ORDER BY id", ())
+
+    def interrupt(self, action_id, outcome, now, decided_before):
+        """G1: one statement, so of several watchers only one marks it, and never a row that finished (or
+        was marked) since it was read, nor one whose approval is younger than `decided_before`. The table
+        has no claim time (migration 023); his tap's time (v2_approvals.decided_at) is the age here, and
+        the watcher also requires having seen it running that long itself (a claim after a long outage)."""
+        return self._one("UPDATE v2_gated_actions SET status = 'failed', outcome = %s, finished_at = %s "
+                         "WHERE id = %s AND status = 'running' AND approval_id IN "
+                         "(SELECT id FROM v2_approvals WHERE decided_at < %s) RETURNING id",
+                         (outcome, now, action_id, decided_before)) is not None
 
     def drop(self, action_id, outcome, now):
         return self._one("UPDATE v2_gated_actions SET status = 'dropped', outcome = %s, finished_at = %s "
@@ -508,7 +540,7 @@ class HandsGate:
         # D58 (11/15 20:22): to him, outside text changes nothing; his button would only show him these
         # same words ("so it protects nothing"). Discord, the one platform the message tool sends on.
         if pid == str(self.owner) and (not tainted or platform == "discord"):
-            return GO
+            return Verdict(True, basis="to_owner_carve_out_D58" if tainted else "to_owner")
         address = str(p.get("address") or "").strip()
         if not address:
             return Verdict(False, f"Not sent: I don't have a {label} address for {p.get('name') or to}. Ask Chris.")
@@ -549,7 +581,7 @@ class HandsGate:
                                  summary=f"Send again to {name} · {label}: {handle} (the last try may have gone through)",
                                  detail=f"{to_line}\nThe last try may have gone through; this sends the same "
                                         f"words again.\n\nWhat she'd send again:\n{text}", what=what)
-            return GO
+            return Verdict(True, basis="confirmed_contact")
         what = f"your first message to {name} ({label}: {handle})"
         return self._ask(MESSAGE, base_key, str(thread_id or ""),
                          {"platform": platform, "address": address, "person_id": str(pid), "name": name,
@@ -675,6 +707,15 @@ def _note_for(row: GatedAction, status: str, outcome: str = "") -> str:
 #: desk keeps one row per key, so re-offers cost a lookup, never a second message.
 FAILED_NOTICE_FOR = timedelta(days=14)
 
+#: G1 (the Nod comparison, 11/24): an approved action claimed ('running') and never finished, because the
+#: watcher died mid-run or couldn't record the outcome, used to stay 'running' forever: she was told "it's
+#: being done now" and every later message to that contact was held. Once his tap is this old AND a watcher
+#: has itself seen the row running this long, it's marked failed and he's told; the action is never run
+#: again (it may have gone). Every executor is a few network calls with their own timeouts (seconds, at most
+#: minutes), so half an hour is far past any real run.
+STUCK_AFTER = timedelta(minutes=30)
+INTERRUPTED = "interrupted; may have run (never redone)"
+
 
 class HandsWatcher:
     """tick(): every waiting action whose button was answered is done (approved, once) or dropped
@@ -690,6 +731,10 @@ class HandsWatcher:
         # HIM too (the brain wires it to the reach desk as owed, quiet text). None = her thread only.
         self.owner_notice = owner_notice
         self._owner_told: set = set()     # this process already handed these failures to the desk
+        # G1: when this watcher first saw each running row (a fresh claim after a long outage has an old tap,
+        # so the tap's age alone can't say it was cut off), and the outcomes it couldn't record (retried).
+        self._running_since: dict[int, datetime] = {}
+        self._unrecorded: dict[int, tuple[str, str]] = {}
         self._stop = threading.Event()
 
     def _tell(self, row: GatedAction, text: str) -> None:
@@ -729,6 +774,72 @@ class HandsWatcher:
         for row in recent:
             self._tell_owner(row, row.outcome or "")
 
+    def _sweep_running(self, now) -> int:
+        """G1: settle approved actions left 'running'. One this watcher ran but couldn't record is recorded
+        with what really happened; one cut off mid-run (a crash, a restart) becomes failed, INTERRUPTED,
+        once his tap is STUCK_AFTER old and this watcher has seen it running that long; the store's
+        compare-and-set means one watcher of several marks it. Never runs the action. Returns how many
+        it marked failed."""
+        g = self.gate
+        try:
+            running = g.store.running()
+        except Exception:
+            log.warning("hands watcher: couldn't read running actions; checked next pass", exc_info=True)
+            return 0
+        live = {r.id for r in running}
+        for gone in [k for k in self._running_since if k not in live]:
+            del self._running_since[gone]
+        for gone in [k for k in self._unrecorded if k not in live]:
+            del self._unrecorded[gone]
+        failed = 0
+        for row in running:
+            if row.id in self._unrecorded:
+                status, outcome = self._unrecorded[row.id]
+                try:
+                    recorded = g.store.finish(row.id, status, outcome, now)
+                except Exception:
+                    log.warning("hands watcher: action %s's outcome still can't be recorded", row.id)
+                    continue
+                del self._unrecorded[row.id]
+                self._settled(row, status, outcome, recorded)
+                continue
+            first = self._running_since.setdefault(row.id, now)
+            if now - first < STUCK_AFTER:
+                continue
+            try:
+                decided = g.approvals.store.get(row.approval_id).decided_at
+            except Exception:
+                log.warning("hands watcher: couldn't read action %s's approval; checked next pass", row.id)
+                continue
+            if decided is None or now - decided < STUCK_AFTER:
+                continue
+            try:
+                marked = g.store.interrupt(row.id, INTERRUPTED, now, now - STUCK_AFTER)
+            except Exception:
+                log.warning("hands watcher: couldn't mark action %s interrupted; checked next pass", row.id)
+                continue
+            self._running_since.pop(row.id, None)
+            if not marked:
+                continue                        # it finished, or another watcher marked it, since the read
+            log.warning("hands watcher: action %s (%s) was cut off mid-run; marked failed, never redone",
+                        row.id, row.action)
+            failed += 1
+            self._tell(row, _note_for(row, "failed", INTERRUPTED))
+            self._tell_owner(row, INTERRUPTED)
+        return failed
+
+    def _settled(self, row: GatedAction, status: str, outcome: str, recorded: bool) -> None:
+        """Tell what happened, once it's on record. Codex round 1 (G1): when the record lost its compare-and-
+        set (another watcher swept the row as interrupted while this run was still going), the stored state
+        is what was told; a second, conflicting outcome is never published (the real one is logged)."""
+        if not recorded:
+            log.warning("hands watcher: action %s finished %s after it was marked interrupted; the stored "
+                        "outcome stands, nothing more is told", row.id, status)
+            return
+        self._tell(row, _note_for(row, status, outcome))
+        if status == "failed":
+            self._tell_owner(row, outcome)
+
     def tick(self) -> dict:
         g, out = self.gate, {"done": 0, "failed": 0, "dropped": 0}
         for row in g.store.waiting():
@@ -757,18 +868,22 @@ class HandsWatcher:
                     outcome, status = f"{type(e).__name__}", "failed"
                 if status == "failed":
                     log.warning("hands watcher: action %s (%s) didn't go through", row.id, row.action)
-                try:
-                    g.store.finish(row.id, status, outcome, now)
-                except Exception:
-                    log.warning("hands watcher: action %s %s, but recording it failed (never redone)", row.id, status)
                 out[status] += 1
-                self._tell(row, _note_for(row, status, outcome))
-                if status == "failed":
-                    self._tell_owner(row, outcome)
+                try:
+                    recorded = g.store.finish(row.id, status, outcome, now)
+                except Exception:
+                    # G1: still 'running' in the table; recorded, and only then told, on a later pass
+                    # (_sweep_running).
+                    self._unrecorded[row.id] = (status, outcome)
+                    log.warning("hands watcher: action %s %s, but recording it failed (never redone; "
+                                "retried next pass)", row.id, status)
+                    continue
+                self._settled(row, status, outcome, recorded)
             elif state in ("declined", "expired", "withdrawn"):
                 if g.store.drop(row.id, state, now):
                     out["dropped"] += 1
                     self._tell(row, _note_for(row, state))
+        out["failed"] += self._sweep_running(g.clock())
         self._drain_failures(g.clock())
         return out
 
@@ -835,7 +950,7 @@ def people_lookup_for(settings) -> Callable[[str, str], list[dict]] | None:
     """Her people records (prod persons + platform_identities), read-only: who an address is.
     A Discord or Telegram account by its id or username; an email by persons.email; else, by the
     name he gave them, anyone with that name who has an address on that platform."""
-    db = getattr(settings, "memories_database_url", None)
+    db = db_url(getattr(settings, "memories_database_url", None))
     if not db:
         return None
 
@@ -888,7 +1003,7 @@ def hands_gate_for(settings, *, executors: dict[str, Callable[[GatedAction], tup
     from aerys_v2.config import home_job_member_map
 
     read_only = [a for a in str(getattr(settings, "home_read_only_agents", "") or "").split(",") if a.strip()]
-    gate = HandsGate(approvals, PostgresGatedActionStore(settings.database_url),
+    gate = HandsGate(approvals, PostgresGatedActionStore(db_url(settings.database_url)),
                      owner_person_id=str(settings.owner_person_id), people=people_lookup_for(settings),
                      executors=executors, read_only_agents=read_only,
                      members=home_job_member_map(settings),
