@@ -18,8 +18,9 @@ for duplicates (the same event on another date is a second event, D97), Kael-lin
 Every candidate judged fine is recorded 'clear' under the same stable key, so it is never judged again
 until its text changes; a proposal he rejected is never proposed again. A nightly cap on Jev questions
 (her_sleep_judgements) is logged when it bites, never silent. Chris approves on the dashboard's Memory tab;
-apply_approved (python -m aerys_v2.workers sleep-apply, Kael-run in v1) re-checks every row and retires it
-through the soft-delete paths. Nothing is hard-deleted.
+apply_approved re-checks every row and retires it through the soft-delete paths; D103 (Chris 11/25 14:10, "A
+works") runs it on its own every APPLY_EVERY_S, so his Approve takes effect within minutes (sleep-apply stays for
+Kael by hand). Nothing is hard-deleted.
 
 REFLECT is her own words about her day. She asked for its shape herself (11/25 13:13, on Kael's line):
 Sira's questions plus "open loops" and "what went right", one concrete change at most, her last notes
@@ -49,6 +50,9 @@ log = logging.getLogger(__name__)
 SLEEP_HOUR, SLEEP_MINUTE = 3, 30          # Eastern: after the 03:00 backup
 SLEEP_UNTIL_HOUR = 12                     # a brain that was down at 03:30 still sleeps that morning
 TICK_S = 60
+#: D103 (Chris 11/25 14:10, "A works"): what he approved on the dashboard is applied on its own, this often,
+#: through apply_approved's re-check (a changed line goes stale; nothing is hard-deleted).
+APPLY_EVERY_S = 600
 
 # ---- Tidy: what it looks at ---------------------------------------------------------------------
 #: His facts: the key kinds Tidy may touch. Everything else (her own words aerys.*, event.*, Kael-line
@@ -652,8 +656,26 @@ class HerSleep:
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
     done: date | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
+    monotonic: Callable[[], float] = field(default=time.monotonic)
+    applied_at: float | None = None
+
+    def apply_due(self) -> list | None:
+        """D103: apply what he approved, at most every APPLY_EVERY_S. None when not due."""
+        now = self.monotonic()
+        if self.applied_at is not None and now - self.applied_at < APPLY_EVERY_S:
+            return None
+        self.applied_at = now
+        try:
+            done = apply_approved(self.v2_db, self.mem_db)
+        except Exception:
+            log.warning("sleep: applying his approvals failed; next try in %ds", APPLY_EVERY_S, exc_info=True)
+            return None
+        if done:
+            log.info("sleep: applied his approvals: %s", ", ".join(f"{r['id']} {r['status']}" for r in done))
+        return done
 
     def tick(self) -> str:
+        self.apply_due()
         with self.lock:
             local = self.clock().astimezone(EASTERN)
             today = local.date()
@@ -683,8 +705,8 @@ class HerSleep:
             return "; ".join(outcome)
 
     def run_forever(self) -> None:  # pragma: no cover - thin loop over tick()
-        log.info("her sleep armed | %02d:%02d Eastern, tidy proposes, reflect writes her note",
-                 SLEEP_HOUR, SLEEP_MINUTE)
+        log.info("her sleep armed | %02d:%02d Eastern, tidy proposes, reflect writes her note, "
+                 "his approvals apply every %ds", SLEEP_HOUR, SLEEP_MINUTE, APPLY_EVERY_S)
         pause = threading.Event()
         while True:
             try:
