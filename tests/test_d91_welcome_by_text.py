@@ -165,20 +165,21 @@ def test_the_brief_still_due_greets_him_instead_one_greeting():
     assert not [r for r in h.desk.store.rows.values() if r.dedupe_key == "brief:2026-11-10" and r.status == "folded"]
 
 
-def test_given_up_into_the_night_nothing_goes():
+def test_given_up_into_the_night_it_goes_as_quiet_text():
+    # D96 (11/24) replaced "never at night": the text still goes after hours, quietly, never aloud.
     home = datetime(2026, 11, 10, 20, 10, tzinfo=ET)
     h = TextHouse(home + timedelta(minutes=5), left=home - timedelta(hours=3), home=home)
     assert h.hello.tick() == "waiting to settle"
-    assert h.at(home + timedelta(minutes=65)).hello.tick() == "quiet hours"       # 21:15, past the hour
+    assert h.at(home + timedelta(minutes=65)).hello.tick() == "by text: sent"     # 21:15, past the hour
     (row,) = h.hellos()
-    assert row.status == "dropped" and row.reason == "quiet hours"
-    assert h.world.texts == [] and h.texted == []
+    assert row.status == "sent" and row.text_only
+    assert h.world.spoken == [] and len(h.world.texts) == 1 and h.world.texts[0][2] is True
 
 
 def test_before_nine_never_settled_with_the_brief_due_no_discord_and_the_brief_goes_alone():
     h = TextHouse(EARLY_HOME + timedelta(minutes=1), left=EARLY_LEFT, home=EARLY_HOME, brief=True, settle=20)
     assert h.hello.tick() == "waiting to settle"
-    assert h.at(EARLY_HOME + timedelta(minutes=21)).hello.tick() == "quiet hours"
+    assert h.at(EARLY_HOME + timedelta(minutes=21)).hello.tick() == BRIEF_GREETS
     assert h.world.texts == [] and h.texted == []
     assert h.at(EARLY_HOME + timedelta(minutes=25)).brief.tick() == "sent"
     assert h.world.spoken == [("Morning brief.", "dev-office")]

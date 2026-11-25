@@ -14,6 +14,7 @@ from aerys_v2.followups import Appointment, FollowUps, MemoryFollowupStore, appo
 from aerys_v2.reach import FREED_FOR_CARRIER, TAKEN_OVER, MemoryReachStore, Prefs, ReachDesk, ReachEvent, Where
 from aerys_v2.welcome import (
     BRIEF_GREETED,
+    BRIEF_GREETS,
     JUST_GREETED,
     DATA_ONLY,
     HELLO_FOR,
@@ -186,14 +187,18 @@ def test_it_waits_for_him_to_settle_then_lets_it_go():
     assert len(h.world.texts) == 1
 
 
-def test_quiet_hours_drop_it_rather_than_saying_it_in_the_morning():
+def test_quiet_hours_never_say_it_aloud_or_in_the_morning():
+    # D96 (11/24): after hours it goes at once as a quiet Discord text (it used to be dropped); never
+    # spoken, and nothing is left to say it the next morning.
     late = datetime(2026, 11, 10, 22, 30, tzinfo=ET)
     h = House(late + timedelta(minutes=3), left=late - timedelta(hours=3), home=late)
-    assert h.hello.tick() == "quiet hours"
+    assert h.hello.tick() == "by text: sent"
     row = h.desk.store.rows[1]
-    assert row.status == "dropped" and row.reason == "quiet hours"
+    assert row.status == "sent" and row.text_only and row.room is None
+    assert h.world.spoken == [] and len(h.world.texts) == 1 and h.world.texts[0][2] is True
     assert h.at(datetime(2026, 11, 11, 9, 5, tzinfo=ET)).hello.tick() == "done"
-    assert h.make().tick() == "too late" and h.composed == [] and h.world.spoken == []      # a restart too
+    assert h.make().tick() in ("done", "too late") and h.world.spoken == []      # a restart too
+    assert len(h.world.texts) == 1
 
 
 def test_never_said_into_quiet_hours_it_expires_at_their_start():
@@ -874,20 +879,23 @@ def test_before_nine_settled_anywhere_but_the_office_no_hello_and_the_brief_goes
     assert h.world.spoken == [("Morning brief.", "dev-office")]
 
 
-def test_before_nine_without_a_brief_to_carry_it_is_still_dropped():
+def test_before_nine_without_a_brief_to_carry_it_is_never_said_aloud():
+    # D96 (11/24): with no brief to carry it, a hello inside quiet hours goes as a quiet Discord text
+    # (it used to be dropped); never spoken.
     h = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME, brief=True)
     h.desk.store.add(ReachEvent(source="brief", topic="brief", headline="Morning.", brief=True,
                                 dedupe_key="brief:2026-11-10"), utc(datetime(2026, 11, 10, 6, 50, tzinfo=ET)),
                      status="sent", reason="", not_before=None)
-    assert h.hello.tick() == "quiet hours" and h.composed == [] and h.world.spoken == []
+    assert h.hello.tick() == "by text: sent" and h.world.spoken == [] and len(h.world.texts) == 1
     plain = House(EARLY_HOME + timedelta(minutes=4), left=EARLY_LEFT, home=EARLY_HOME)    # no brief armed
-    assert plain.hello.tick() == "quiet hours" and plain.world.spoken == []
+    assert plain.hello.tick() == "by text: sent" and plain.world.spoken == [] and len(plain.world.texts) == 1
 
 
-def test_before_five_the_brief_isnt_due_so_nothing_is_said():
+def test_before_five_the_brief_isnt_due_so_nothing_is_said_aloud():
+    # D96: a quiet Discord text instead (it used to be dropped); nothing spoken.
     home = datetime(2026, 11, 10, 4, 30, tzinfo=ET)
     h = House(home + timedelta(minutes=4), left=home - timedelta(hours=2), home=home, brief=True)
-    assert h.hello.tick() == "quiet hours" and h.world.spoken == []
+    assert h.hello.tick() == "by text: sent" and h.world.spoken == [] and h.world.texts[0][2] is True
 
 
 def test_the_brief_waits_while_a_hello_is_still_deciding_so_the_hello_carries_it():
@@ -908,7 +916,7 @@ def test_a_hello_that_lets_the_arrival_go_frees_the_brief():
     h.reading = HomeReading(home="home", since=utc(EARLY_HOME), room="", confirmed=False)
     assert h.hello.tick() == "waiting to settle"
     h.at(EARLY_HOME + timedelta(minutes=25))                  # never settled in the settle window
-    assert h.hello.tick() == "quiet hours"                    # D91: given up before nine, no Discord either
+    assert h.hello.tick() == BRIEF_GREETS                    # given up before nine: the brief greets him, no Discord
     assert h.brief.tick() == "sent"                          # the brief's own reading: the office
 
 

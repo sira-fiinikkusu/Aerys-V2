@@ -18,7 +18,8 @@ So, once per arrival:
      until HELLO_FOR), the hello goes to him as a Discord message instead, written for text. It
      carries nothing (the morning brief and anything held keep waiting for his room), and it stays
      quiet when he's been greeted another way (the brief just said it or is still due to; he's
-     talked with her since he got home), at night, or when he muted it. It's decided from durable
+     talked with her since he got home), or when he muted it. D96 (Chris 11/24): home after hours,
+     the hello goes this way at once, as quiet text, never aloud. It's decided from durable
      records, so a restart up to GIVE_UP_GRACE past the hour decides the same way (a dropped row
      says why when nothing goes);
   3. not in quiet hours (a welcome home the next morning is wrong: it's dropped), and nothing
@@ -471,11 +472,12 @@ class WelcomeHome:
             self._finish(key)
             return "muted"
         # Inside quiet hours only a hello that carries the morning brief is said, in the brief's room.
+        # D96 (Chris 11/24 23:05, "I dont want her blowing the house up after hours in voice but I would
+        # have appreciated a welcome home thing from her tonight"): any other hello after hours goes to
+        # him as a Discord text right away, never aloud, with D91's reasons to stay quiet still standing.
         night = self.desk.quiet(now)
         if night and not (self.brief is not None and self._brief_due(now, now.astimezone(EASTERN).date())):
-            self._drop(key, now, "quiet hours")
-            self._finish(key)
-            return "quiet hours"
+            return self._give_up(key, arrived, now)
         if not (r.room in self.rooms and r.confirmed):
             if now - arrived > self.settle_for:
                 return self._give_up(key, arrived, now)                  # D91: never settled in time
@@ -498,7 +500,8 @@ class WelcomeHome:
         durable, so a restart decides the same way (Codex review of 1e42a9c): what the desk already holds
         under this key, the trip from HA's own history. It stays quiet when he's been greeted another way:
         the morning brief just said it, the brief is still due (it greets him when he reaches its room:
-        one greeting, D88), or he's talked with her since he got home. Never at night, never muted. A read
+        one greeting, D88), or he's talked with her since he got home. Never muted. After hours (D96) it goes
+        too, as quiet text: the only after-hours path to a spoken hello is the brief's (D18 #3). A read
         that fails waits for the next pass (inside GIVE_UP_GRACE), never guesses."""
         store = self.desk.store
         day = now.astimezone(EASTERN).date()
@@ -516,10 +519,8 @@ class WelcomeHome:
         if left is None or arrived - left < self.away_for:
             self._finish(key)
             return "not a trip" if left is None else "a short trip"
-        if self.desk.quiet(now):
-            self._drop(key, now, "quiet hours")
-            self._finish(key)
-            return "quiet hours"
+        # D96: after hours is no longer a reason to stay quiet; it goes as text (the desk sends a text-only
+        # hello at night as quiet text). Before nine with the brief due, _why_quiet keeps it for the brief.
         # A first look without the lock, so a give-up that stays quiet costs no place look-ups (D92); then
         # the stops, named outside the brief's lock (it can take seconds); then the deciding look and the
         # send under it. The brief's own thread speaks only under that lock, so it can't greet him between
@@ -751,8 +752,9 @@ class WelcomeHome:
         # Never said at night, and not long after he got home (the desk drops it past this).
         expires = min(arrived + HELLO_FOR, next_local(arrived, self.quiet_start_hour))
         if by_text:
-            # D91: given up on as a spoken hello, it goes now as a message; never into the night.
-            expires = min(now + TEXT_HELLO_FOR, next_local(now, self.quiet_start_hour))
+            # D91: given up on as a spoken hello, it goes now as a message. D96: after hours too, so its
+            # window is just TEXT_HELLO_FOR (the desk sends a text-only hello at night as quiet text).
+            expires = now + TEXT_HELLO_FOR
         store = self.desk.store
         took = False
         # D91: a Discord hello carries nothing: the brief (made to be said) keeps waiting for his room.
