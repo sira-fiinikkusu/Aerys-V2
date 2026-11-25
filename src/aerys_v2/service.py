@@ -36,7 +36,7 @@ import random
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _replace_decision
 from datetime import datetime, timedelta
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -994,6 +994,28 @@ def text_one_loop_eligible(identity: dict, action_allowlist, owner_id: str = "")
     return bool(owner_id) and user == str(owner_id)
 
 
+
+def room_recall_eligible(identity: dict, action_allowlist, owner_id: str = "") -> bool:
+    """D99 (Chris 11/25 12:46): may this group-room turn be moved to her tool side for a look back? Only a
+    resolved HOUSEHOLD identity typing in a shared room (Discord guild, Telegram group). Never a DM (D79's one
+    loop already serves those), voice, the lens, a cold handle, a guest, or a surface with no platform.
+    Household = the action allowlist; with no allowlist (a dev box) only the configured owner. Called AFTER
+    ask()'s allowlist gate and it checks the allowlist itself, so a guest can never reach the privileged graph
+    this way (the D79 rule)."""
+    identity = identity or {}
+    if identity.get("voice") or is_lens_surface(identity):
+        return False
+    if str(identity.get("platform") or "").lower() not in ("discord", "telegram"):
+        return False
+    if str(identity.get("channel_kind") or "").lower() not in ("guild", "group"):
+        return False
+    user = str(identity.get("user_id") or "")
+    if not user or ":" in user:          # a cold '{platform}:{id}' handle is a stranger
+        return False
+    if action_allowlist is not None:
+        return user in action_allowlist
+    return bool(owner_id) and user == str(owner_id)
+
 def text_one_loop_flag(settings) -> Callable[[], bool]:
     """The switch, read on every turn: the file (settings.text_one_loop_file) when it exists and says
     on/off, else settings.text_one_loop. The file lets a deploy flip it without recreating a container
@@ -1688,6 +1710,22 @@ def ask(
                     extra_degraded=[DROPPED_UNADDRESSED_MARKER, LENS_HEARD_SKIP_MARKER],
                 )
                 return ""
+        if (
+            decision.route == "chat"
+            and "action" in specialists
+            and getattr(specialists["action"], "looking_back", None) is not None
+            and room_recall_eligible(identity, action_allowlist, factory._OWNER_ID)
+        ):
+            # D99 (Chris 11/25 12:46): a household member's "remember when…" in a group room goes to her tool
+            # side, where search_memory/search_history are (scoped to this room's public talk and the public
+            # facts of the people here). One Jev look; any doubt or failure keeps the old chat path.
+            from aerys_v2.looking_back import reroute as _looking_back
+
+            p_back = specialists["action"].looking_back(text)
+            if _looking_back(p_back):
+                log.info("route decision | thread=%s route=chat → action (looking back in a room, p=%.2f)",
+                         thread_id, p_back)
+                decision = _replace_decision(decision, route="action")
         selected_graph = specialists.get(decision.route)
         if selected_graph is not None:
             config["configurable"]["specialist_route"] = decision.route

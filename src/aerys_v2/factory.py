@@ -2962,6 +2962,14 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     except Exception:
         log.warning("addressed check: couldn't build it; glasses follow-ups are all answered", exc_info=True)
         action_graph.addressed_check = None
+    # D99: in group rooms, a household member's "looking back" question goes to the tool side. None = never moved.
+    try:
+        from aerys_v2.looking_back import looking_back_for
+
+        action_graph.looking_back = looking_back_for(settings)
+    except Exception:
+        log.warning("looking-back check: couldn't build it; room turns stay on the chat side", exc_info=True)
+        action_graph.looking_back = None
     # --serve starts the D10 gate's watcher from here (one per brain, with the note injector).
     action_graph.home_jobs = home_jobs
     action_graph.hands_watcher = (home_jobs.watcher if home_jobs is not None else
