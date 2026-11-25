@@ -175,7 +175,11 @@ WHERE speaker_id = %(person_id)s::uuid AND status IN ('approved', 'provisional')
 ORDER BY created_at
 """
 
-KNOWN_KEYS_SQL = "SELECT proposal_key, status FROM v2_memory_proposals WHERE person_id = %(person_id)s::uuid"
+KNOWN_KEYS_SQL = ("SELECT proposal_key, status, kind, created_at FROM v2_memory_proposals "
+                  "WHERE person_id = %(person_id)s::uuid")
+#: Codex 11/25: a plan judged still current is asked again after this many days (its date may have passed);
+#: every other judgement is about the text alone and stands until the text changes.
+REJUDGE_PLAN_DAYS = 3
 #: Rows already in a proposal that is waiting on him or approved: never proposed twice at once.
 BUSY_IDS_SQL = """\
 SELECT unnest(retire_ids || keep_ids) FROM v2_memory_proposals
@@ -186,7 +190,10 @@ INSERT INTO v2_memory_proposals
   (proposal_key, person_id, kind, retire_table, retire_ids, keep_ids, snapshot, reason, score, status, careful)
 VALUES (%(proposal_key)s, %(person_id)s::uuid, %(kind)s, %(retire_table)s, %(retire_ids)s::text[],
         %(keep_ids)s::text[], %(snapshot)s::jsonb, %(reason)s, %(score)s, %(status)s, %(careful)s)
-ON CONFLICT (proposal_key) DO NOTHING
+ON CONFLICT (proposal_key) DO UPDATE SET
+  status = EXCLUDED.status, score = EXCLUDED.score, reason = EXCLUDED.reason, careful = EXCLUDED.careful,
+  snapshot = EXCLUDED.snapshot, retire_ids = EXCLUDED.retire_ids, keep_ids = EXCLUDED.keep_ids, created_at = now()
+WHERE v2_memory_proposals.status = 'clear'
 """
 
 
@@ -194,9 +201,15 @@ _CAREFUL = " It may also hold something lasting about him: read it before approv
 
 
 def _value(key: str | None, content: str | None) -> str:
+    """The whole value (Codex 11/25 BLOCKER: snapshots and the apply re-check compare ALL of it); only what Jev
+    is shown is cut (_for_jev)."""
     text = " ".join(str(content or "").split())
     if key and text.lower().startswith(str(key).lower() + ":"):
         text = text[len(key) + 1:].strip()
+    return text
+
+
+def _for_jev(text: str) -> str:
     return text[:VALUE_MAX]
 
 
@@ -313,7 +326,7 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
             if known.get(dup_key, "clear") != "clear":
                 continue                   # a duplicate proposal for this pair exists (waiting, rejected, done)
             if dup_key not in known:
-                p = judge.ask("same", {"a": a["value"], "b": b["value"]})
+                p = judge.ask("same", {"a": _for_jev(a["value"]), "b": _for_jev(b["value"])})
                 if p is not None:
                     if p >= SAME_AT:
                         keep, drop = ((new_id, old_id) if len(newer["value"]) >= len(older["value"])
@@ -329,8 +342,8 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
         both_key = proposal_key("contradiction", list(pair), [], texts)
         if both_key in known:
             continue
-        p = judge.ask("both_true", {"older": {"text": older["value"], "written_on": older["at"].date().isoformat()},
-                                    "newer": {"text": newer["value"], "written_on": newer["at"].date().isoformat()}})
+        p = judge.ask("both_true", {"older": {"text": _for_jev(older["value"]), "written_on": older["at"].date().isoformat()},
+                                    "newer": {"text": _for_jev(newer["value"]), "written_on": newer["at"].date().isoformat()}})
         if p is None:
             continue
         if p < BOTH_TRUE_BELOW:
@@ -350,7 +363,7 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
         key = proposal_key("stale_plan", [row_id], [], [snap[row_id]])
         if key in known:
             continue
-        got = judge.ask_many(("plan_passed", "lasting"), {"line": f["value"], "written_on": f["at"].date().isoformat(),
+        got = judge.ask_many(("plan_passed", "lasting"), {"line": _for_jev(f["value"]), "written_on": f["at"].date().isoformat(),
                                                           "today": today.isoformat()})
         p = got.get("plan_passed")
         if p is None:
@@ -365,7 +378,7 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
     for core_id, key_label, text, at in mem_conn.execute(CLAIMS_SQL, {"person_id": person_id}).fetchall():
         if core_id in taken:
             continue
-        line = f"{key_label or ''}: {' '.join(str(text or '').split())[:VALUE_MAX]}"
+        line = f"{key_label or ''}: {' '.join(str(text or '').split())}"
         snap = {core_id: line}
         key = proposal_key("old_claim", [core_id], [], [line])
         if key in known:
@@ -386,6 +399,18 @@ def tidy(mem_conn, person_id: str, judge: Judge, *, known: dict[str, str], busy:
     return out
 
 
+def known_keys(rows, today: date) -> dict:
+    """proposal_key -> status, leaving out a stale-plan 'clear' older than REJUDGE_PLAN_DAYS (asked again; the
+    save may then turn that clear row into a proposal, and only a clear row is ever overwritten)."""
+    known = {}
+    for key, status, kind, created in rows:
+        if (kind == "stale_plan" and status == "clear" and created is not None
+                and created.date() <= today - timedelta(days=REJUDGE_PLAN_DAYS)):
+            continue
+        known[key] = status
+    return known
+
+
 def save_proposals(v2_conn, person_id: str, proposals: list[Proposal]) -> int:
     saved = 0
     for p in proposals:
@@ -395,7 +420,7 @@ def save_proposals(v2_conn, person_id: str, proposals: list[Proposal]) -> int:
 
 def run_tidy(v2_db, mem_db, person_id: str, judge: Judge, today: date) -> dict:
     with v2_db() as v2:
-        known = {r[0]: r[1] for r in v2.execute(KNOWN_KEYS_SQL, {"person_id": person_id}).fetchall()}
+        known = known_keys(v2.execute(KNOWN_KEYS_SQL, {"person_id": person_id}).fetchall(), today)
         busy = {str(r[0]) for r in v2.execute(BUSY_IDS_SQL, {"person_id": person_id}).fetchall()}
     with mem_db() as mem:
         mem.read_only = True
@@ -416,12 +441,12 @@ FROM v2_memory_proposals WHERE status = 'approved' ORDER BY decided_at NULLS LAS
 """
 MARK_SQL = "UPDATE v2_memory_proposals SET status = %(status)s, applied_at = now() WHERE id = %(id)s AND status = 'approved'"
 MEMORY_ROW_SQL = ("SELECT key_label, content, deleted_at IS NULL, COALESCE(category, ARRAY[]::text[]) "
-                  "FROM memories WHERE id = %(id)s::uuid AND person_id = %(person_id)s::uuid")
+                  "FROM memories WHERE id = %(id)s::uuid AND person_id = %(person_id)s::uuid FOR UPDATE")
 CLAIM_ROW_SQL = ("SELECT key_label, claim_text, status FROM core_claim "
-                 "WHERE core_id = %(id)s::uuid AND speaker_id = %(person_id)s::uuid")
+                 "WHERE core_id = %(id)s::uuid AND speaker_id = %(person_id)s::uuid FOR UPDATE")
 RETIRE_MEMORY_SQL = """\
 UPDATE memories SET deleted_at = now(), updated_at = now(),
-       category = COALESCE(category, ARRAY[]::text[]) || ARRAY[%(tag)s]::text[]
+       category = COALESCE(category, ARRAY[]::text[]) || ARRAY[%(tag)s, %(receipt)s]::text[]
 WHERE id = %(id)s::uuid AND person_id = %(person_id)s::uuid AND deleted_at IS NULL
 """
 RETIRE_CLAIM_SQL = """\
@@ -430,54 +455,84 @@ WHERE core_id = %(id)s::uuid AND speaker_id = %(person_id)s::uuid AND status IN 
 """
 
 
-def _still_as_judged(mem, table: str, row_id: str, person_id: str, judged: str, *, tag: str) -> str:
-    """'live' (unchanged and live), 'done' (already retired by this tidy), or 'changed'."""
+class _Stale(Exception):
+    """Something changed since it was judged: roll the proposal's transaction back, touch nothing."""
+
+
+def _receipt(proposal_id) -> str:
+    """Codex 11/25: the retired row carries WHICH proposal retired it, so a retry after the proposal's own status
+    write failed recognises its finished work (even if the kept row changed since)."""
+    return f"tidy-proposal:{proposal_id}"
+
+
+def _row_state(mem, table: str, row_id: str, person_id: str, judged: str, *, receipt: str) -> str:
+    """'live' (unchanged, live), 'done' (retired by THIS proposal), or 'changed'. Rows are locked (FOR UPDATE)
+    for the rest of the transaction, so nothing can change between this check and the retire."""
     if table == "memories":
         r = mem.execute(MEMORY_ROW_SQL, {"id": row_id, "person_id": person_id}).fetchone()
         if r is None:
             return "changed"
-        now_text = f"{r[0] or ''}: {_value(r[0], r[1])}"
         if not r[2]:
-            return "done" if tag in (r[3] or []) and now_text == judged else "changed"
-        return "live" if now_text == judged else "changed"
+            return "done" if receipt in (r[3] or []) else "changed"
+        return "live" if f"{r[0] or ''}: {_value(r[0], r[1])}" == judged else "changed"
     r = mem.execute(CLAIM_ROW_SQL, {"id": row_id, "person_id": person_id}).fetchone()
     if r is None:
         return "changed"
-    now_text = f"{r[0] or ''}: {' '.join(str(r[1] or '').split())[:VALUE_MAX]}"
+    now_text = f"{r[0] or ''}: {' '.join(str(r[1] or '').split())}"
     if r[2] == "retired":
         return "done" if now_text == judged else "changed"
     return "live" if r[2] in ("approved", "provisional") and now_text == judged else "changed"
 
 
 def apply_approved(v2_db, mem_db, *, dry_run: bool = False) -> list[dict]:
-    """Retire what he approved, after re-checking every row: each row to retire and each row kept must still
-    read exactly as judged (and the kept one must be live), or the proposal is marked 'stale' and nothing of
-    it is touched. Memories: soft delete tagged tidy:<kind>; claims: status 'retired'."""
+    """Retire what he approved. One transaction per proposal on her memory: every row to retire and every row
+    kept is locked and must still read exactly as judged (the whole text), the kept rows live; every retire must
+    change exactly one row; anything else rolls the transaction back and marks the proposal 'stale', touching
+    nothing. A retry recognises rows this proposal already retired (its receipt tag) and finishes the mark.
+    Memories: soft delete tagged tidy:<kind> + tidy-proposal:<id>; claims: status 'retired'."""
     results = []
     with v2_db() as v2:
         approved = v2.execute(APPROVED_SQL).fetchall()
     for pid, person, kind, table, retire, keep, snapshot in approved:
         snap = snapshot if isinstance(snapshot, dict) else json.loads(snapshot or "{}")
-        tag = f"tidy:{kind}"
-        with mem_db() as mem:
-            states = {i: _still_as_judged(mem, table, i, person, snap.get(i, ""), tag=tag) for i in retire}
-            keeps = {i: _still_as_judged(mem, "memories", i, person, snap.get(i, ""), tag=tag) for i in keep}
-            ok = (all(s in ("live", "done") for s in states.values())
-                  and all(s == "live" for s in keeps.values()))
-            if ok and not dry_run:
-                for i, s in states.items():
-                    if s == "live":
+        tag, receipt = f"tidy:{kind}", _receipt(pid)
+        status = "applied"
+        try:
+            with mem_db() as mem:
+                states = {i: _row_state(mem, table, i, person, snap.get(i, ""), receipt=receipt) for i in retire}
+                if any(st == "changed" for st in states.values()):
+                    raise _Stale()
+                if any(st == "live" for st in states.values()):
+                    # Only while something is still to retire do the kept rows matter (a finished one is done).
+                    keeps = {i: _row_state(mem, "memories", i, person, snap.get(i, ""), receipt=receipt) for i in keep}
+                    if any(st != "live" for st in keeps.values()):
+                        raise _Stale()
+                    if dry_run:
+                        raise _DryRun()
+                    for i, st in states.items():
+                        if st != "live":
+                            continue
                         if table == "memories":
-                            mem.execute(RETIRE_MEMORY_SQL, {"id": i, "person_id": person, "tag": tag})
+                            n = mem.execute(RETIRE_MEMORY_SQL, {"id": i, "person_id": person, "tag": tag,
+                                                                "receipt": receipt}).rowcount
                         else:
-                            mem.execute(RETIRE_CLAIM_SQL, {"id": i, "person_id": person})
-        status = "applied" if ok else "stale"
+                            n = mem.execute(RETIRE_CLAIM_SQL, {"id": i, "person_id": person}).rowcount
+                        if n != 1:
+                            raise _Stale()
+        except _DryRun:
+            status = "applied"
+        except _Stale:
+            status = "stale"
         if not dry_run:
             with v2_db() as v2:
                 v2.execute(MARK_SQL, {"status": status, "id": pid})
-        results.append({"id": pid, "kind": kind, "status": status, "retired": list(retire) if ok else []})
+        results.append({"id": pid, "kind": kind, "status": status, "retired": list(retire) if status == "applied" else []})
         log.info("sleep: proposal %s (%s) %s%s", pid, kind, status, " (dry run)" if dry_run else "")
     return results
+
+
+class _DryRun(_Stale):
+    """A dry run that would have applied: rolled back like a stale one, reported as applied."""
 
 
 # ---- Reflect --------------------------------------------------------------------------------------
