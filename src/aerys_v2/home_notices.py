@@ -39,7 +39,6 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from aerys_v2.reach import ReachEvent
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -541,7 +540,7 @@ def asked_on_for(settings) -> Callable[[Notice], str | None]:
     """Where his job was asked (home_jobs.py keeps it on the job's record in v2_home_tasks)."""
     from aerys_v2.home_jobs import PostgresHomeTaskLedger
 
-    ledger = PostgresHomeTaskLedger(db_url(settings.database_url))
+    ledger = PostgresHomeTaskLedger(settings.database_url)
     return lambda notice: ledger.asked_on(notice.thread_id)
 
 
@@ -560,7 +559,7 @@ def whose_for(settings) -> Callable[[Notice], str | None] | None:
 
     if not home_job_member_map(settings):
         return None
-    ledger = PostgresHomeTaskLedger(db_url(settings.database_url))
+    ledger = PostgresHomeTaskLedger(settings.database_url)
     return lambda notice: ledger.owner_of(notice.thread_id)
 
 
@@ -593,7 +592,7 @@ def home_notices_for(settings, desk) -> HomeNotices | None:
     if (not getattr(settings, "home_notices", False) or getattr(settings, "home_webhook_token", None) is None
             or desk is None or not getattr(settings, "database_url", None)):
         return None
-    return HomeNotices(desk, PostgresNoticeStore(db_url(settings.database_url)), fetch=fetcher_for(settings),
+    return HomeNotices(desk, PostgresNoticeStore(settings.database_url), fetch=fetcher_for(settings),
                        compose=composer_for(settings), asked_on=asked_on_for(settings),
                        whose=whose_for(settings), owner=str(getattr(settings, "owner_person_id", None) or ""),
                        tell_member=tell_member_for(settings))

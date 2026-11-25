@@ -71,7 +71,6 @@ from email import message_from_bytes
 from email import policy as email_policy
 from email.utils import parseaddr
 from typing import Any, Callable
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -246,7 +245,7 @@ def reach_notify_for(settings, *, store=None, clock=None) -> Callable[..., None]
 
     from aerys_v2.reach import PostgresReachStore, ReachEvent
 
-    store = store or PostgresReachStore(db_url(settings.database_url))
+    store = store or PostgresReachStore(settings.database_url)
     now_fn = clock or (lambda: datetime.now(timezone.utc))
 
     def notify(text: str, key: str | None = None) -> None:

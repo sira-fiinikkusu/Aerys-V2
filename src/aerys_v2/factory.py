@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 
 from aerys_v2.action_context import memoized
 from aerys_v2.anthropic_model import build_metered_model
-from aerys_v2.config import Settings, db_url
+from aerys_v2.config import Settings
 from aerys_v2.house_names import NAMES, wife_or
 from aerys_v2.history import prompt_with_context, window_messages
 from aerys_v2.router import DEFAULT_TIER, HANDOFF_MARKER, normalize_tier
@@ -106,7 +106,7 @@ def checkpointer_for(settings: Settings):
     from psycopg_pool import ConnectionPool
 
     pool = ConnectionPool(
-        conninfo=db_url(settings.database_url),
+        conninfo=settings.database_url,
         min_size=1,
         max_size=CHECKPOINT_POOL_MAX,
         # The self-heal. Without this the pool would hand back the same dead
@@ -256,7 +256,7 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
         # through to the profile visibility gates; defaults 'public' (fail-closed
         # / least disclosure) — the owner's private channels opt in explicitly.
         try:
-            with psycopg.connect(db_url(settings.memories_database_url)) as conn:
+            with psycopg.connect(settings.memories_database_url) as conn:
                 conn.read_only = True
                 return build_context(
                     person_id, query_text, conn,
@@ -272,7 +272,7 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
         # on voice she "suddenly doesnt remember [a friend]"). Same fences as context_fn.
         from aerys_v2.services.people_memory import people_memory_block
         try:
-            with psycopg.connect(db_url(settings.memories_database_url)) as conn:
+            with psycopg.connect(settings.memories_database_url) as conn:
                 conn.read_only = True
                 return people_memory_block(conn, person_id, window_text, privacy_context)
         except Exception:
@@ -290,7 +290,7 @@ def context_fn_for(settings: Settings, *, profile_only: bool = False) -> Context
                 def connection():
                     nonlocal conn
                     if conn is None:
-                        conn = stack.enter_context(psycopg.connect(db_url(settings.memories_database_url)))
+                        conn = stack.enter_context(psycopg.connect(settings.memories_database_url))
                         conn.read_only = True
                     return conn
 
@@ -966,7 +966,7 @@ def deep_gate_for(settings: Settings) -> Callable[[], bool] | None:
         try:
             # Fresh short connection per check — same per-call choice (and the
             # same "pool is a drop-in later" note) as context_fn_for above.
-            with psycopg.connect(db_url(settings.database_url)) as conn:
+            with psycopg.connect(settings.database_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO v2_model_usage (day, tier, call_count) "
@@ -1020,7 +1020,7 @@ def turn_recorder_for(settings: Settings) -> Callable[[dict], None] | None:
             # can never hold an aerys_v2 slot open long enough to accumulate against
             # Postgres max_connections and starve the hot path's own DB access.
             with psycopg.connect(
-                db_url(settings.database_url),
+                settings.database_url,
                 connect_timeout=5,
                 options="-c statement_timeout=5000",
             ) as conn:
@@ -1056,7 +1056,7 @@ def gaps_reader_for(settings: Settings) -> Callable[[], str] | None:
     def read() -> str:
         try:
             with psycopg.connect(
-                db_url(settings.database_url),
+                settings.database_url,
                 connect_timeout=5,
                 options="-c statement_timeout=5000",
             ) as conn:
@@ -1091,7 +1091,7 @@ def prod_rw_conn_factory_for(settings: Settings) -> Callable[[], Any] | None:
         return None
     import psycopg
 
-    url = db_url(settings.memories_database_url)
+    url = settings.memories_database_url
 
     def connect() -> Any:
         return psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000")
@@ -1228,7 +1228,7 @@ def remember_writer_for(settings: Settings):
     embed = embedder_from_settings(settings)
     if embed is None:
         return None
-    url = db_url(settings.memories_database_url)
+    url = settings.memories_database_url
 
     def writer(record: dict) -> str:
         import psycopg
@@ -1285,7 +1285,7 @@ def room_context_fn_for(settings: Settings) -> RoomContextFn | None:
     def room(channel_id: str, channel: str) -> str:
         try:
             with psycopg.connect(
-                db_url(settings.database_url),
+                settings.database_url,
                 connect_timeout=5,
                 options="-c statement_timeout=5000",
             ) as conn:
@@ -1336,7 +1336,7 @@ def room_names_for(settings: Settings, platform: str = "discord") -> dict:
     import psycopg
 
     try:
-        with psycopg.connect(db_url(settings.memories_database_url), connect_timeout=5,
+        with psycopg.connect(settings.memories_database_url, connect_timeout=5,
                              options="-c statement_timeout=5000") as conn:
             conn.read_only = True
             rows = conn.execute(ROOM_NAMES_SQL, {"platform": platform}).fetchall()
@@ -1363,7 +1363,7 @@ def owner_room_names_for(settings: Settings, platform: str = "discord") -> dict:
     import psycopg
 
     try:
-        with psycopg.connect(db_url(settings.memories_database_url), connect_timeout=5,
+        with psycopg.connect(settings.memories_database_url, connect_timeout=5,
                              options="-c statement_timeout=5000") as conn:
             conn.read_only = True
             rows = conn.execute(
@@ -1405,7 +1405,7 @@ def portable_context_fn_for(settings: Settings) -> PortableContextFn | None:
     def portable(person_id: str) -> str:
         try:
             with psycopg.connect(
-                db_url(settings.database_url),
+                settings.database_url,
                 connect_timeout=5,
                 options="-c statement_timeout=5000",
             ) as conn:
@@ -2361,7 +2361,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             # Fresh short connection per outbox touch — same per-call choice (and
             # the same "pool is a drop-in later" note) as context_fn_for above.
             def conn_factory():
-                return psycopg.connect(db_url(settings.database_url))
+                return psycopg.connect(settings.database_url)
 
         tools.append(
             build_home_control_tool(
@@ -2514,7 +2514,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     base_url=settings.ha_base_url,
                     token=settings.ha_token.get_secret_value(),
                     config_entry_id=settings.ha_music_config_entry,
-                    dj_store=store_for(db_url(settings.database_url)),
+                    dj_store=store_for(settings.database_url),
                     players=satellite_map_from(settings.ha_music_players),
                     default_player=settings.ha_music_default_player,
                     owner_person_id=str(settings.owner_person_id or "") or None,
@@ -2561,7 +2561,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
 
         from aerys_v2.tools.log_gap import build_log_gap_tool
 
-        _gaps_url = db_url(settings.database_url)
+        _gaps_url = settings.database_url
 
         def gaps_conn_factory():
             return _psycopg.connect(_gaps_url, connect_timeout=5,
@@ -2603,7 +2603,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         if settings.memories_database_url and settings.owner_person_id is not None:
             from aerys_v2.tools.contacts import PostgresContacts, build_contact_tool
 
-            contacts = PostgresContacts(db_url(settings.memories_database_url))
+            contacts = PostgresContacts(settings.memories_database_url)
             owner = str(settings.owner_person_id)
             tools.append(build_contact_tool(contacts, owner_person_id=owner,
                                             owner_names=lambda: contacts.names_of(owner)))
@@ -2637,7 +2637,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         from aerys_v2.reach import PostgresReachStore
         from aerys_v2.tools.reach_prefs import build_reach_prefs_tool
 
-        tools.append(build_reach_prefs_tool(PostgresReachStore(db_url(settings.database_url)),
+        tools.append(build_reach_prefs_tool(PostgresReachStore(settings.database_url),
                                             default_budget=settings.reach_daily_budget))
         if settings.followups:
             # CHECK BACK (board #176, Stage 2; the owner's C, 11/08): when he says yes to her
@@ -2645,14 +2645,14 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             # runner (followups.py) brings it back at its time through the desk.
             from aerys_v2.followups import PostgresFollowupStore, build_check_back_tool
 
-            tools.append(build_check_back_tool(PostgresFollowupStore(db_url(settings.database_url)),
-                                               withdraw=PostgresReachStore(db_url(settings.database_url)).withdraw))
+            tools.append(build_check_back_tool(PostgresFollowupStore(settings.database_url),
+                                               withdraw=PostgresReachStore(settings.database_url).withdraw))
         if settings.wakeups:
             # HER WAKE-UPS (D40/D41, 11/12): she sets herself a later check, for any task, and the
             # wake-ups runner (wakeups.py) runs it as an unattended action turn at its time.
             from aerys_v2.wakeups import PostgresWakeupStore, WakeRails, build_wake_me_tool
 
-            wake_store = PostgresWakeupStore(db_url(settings.database_url))
+            wake_store = PostgresWakeupStore(settings.database_url)
             if message_sender is not None:
                 # D42 (11/13): a message he asks for when a wake-up is set goes at its time, untapped.
                 message_sender.wake_store = wake_store
@@ -2676,7 +2676,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             from aerys_v2.tickets import PostgresTicketStore, line_sender
             from aerys_v2.tools.kael_tickets import build_kael_tickets_tool
 
-            ticket_store = PostgresTicketStore(db_url(settings.database_url))
+            ticket_store = PostgresTicketStore(settings.database_url)
             tools.append(build_kael_tickets_tool(
                 ticket_store,
                 line_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value()),
@@ -2696,7 +2696,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             from aerys_v2.checkins import PostgresCheckinStore
             from aerys_v2.tools.kael_checkins import build_kael_checkins_tool
 
-            tools.append(build_kael_checkins_tool(PostgresCheckinStore(db_url(settings.database_url))))
+            tools.append(build_kael_checkins_tool(PostgresCheckinStore(settings.database_url)))
 
     if not guest and settings.ha_token is not None:
         # Keep listening (11/11): his voice switch for input_boolean.aerys_keep_listening.
@@ -2876,7 +2876,7 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
     )
     from aerys_v2.dj import store_for
 
-    action_graph.dj_store = store_for(db_url(settings.database_url))
+    action_graph.dj_store = store_for(settings.database_url)
     # D79: the honesty judge on her one-loop replies (Jev on the reflex's key; None without one). It can
     # never take the tool stack down: a judge that won't build is None, i.e. judge_unavailable on each turn.
     try:
@@ -3207,7 +3207,7 @@ def voice_room_fn_for(settings: Settings):
 
     def voice_room(channel_id: str) -> str:
         try:
-            with psycopg.connect(db_url(settings.database_url), connect_timeout=3) as conn:
+            with psycopg.connect(settings.database_url, connect_timeout=3) as conn:
                 conn.read_only = True
                 rows = conn.execute(
                     VOICE_ROOM_TURNS_SQL,

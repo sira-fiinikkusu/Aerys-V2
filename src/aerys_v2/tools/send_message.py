@@ -15,7 +15,6 @@ from langgraph.prebuilt import ToolRuntime
 from aerys_v2.hands_gate import MESSAGE
 from aerys_v2.outside_guard import note_basis, sources_for
 from aerys_v2.state import is_voice_turn
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 WINDOW = timedelta(minutes=10)
@@ -347,8 +346,8 @@ def message_sender_for(settings, gate):
         return None
     from aerys_v2.kael_line import _discord_dm_send
     token = settings.discord_bot_token.get_secret_value()
-    sender = MessageSender(gate, people, PostgresMessageSends(db_url(settings.database_url)),
+    sender = MessageSender(gate, people, PostgresMessageSends(settings.database_url),
                            lambda address, text: _discord_dm_send(token, address, text),
-                           names=message_names_for(db_url(getattr(settings, 'memories_database_url', None))))
+                           names=message_names_for(getattr(settings, 'memories_database_url', None)))
     log.info('send_message armed')
     return sender

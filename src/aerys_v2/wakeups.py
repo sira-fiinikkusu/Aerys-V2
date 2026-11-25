@@ -46,7 +46,6 @@ from zoneinfo import ZoneInfo
 from langchain_core.runnables import RunnableConfig
 
 from aerys_v2.reach import ReachEvent
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -1566,5 +1565,5 @@ def wakeups_for(settings, desk, *, action_graph=None) -> WakeUps | None:
         return None
     rails = WakeRails.from_settings(settings)
     set_autonomy_blocked(getattr(settings, "autonomy_blocked", ""))
-    return WakeUps(desk, PostgresWakeupStore(db_url(settings.database_url)),
+    return WakeUps(desk, PostgresWakeupStore(settings.database_url),
                    run_turn=wake_turn_for(graph, str(owner), steps=rails.steps), rails=rails)

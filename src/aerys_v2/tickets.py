@@ -39,7 +39,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterable, Protocol
 
 import httpx
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -559,7 +558,7 @@ def kael_update_for(store: TicketStore, note_fn, wake: threading.Event | None = 
 def ticket_door_for(settings, note_fn, wake: threading.Event | None = None) -> TicketDoor | None:
     if not getattr(settings, "database_url", None):
         return None
-    store = PostgresTicketStore(db_url(settings.database_url))
+    store = PostgresTicketStore(settings.database_url)
     return TicketDoor(store=store, update=kael_update_for(store, note_fn, wake))
 
 
@@ -572,7 +571,7 @@ def start_tickets(settings, graph, wake: threading.Event | None = None, desk=Non
     from aerys_v2.kael_line import owner_notice_for, ticket_relay_for
 
     watcher = TicketWatcher(
-        PostgresTicketStore(db_url(settings.database_url)),
+        PostgresTicketStore(settings.database_url),
         line_sender(settings.kael_desk_url, settings.kael_desk_token.get_secret_value()),
         nag_after=timedelta(hours=settings.kael_ticket_nag_after_h),
         tell_owner_after=timedelta(hours=settings.kael_ticket_tell_owner_after_h),

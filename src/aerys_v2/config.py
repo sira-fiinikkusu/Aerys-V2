@@ -10,15 +10,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 log = logging.getLogger(__name__)
 
 
-def db_url(value) -> str | None:
-    """G2: the plain URL out of a database URL setting (a SecretStr, so a repr or a log of the settings never
-    prints the NAS password). A plain string (a test double) passes through; None stays None. Every reader of
-    database_url / memories_database_url goes through this (tests/test_config.py checks every one)."""
-    if value is None:
-        return None
-    return value.get_secret_value() if isinstance(value, SecretStr) else str(value)
-
-
 class Settings(BaseSettings):
     # tells pydantic WHERE to read from (like pointing dotenv at a file)
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -263,9 +254,7 @@ class Settings(BaseSettings):
     # brain's OWN database on the NAS (checkpoints, outbox, model-usage cap).
     # MUST target `aerys_v2`, never prod `aerys` — run_boot_assertions() below
     # refuses to start otherwise (the two-database footgun, made unbootable).
-    # G2 (11/24): SecretStr like every other credential (the URL carries the NAS
-    # password); every reader unwraps it with db_url() below.
-    database_url: SecretStr | None = None
+    database_url: str | None = None
     her_skills: bool = False
 
     # ---- MEMORY-RETRIEVAL block (long-term context) --------------------------
@@ -276,8 +265,8 @@ class Settings(BaseSettings):
     # and the owner-facing slash commands (/aerys-tell, -forget, -correct —
     # explicit user edits, audit-logged). Kept separate from database_url on
     # purpose — the checkpointer may live in its own DB, and "durable threads"
-    # vs "prod memories" are different blast radii. SecretStr, like database_url (G2).
-    memories_database_url: SecretStr | None = None
+    # vs "prod memories" are different blast radii.
+    memories_database_url: str | None = None
 
     # Channel-recent room context (cross-surface continuity, multi-person half):
     # how many recent turns of a PUBLIC channel to splice into the system prompt so
@@ -917,7 +906,7 @@ def run_boot_assertions(settings: Settings, env_file: Path | None = None) -> Non
     #    must be aerys_v2 — anything else risks writing into prod `aerys` or
     #    n8n's engine database.
     if settings.database_url is not None:
-        name = database_name(db_url(settings.database_url))
+        name = database_name(settings.database_url)
         if name != V2_DATABASE_NAME:
             raise BootConfigError(
                 f"DATABASE_URL targets database {name!r} — the V2 brain writes "
@@ -930,7 +919,7 @@ def run_boot_assertions(settings: Settings, env_file: Path | None = None) -> Non
     #    mistake mirrored — retrieval reads an empty staging DB and every turn
     #    quietly knows nothing. Survivable (read-only), so warn, don't die.
     if settings.memories_database_url is not None:
-        name = database_name(db_url(settings.memories_database_url))
+        name = database_name(settings.memories_database_url)
         if name == V2_DATABASE_NAME:
             log.warning(
                 "MEMORIES_DATABASE_URL targets '%s' — that is the brain's OWN "

@@ -38,7 +38,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from aerys_v2.test_bodies import patterns_for
 from aerys_v2.tickets import TEXT_SURFACES, ask_surface  # ask_surface re-exported for callers
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +106,7 @@ def _person_platform_id(settings, platform: str, person_id) -> str | None:
     """The owner's platform user id, resolved from prod platform_identities.
     memories_database_url, NOT database_url — identity is prod data (the
     8/15 wrong-database lesson, learned once)."""
-    db = db_url(getattr(settings, "memories_database_url", None))
+    db = getattr(settings, "memories_database_url", None)
     if not db or person_id is None:
         return None
     import psycopg
@@ -131,7 +130,7 @@ def _owner_last_surface(settings) -> tuple[str, str | None]:
     on that satellite or inked on that Sticky via the followup router. A
     stale one may be an empty room -> Discord, his text default. Telegram
     only when telegram was truly last."""
-    db = db_url(getattr(settings, "database_url", None))  # v2 spine — turns live here
+    db = getattr(settings, "database_url", None)  # v2 spine — turns live here
     if not db or settings.owner_person_id is None:
         return ("discord", None)
     import psycopg
@@ -348,7 +347,7 @@ def kael_note_for(
     """
     import uuid
 
-    database_url = db_url(settings.database_url)
+    database_url = settings.database_url
 
     # Gap #45: the proactive turn — armed only for the owner's person thread
     # and only when she has a way to reach him (telegram token + identity).
@@ -551,7 +550,7 @@ def family_notes_fn_for(settings) -> Callable[[dict], str] | None:
     import psycopg
 
     owner = settings.owner_person_id
-    database_url = db_url(settings.database_url)
+    database_url = settings.database_url
 
     def family(identity: dict) -> str:
         if str(identity.get("user_id") or "") != owner:
@@ -1055,7 +1054,7 @@ def owner_replied_since(settings, when) -> bool:
     nap or wake him for a brief while he slept; test_bodies.py, 11/09)."""
     import psycopg
 
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=5) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
         conn.read_only = True
         return conn.execute(_OWNER_REPLIED_SQL,
                             (settings.owner_person_id, when, patterns_for(settings))).fetchone() is not None
@@ -1086,7 +1085,7 @@ def owner_saw_otherwise(settings, row, *, owner_discord=None) -> bool:
 
     run_start = row.created_at - WAKE_RUN_SPAN
     tapper = (owner_discord or owner_id_for(settings))()
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=5) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
         conn.read_only = True
         if conn.execute(_OWNER_TEXTED_SQL, (str(settings.owner_person_id), run_start,
                                             row.spoken_at + WAKE_RUN_SPAN)).fetchone():
@@ -1227,7 +1226,7 @@ def reach_desk_for(settings, graph):
         log.info("reach desk: his mornings follow his phone (quiet ends when he's up; %02d:00 fallback)", end_h)
 
     return ReachDesk(
-        PostgresReachStore(db_url(settings.database_url)),
+        PostgresReachStore(settings.database_url),
         Deliverer(locate=locate, speak=speak, text=text, busy=busy, text_surface=text_surface,
                   notify=notify if notify_service and getattr(settings, "ha_token", None) is not None else None),
         budget_default=int(getattr(settings, "reach_daily_budget", 3)),

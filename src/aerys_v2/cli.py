@@ -1,7 +1,7 @@
 import logging, sys
 import signal, threading
 from pydantic import ValidationError
-from aerys_v2.config import BootConfigError, Settings, db_url, run_boot_assertions
+from aerys_v2.config import BootConfigError, Settings, run_boot_assertions
 from aerys_v2.privacy_shadow import privacy_shadow_for
 from aerys_v2.speaker_redirect import speaker_redirect_for
 from aerys_v2.satellite_voice import satellite_voice_for
@@ -80,7 +80,7 @@ def main() -> None:
         # fresh connection while the HTTP /health probes the live server's pool.
         from aerys_v2.factory import store_reachable
 
-        if not store_reachable(db_url(settings.database_url)):
+        if not store_reachable(settings.database_url):
             print("unhealthy: checkpoint store unreachable")
             sys.exit(1)
         print("ok")
@@ -583,7 +583,7 @@ def main() -> None:
         if settings.memories_database_url is not None:
             from aerys_v2.transports.resolver import db_resolver
 
-            resolve = db_resolver(db_url(settings.memories_database_url))
+            resolve = db_resolver(settings.memories_database_url)
         else:
             from aerys_v2.transports.resolver import identity_from_lookup
 
@@ -753,7 +753,7 @@ def main() -> None:
         if settings.memories_database_url is not None:
             from aerys_v2.transports.resolver import db_resolver
 
-            resolve = db_resolver(db_url(settings.memories_database_url))
+            resolve = db_resolver(settings.memories_database_url)
         else:
             from aerys_v2.transports.resolver import identity_from_lookup
 

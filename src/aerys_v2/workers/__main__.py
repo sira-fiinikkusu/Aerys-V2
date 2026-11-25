@@ -42,7 +42,6 @@ from .capability_requests import (
     run_gap_mining,
 )
 from .extraction import anthropic_chat, openrouter_chat, run_extraction, run_live_extraction
-from aerys_v2.config import db_url
 
 log = logging.getLogger("aerys_v2.workers")
 
@@ -94,14 +93,14 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
     sealed_rooms = frozenset(
         c.strip() for c in settings.discord_sealed_channel_ids.split(",") if c.strip()
     )
-    with psycopg.connect(db_url(settings.memories_database_url)) as source_conn:
+    with psycopg.connect(settings.memories_database_url) as source_conn:
         source_conn.read_only = True
-        with psycopg.connect(db_url(settings.database_url)) as staging_conn:
+        with psycopg.connect(settings.database_url) as staging_conn:
             if live:
                 # A THIRD connection to the SAME url as source_conn — read_only
                 # is a per-connection posture, so writing to prod `memories`
                 # needs its own connection object, never source_conn itself.
-                with psycopg.connect(db_url(settings.memories_database_url)) as prod_write_conn:
+                with psycopg.connect(settings.memories_database_url) as prod_write_conn:
                     summary = run_live_extraction(
                         source_conn,
                         staging_conn,
@@ -269,8 +268,8 @@ def _extraction_main(settings: Settings, args: argparse.Namespace) -> int:
     missing = [
         name
         for name, value in (
-            ("DATABASE_URL", db_url(settings.database_url)),
-            ("MEMORIES_DATABASE_URL", db_url(settings.memories_database_url)),
+            ("DATABASE_URL", settings.database_url),
+            ("MEMORIES_DATABASE_URL", settings.memories_database_url),
             ("EMBEDDINGS_API_KEY", settings.embeddings_api_key),
         )
         if not value
@@ -327,7 +326,7 @@ def _mine_gaps_once(settings: Settings, allowlist) -> dict:
     # INSERT/watermark write), not a whole-pass one — enough to unstick a hung DB.
     # The SET also guarantees a transaction is open before the per-turn SAVEPOINTs,
     # reinforcing the non-autocommit invariant run_gap_mining now asserts.
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=10) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
         conn.execute("SET statement_timeout = '120s'")
         summary = run_gap_mining(
             conn,
@@ -350,7 +349,7 @@ def _gaps_mine_main(settings: Settings, args: argparse.Namespace) -> int:
     from ..factory import action_allowlist_for
 
     allow = action_allowlist_for(settings)
-    missing = [n for n, v in (("DATABASE_URL", db_url(settings.database_url)),) if not v]
+    missing = [n for n, v in (("DATABASE_URL", settings.database_url),) if not v]
     if allow is None:
         missing.append("OWNER_PERSON_ID")
     if missing:
@@ -410,7 +409,7 @@ def _email_watch_once(settings: Settings, notify_fn) -> dict:
         settings.email_address,
         settings.email_app_password.get_secret_value(),
     )
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=10,
+    with psycopg.connect(settings.database_url, connect_timeout=10,
                          autocommit=True) as conn:
         conn.execute("SET statement_timeout = '30s'")
         stats = run_once(conn, imap_factory, notify_fn)
@@ -437,7 +436,7 @@ def _email_watch_main(settings: Settings, args: argparse.Namespace) -> int:
     missing = [
         name
         for name, value in (
-            ("DATABASE_URL", db_url(settings.database_url)),
+            ("DATABASE_URL", settings.database_url),
             ("EMAIL_ADDRESS", settings.email_address),
             ("EMAIL_APP_PASSWORD", settings.email_app_password),
         )
@@ -489,7 +488,7 @@ def _gaps_read_main(settings: Settings, args: argparse.Namespace) -> int:
         return 2
     import psycopg
 
-    with psycopg.connect(db_url(settings.database_url)) as conn:
+    with psycopg.connect(settings.database_url) as conn:
         # Belt-and-braces: the /gaps surface never writes; the DB refuses one too.
         conn.read_only = True
         rows = read_gaps(conn, status=args.status, limit=args.limit)
@@ -510,7 +509,7 @@ def _reflex_report_main(settings: Settings, args: argparse.Namespace) -> int:
 
     from .reflex_report import format_report, read_reflex_rows
 
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=10) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
         conn.read_only = True
         conn.execute("SET statement_timeout = '30s'")
         rows = read_reflex_rows(conn, args.window)
@@ -526,7 +525,7 @@ def _privacy_report_main(settings: Settings, args: argparse.Namespace) -> int:
 
     from .privacy_report import format_report, read_rows
 
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=10) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=10) as conn:
         conn.read_only = True
         conn.execute("SET statement_timeout = '30s'")
         rows = read_rows(conn, args.window)
@@ -559,12 +558,12 @@ def _signals_main(settings: Settings, args: argparse.Namespace) -> int:
     # of these as a speaker, identity resolution was bypassed somewhere.
     aliases = args.alias or []
 
-    with psycopg.connect(db_url(settings.database_url)) as turns_conn:
+    with psycopg.connect(settings.database_url) as turns_conn:
         turns_conn.read_only = True
         memories_conn = None
         try:
             if settings.memories_database_url:
-                memories_conn = psycopg.connect(db_url(settings.memories_database_url))
+                memories_conn = psycopg.connect(settings.memories_database_url)
                 memories_conn.read_only = True
             results = run_signals(
                 turns_conn=turns_conn, memories_conn=memories_conn,
@@ -608,7 +607,7 @@ def _gap_board_main(settings: Settings, args: argparse.Namespace) -> int:
 
     board = GitHubBoard(repo=settings.board_repo, token=settings.board_token,
                         private=True)
-    with psycopg.connect(db_url(settings.database_url)) as conn:
+    with psycopg.connect(settings.database_url) as conn:
         filed = run_publish(conn, board=board)
     print(f"filed {filed} gap(s) on {settings.board_repo}")
     return 0

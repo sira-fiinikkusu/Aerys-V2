@@ -33,7 +33,6 @@ from datetime import datetime, time, timedelta, timezone
 from typing import Callable
 
 from aerys_v2.reach import EASTERN, ReachEvent, muted_topics
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -688,7 +687,7 @@ def plan_miner_turns(settings, after: int | None) -> list:
     from aerys_v2.test_bodies import patterns_for
 
     owner = getattr(settings, "owner_person_id", None)
-    with psycopg.connect(db_url(settings.database_url), connect_timeout=5) as conn:
+    with psycopg.connect(settings.database_url, connect_timeout=5) as conn:
         conn.read_only = True
         if after is None:
             row = conn.execute("SELECT max(id) FROM v2_turns").fetchone()
@@ -775,7 +774,7 @@ def followups_for(settings, desk) -> FollowUps | None:
     """None unless armed: followups on, a desk, and a database."""
     if not getattr(settings, "followups", False) or desk is None or not getattr(settings, "database_url", None):
         return None
-    store = PostgresFollowupStore(db_url(settings.database_url))
+    store = PostgresFollowupStore(settings.database_url)
     asked, appt, plan = (_her_words(settings, ASKED_PROMPT), _her_words(settings, APPOINTMENT_PROMPT),
                          _her_words(settings, PLAN_PROMPT))
     mode = str(getattr(settings, "followup_plans", "shadow") or "shadow").strip().lower()

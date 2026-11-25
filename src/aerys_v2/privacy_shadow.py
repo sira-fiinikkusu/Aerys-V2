@@ -20,7 +20,6 @@ import threading
 from typing import Callable
 
 from aerys_v2.services.content_privacy import PRIVATE, PUBLIC, keyword_verdict
-from aerys_v2.config import db_url
 
 log = logging.getLogger(__name__)
 
@@ -124,5 +123,5 @@ def privacy_shadow_for(settings, judge, reflex):
         return judge
     if not hasattr(reflex, "judge_privacy"):
         return judge
-    return shadow_privacy_fn(judge, reflex, db_sink_for(db_url(settings.database_url)),
+    return shadow_privacy_fn(judge, reflex, db_sink_for(settings.database_url),
                              vote_below=getattr(settings, "reflex_privacy_vote_below", None))
