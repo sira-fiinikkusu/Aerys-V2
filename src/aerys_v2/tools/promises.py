@@ -144,13 +144,10 @@ def build_promises_tool(memories_db: ConnFactory, *, turn_text: Callable[[], str
     return promises
 
 
-#: D101: how long an untold close waits to be named before it is let go (the dashboard keeps it either way).
-CLOSED_TELL_DAYS = 14
-
 CLOSED_SQL = """\
 SELECT id::text, content, category, deleted_at FROM memories
 WHERE person_id = %(person_id)s::uuid AND key_label LIKE 'aerys.promised.%%'
-  AND deleted_at IS NOT NULL AND deleted_at > now() - make_interval(days => %(days)s)
+  AND deleted_at IS NOT NULL
   AND COALESCE(category, ARRAY[]::text[]) && ARRAY['promise:kept', 'promise:dropped']::text[]
   AND NOT ('promise:told' = ANY(COALESCE(category, ARRAY[]::text[])))
 ORDER BY deleted_at
@@ -166,10 +163,11 @@ WHERE id = ANY(%(ids)s::uuid[]) AND person_id = %(person_id)s::uuid AND deleted_
 """
 
 
-def closed_promises(conn, person_id: str, *, days: int = CLOSED_TELL_DAYS, limit: int = 10) -> list[dict]:
+def closed_promises(conn, person_id: str, *, limit: int = 10) -> list[dict]:
     """D101: the promises the tool closed that he hasn't been told about yet (untagged retirements are not
-    hers to report). Untold, not "the last 24 hours": a morning with no brief never loses one."""
-    rows = conn.execute(CLOSED_SQL, {"person_id": person_id, "days": days, "limit": limit}).fetchall()
+    hers to report). Untold, however long ago (Codex 11/25: no age cutoff), so no morning loses one; oldest
+    first, LIMIT at a time."""
+    rows = conn.execute(CLOSED_SQL, {"person_id": person_id, "limit": limit}).fetchall()
     out = []
     for row_id, content, category, at in rows:
         how = "kept" if "promise:kept" in (category or []) else "dropped"
