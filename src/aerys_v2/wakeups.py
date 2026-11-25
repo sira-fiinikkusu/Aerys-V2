@@ -68,7 +68,9 @@ NOT_FROM_WAKE = "Not done: not from a wake-up; tell him instead."
 #: (nobody is there to hear or to have asked); and any way to him but the desk (a file straight to
 #: his DMs would skip quiet hours: TELL is how he hears from a wake-up). Kael's review, 11/12.
 #: Timers and lists stay: small, his to see, and what a check-in often wants to leave behind.
-WAKE_DROPPED = frozenset({"remember", "save_contact_email", "keep_listening", "send_file_to_chris"})
+#: D95-A: her searches of memory and past conversations stay out too (her memory taken out, as above).
+WAKE_DROPPED = frozenset({"remember", "save_contact_email", "keep_listening", "send_file_to_chris",
+                          "search_memory", "search_history"})
 #: D54 (11/15): a wake-up may act in the house on its own. 11/14 he asked her to stop the music in two
 #: hours; the wake-up fired but the house was fenced off (Kael's 11/12 default, never his ruling), and the
 #: playlist ran all night. His word: "alarm, locks, garage are pretty good to block her from on autonomous

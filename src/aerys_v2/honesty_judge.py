@@ -195,6 +195,11 @@ WORDS = {
     "read_file": lambda a: f"read the file {_a(a, 'file_path')} on her home machine",
     "ls": lambda a: f"listed the files in {_a(a, 'path') or 'her home workspace'}",
     "read_my_code": lambda a: "read lines of her own code",
+    "search_memory": lambda a: f"searched her long-term memory for '{_a(a, 'query')}'",
+    "search_history": lambda a: ("searched past conversations"
+                                 + (f" for '{_a(a, 'query')}'" if _a(a, "query") else "")
+                                 + (f" from {_a(a, 'since')}" if _a(a, "since") else "")
+                                 + (f" until {_a(a, 'until')}" if _a(a, "until") else "")),
     "read_document": lambda a: "read a document he sent",
     "analyze_image": lambda a: "looked at an image",
     "youtube_summary": lambda a: "read a YouTube video's transcript",

@@ -32,6 +32,7 @@ old-but-on-point memory (sim*0.7 floor) beats fresh noise.
 
 import json
 import math
+import re
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
@@ -137,6 +138,136 @@ def retrieve_memories(
         },
     ).fetchall()
     return [dict(zip(_COLUMNS, row)) for row in rows]
+
+
+# --- D95-A (Chris 11/24): her own search of long-term memory -------------------------------
+# Recall hands every turn CONTEXT_CAP lines scored against the current message; a LongMemEval
+# pilot the same day showed she could not reach anything past them. search_memories is the
+# same scoring over the same table, plus a plain word match (a name the vectors rank low is
+# still found), returning more rows. WHO and WHICH LEVELS are decided by the caller's scope
+# (services/recall_search.py) and passed in; nothing here widens on its own. Never her
+# Kael-line logs (a2a_*, as in the people block) or her skills (as on the stick).
+SEARCH_LIMIT = 12
+SEARCH_POOL = 30  # rows each half fetches before the merge
+
+_SEARCH_FROM = """\
+FROM memories m
+LEFT JOIN persons p ON p.id = m.person_id"""
+
+_SEARCH_WHERE = """\
+WHERE m.person_id = ANY(%(person_ids)s::uuid[])
+  AND m.deleted_at IS NULL
+  AND m.privacy_level = ANY(%(levels)s)
+  AND (m.key_label IS NULL OR (m.key_label NOT LIKE 'a2a\\_%%' AND m.key_label NOT LIKE 'skill.%%'))
+  AND m.source_platform IS DISTINCT FROM 'kael_line'"""
+
+_SEARCH_COLUMNS = (
+    "id", "person_id", "content", "key_label", "source_platform", "privacy_level",
+    "created_at", "score", "display_name",
+)
+
+SEARCH_SEMANTIC_SQL = f"""\
+SELECT
+  m.id::text, m.person_id::text, m.content, m.key_label, m.source_platform, m.privacy_level,
+  m.created_at,
+  (1 - (m.embedding <=> %(embedding)s::vector))
+  * ({SIM_WEIGHT} + {RECENCY_WEIGHT} * LEAST(1.0, GREATEST(0.0,
+      1 - EXTRACT(EPOCH FROM (NOW() - m.created_at)) / {RECENCY_WINDOW_S}.0
+    ))) AS score,
+  p.display_name
+{_SEARCH_FROM}
+{_SEARCH_WHERE}
+  AND m.embedding IS NOT NULL
+ORDER BY score DESC
+LIMIT %(limit)s
+"""
+
+# held = how many of the query's words the row holds (its text, its key, or, for someone
+# other than the caller, their name: "what do you know about Sam" finds Sam's own facts).
+SEARCH_KEYWORD_SQL = f"""\
+SELECT
+  m.id::text, m.person_id::text, m.content, m.key_label, m.source_platform, m.privacy_level,
+  m.created_at, h.held AS score, p.display_name
+{_SEARCH_FROM}
+CROSS JOIN LATERAL (
+  SELECT count(*) AS held FROM unnest(%(patterns)s::text[]) AS w(pat)
+  WHERE m.content ~* w.pat OR COALESCE(m.key_label, '') ~* w.pat
+     OR (m.person_id <> %(caller)s::uuid AND COALESCE(p.display_name, '') ~* w.pat)
+) h
+{_SEARCH_WHERE}
+  AND h.held > 0
+ORDER BY h.held DESC, m.created_at DESC
+LIMIT %(limit)s
+"""
+
+_SEARCH_STOP = frozenset(
+    "the and for with what who where when which about tell know does did you your have has "
+    "from that this are was were any some said say told ever".split())
+
+
+def search_words(query: str) -> list[str]:
+    """The query's words worth matching on their own: 3+ letters, not filler, in order, once."""
+    out: list[str] = []
+    for word in re.findall(r"[^\W_]{3,}", (query or "").lower()):
+        if word not in _SEARCH_STOP and word not in out:
+            out.append(word)
+    return out[:8]
+
+
+def search_memories(
+    conn: Any,
+    person_ids: Sequence[str],
+    levels: Sequence[str],
+    query: str,
+    *,
+    caller: str,
+    embed: Embedder | None = None,
+    query_embedding: Sequence[float] | None = None,
+    limit: int = SEARCH_LIMIT,
+) -> list[dict]:
+    """Rows holding EVERY query word first, then the vector ranking, then rows holding some
+    of the words (the stick's order, so both bodies search alike). Deduplicated by id.
+
+    Pass a precomputed `query_embedding` (so no connection is held open across the embed
+    call) or an `embed` seam. A failed or missing embedding leaves the word match standing;
+    it never raises for that.
+    """
+    query = (query or "").strip()
+    if conn is None or not query or not person_ids or not levels:
+        return []
+    base = {"person_ids": list(person_ids), "levels": list(levels), "caller": caller,
+            "limit": SEARCH_POOL}
+    words = search_words(query)
+    keyword: list[dict] = []
+    if words:
+        from aerys_v2.services.people_memory import postgres_word
+
+        rows = conn.execute(SEARCH_KEYWORD_SQL,
+                            {**base, "patterns": [postgres_word(w) for w in words]}).fetchall()
+        keyword = [dict(zip(_SEARCH_COLUMNS, row)) for row in rows]
+    ranked: list[dict] = []
+    vector = query_embedding
+    if vector is None and embed is not None:
+        try:
+            vector = embed(query)
+        except Exception:
+            vector = None
+    if vector:
+        rows = conn.execute(SEARCH_SEMANTIC_SQL,
+                            {**base, "embedding": embedding_to_pgvector(vector)}).fetchall()
+        ranked = [dict(zip(_SEARCH_COLUMNS, row)) for row in rows]
+    complete = [r for r in keyword if words and int(r.get("score") or 0) >= len(words)]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in (*complete, *ranked, *keyword):
+        key = str(row.get("id"))
+        if key in seen or row.get("content") is None:
+            continue
+        seen.add(key)
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> str:
