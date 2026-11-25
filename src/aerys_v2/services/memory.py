@@ -180,6 +180,9 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
             display = ":".join(content.split(":")[1:]).strip()
         else:
             display = content
+        if key.startswith("aerys."):
+            # D97 (2026-11-25): her own words, never to be read as a fact about him.
+            display = f"(her own words) {display}"
 
         parts = [f"* {display}"]
         if row.get("source_platform"):

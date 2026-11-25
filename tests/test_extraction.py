@@ -38,7 +38,7 @@ ROBIN = "11111111-2222-3333-4444-555555555555"
 
 def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
         platform="discord", privacy="private", thread="v1:n8n_chat_histories",
-        channel_id=None, sealed_room=None):
+        channel_id=None, sealed_room=None, reply=None):
     """A source row in SOURCE_COLUMNS order — both queries return this shape.
 
     id defaults to "1" (fine when a test only ever has one row, or doesn't
@@ -57,6 +57,7 @@ def row(person_id, content, *, id="1", at=T0, raw=None, speaker="Unknown",
         "source_thread": thread,
         "channel_id": channel_id,
         "sealed_room": sealed_room,
+        "reply": reply,
     }
     return tuple(values[c] for c in SOURCE_COLUMNS)
 
@@ -828,10 +829,12 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
     prod_write = FakeConn([("FROM memories", [])])
     run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder)
 
-    assert calls["n"] == 2  # one fresh embed call per observation, not one for the batch
+    # D95-B (2026-11-25): the first call embeds the batch for the KNOWN lookup; then one fresh
+    # embed call per observation, never one reused for the batch.
+    assert calls["n"] == 3
     inserts = [p for s, p in prod_write.calls if s.lstrip().upper().startswith("INSERT")]
     embeddings = {p["embedding"] for p in inserts}
-    assert embeddings == {"[1.0]", "[2.0]"}  # two distinct fresh vectors, not a shared/cached one
+    assert embeddings == {"[2.0]", "[3.0]"}  # two distinct fresh vectors, not a shared/cached one
 
 
 def test_live_extraction_skips_unusable_observations_and_counts_them():
