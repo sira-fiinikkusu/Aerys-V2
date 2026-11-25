@@ -379,6 +379,16 @@ WHERE person_id = %(person_id)s::uuid AND key_label = %(key_label)s
 ORDER BY created_at DESC
 """
 
+# D97 (Codex r5): an UNDATED restatement of a DATED append row keeps the row's date and wording;
+# only its freshness (and a privacy tightening) changes, so a later occurrence on another date
+# still reads as a second occurrence.
+TRIAGE_APPEND_REFRESH_SQL = """\
+UPDATE memories
+SET updated_at = now(),
+    privacy_level = CASE WHEN %(privacy_level)s = 'private' THEN 'private' ELSE privacy_level END
+WHERE id = %(id)s
+"""
+
 # D95-B: soft-delete ONE row the extractor was shown, only if it is still this person's and live.
 TRIAGE_RETIRE_SQL = """\
 UPDATE memories SET deleted_at = now(), updated_at = now()
@@ -811,6 +821,9 @@ def triage_memory(
                 if mined_from_turn and not (source_text and source_text.strip()) and not at_least_as_specific(value_text, row_value):
                     log.warning("memory skipped: weaker same-key observation")
                     return "skipped"
+                if row_date and not event_date:
+                    conn.execute(TRIAGE_APPEND_REFRESH_SQL, {"id": row_id, "privacy_level": privacy_level})
+                    return finish("update", row_id)
                 conn.execute(TRIAGE_UPDATE_SQL, {"id": row_id, "content": content, "context": context,
                                                  "event_date": event_date, "embedding": embedding,
                                                  "privacy_level": privacy_level})

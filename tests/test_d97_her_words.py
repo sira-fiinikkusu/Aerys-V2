@@ -383,3 +383,14 @@ def test_the_same_event_on_the_same_date_refreshes_its_row():
     conn = FakeConn([("SELECT id, content, event_date FROM memories",
                       [("e1", "event.concert: Saw Bruno Mars at the Arena (Nov 1)", "Nov 1")])])
     assert _triage_dated(conn, "Saw Bruno Mars at the Arena", "Nov 1") == "update"
+
+
+def test_an_undated_restatement_keeps_the_events_date_so_a_later_occurrence_stays_separate():
+    """Codex r5: Nov 1 row, then an undated 'remember I saw Bruno Mars', then Nov 20: still two concerts."""
+    rows = [("e1", "event.concert: Saw Bruno Mars at the Arena (Nov 1)", "Nov 1")]
+    conn = FakeConn([("SELECT id, content, event_date FROM memories", rows), ("RETURNING id", [("e2",)])])
+    assert _triage_dated(conn, "Saw Bruno Mars at the Arena", None) == "update"
+    writes = [(s, p) for s, p in conn.calls if s.lstrip().startswith("UPDATE memories")]
+    assert writes and all("event_date" not in s and "content" not in s.split("WHERE")[0] for s, _ in writes)
+    # the stored row is unchanged (date intact), so the Nov 20 concert is a new occurrence
+    assert _triage_dated(conn, "Saw Bruno Mars at the Arena", "Nov 20") == "insert"
