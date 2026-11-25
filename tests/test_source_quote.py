@@ -1,4 +1,4 @@
-"""No quote, no memory: a mined fact must quote the speaker's own words.
+"""No quote, no memory: a mined fact's quote must be present in the speaker's messages.
 
 The extraction model is asked for `source_text`, the words a fact came from. Until
 2026-11-24 a quote that was not in the messages was simply dropped to None and the
@@ -13,6 +13,10 @@ whitespace, punctuation (apostrophes and commas he left out or the model added),
 quotes, the transcript's own "[Speaker]: " prefix. It does not forgive changed words.
 The explicit remember tool is not affected: when he says "remember that...", his words
 are the source.
+
+What the gate guarantees is quote PRESENCE, and no more: not that the message supports
+the fact, nor that he said it (pinned below by test_quote_presence_is_all_the_gate_checks).
+Whether a message states a fact as true comes later, as a model judgment.
 
 All fixtures are synthetic.
 """
@@ -55,13 +59,13 @@ def stats_of(summary):
     return summary["sources"]["prod_chat"]
 
 
-def test_a_quoted_fact_is_kept():
+def test_a_fact_with_its_quote_present_is_kept():
     summary, inserts = live([MESSAGE], [obs("I adopted a gray tabby named Pickle last week")])
     assert summary["inserted_total"] == 1 and len(inserts) == 1
     assert stats_of(summary)["unquoted"] == 0
 
 
-def test_a_fact_whose_quote_is_not_in_his_messages_is_skipped_counted_and_logged_by_key(caplog):
+def test_a_fact_whose_quote_is_not_present_is_skipped_counted_and_logged_by_key(caplog):
     caplog.set_level(logging.WARNING)
     made_up = "I adopted a black kitten named Biscuit"
     summary, inserts = live([MESSAGE], [obs(made_up, value="Adopted a black kitten named Biscuit")])
@@ -144,11 +148,24 @@ def test_an_unquoted_portable_fact_never_reaches_the_review_inbox(monkeypatch):
     assert inserts == [] and summary["sources"]["v2_turns"]["unquoted"] == 1
 
 
-def test_a_quoted_portable_fact_still_goes_to_the_review_inbox(monkeypatch):
+def test_a_portable_fact_with_its_quote_present_still_goes_to_the_review_inbox(monkeypatch):
     hook = Mock()
     monkeypatch.setattr(ex, "portable_quarantine_hook", lambda: hook)
     live([MESSAGE], [obs("I adopted a gray tabby named Pickle")], platform="portable")
     hook.assert_called_once()
+
+
+@pytest.mark.parametrize("message,quote,value", [
+    ("I adopted a gray tabby named Pickle.", "I adopted a gray tabby named Pickle", "Adopted a black dog named Biscuit"),
+    ("I never said my birthday is April 12.", "my birthday is April 12", "Birthday is April 12"),
+])
+def test_quote_presence_is_all_the_gate_checks(message, quote, value):
+    """KNOWN LIMIT, pinned on purpose (Codex review round 3; ruled 2026-11-25). The
+    quote is present in both, so the gate passes facts the message does not support.
+    Support is the planned model judgment ("does the quote say everything the fact
+    says?"), part of the memory redesign. When it lands, this test flips on purpose."""
+    _, inserts = live([message], [obs(quote, value=value, key="basic.note")])
+    assert len(inserts) == 1
 
 
 def test_the_triage_writer_receives_the_quote_that_matched(monkeypatch):

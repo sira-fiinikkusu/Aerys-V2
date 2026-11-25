@@ -52,7 +52,7 @@ def test_a_fact_inside_a_question_is_lost_for_now():
     assert summary["sources"]["prod_chat"]["rows"] == 1      # read, and the line still moves
 
 
-def test_the_same_fact_stated_on_its_own_is_kept():
+def test_the_same_words_without_the_question_reach_the_model_and_are_kept():
     summary, inserts, llm = live(TRUCK_STATEMENT, [obs("Just bought a new truck", TRUCK_QUOTE)])
     assert len(llm.calls) == 1 and len(inserts) == 1
 

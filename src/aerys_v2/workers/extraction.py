@@ -1124,7 +1124,13 @@ def _quote_words(folded: str) -> str:
 
 
 def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
-    """Is QUOTE the speaker's own words, found whole in ONE of MESSAGES?
+    """Is QUOTE present, word for word, in ONE of MESSAGES?
+
+    Presence only. It does not check that the message supports the fact the quote
+    was attached to: an exact quote about a gray tabby can carry a fact about a dog,
+    and "I never said my birthday is April 12" contains "my birthday is April 12".
+    Whether a message states a fact as true is a judgment for a later model check
+    (2026-11-25), not for this gate.
 
     Compared on words: forgiven are case, whitespace, curly quotes, punctuation
     (an added or dropped apostrophe or comma, a wrapping quote mark, a trailing full
@@ -1142,14 +1148,15 @@ def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
 
 def quoted_observations(observations: list[dict], group: dict, stats: dict) -> list[dict]:
     """No quote, no memory (2026-11-24). Keep only the observations whose source_text
-    is found in a message the model was shown (source_quote_found).
+    is present in a message the model was shown (source_quote_found).
 
     The model is asked for that quote; before, a quote that was not there became
-    None and the fact was written anyway, so a fact the model made up landed with
-    nothing he said behind it, and a thin memory is worse than none. Each skip is
-    counted (stats["unquoted"]) and logged by its key only, never the fact. Runs in
-    both loops and before the portable review inbox, which is a writer too. The
-    explicit remember tool never passes through here: his words are the source.
+    None and the fact was written anyway, so a fact the model made up landed with no
+    quote of his present behind it, and a thin memory is worse than none. The
+    guarantee is quote PRESENCE, not that he said the fact (see source_quote_found).
+    Each skip is counted (stats["unquoted"]) and logged by its key only, never the
+    fact. Runs in both loops and before the portable review inbox, which is a writer
+    too. The explicit remember tool never passes through here: his words are the source.
     """
     sent = model_messages(group)
     kept = []
