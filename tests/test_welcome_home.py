@@ -1337,7 +1337,7 @@ def test_a_hello_that_carries_the_brief_carries_what_she_closed_too():
                                                       "closed": [{"id": "p1", "text": "track his flight", "how": "kept"}]})
     h.brief.promises_told = told.append
     assert h.hello.tick() == "sent"
-    rows = [r for r in h.desk.store.rows.values() if r.dedupe_key == "brief:2026-11-10:promises"]
+    rows = [r for r in h.desk.store.rows.values() if (r.dedupe_key or "").startswith("brief:2026-11-10:promises:")]
     assert len(rows) == 1 and rows[0].owed and rows[0].headline == \
         "Promises I closed since yesterday: track his flight (kept)."
     assert told == [["p1"]]
