@@ -181,8 +181,11 @@ def test_a_state_fact_still_replaces():
 
 
 def test_extraction_files_events_interests_and_her_words_as_append_keys():
-    assert all(ex.is_append_key(k) for k in ("event.concert", "interest.band", "aerys.told.x"))
-    assert not any(ex.is_append_key(k) for k in ("basic.location", "work.employer", "preference.color"))
+    assert all(ex.is_append_key(k) for k in ("event.concert", "aerys.told.x"))
+    # a favourite drink is one current value; a specific interest gets its own subject key instead
+    assert not any(ex.is_append_key(k) for k in ("basic.location", "work.employer", "preference.color",
+                                                 "interest.beverage", "interest.band"))
+    assert "interest.band.electric_storm" in EXTRACTION_SYSTEM_PROMPT
 
 
 # ── D95-B: the KNOWN list and replaces ──────────────────────────────────────────────────────────
@@ -269,3 +272,54 @@ def test_recall_labels_her_rows_as_her_own_words():
     block = format_memory_context(rows, now=now)
     assert "* (her own words) Aerys suggested a 3 pm wake-up" in block
     assert "* Works the night shift" in block
+
+
+# ── Codex review r1 fixes ───────────────────────────────────────────────────────────────────────
+
+def test_append_prefixes_agree_between_recall_and_extraction():
+    from aerys_v2.services import memory
+    assert memory._APPEND_PREFIXES == ex.APPEND_PREFIXES
+
+
+def test_a_replace_never_retires_two_rows():
+    """r1 #2: retiring basic.job must not ALSO retire the live work.role the new fact lands on."""
+    conn = FakeConn([("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
+                     ("RETURNING id, key_label", [("k1",)]), ("RETURNING id", [("n1",)])])
+    action = _triage(conn, "work.role", "Automation engineer on the apps team", replace_id="k1")
+    retires = [p for s, p in conn.calls if "RETURNING id, key_label" in s]
+    assert retires == []                      # another live row holds the destination key: not honoured
+    soft_deletes = [p for s, p in conn.calls if "WITH soft_del" in s]
+    assert len(soft_deletes) <= 1 and action in ("replace", "update")   # the ordinary rule, at most one row
+
+
+def test_a_replace_is_honoured_when_the_destination_is_free():
+    conn = FakeConn([("SELECT id, content FROM memories", []),
+                     ("RETURNING id, key_label", [("k1", "relationship.family")]), ("RETURNING id", [("n1",)])])
+    assert _triage(conn, "relationship.dad.visit", "Dad went home Sunday", replace_id="k1") == "replace"
+    assert [p["old_id"] for s, p in conn.calls if "RETURNING id, key_label" in s] == ["k1"]
+
+
+def test_the_remember_tool_adds_an_event_beside_a_distinct_one_and_tags_only_its_row():
+    """r1 #3: the remember writer (append not passed) must not overwrite a distinct event, and its
+    provenance update names its own row, never every sibling under the key."""
+    conn = FakeConn([("SELECT id, content FROM memories", [("e1", "event.concert: Saw Bruno Mars at the Arena")]),
+                     ("RETURNING id", [("e2",)])])
+    action = triage_memory(conn, person_id=CHRIS, key_label="event.concert", value_text="Saw The Electric Storm",
+                           content="Saw The Electric Storm", context=None, event_date=None, embedding="[0.1]",
+                           source_platform="discord_dm", privacy_level="private",
+                           created_at="2026-11-20 15:00:00+00", channel="c1", category=["trust:owner", "remember"])
+    assert action == "insert"
+    assert not any("WITH soft_del" in s for s, _ in conn.calls)
+    prov = [(s, p) for s, p in conn.calls if "SET source_platform" in s]
+    assert prov and all("WHERE id = %(id)s" in s and p["id"] == "e2" for s, p in prov)
+
+
+def test_recall_keeps_two_distinct_concerts():
+    now = T0 + timedelta(days=1)
+    rows = [{"content": "event.concert: Saw Bruno Mars at the Arena", "created_at": T0, "source_platform": None},
+            {"content": "event.concert: Saw The Electric Storm at the Riverfront", "created_at": T0, "source_platform": None},
+            {"content": "basic.location: Lives in Exampleville", "created_at": T0, "source_platform": None},
+            {"content": "basic.location: Lives in Exampleville, Vermont", "created_at": T0, "source_platform": None}]
+    block = format_memory_context(rows, now=now)
+    assert "Bruno Mars" in block and "Electric Storm" in block
+    assert block.count("Exampleville") == 1   # a state key still shows its best row once

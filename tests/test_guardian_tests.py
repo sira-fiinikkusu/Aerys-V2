@@ -98,6 +98,7 @@ def test_real_facts_survive_model_and_write_guards(key, value):
     assert len(parse(key, value)) == 1
     conn = Mock()
     conn.execute.return_value.fetchone.return_value = None
+    conn.execute.return_value.fetchall.return_value = []   # D97: an event key reads its live rows first
     assert triage(conn, key, value, mined_from_turn=True) == "insert"
 
 
@@ -207,6 +208,7 @@ def test_real_article_relay_is_written():
 def test_explicit_remember_writer_remains_unguarded(fact, key):
     conn = Mock()
     conn.execute.return_value.fetchone.return_value = None
+    conn.execute.return_value.fetchall.return_value = []   # D97: an event key reads its live rows first
     tool = build_remember_tool(lambda record: triage(conn, record["key_label"], record["fact"]),
                                key_labeler=lambda _: key)
     assert tool.invoke({"fact": fact}, {"configurable": {"identity": {"user_id": PERSON}}}).startswith("Kept:")

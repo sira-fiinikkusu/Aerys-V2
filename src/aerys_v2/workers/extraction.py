@@ -201,6 +201,8 @@ The user message may list memories she already has, as `id · key · value`. The
 - Generic prefixes ONLY: basic, user, work, vehicle, interest, relationship, preference, event -- and aerys, ONLY for Aerys's own words (below)
 - Use one key per fact: basic.birth_date for a date of birth (including birthday); preference.favorite_color for favorite color; interest.beverage for a favorite drink. A birthday celebration is a separate event, not a second birth-date fact.
 - Keys describe the subject and attribute, NEVER the value: a correction must keep the same key.
+- A specific interest gets its own subject in the key, so two of them never share one: interest.band.electric_storm, interest.game.zoids, interest.show.severance. A single "favorite X" keeps one key (interest.beverage).
+- Every distinct event is its own observation, even when it shares a key with an earlier one (two concerts are two event.concert items, each with its own date).
 - For a named subject other than the speaker, qualify the attribute with a stable lowercase subject identifier, e.g. preference.test_plant.light. Preserve an explicit valid category.subject.attribute label when supplied with the fact.
 - NEVER use a person's name as prefix
 - Examples: basic.location, user.vehicle, interest.game, event.trip, preference.communication
@@ -365,9 +367,10 @@ ON CONFLICT (source) DO UPDATE
 
 # --- live-mode triage (prod `memories`, not staging) --------------------------
 
-# The dedup check — the unique index's actual shape: one LIVE row per
-# (person_id, key_label). ORDER BY + LIMIT 1 is belt-and-braces (the index
-# should already guarantee at most one live row) rather than trusting it blind.
+# The dedup check for STATE keys: one live row per (person_id, key_label), kept by
+# this triage, NOT by the database. idx_memories_dedup is a plain btree, not unique
+# (prod schema read 2026-11-25), which is what lets an APPEND key (event./interest./
+# aerys.) hold several live rows (D97). ORDER BY + LIMIT 1 picks the newest.
 # D97: an append key may have several live rows; each is compared on its own.
 TRIAGE_SELECT_ALL_SQL = """\
 SELECT id, content FROM memories
@@ -730,6 +733,9 @@ def triage_memory(
         log.warning("memory skipped: test-shaped observation")
         return "skipped"
     key_label = canonical_key(key_label, value_text)
+    # D97: an event, an interest or her own words adds up for EVERY caller (the remember
+    # tool too), so no writer can erase a distinct item filed under the same key.
+    append = append or is_append_key(key_label)
 
     params = {
         "person_id": person_id,
@@ -758,6 +764,9 @@ def triage_memory(
             """, {"source_platform": source_platform, "channel": channel, "category": category,
                   "source_message_id": source_message_id, "id": row_id})
             return action
+        if row_id is not None:
+            return action
+        # Legacy key-wide form, reached only when the database returned no id (test fakes).
         if channel is not None or category is not None or source_message_id is not None:
             conn.execute("""
                 UPDATE memories SET source_platform = %(source_platform)s,
@@ -775,16 +784,25 @@ def triage_memory(
     retired = None
     if replace_id:
         # D95-B: the extractor said this fact supersedes ONE row it was shown (the caller
-        # checked it was shown and that both keys are state keys). Retire it, then file the
-        # new fact by the ordinary rules below.
-        retired = conn.execute(TRIAGE_RETIRE_SQL, {"old_id": replace_id, "person_id": person_id}).fetchone()
+        # checked it was shown and that both keys are state keys). Honoured only when the
+        # destination key holds no OTHER live row: one replace retires at most one row
+        # (I6, Codex r1 #2). Otherwise the ordinary rules below decide, as before D95-B.
+        others = [r[0] for r in conn.execute(TRIAGE_SELECT_ALL_SQL,
+                                             {"person_id": person_id, "key_label": key_label}).fetchall()
+                  if str(r[0]) != str(replace_id)]
+        if not others:
+            retired = conn.execute(TRIAGE_RETIRE_SQL, {"old_id": replace_id, "person_id": person_id}).fetchone()
 
     if append:
         # D97: events, interests and her own words add up. A near-identical restatement
         # refreshes its row; anything else is a new row beside the others.
         for row_id, row_content in conn.execute(TRIAGE_SELECT_ALL_SQL,
                                                 {"person_id": person_id, "key_label": key_label}).fetchall():
-            if values_similar(_value_text_from_content(row_content), value_text):
+            row_value = _value_text_from_content(row_content)
+            if values_similar(row_value, value_text):
+                if mined_from_turn and not (source_text and source_text.strip()) and not at_least_as_specific(value_text, row_value):
+                    log.warning("memory skipped: weaker same-key observation")
+                    return "skipped"
                 conn.execute(TRIAGE_UPDATE_SQL, {"id": row_id, "content": content, "context": context,
                                                  "event_date": event_date, "embedding": embedding,
                                                  "privacy_level": privacy_level})
@@ -794,8 +812,8 @@ def triage_memory(
 
     existing = conn.execute(TRIAGE_SELECT_SQL, {"person_id": person_id, "key_label": key_label}).fetchone()
     if existing is None:
-        conn.execute(TRIAGE_INSERT_SQL, params)
-        return finish("replace" if retired else "insert")
+        inserted = conn.execute(TRIAGE_INSERT_SQL.rstrip() + "\nRETURNING id", params).fetchone()
+        return finish("replace" if retired else "insert", inserted[0] if inserted else None)
 
     existing_id, existing_content = existing
     existing_value = _value_text_from_content(existing_content)
@@ -809,10 +827,10 @@ def triage_memory(
              "event_date": event_date, "embedding": embedding,
              "privacy_level": privacy_level},
         )
-        return finish("update")
+        return finish("update", existing_id)
 
-    conn.execute(TRIAGE_REPLACE_SQL, {**params, "old_id": existing_id})
-    return finish("replace")
+    replaced = conn.execute(TRIAGE_REPLACE_SQL.rstrip() + "\nRETURNING id", {**params, "old_id": existing_id}).fetchone()
+    return finish("replace", replaced[0] if replaced else None)
 
 
 def soft_delete_memory(conn: Any, *, person_id: str, key_label: str) -> str:
@@ -884,7 +902,9 @@ HER_PREFIX = "aerys."
 #: One value is current: a new value replaces the old (the original triage rule).
 STATE_PREFIXES = ("basic.", "user.", "work.", "vehicle.", "relationship.", "preference.")
 #: Distinct items add up with their dates; only a near-identical restatement refreshes one.
-APPEND_PREFIXES = ("event.", "interest.", HER_PREFIX)
+#: interest.* stays single-valued ("interest.beverage" is his favourite drink, one current value);
+#: a specific interest gets its own subject in the key instead (the prompt's rule).
+APPEND_PREFIXES = ("event.", HER_PREFIX)
 #: Her long replies are shown clipped to the extractor; the quote gate checks her FULL reply.
 HER_REPLY_HEAD = HER_REPLY_TAIL = 1500
 #: How many of the person's live memories the extractor is shown (the KNOWN list).
@@ -1710,8 +1730,6 @@ def run_live_extraction(
                                        and is_state_key(known_keys[replace_id])):
                     stats["replaces_ignored"] = stats.get("replaces_ignored", 0) + 1
                     replace_id = None
-                if replace_id:
-                    stats["replaces_used"] = stats.get("replaces_used", 0) + 1
                 action = triage_memory(
                     prod_write_conn,
                     person_id=group["person_id"],
@@ -1732,6 +1750,9 @@ def run_live_extraction(
                     append=is_append_key(key),
                     replace_id=replace_id,
                 )
+                if replace_id:
+                    counted = "replaces_used" if action == "replace" else "replaces_ignored"
+                    stats[counted] = stats.get(counted, 0) + 1
                 stat_key = _TRIAGE_STAT_KEYS[action]
                 stats[stat_key] += 1
                 summary[f"{stat_key}_total"] += 1

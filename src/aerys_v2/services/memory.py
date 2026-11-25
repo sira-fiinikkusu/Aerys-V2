@@ -45,6 +45,8 @@ RECENCY_WEIGHT = 0.3
 RECENCY_WINDOW_S = 2_592_000  # 30 days — recency decays linearly to 0 over this
 RETRIEVE_LIMIT = 20  # rows scored & returned by SQL
 CONTEXT_CAP = 5  # lines that survive dedup into the prompt block
+#: Keys whose rows add up instead of replacing (workers/extraction.APPEND_PREFIXES; a test keeps them equal).
+_APPEND_PREFIXES = ("event.", "aerys.")
 EMBED_MODEL = "openai/text-embedding-3-small"  # via OpenRouter, 1536-dim
 
 # An embedder is just "text in, vector out" — injectable so tests never touch the
@@ -172,9 +174,12 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
             if ":" in content
             else content.strip().lower()
         )
-        if key in seen:
+        # D97: an event, an interest or her own words may hold several distinct rows
+        # under one key; each is its own memory (dedup those on the whole line).
+        dedup = content.strip().lower() if key.startswith(_APPEND_PREFIXES) else key
+        if dedup in seen:
             continue
-        seen.add(key)
+        seen.add(dedup)
 
         if ":" in content:
             display = ":".join(content.split(":")[1:]).strip()
