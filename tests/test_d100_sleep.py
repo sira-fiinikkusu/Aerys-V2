@@ -375,6 +375,7 @@ def sleeper(at, *, tidy_ok=True, judge_obj=object()):
     s = sl.HerSleep(person_id=ME, v2_db=None, mem_db=None, judge_for=lambda: judge_obj,
                     reflect_with=lambda day: calls.append(("reflect", day)) or {"status": "saved"},
                     clock=lambda: clock["now"])
+    s.apply_due = lambda: None              # D103's applier has its own tests below
     return s, calls, clock
 
 
@@ -417,3 +418,29 @@ def test_the_migration_keeps_proposals_stable_and_reflections_one_a_day():
     assert "'proposed', 'approved', 'rejected', 'applied', 'stale', 'clear'" in sql
     import re
     assert not re.search(r"\bDELETE\s+FROM\b|\bTRUNCATE\b|\bDROP\s+(?:TABLE|COLUMN|INDEX)\b", sql, re.I)
+
+
+# ---- D103 (Chris 11/25 14:10, "A works"): his approvals apply on their own ---------------------------------------
+
+def test_his_approvals_apply_on_their_own_every_ten_minutes_through_the_recheck(monkeypatch):
+    runs = []
+    monkeypatch.setattr(sl, "apply_approved", lambda v2, mem: runs.append(1) or [{"id": 7, "status": "applied"}])
+    t = {"now": 1000.0}
+    s = sl.HerSleep(person_id=ME, v2_db="v2", mem_db="mem", judge_for=lambda: None, reflect_with=None,
+                    clock=lambda: datetime(2026, 11, 26, 18, 0, tzinfo=timezone.utc), monotonic=lambda: t["now"])
+    assert s.tick() == "awake" and runs == [1]          # any time of day, not only at night
+    t["now"] += sl.APPLY_EVERY_S - 1
+    s.tick()
+    assert runs == [1]
+    t["now"] += 2
+    s.tick()
+    assert runs == [1, 1]
+
+
+def test_a_failed_apply_never_stops_the_night(monkeypatch):
+    monkeypatch.setattr(sl, "apply_approved", lambda v2, mem: (_ for _ in ()).throw(RuntimeError("nas down")))
+    monkeypatch.setattr(sl, "run_tidy", lambda *a: {"proposed": 0})
+    s = sl.HerSleep(person_id=ME, v2_db="v2", mem_db="mem", judge_for=lambda: object(),
+                    reflect_with=lambda day: {"status": "saved"},
+                    clock=lambda: datetime(2026, 11, 26, 9, 0, tzinfo=timezone.utc))
+    assert s.tick() == "tidy: 0 proposed; reflect: saved"
