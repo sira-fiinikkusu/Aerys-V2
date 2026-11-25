@@ -386,6 +386,17 @@ class PostgresTicketStore:
 # --- the line --------------------------------------------------------------------------
 
 
+def keep_lines(text: str | None) -> str:
+    """11/25 (Chris: "she needs to work on her formatting"): Kael's answer keeps its line breaks (a numbered
+    list stays a list when she relays it); spaces inside a line are tidied and blank runs fold to one."""
+    out: list[str] = []
+    for line in (text or "").strip().splitlines():
+        tidy = " ".join(line.split())
+        if tidy or (out and out[-1]):
+            out.append(tidy)
+    return "\n".join(out).strip()
+
+
 def line_text(ticket: Ticket, text: str, *, preserve_lines=False) -> str:
     is_report = bool(re.search(r'\nReport source: [0-9a-f]{64}$', ticket.ask))
     clean = text.strip() if preserve_lines or is_report else ' '.join(text.split())
@@ -542,7 +553,7 @@ def kael_update_for(store: TicketStore, note_fn, wake: threading.Event | None = 
         ticket = store.get(ticket_id)
         if ticket is None:
             return None
-        words = " ".join((text or "").split())
+        words = keep_lines(text)
         if words and note_fn is not None:
             note_fn(ticket.thread_id, f"(ticket {label(ticket.id)}, {status}) {words}",
                     family_visible, proactive=False)

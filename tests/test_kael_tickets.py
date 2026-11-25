@@ -595,3 +595,12 @@ def test_a_refused_append_is_never_reported_as_added_even_if_the_text_matches():
     store.items[1].outbox = "x" * 3780 + "\nupdate: hi"      # same tail, but no room left
     out = her_tool(store, Recorder()).invoke({"action": "update", "ticket": "T-1", "message": "hi"})
     assert out.startswith("NOT DONE")
+
+
+def test_kaels_answer_keeps_its_line_breaks_for_her_relay():
+    """11/25 (Chris: "she needs to work on her formatting"): a numbered answer reached him as one wall of text
+    because the door flattened every line break. Lines stay lines; spaces inside them are tidied; blank runs fold."""
+    from aerys_v2.tickets import keep_lines
+    text = "Yes.\n\n\n1. Your own   words are kept.\n2. Search  is live.\n\n  It reaches you through your tools.  "
+    assert keep_lines(text) == "Yes.\n\n1. Your own words are kept.\n2. Search is live.\n\nIt reaches you through your tools."
+    assert keep_lines("") == "" and keep_lines(None) == ""

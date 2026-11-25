@@ -199,12 +199,8 @@ def split_message(text: str, limit: int) -> list[str]:
     * lastIndexOf semantics: a delimiter STARTING exactly at `limit` is eligible
       (see _js_last_index_of).
     * The split index sits at the START of the delimiter, so `\\n\\n` / `\\n` land at
-      the head of `remaining` and vanish under strip() — but for ". " the sentence's
-      final period travels WITH the delimiter: the previous chunk loses its trailing
-      "." and the next chunk begins ". Next sentence..." (strip only removes
-      whitespace, not the dot). Production has sent messages like this since Phase 2;
-      the port reproduces it rather than silently changing live behavior. Fix it on
-      purpose someday, with a test change, not by accident.
+      the head of `remaining` and vanish under strip(). The ". " quirk (the period travelling to the next
+      chunk) was FIXED on purpose 11/25 with a test change: the split now lands after the period.
     * A remaining that strips to "" is dropped (JS `if (remaining)` truthiness).
     """
     if len(text) <= limit:
@@ -217,9 +213,12 @@ def split_message(text: str, limit: int) -> list[str]:
         # Tier 2: single newline — only if the paragraph break was in the first half.
         if split_at < limit * 0.5:
             split_at = _js_last_index_of(remaining, "\n", limit)
-        # Tier 3: sentence end — only if the newline was ALSO in the first half.
+        # Tier 3: sentence end — only if the newline was ALSO in the first half. 11/25 (Chris: "she needs to
+        # work on her formatting"): the split goes AFTER the period, so a sentence keeps its full stop and the
+        # next part no longer starts with ". ". Searched from limit-1 so the period never pushes a part past it.
         if split_at < limit * 0.5:
-            split_at = _js_last_index_of(remaining, ". ", limit)
+            dot = _js_last_index_of(remaining, ". ", limit - 1)
+            split_at = dot + 1 if dot >= 0 else -1
         # Tier 4: hard cut. Note the looser 30% window — a sentence split between
         # 30% and 50% of the limit IS accepted (the 50% checks above only gated the
         # newline tiers).

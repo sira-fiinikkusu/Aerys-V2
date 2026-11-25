@@ -172,23 +172,25 @@ def test_split_falls_back_to_newline():
     ]
 
 
-def test_split_sentence_period_migrates_to_next_chunk():
-    # THE ". " QUIRK, pinned: the split index sits at the '.', so the sentence's
-    # final period leaves chunk 1 and arrives at the head of chunk 2 (strip removes
-    # whitespace, not dots). Production has always sent this; the port must too.
+def test_split_sentence_keeps_its_period():
+    # 11/25 (Chris: "she needs to work on her formatting"): THE ". " QUIRK, fixed on purpose. A ticket answer
+    # reached him as "...the first week (12/2)" then a message starting ". It reaches you". The split now lands
+    # after the period: the sentence keeps its full stop and the next part starts with its first word.
     text = "Alpha beta gam. Delta epsilon zeta eta."
     assert split_message(text, 20) == [
-        "Alpha beta gam",  # NO trailing period
-        ". Delta epsilon zeta",  # period at the head; ". " at 0 < 30% → hard cut at 20
-        "eta.",
+        "Alpha beta gam.",
+        "Delta epsilon zeta e",  # no delimiter in the window: hard cut at 20 (unchanged)
+        "ta.",
     ]
+    for part in split_message("One two three. " * 300, 2000):
+        assert len(part) <= 2000 and not part.startswith(".") and part.endswith(".")
 
 
 def test_split_sentence_accepted_in_30_to_50_percent_window():
     # The newline tiers demand ≥ 50% of the limit; the sentence tier only ≥ 30%.
     # ". " at index 7 (35% of 20) is rejected nowhere and wins.
     text = "Aa bb c. " + "d" * 13
-    assert split_message(text, 20) == ["Aa bb c", ". " + "d" * 13]
+    assert split_message(text, 20) == ["Aa bb c.", "d" * 13]
 
 
 def test_split_js_lastindexof_boundary_semantics():
