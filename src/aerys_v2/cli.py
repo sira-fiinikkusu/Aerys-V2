@@ -423,6 +423,10 @@ def main() -> None:
             # Her evening heads-up: tomorrow, briefly, only when tomorrow earns it. Off unless
             # EVENING_HEADS_UP is set.
             start_evening_heads_up(evening_heads_up_for(settings, reach_desk, action_graph=action_graph))
+            # Her sleep (D100): nightly Tidy proposals for his approval, and her own reflection note.
+            from aerys_v2.sleep import her_sleep_for, start_her_sleep
+
+            start_her_sleep(her_sleep_for(settings))
             # Her welcome-home hello (board #178): after 30+ minutes out, in the room he settles
             # in; it carries the morning brief when that's still due. Off unless WELCOME_HOME is set.
             from aerys_v2.welcome import start_welcome_home, welcome_home_for

@@ -626,6 +626,76 @@ def _gap_board_main(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def _sleep_apply_main(settings: Settings, args) -> int:
+    """D100: Kael applies what Chris approved. Every row is re-checked; a changed one marks the proposal stale."""
+    from aerys_v2.sleep import _connector, apply_approved
+
+    results = apply_approved(_connector(settings.database_url), _connector(settings.memories_database_url),
+                             dry_run=args.dry_run)
+    for r in results:
+        print(f"{r['id']} {r['kind']}: {r['status']}" + (f" ({len(r['retired'])} retired)" if r["retired"] else ""))
+    print(f"{len(results)} approved proposal(s){' (dry run)' if args.dry_run else ''}")
+    return 0
+
+
+def _sleep_main(settings: Settings, args) -> int:
+    """D100 by hand: the Tidy pass and/or her note for one day. --dry-run saves nothing (a replay)."""
+    from datetime import date, datetime
+
+    from aerys_v2.reach import EASTERN
+    from aerys_v2.sleep import _connector, day_turns, judge_for, reflect, run_tidy, tidy, transcript
+
+    owner = str(settings.owner_person_id or "")
+    v2_db, mem_db = _connector(settings.database_url), _connector(settings.memories_database_url)
+    today = datetime.now(EASTERN).date()
+    if args.tidy:
+        judge = judge_for(settings)
+        if judge is None:
+            print("tidy: no TYPESAFE_API_KEY")
+            return 1
+        if args.dry_run:
+            with mem_db() as mem:
+                mem.read_only = True
+                found = tidy(mem, owner, judge, known={}, busy=set(), today=today)
+            for p in found:
+                if p.status == "proposed":
+                    print(f"[{p.kind}] p={p.score:.2f} retire={p.retire_ids} keep={p.keep_ids} :: "
+                          + " || ".join(f"{k[:8]} {v}" for k, v in p.snapshot.items()))
+            print(f"tidy (dry run): {sum(p.status == 'proposed' for p in found)} proposed, "
+                  f"{sum(p.status == 'clear' for p in found)} clear, {judge.asked} asked, {judge.over} over the cap")
+        else:
+            print(run_tidy(v2_db, mem_db, owner, judge, today))
+    if args.reflect:
+        day = date.fromisoformat(args.reflect)
+        from aerys_v2.factory import build_model, load_soul
+        from aerys_v2.services.recall_search import sealed_ids_from
+        from aerys_v2.sleep import gap_filer_for
+        from aerys_v2.test_bodies import patterns_for
+
+        kw = dict(test_bodies=patterns_for(settings), sealed_ids=sealed_ids_from(settings.discord_sealed_channel_ids))
+        if args.dry_run:
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            from aerys_v2.service import _reply_text
+            from aerys_v2.sleep import PREVIOUS_NOTES, PREVIOUS_SQL, REFLECT_PROMPT
+
+            with v2_db() as v2:
+                turns = day_turns(v2, owner, day, **kw)
+                has_notes = v2.execute("SELECT to_regclass('public.v2_reflections')").fetchone()[0] is not None
+                previous = (v2.execute(PREVIOUS_SQL, {"person_id": owner, "day": day, "n": PREVIOUS_NOTES}).fetchall()
+                            if has_notes else [])          # before migration 034: no notes yet
+            if not turns:
+                print(f"no turns on {day}")
+                return 0
+            reply = build_model(settings).invoke([SystemMessage(content=load_soul(settings.soul_file_path) + REFLECT_PROMPT),
+                                                  HumanMessage(content=transcript(turns, previous))])
+            print(f"--- her note for {day} (dry run, {len(turns)} turns) ---\n{_reply_text(reply).strip()}")
+        else:
+            print(reflect(v2_db, owner, day, model=build_model(settings), soul=load_soul(settings.soul_file_path),
+                          model_name=settings.model, file_gap=gap_filer_for(v2_db), **kw))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(prog="python -m aerys_v2.workers")
@@ -678,6 +748,16 @@ def main(argv: list[str] | None = None) -> int:
         "gap-board",
         help="put her unpublished open gaps on the shared board (private repo only)")
 
+    sleep_apply = sub.add_parser(
+        "sleep-apply", help="D100: retire what Chris approved on the dashboard (re-checks every row first)")
+    sleep_apply.add_argument("--dry-run", action="store_true", help="re-check and report, change nothing")
+    sleep_run = sub.add_parser(
+        "sleep", help="D100: run her sleep now (tidy proposals and/or her reflection note)")
+    sleep_run.add_argument("--tidy", action="store_true", help="run the Tidy pass")
+    sleep_run.add_argument("--reflect", default="", help="write her note for this day (YYYY-MM-DD)")
+    sleep_run.add_argument("--dry-run", action="store_true",
+                           help="print what Tidy would propose and the note she would write; save nothing")
+
     args = parser.parse_args(argv)
     settings = Settings()
 
@@ -699,6 +779,10 @@ def main(argv: list[str] | None = None) -> int:
         return _signals_main(settings, args)
     if args.worker == "gap-board":
         return _gap_board_main(settings, args)
+    if args.worker == "sleep-apply":
+        return _sleep_apply_main(settings, args)
+    if args.worker == "sleep":
+        return _sleep_main(settings, args)
     return 2  # unreachable: subparsers is required=True
 
 
