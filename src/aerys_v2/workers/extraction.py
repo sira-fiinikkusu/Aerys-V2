@@ -212,7 +212,7 @@ The user message may list memories she already has, as `id · key · value`. The
 - Include source_text: the exact declarative source sentence supporting each fact. Never use a question as evidence.
 - Copy the words exactly from one message; never paraphrase, shorten or join two messages. A fact you cannot quote this way is not kept, so leave it out.
 - A fact about the speaker (or anyone he mentions) is quoted from HIS OWN lines only. An [Aerys] line is never evidence for a fact about him, even when she repeats what he said.
-- A line marked "(asking; context only, never a source)" is never a source for anything.
+- A line marked "(asking; a fact he states inside may be quoted, never what he asks)": quote only the part where he STATES something as true ("I just bought a Ram"), never the question, never something he only wonders about, plans or supposes.
 
 ## value_text rules:
 - Write naturally, as a human would remember it -- NOT as a database entry
@@ -967,6 +967,64 @@ def her_messages(group: dict) -> list[dict]:
             for m in group["messages"] if isinstance(m.get("reply"), str) and m["reply"].strip()]
 
 
+# --- M1 (2026-11-25, #259): a fact he STATES inside a question --------------------------------
+#: (his message, facts, said_on) -> one probability per fact that he states it as true, None where unknown.
+StatedCheck = Callable[..., list]
+#: Jev's judgement is the input; keeping is decided here (the TypeSafe rule). 0.7, the default.
+STATED_YES = 0.7
+STATED_MODEL = "jev-1.14.0"
+
+
+def _stated_question(fact: str) -> dict:
+    # Criteria re-worded 11/25 after his real 30-day replay showed a stated plan ("I'm heading to the
+    # market tomorrow, will it rain?") read as not-stated; checked on 9 held-out cases (all clean) with
+    # generic examples, never his own messages.
+    return {"type": "noul",
+            "instructions": f"Does the speaker of `message` state, as true, that: {fact}? A date in the "
+                            "fact may be worked out from `said_on` and the message's own time words "
+                            "(\"just\", \"yesterday\", \"next week\").",
+            "criteria": {
+                "true": "He asserts it as so about himself or his life, even inside a question: something he "
+                        "did, has, is, prefers, or intends (\"I just bought a Ram, what oil should I use?\" "
+                        "states he bought a Ram; \"I'm driving to Tampa tomorrow, will there be traffic?\" "
+                        "states his plan).",
+                "false": "He only asks about it, wonders, supposes, or weighs it as an option, or reports what "
+                         "someone else said; or the message doesn't contain it (\"is my dad visiting?\", "
+                         "\"what if I bought a Ram?\", \"should I get a Ram?\", \"would it be crazy if I "
+                         "quit?\")."}}
+
+
+def jev_stated_check(api_key: str, *, model: str = STATED_MODEL, timeout_s: float = 2.0, client=None) -> StatedCheck:
+    """One Jev request per message, one Noul per fact. Any failure is None for every fact (never a
+    yes, never a no): the caller then keeps nothing, which is the old behaviour."""
+    if client is None:
+        from typesafe_sdk import RetryPolicy, TypeSafeClient
+
+        client = TypeSafeClient(api_key=api_key, model=model, timeout=timeout_s, retry=RetryPolicy(max_retries=0))
+
+    def check(message: str, facts: list[str], said_on: str | None = None) -> list:
+        if not facts:
+            return []
+        questions = {f"f{i}": _stated_question(f) for i, f in enumerate(facts)}
+        state = {"message": message, "said_on": said_on} if said_on else {"message": message}
+        try:
+            answers = client.system_one(state=state, questions=questions, model=model).answers
+        except Exception:  # noqa: BLE001
+            log.warning("stated-as-true check unavailable", exc_info=True)
+            return [None] * len(facts)
+        out = []
+        for i in range(len(facts)):
+            try:
+                v = answers[f"f{i}"].noul
+                ok = isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 1.0
+                out.append(float(v) if ok else None)
+            except Exception:  # noqa: BLE001
+                out.append(None)
+        return out
+
+    return check
+
+
 def transcript_turns(group: dict) -> list[dict]:
     """What the extraction model is shown, in order: each of his lines and her reply to it.
 
@@ -1073,7 +1131,7 @@ def build_transcript(messages: list[dict]) -> str:
             return f"[Aerys]: {m['content']}"
         name = m.get('speaker_name') or 'Unknown'
         if m.get("role") == "context":
-            return f"[{name}] (asking; context only, never a source): {m['content']}"
+            return f"[{name}] (asking; a fact he states inside may be quoted, never what he asks): {m['content']}"
         return f"[{name}]: {m['content']}"
 
     lines = [line(m) for m in messages]
@@ -1290,7 +1348,8 @@ _FORMAT_CORRECTION = (
 )
 
 
-def _extract_group(llm: Llm, group: dict, stats: dict, known: Sequence[dict] = ()) -> tuple[list[dict] | None, LlmReply]:
+def _extract_group(llm: Llm, group: dict, stats: dict, known: Sequence[dict] = (),
+                   asking_ok: bool = False) -> tuple[list[dict] | None, LlmReply]:
     """One group's observations, or None when the watermark must be held.
 
     None now means TRUNCATION AND NOTHING ELSE. A complete reply that ignored the
@@ -1318,7 +1377,8 @@ def _extract_group(llm: Llm, group: dict, stats: dict, known: Sequence[dict] = (
     if len(his) != len(group['messages']):
         log.warning("memory skipped: question-shaped or test-shaped source message")
     turns = transcript_turns(group)
-    if not his and not any(t.get("role") == "aerys" for t in turns):
+    # M1: with the stated-as-true check armed, a group of only question lines is still worth a look.
+    if not his and not any(t.get("role") == "aerys" or (asking_ok and t.get("role") == "context") for t in turns):
         return [], LlmReply("[]", False)
     return _extract_messages(llm, turns, stats, known)
 
@@ -1380,7 +1440,8 @@ def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
     return any(pattern.search(_quote_words(_fold_for_quote(m.get("content")))) for m in messages)
 
 
-def quoted_observations(observations: list[dict], group: dict, stats: dict) -> list[dict]:
+def quoted_observations(observations: list[dict], group: dict, stats: dict,
+                        stated: StatedCheck | None = None) -> list[dict]:
     """No quote, no memory (2026-11-24). Keep only the observations whose source_text
     is present in a message the model was shown (source_quote_found).
 
@@ -1394,10 +1455,21 @@ def quoted_observations(observations: list[dict], group: dict, stats: dict) -> l
     """
     his = model_messages(group)
     hers = her_messages(group)
+    # M1: his question-shaped lines (never a probe). A quote found ONLY here is a candidate that Jev
+    # must confirm he states as true; without the seam, nothing from them is kept (the old rule).
+    asking = [m for m in group["messages"]
+              if question_shaped(m.get("content")) and not test_shaped(m.get("content"))]
     kept = []
+    candidates: dict[int, list[dict]] = {}
     for obs in observations:
         mine = is_her_key(obs.get("key_label"))
         quote = obs.get("source_text")
+        if (not mine and stated is not None and not source_quote_found(quote, his)
+                and not question_shaped(quote)):
+            where = next((i for i, m in enumerate(asking) if source_quote_found(quote, [m])), None)
+            if where is not None:
+                candidates.setdefault(where, []).append(obs)
+                continue
         # D97 I1: his facts quote HIS lines, her words quote HER full replies. Never across.
         if source_quote_found(quote, hers if mine else his):
             if mine and any(_HER_CANT.search(t or "") for t in (quote, obs.get("value_text"))):
@@ -1413,6 +1485,28 @@ def quoted_observations(observations: list[dict], group: dict, stats: dict) -> l
         key = obs.get("key_label")
         log.warning("memory skipped: source quote not found in the speaker's messages (key %s)",
                     key if isinstance(key, str) and _LOGGABLE_KEY.fullmatch(key) else "(unrecognized key)")
+    for where, cands in candidates.items():
+        at = asking[where].get("created_at")
+        said_on = None
+        if isinstance(at, datetime):
+            local = at.astimezone(USER_TZ)
+            said_on = f"{local.strftime('%A')}, {local.strftime('%b')} {local.day}, {local.year}"
+        try:
+            scores = stated(asking[where]["content"], [c.get("value_text") or "" for c in cands], said_on=said_on) or []
+        except TypeError:   # a seam without said_on (tests): same call, no date
+            scores = stated(asking[where]["content"], [c.get("value_text") or "" for c in cands]) or []
+        for obs, p in zip(cands, list(scores) + [None] * (len(cands) - len(scores))):
+            if p is None:
+                stats["stated_unavailable"] = stats.get("stated_unavailable", 0) + 1
+            elif p >= STATED_YES:
+                stats["stated_kept"] = stats.get("stated_kept", 0) + 1
+                # Codex M1 r1: only what Jev judged is stored. Context and a separate date were never
+                # judged, so they go (the date falls back to the day he said it).
+                obs["context"] = ""
+                obs["event_date"] = ""
+                kept.append(obs)
+            else:
+                stats["stated_refused"] = stats.get("stated_refused", 0) + 1
     return kept
 
 
@@ -1485,6 +1579,7 @@ def run_extraction(
     batch_limit: int = DEFAULT_LIMIT,
     sealed_rooms: frozenset[str] = frozenset(),
     test_bodies: Sequence[str] = DEFAULT_TEST_BODY_PATTERNS,
+    stated: StatedCheck | None = None,
 ) -> dict:
     """One shadow extraction pass over both conversation sources.
 
@@ -1541,7 +1636,7 @@ def run_extraction(
         failed_row_ids: set[str] = set()
 
         for group in groups:
-            observations, reply = _extract_group(llm, group, stats)
+            observations, reply = _extract_group(llm, group, stats, asking_ok=stated is not None)
             if observations is None:
                 # TRUNCATION only, now that a complete non-answer is recovered in
                 # _extract_group. Never stage anything for this group, and never
@@ -1551,7 +1646,7 @@ def run_extraction(
                 failed_row_ids.update(m["id"] for m in group["messages"])
                 continue
             stats["observations"] += len(observations)
-            observations = quoted_observations(observations, group, stats)
+            observations = quoted_observations(observations, group, stats, stated)
             fallback = batch_date(group["latest"]["created_at"])
 
             for obs in observations:
@@ -1622,6 +1717,7 @@ def run_live_extraction(
     batch_limit: int = DEFAULT_LIMIT,
     sealed_rooms: frozenset[str] = frozenset(),
     test_bodies: Sequence[str] = DEFAULT_TEST_BODY_PATTERNS,
+    stated: StatedCheck | None = None,
 ) -> dict:
     """The live counterpart of run_extraction(): same read -> group -> LLM ->
     embed pipeline, same watermark table (both modes share the high-water
@@ -1713,10 +1809,11 @@ def run_live_extraction(
             # Only a group with something to extract earns the KNOWN lookup (and its embedding):
             # a memory probe's group is skipped untouched, as before.
             extractable = bool(model_messages(group)) or any(
-                t.get("role") == "aerys" for t in transcript_turns(group))
+                t.get("role") == "aerys" or (stated is not None and t.get("role") == "context")
+                for t in transcript_turns(group))
             known = known_memories(source_conn, group, embedder) if extractable else []
             known_keys = {k["id"]: k["key"] for k in known}
-            observations, reply = _extract_group(llm, group, stats, known)
+            observations, reply = _extract_group(llm, group, stats, known, asking_ok=stated is not None)
             if observations is None:
                 # TRUNCATION only (see _extract_group). Never triage anything for
                 # this group, and never let the watermark advance past it.
@@ -1725,7 +1822,7 @@ def run_live_extraction(
                 continue
             stats["observations"] += len(observations)
             # No quote, no memory — before the review inbox too, which is a writer.
-            quoted = quoted_observations(observations, group, stats)
+            quoted = quoted_observations(observations, group, stats, stated)
             stats["skipped"] += len(observations) - len(quoted)
             summary["skipped_total"] += len(observations) - len(quoted)
             observations = quoted

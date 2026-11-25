@@ -58,7 +58,7 @@ def test_both_sources_return_her_reply_column_last():
 def test_the_prompt_teaches_her_prefix_and_the_speaker_rule():
     assert "aerys.told.<subject>" in EXTRACTION_SYSTEM_PROMPT
     assert "An [Aerys] line is never evidence for a fact about him" in EXTRACTION_SYSTEM_PROMPT
-    assert "context only, never a source" in EXTRACTION_SYSTEM_PROMPT
+    assert "a fact he states inside may be quoted, never what he asks" in EXTRACTION_SYSTEM_PROMPT
     assert '"replaces"' in EXTRACTION_SYSTEM_PROMPT
 
 
@@ -73,7 +73,7 @@ def test_transcript_shows_his_line_then_her_reply_and_questions_as_context_only(
     text = build_transcript(turns)
     assert "[Chris]: I sold the truck last week." in text
     assert "[Aerys]: Good call. I'd list the trailer next." in text
-    assert "[Chris] (asking; context only, never a source): Can you make me a shift sheet?" in text
+    assert "[Chris] (asking; a fact he states inside may be quoted, never what he asks): Can you make me a shift sheet?" in text
     assert "Biscuit" not in text   # a probe and her answer to it are never shown
 
 
