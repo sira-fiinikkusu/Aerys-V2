@@ -115,9 +115,18 @@ def fake_embedder(text):
     return [0.1, 0.2, 0.3]
 
 
-OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Rotonda West, Florida",
+#: Since 2026-11-24 a mined fact must quote the speaker (no quote, no memory:
+#: extraction.quoted_observations), so a canned observation carries the words its row
+#: said. The place is made up: this repository is public.
+OBS = json.dumps([{"key_label": "basic.location", "value_text": "Lives in Exampleville",
                    "context": None, "event_date": None, "privacy_level": "public",
-                   "asserted_by": "self", "confidence": 0.9}])
+                   "asserted_by": "self", "confidence": 0.9,
+                   "source_text": "I live in Exampleville"}])
+
+
+def obs_quoting(source_text):
+    """OBS, quoting what ITS row said, for tests about plumbing rather than places."""
+    return json.dumps([{**json.loads(OBS)[0], "source_text": source_text}])
 
 
 # --- grouping ----------------------------------------------------------------
@@ -128,17 +137,17 @@ def test_groups_by_person_before_extraction():
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram"),
         row(ROBIN, "I collect SNES games"),
-        row(CHRIS, "and I live in Rotonda West"),
+        row(CHRIS, "and I live in Exampleville"),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS])
+    llm = FakeLlm([OBS, obs_quoting("I collect SNES games")])
     run_extraction(prod, staging, llm, fake_embedder)
 
     assert len(llm.calls) == 2
     transcripts = [user for _, user in llm.calls]
     chris_t = next(t for t in transcripts if "Dodge Ram" in t)
     robin_t = next(t for t in transcripts if "SNES" in t)
-    assert "SNES" not in chris_t and "Rotonda West" in chris_t  # no cross-person bleed
+    assert "SNES" not in chris_t and "Exampleville" in chris_t  # no cross-person bleed
     assert "Dodge Ram" not in robin_t
     assert all(system == EXTRACTION_SYSTEM_PROMPT for system, _ in llm.calls)
 
@@ -178,7 +187,7 @@ def test_watermark_picks_newest_by_timestamp_not_string():
 
 
 def test_prod_conn_gets_selects_only_and_writes_go_to_staging():
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville")])])
     staging = FakeConn()
     run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)
 
@@ -196,7 +205,7 @@ def test_prod_conn_gets_selects_only_and_writes_go_to_staging():
 def test_memory_created_at_is_message_time_and_provenance_flows():
     raw = "2026-07-01 08:30:00.000001+00"
     prod = FakeConn([("FROM n8n_chat_histories",
-                      [row(CHRIS, "I live in Rotonda West", at=T0 - timedelta(days=2), raw=raw)])])
+                      [row(CHRIS, "I live in Exampleville", at=T0 - timedelta(days=2), raw=raw)])])
     staging = FakeConn()
     run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)
 
@@ -204,7 +213,7 @@ def test_memory_created_at_is_message_time_and_provenance_flows():
     assert params["created_at"] == raw            # original message time, not now()
     assert params["source_thread"] == "v1:n8n_chat_histories"
     assert params["embedding"] == "[0.1,0.2,0.3]"  # pgvector text format
-    assert params["content"].startswith("basic.location: Lives in Rotonda West")
+    assert params["content"].startswith("basic.location: Lives in Exampleville")
 
 
 # --- empty window ------------------------------------------------------------
@@ -269,7 +278,8 @@ def test_parse_failure_mid_batch_holds_watermark_but_stages_other_groups():
         row(PERSON_C, "mumble mumble", id="c", at=T0 + timedelta(seconds=5), raw=raw_c),
     ])])
     staging = FakeConn()
-    llm = FakeLlm([OBS, OBS, cut_off("not json at all -- truncated"), cut_off("still cut off")])
+    llm = FakeLlm([obs_quoting("I drive a Dodge Ram"), obs_quoting("I collect SNES games"),
+                   cut_off("not json at all -- truncated"), cut_off("still cut off")])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     # both successful groups still staged — one failure doesn't block the rest
@@ -328,7 +338,7 @@ def test_complete_prose_reply_retries_once_then_counts_as_empty():
 def test_corrective_retry_that_complies_stages_normally():
     """The common recovery: told its reply was the wrong shape, the model complies."""
     prod = FakeConn([("FROM n8n_chat_histories",
-                      [row(CHRIS, "I live in Rotonda West", id="a")])])
+                      [row(CHRIS, "I live in Exampleville", id="a")])])
     staging = FakeConn()
     llm = FakeLlm([PROSE, OBS])
     summary = run_extraction(prod, staging, llm, fake_embedder)
@@ -439,7 +449,7 @@ def test_limit_boundary_tie_is_trimmed_not_split():
         row(CHRIS, "tied-b", id="3", at=tie_at, raw=tie_raw),
     ])])
     staging = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+    summary = run_extraction(prod, staging, FakeLlm([obs_quoting("first")]), fake_embedder, batch_limit=2)
 
     # only the untied first row was processed this pass
     assert summary["sources"]["prod_chat"]["rows"] == 1
@@ -461,7 +471,8 @@ def test_limit_boundary_no_tie_processes_the_full_overfetch_headroom():
         row(CHRIS, "only one row", id="1", at=T0, raw="2026-07-03 12:00:00.000000+00"),
     ])])
     staging = FakeConn()
-    summary = run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder, batch_limit=2)
+    summary = run_extraction(prod, staging, FakeLlm([obs_quoting("only one row")]), fake_embedder,
+                             batch_limit=2)
     assert summary["sources"]["prod_chat"]["rows"] == 1
     assert summary["inserted_total"] == 1
 
@@ -499,7 +510,8 @@ def test_v2_turns_read_from_staging_conn_with_thread_provenance():
             privacy="private", thread="voice:beta", raw="2026-07-03 09:00:00.5+00"),
     ])])
     prod = FakeConn()
-    run_extraction(prod, staging, FakeLlm([OBS]), fake_embedder)  # prod empty -> 1 call
+    run_extraction(prod, staging, FakeLlm([obs_quoting("my Even G2 glasses arrive next week")]),
+                   fake_embedder)  # prod empty -> 1 call
 
     assert not any("v2_turns" in s for s, _ in prod.calls)  # her turns never hit prod
     params = next(p for s, p in staging.calls if "v2_memories_staging" in s)
@@ -778,7 +790,7 @@ def test_live_refuses_when_write_mutex_already_held():
 
 
 def test_live_proceeds_and_triages_when_lease_held_by_brain_and_n8n_inactive():
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])  # nothing existing -> insert
     summary = run_live_extraction(
@@ -804,12 +816,14 @@ def test_live_computes_fresh_embedding_per_write_not_cached():
         return [float(calls["n"])]
 
     two_obs = json.dumps([
-        {"key_label": "basic.location", "value_text": "Lives in Rotonda West", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+        {"key_label": "basic.location", "value_text": "Lives in Exampleville", "context": None,
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "I live in Exampleville"},
         {"key_label": "interest.game", "value_text": "Collects SNES games", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "collect SNES"},
     ])
-    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Rotonda West and collect SNES")])])
+    prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "I live in Exampleville and collect SNES")])])
     staging = lease_conn(holder="brain")
     prod_write = FakeConn([("FROM memories", [])])
     run_live_extraction(prod, staging, prod_write, FakeLlm([two_obs]), counting_embedder)
@@ -827,9 +841,11 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     skipped tally, not silently vanish as if nothing was extracted at all."""
     bad_obs = json.dumps([
         {"key_label": None, "value_text": "no label at all", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "mumble mumble"},
         {"key_label": "basic.location", "value_text": "", "context": None,
-         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9},
+         "event_date": None, "privacy_level": "public", "asserted_by": "self", "confidence": 0.9,
+         "source_text": "mumble mumble"},
     ])
     prod = FakeConn([("FROM n8n_chat_histories", [row(CHRIS, "mumble mumble")])])
     staging = lease_conn(holder="brain")
@@ -841,6 +857,7 @@ def test_live_extraction_skips_unusable_observations_and_counts_them():
     assert summary["replaced_total"] == 0
     assert summary["skipped_total"] == 2
     assert summary["sources"]["prod_chat"]["skipped"] == 2
+    assert summary["sources"]["prod_chat"]["unquoted"] == 0   # refused by triage, not the quote gate
     assert not any(
         s.lstrip().upper().startswith(("INSERT", "UPDATE")) for s, _ in prod_write.calls
     )
@@ -1067,18 +1084,20 @@ def test_a_group_still_truncated_plain_is_split_and_both_halves_land():
     raws = ["2026-07-03 12:00:00.000001+00", "2026-07-03 12:00:01.000001+00"]
     prod = FakeConn([("FROM n8n_chat_histories", [
         row(CHRIS, "I drive a Dodge Ram", id="a", at=T0, raw=raws[0]),
-        row(CHRIS, "and I live in Rotonda West", id="b", at=T0 + timedelta(seconds=1), raw=raws[1]),
+        row(CHRIS, "and I live in Exampleville", id="b", at=T0 + timedelta(seconds=1), raw=raws[1]),
     ])])
     staging = FakeConn([("last_processed_at", [("2026-07-03 11:00:00+00",)])])
-    llm = FakeLlm([cut_off('[{"key_label": "vehic'), cut_off('[{"key_label": "vehi'), OBS, OBS])
+    llm = FakeLlm([cut_off('[{"key_label": "vehic'), cut_off('[{"key_label": "vehi'),
+                   obs_quoting("I drive a Dodge Ram"), OBS])
     summary = run_extraction(prod, staging, llm, fake_embedder)
 
     assert [c[2:] for c in llm.calls] == [(), ("plain",), (), ()]
     halves = [c[1] for c in llm.calls[2:]]
-    assert "Dodge Ram" in halves[0] and "Rotonda" not in halves[0]
-    assert "Rotonda" in halves[1] and "Dodge Ram" not in halves[1]
+    assert "Dodge Ram" in halves[0] and "Exampleville" not in halves[0]
+    assert "Exampleville" in halves[1] and "Dodge Ram" not in halves[1]
     stats = summary["sources"]["prod_chat"]
     assert (stats["splits"], stats["parse_failures"], stats["observations"]) == (1, 0, 2)
+    assert len([s for s, _ in staging.calls if "v2_memories_staging" in s]) == 2   # both landed
     save = next(p for s, p in staging.calls if "v2_extraction_watermark" in s and "INSERT" in s)
     assert save["raw"] == raws[1], "advanced past the split group"
 
