@@ -369,21 +369,14 @@ def action_executor(tools, *, skill_middleware=None):
                           if tool.name == 'save_contact_email' else '')
         token = CURRENT_TURN_TEXT.set(approved_words)
         tool_args = dict(row.args['tool_args'])
-        approved = None
         if tool.name == 'send_email':
-            # His tap on the button that showed this exact mail is the confirmation (and, G3, stands in
-            # for the draft shown: the button showed him exactly this mail).
-            from aerys_v2.tools.email_tool import APPROVED_MAIL, mail_digest
+            # His tap on the button that showed this exact mail is the confirmation.
             tool_args = {k: str(tool_args.get(k) or '') for k in ('to', 'subject', 'body')}
             tool_args['confirmed'] = True
-            approved = APPROVED_MAIL.set(mail_digest(tool_args['to'], tool_args['subject'], tool_args['body']))
         try:
             result = str(tool.invoke(tool_args, config=config))
         finally:
             CURRENT_TURN_TEXT.reset(token)
-            if approved is not None:
-                from aerys_v2.tools.email_tool import APPROVED_MAIL
-                APPROVED_MAIL.reset(approved)
         prefixes = {
             'remember': ('Kept:', 'Already kept:'),
             'sticky_note': ('Note is up on the sticky displays',),
