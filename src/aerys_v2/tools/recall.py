@@ -80,7 +80,10 @@ def build_search_memory_tool(memories_db: ConnFactory, *, turns_db: ConnFactory 
         except Exception:
             log.warning("search_memory failed for person %s", scope.person_id, exc_info=True)
             return MEMORY_FAILED
-        return format_memories([r for r in rows if memory_allowed(r, scope, people)], q, scope)
+        kept = [r for r in rows if memory_allowed(r, scope, people)]
+        if any(str(r.get("person_id") or "") != scope.person_id for r in kept):
+            _other_peoples_words(runtime)          # Codex 11/25: facts about others count like their words
+        return format_memories(kept, q, scope)
 
     return search_memory
 

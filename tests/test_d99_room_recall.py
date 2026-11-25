@@ -207,3 +207,39 @@ def test_the_callers_own_lines_leave_the_turn_unmarked():
     assert sink == {}
     history_tool(strict_conn([turn()])).func(runtime=_rt(dm_identity(), sink), query="attic")
     assert sink == {}                                  # D98: his own past chats need no tap
+
+
+
+def test_facts_about_other_people_from_a_room_memory_search_count_as_outside_text_too():
+    """Codex 11/25: search_memory can return public facts about someone who spoke in the room recently; those mark
+    the turn exactly like their words do. The caller's own facts don't."""
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from aerys_v2.services import recall_search as rs
+    from aerys_v2.tools.recall import build_search_memory_tool
+    from test_recall_search import ALEX, CHRIS, guild as room_identity
+
+    def tool_returning(rows):
+        @contextmanager
+        def mem():
+            yield SimpleNamespace()
+        @contextmanager
+        def turns():
+            yield SimpleNamespace()
+        return build_search_memory_tool(mem, turns_db=turns)
+
+    import aerys_v2.tools.recall as rec
+    for person, marked in ((ALEX, True), (CHRIS, False)):
+        sink = {}
+        row = {"id": "m1", "person_id": person, "privacy_level": "public", "key_label": "interest.hiking",
+               "content": "interest.hiking: likes hiking", "created_at": None, "display_name": "Alex"}
+        orig = (rec.search_memories, rec.people_in_room, rec.memory_allowed)
+        rec.search_memories = lambda *a, **k: [row]
+        rec.people_in_room = lambda *a, **k: [ALEX]
+        rec.memory_allowed = lambda *a, **k: True
+        try:
+            tool_returning([row]).func(runtime=_rt(room_identity(), sink), query="hiking")
+        finally:
+            rec.search_memories, rec.people_in_room, rec.memory_allowed = orig
+        assert (sink == {"outside": True}) is marked
