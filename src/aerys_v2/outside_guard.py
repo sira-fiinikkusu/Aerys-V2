@@ -60,6 +60,41 @@ def wrap_outside(text):
     return text if _wrapped(text) else _HEAD + _MARKER.sub('[', text) + _TAIL
 
 
+_HEAD_BLOCK = _HEAD.rstrip('\n')
+
+
+def _block_text(block):
+    """A content block's text, for both forms a text block takes (a plain string, or a 'text' dict)."""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict) and block.get('type') == 'text':
+        return str(block.get('text') or '')
+    return None
+
+
+def _defused_block(block):
+    if isinstance(block, str):
+        return _MARKER.sub('[', block)
+    if isinstance(block, dict) and block.get('type') == 'text':
+        return {**block, 'text': _MARKER.sub('[', str(block.get('text') or ''))}
+    return block                                    # an image or other non-text block: no words in it
+
+
+def _blocks_wrapped(blocks):
+    return (len(blocks) >= 2 and _block_text(blocks[0]) == _HEAD_BLOCK and _block_text(blocks[-1]) == OUTSIDE_CLOSE
+            and not any(_MARKER.search(t) for t in map(_block_text, blocks[1:-1]) if t))
+
+
+def wrap_outside_blocks(blocks):
+    """wrap_outside for an answer in content blocks: the notice and open marker first, every text block
+    (either form) defused, the close marker last. Already wrapped stays as is, as for text."""
+    blocks = list(blocks)
+    if _blocks_wrapped(blocks):
+        return blocks
+    return [{'type': 'text', 'text': _HEAD_BLOCK}, *map(_defused_block, blocks),
+            {'type': 'text', 'text': OUTSIDE_CLOSE}]
+
+
 def unwrap_outside(content):
     """The reader's own text inside the wrapper, for code that reads a tool's first line (the turn record's
     failure classes, her honesty receipts); anything not wrapped comes back as it was."""
@@ -280,11 +315,7 @@ def _marked(message, code, reader):
         if isinstance(content, str):
             update['content'] = wrap_outside(content)
         elif isinstance(content, list):
-            # Blocks (rare for a reader): its text blocks defused, the notice and markers around them.
-            update['content'] = [{'type': 'text', 'text': _HEAD.rstrip('\n')},
-                                 *({**b, 'text': _MARKER.sub('[', str(b.get('text') or ''))}
-                                   if isinstance(b, dict) and b.get('type') == 'text' else b for b in content),
-                                 {'type': 'text', 'text': OUTSIDE_CLOSE}]
+            update['content'] = wrap_outside_blocks(content)     # blocks (rare for a reader)
     if code:
         update['response_metadata'] = {**(message.response_metadata or {}), 'basis': code}
     return message.model_copy(update=update) if update else message
