@@ -14,7 +14,9 @@ What it refuses, each by its shape, never by guessing:
     Mastercard, Amex, Discover): order numbers, tracking numbers and timestamps pass.
   - JWTs, PEM private keys, and `scheme://user:pass@` links.
   - obvious API-key formats (sk-, ghp_/github_pat_, xox?-, AKIA/ASIA, AIza, sk_live_),
-    and a long random-looking value right after a key/token/secret/password label.
+    and a long value with letters and digits right after a token/secret/password/API-key
+    label, read whole (punctuation and all). A bare "key" counts only as an assignment
+    ("key: ...") and never for a dashed word identifier ("part-number-2026-revision-2").
 
 A short human password ("the wifi password is bluefish") is NOT caught: it has no
 shape to tell it from an ordinary word. Whether she may keep those is Chris's call.
@@ -119,10 +121,34 @@ _API_KEYS = [(re.compile(p), needs_random) for p, needs_random in (
     (r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])", False),     # AWS access key id
     (r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_\-]{35}", False),                     # Google API key
 )]
+#: The value after a label, read WHOLE (Codex review round 1: a password with "!" in it
+#: was cut at the "!" and then too short to count): a quoted run, or a bare run up to
+#: whitespace. Never across whitespace, even quoted.
+_VALUE = r"""(?:"([^"\s]{1,200})"|'([^'\s]{1,200})'|([^\s"'`]{1,200}))"""
+#: Labels whose value IS a credential: "my token is ...", "password: ...", "API_KEY=...".
 _LABEL = (r"(?:api[ _-]?key|access[ _-]?key|secret[ _-]?key|private[ _-]?key|client[ _-]?secret"
-          r"|secret|token|bearer|password|passwd|passphrase|pwd|key)")
-_LABELLED = re.compile(r"(?<![a-z])" + _LABEL + r"(?![a-z])[\"']?\s*(?:[:=]|\bis\b|\bwas\b)?\s*[\"']?"
-                       r"([A-Za-z0-9+/_\-.~]{20,}=*)", re.I)
+          r"|secret|token|bearer|password|passwd|passphrase|pwd)")
+_LABELLED = re.compile(r"(?<![a-z])" + _LABEL + r"(?![a-z])[\"']?\s*(?:[:=]|\bis\b|\bwas\b)?\s*" + _VALUE,
+                       re.I)
+#: A bare "key" is everyday English ("the key is to keep the RPM down"), so it counts only
+#: as an assignment ("key: ...", "SERVICE_KEY=..."), and only for a random-looking value.
+_BARE_KEY = re.compile(r"(?<![a-z])key(?![a-z])[\"']?\s*[:=]\s*" + _VALUE, re.I)
+#: Sentence punctuation after a bare value is the sentence's, not the value's.
+_TRAILING = ".,;:)]}>"
+
+
+def _whole_value(match: re.Match) -> str:
+    quoted = match.group(1) or match.group(2)
+    return quoted if quoted else match.group(3).rstrip(_TRAILING)
+
+
+def _structured(value: str) -> bool:
+    """Words and numbers joined by - _ . / ("part-number-2026-revision-v2"): an
+    identifier someone typed, not a random one. Judged by runs: a piece that switches
+    between letters and digits twice or more ("a1B2", "123e4567") reads as random; "v2"
+    or "2026" does not (Codex review round 1)."""
+    pieces = [p for p in re.split(r"[-_./]+", value) if p]
+    return bool(pieces) and all(len(re.findall(r"[^\W\d_]+|\d+", p)) < 3 and p.isalnum() for p in pieces)
 
 
 def _random_looking(token: str) -> bool:
@@ -148,7 +174,9 @@ def secret_kind(text: object) -> str | None:
     if any(not needs_random or _random_looking(m.group(0))
            for pattern, needs_random in _API_KEYS for m in pattern.finditer(text)):
         return "API key"
-    if any(_random_looking(m.group(1)) for m in _LABELLED.finditer(text)):
+    if any(_random_looking(_whole_value(m)) for m in _LABELLED.finditer(text)):
+        return "labelled secret"
+    if any(_random_looking(v) and not _structured(v) for v in map(_whole_value, _BARE_KEY.finditer(text))):
         return "labelled secret"
     return None
 

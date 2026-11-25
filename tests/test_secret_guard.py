@@ -30,6 +30,7 @@ from test_extraction import FakeConn, FakeLlm, fake_embedder, lease_conn, row
 from test_memory_hygiene import PERSON
 
 RANDOM = "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"           # 36 mixed characters, no meaning
+PUNCTUATED = "Xk9!mP2v#L8qR4$nT6w&"                          # 20, with password punctuation
 HEX = "0123456789abcdef" * 3
 
 SECRETS = [
@@ -66,6 +67,16 @@ SECRETS = [
     ("labelled secret", "the wifi password is " + RANDOM[:20]),
     ("labelled secret", "client_secret = '" + RANDOM + "'"),
     ("labelled secret", "Bearer " + RANDOM),
+    # Codex review round 1: the value is read whole, punctuation and all, then shape-checked.
+    ("labelled secret", "the password is " + PUNCTUATED),
+    ("labelled secret", "my password is " + PUNCTUATED + "."),         # a sentence's full stop is not in it
+    ("labelled secret", 'password: "' + PUNCTUATED + '"'),
+    ("labelled secret", "pwd=" + PUNCTUATED),
+    ("labelled secret", "key: " + RANDOM),                             # a bare "key" with : or =
+    ("labelled secret", "SOME_SERVICE_KEY=" + RANDOM),
+    # PINNED (reported 2026-11-24): words and a year after a password label still count;
+    # only after a bare "key" does a dashed word identifier pass.
+    ("labelled secret", "the wifi password is Sunshine-Garden-2024"),
 ]
 
 ORDINARY = [
@@ -93,6 +104,10 @@ ORDINARY = [
     "Commit " + HEX[:40] + " fixed it",              # an unlabelled hash is not a secret
     "Key West trip in 2027",
     "Map key: midnight-blue-with-silver-accents",    # a label, then a long value that is plain words
+    # Codex review round 1: a bare "key" needs : or =, and a dashed word identifier is not random.
+    "The key is part-number-2026-revision-2",
+    "key: part-number-2026-revision-2", "key: part-number-2026-revision-v2",
+    "my password is " + PUNCTUATED[:11],                              # short: the short-password line holds
     "Token of appreciation for 20 years of service",
     "",
 ]
