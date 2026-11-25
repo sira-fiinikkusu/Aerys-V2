@@ -134,6 +134,7 @@ def _run_once(settings: Settings, *, live: bool = False) -> dict:
                     batch_limit=settings.extraction_batch_limit,
                     sealed_rooms=sealed_rooms,
                     test_bodies=test_body_patterns(settings),
+                    stated=stated_check(settings),
                 )
     log.info("extraction pass (%s): %s", "live" if live else "shadow", json.dumps(summary))
     _check_stalled(summary)

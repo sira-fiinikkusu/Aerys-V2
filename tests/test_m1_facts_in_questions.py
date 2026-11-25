@@ -139,3 +139,21 @@ def test_the_check_is_told_when_he_said_it_so_a_worked_out_date_can_be_judged():
     quoted_observations([obs("vehicle.truck", "Bought a Ram 1500 around Nov 20, 2026", "I just bought a Ram 1500")],
                         group(RAM), {}, stated)
     assert seen == ["Friday, Nov 20, 2026"]
+
+
+def test_only_the_judged_fact_is_stored_never_unchecked_context_or_date():
+    """Codex M1 r1: a hypothetical riding in the context must not become stored testimony."""
+    msg = "I just bought a Ram 1500; what if my dad visits for Christmas?"
+    o = obs("vehicle.truck", "Bought a Ram 1500", "I just bought a Ram 1500")
+    o["context"], o["event_date"] = "His dad is visiting him", "2026-12-25"
+    kept = quoted_observations([o], group(msg), {}, Stated(0.95))
+    assert kept and kept[0]["context"] == "" and kept[0]["event_date"] == ""
+    content, date = ex._compose_content(kept[0], "Nov 20")
+    assert "dad" not in content.lower() and "12-25" not in content and date == "Nov 20"
+
+
+def test_the_shadow_worker_passes_the_check_too():
+    import inspect
+    from aerys_v2.workers import __main__ as w
+    src = inspect.getsource(w._run_once)
+    assert src.count("stated=stated_check(settings)") == 2

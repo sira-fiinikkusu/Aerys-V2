@@ -1494,6 +1494,10 @@ def quoted_observations(observations: list[dict], group: dict, stats: dict,
                 stats["stated_unavailable"] = stats.get("stated_unavailable", 0) + 1
             elif p >= STATED_YES:
                 stats["stated_kept"] = stats.get("stated_kept", 0) + 1
+                # Codex M1 r1: only what Jev judged is stored. Context and a separate date were never
+                # judged, so they go (the date falls back to the day he said it).
+                obs["context"] = ""
+                obs["event_date"] = ""
                 kept.append(obs)
             else:
                 stats["stated_refused"] = stats.get("stated_refused", 0) + 1
