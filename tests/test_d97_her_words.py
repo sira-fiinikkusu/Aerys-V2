@@ -271,7 +271,7 @@ def test_recall_labels_her_rows_as_her_own_words():
              "source_platform": "discord_dm"},
             {"content": "work.shift: Works the night shift", "created_at": T0, "source_platform": "discord_dm"}]
     block = format_memory_context(rows, now=now)
-    assert "* (her own words) Aerys suggested a 3 pm wake-up" in block
+    assert "* (her own words, not a checked fact) Aerys suggested a 3 pm wake-up" in block
     assert "* Works the night shift" in block
 
 
@@ -394,3 +394,30 @@ def test_an_undated_restatement_keeps_the_events_date_so_a_later_occurrence_stay
     assert writes and all("event_date" not in s and "content" not in s.split("WHERE")[0] for s, _ in writes)
     # the stored row is unchanged (date intact), so the Nov 20 concert is a new occurrence
     assert _triage_dated(conn, "Saw Bruno Mars at the Arena", "Nov 20") == "insert"
+
+
+# ── her guesses stay guesses (side-agent note, 11/25) ───────────────────────────────────────────
+
+def test_the_prompt_keeps_her_hedges():
+    assert "Keep her hedges exactly" in EXTRACTION_SYSTEM_PROMPT
+    assert "never upgraded into a certainty" in EXTRACTION_SYSTEM_PROMPT
+
+
+def test_recall_tells_her_that_her_own_lines_are_claims_not_facts():
+    from aerys_v2.services import context as ctx
+    class Conn:
+        def execute(self, sql, params=None):
+            class R:
+                def fetchall(self_inner):
+                    return [("m1", CHRIS, "aerys.told.shop: Aerys told him Retail Therapy is most likely a gift shop",
+                             "discord_dm", "private", T0, 0.9)]
+            return R()
+    orig = ctx.get_profile
+    ctx.get_profile = lambda *a, **k: {"profile": {"lines": []}}
+    try:
+        block = ctx.build_context(CHRIS, "where is Retail Therapy", Conn(), embed=lambda t: [0.1],
+                                  privacy_context="private")
+    finally:
+        ctx.get_profile = orig
+    assert "(her own words, not a checked fact) Aerys told him Retail Therapy is most likely a gift shop" in block
+    assert "not verified facts and not things he said" in block

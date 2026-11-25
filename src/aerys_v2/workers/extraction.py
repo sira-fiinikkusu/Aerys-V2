@@ -186,6 +186,7 @@ Aerys is the assistant. Keep what SHE said that has lasting value, under the aer
 - aerys.told.<subject>: specific information she gave him that he may come back to (a schedule, a list, an answer with particulars)
 - aerys.view.<subject>: her own stated opinion or preference
 value_text for these ALWAYS starts with "Aerys" ("Aerys told him the Sunday shift is 8 am - 4 pm").
+Keep her hedges exactly as she said them ("most likely", "I think", "probably", "I couldn't confirm"): a guess of hers is saved as a guess, never upgraded into a certainty.
 REJECT from her lines: small talk and acknowledgements; her restating his facts back to him; tool status ("done", "turning it on"); anything she says she can't do or doesn't have access to; questions she asked him.
 Never turn her words into a fact about him or anyone else: what she said stays what she said.
 

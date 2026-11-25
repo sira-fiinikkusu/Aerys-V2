@@ -45,6 +45,9 @@ RECENCY_WEIGHT = 0.3
 RECENCY_WINDOW_S = 2_592_000  # 30 days — recency decays linearly to 0 over this
 RETRIEVE_LIMIT = 20  # rows scored & returned by SQL
 CONTEXT_CAP = 5  # lines that survive dedup into the prompt block
+#: How recall marks a line of HER own words (D97): what she said then, never a checked fact and
+#: never something he said. services/context.py adds the matching note to the block header.
+HER_WORDS_LABEL = "(her own words, not a checked fact)"
 #: Keys whose rows add up instead of replacing (workers/extraction.APPEND_PREFIXES; a test keeps them equal).
 _APPEND_PREFIXES = ("event.", "aerys.")
 EMBED_MODEL = "openai/text-embedding-3-small"  # via OpenRouter, 1536-dim
@@ -187,7 +190,7 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
             display = content
         if key.startswith("aerys."):
             # D97 (2026-11-25): her own words, never to be read as a fact about him.
-            display = f"(her own words) {display}"
+            display = f"{HER_WORDS_LABEL} {display}"
 
         parts = [f"* {display}"]
         if row.get("source_platform"):

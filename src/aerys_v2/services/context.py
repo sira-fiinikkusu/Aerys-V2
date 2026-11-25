@@ -28,6 +28,7 @@ from typing import Any
 
 from aerys_v2.services.memory import (
     EMBED_MODEL,
+    HER_WORDS_LABEL,
     Embedder,
     format_memory_context,
     retrieve_memories,
@@ -102,6 +103,11 @@ def build_context(
                 privacy_context=privacy_context,
             )
             memory_block = format_memory_context(rows)
+            if memory_block and HER_WORDS_LABEL in memory_block:
+                # D97: her own earlier words are claims she made, not facts (a guess stays a guess).
+                memory_block += (f"\nLines marked {HER_WORDS_LABEL} are what you (Aerys) said at the time, "
+                                 "not verified facts and not things he said: if one matters, check it "
+                                 "before repeating it as settled.")
             if memory_block:
                 # Stored-prompt-injection surface: this content is USER-authored
                 # and PERSISTENT (extracted from past conversations, not this
