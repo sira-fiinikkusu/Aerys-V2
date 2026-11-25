@@ -323,3 +323,28 @@ def test_recall_keeps_two_distinct_concerts():
     block = format_memory_context(rows, now=now)
     assert "Bruno Mars" in block and "Electric Storm" in block
     assert block.count("Exampleville") == 1   # a state key still shows its best row once
+
+
+# ── Codex review r2 fixes ───────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("known_key,new_key", [("preference.favorite_drink", "interest.beverage"),
+                                               ("interest.beverage", "preference.favorite_drink")])
+def test_a_single_valued_interest_can_be_replaced_either_way(known_key, new_key):
+    summary, write = _live(
+        [obs(new_key, "Favorite drink is tea", "my favorite drink is tea now", replaces="k1")],
+        [("k1", known_key, f"{known_key}: Favorite drink is coffee")],
+        [row(CHRIS, "my favorite drink is tea now")])
+    assert [p["old_id"] for s, p in write.calls if "RETURNING id, key_label" in s] == ["k1"]
+    assert summary["sources"]["prod_chat"]["replaces_used"] == 1
+
+
+def test_an_unhonoured_replace_is_counted_as_ignored_even_when_triage_replaces_another_row():
+    prod = FakeConn([("FROM memories m", [("k1", "basic.job", "basic.job: Team lead")]),
+                     ("FROM n8n_chat_histories", [row(CHRIS, "I'm an automation engineer now")])])
+    write = FakeConn([("SELECT id, content FROM memories", [("w9", "work.role: Team lead")]),
+                      ("RETURNING id, key_label", [("k1",)]), ("RETURNING id", [("n1",)])])
+    summary = run_live_extraction(prod, lease_conn(holder="brain"), write, FakeLlm([json.dumps(
+        [obs("work.role", "Automation engineer", "I'm an automation engineer now", replaces="k1")])]), lambda t: [0.5])
+    stats = summary["sources"]["prod_chat"]
+    assert stats.get("replaces_used", 0) == 0 and stats["replaces_ignored"] == 1
+    assert not [p for s, p in write.calls if "RETURNING id, key_label" in s]

@@ -689,6 +689,7 @@ def triage_memory(
     source_text: str | None = None,
     append: bool = False,
     replace_id: str | None = None,
+    outcome: dict | None = None,
 ) -> str:
     """The "Insert Memory" node's real dedup branch, ported to prod `memories`.
 
@@ -792,6 +793,8 @@ def triage_memory(
                   if str(r[0]) != str(replace_id)]
         if not others:
             retired = conn.execute(TRIAGE_RETIRE_SQL, {"old_id": replace_id, "person_id": person_id}).fetchone()
+        if outcome is not None:
+            outcome["retired"] = bool(retired)   # the explicit replace's own result (Codex r2 #2)
 
     if append:
         # D97: events, interests and her own words add up. A near-identical restatement
@@ -900,7 +903,7 @@ PRIVATE_LEVEL = "private"
 #: Her own words live under this prefix and nowhere else; his facts never use it.
 HER_PREFIX = "aerys."
 #: One value is current: a new value replaces the old (the original triage rule).
-STATE_PREFIXES = ("basic.", "user.", "work.", "vehicle.", "relationship.", "preference.")
+STATE_PREFIXES = ("basic.", "user.", "work.", "vehicle.", "relationship.", "preference.", "interest.")
 #: Distinct items add up with their dates; only a near-identical restatement refreshes one.
 #: interest.* stays single-valued ("interest.beverage" is his favourite drink, one current value);
 #: a specific interest gets its own subject in the key instead (the prompt's rule).
@@ -1726,6 +1729,7 @@ def run_live_extraction(
                 # between state keys (an event, an interest or her own words is never deleted
                 # by the model; Gemini review 11/25). Anything else is ignored and counted.
                 replace_id = (obs.get("replaces") or "").strip() or None
+                outcome: dict = {}
                 if replace_id and not (replace_id in known_keys and is_state_key(key)
                                        and is_state_key(known_keys[replace_id])):
                     stats["replaces_ignored"] = stats.get("replaces_ignored", 0) + 1
@@ -1749,9 +1753,10 @@ def run_live_extraction(
                     source_text=obs.get("source_text"),
                     append=is_append_key(key),
                     replace_id=replace_id,
+                    outcome=outcome,
                 )
                 if replace_id:
-                    counted = "replaces_used" if action == "replace" else "replaces_ignored"
+                    counted = "replaces_used" if outcome.get("retired") else "replaces_ignored"
                     stats[counted] = stats.get(counted, 0) + 1
                 stat_key = _TRIAGE_STAT_KEYS[action]
                 stats[stat_key] += 1
