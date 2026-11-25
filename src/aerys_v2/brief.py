@@ -92,6 +92,7 @@ class Facts:
     personal: int = 0                             # events from his personal calendars
     wet: bool = False                             # rain (or worse) in the forecast
     complete: bool = True                         # every source answered (else "quiet" may be a gap)
+    promises: list = field(default_factory=list)  # #259: her open promises to him, newest first (<= 3)
 
 
 def _at(day: date, hour: int) -> datetime:
@@ -138,6 +139,10 @@ def facts_text(facts: Facts) -> str:
         lines += [f"- {stamped(r)}" for r in [*facts.held, *facts.quiet]]
     else:
         lines.append("Came in overnight: nothing (say nothing about it)")
+    if facts.promises:
+        lines.append("Things you said you'd do for him (yours; mention one only if it's due today or clearly "
+                     "useful now, never list them all, and never as though he asked again):")
+        lines += [f"- {p}" for p in facts.promises]
     return "\n".join(lines)
 
 
@@ -585,10 +590,30 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
             log.warning("brief: the forecast read failed (%s); going without it", type(e).__name__)
             failed.append(weather_entity)
         found = events(start_at, target, failed)
+        promised = open_promises_for_brief(now) if day is None else []
         timed = [t for t, line, _ in found if not line.startswith("all day")]
         return Facts(weather=weather, events=[line for _, line, _ in found], held=held, quiet=quiet,
                      first_at=min(timed) if timed else None, personal=sum(1 for *_, mine in found if mine),
-                     wet=wet, complete=not failed)
+                     wet=wet, complete=not failed, promises=promised)
+
+    def open_promises_for_brief(now: datetime) -> list[str]:
+        """#259 step 4: up to 3 of her open promises to the owner from the last 14 days. Fails open."""
+        url, owner = getattr(settings, "memories_database_url", None), getattr(settings, "owner_person_id", None)
+        if not url or owner is None:
+            return []
+        try:
+            import psycopg
+
+            from aerys_v2.tools.promises import open_promises
+
+            with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+                conn.read_only = True
+                found = open_promises(conn, str(owner), limit=10)
+        except Exception as e:
+            log.warning("brief: reading her promises failed (%s); going without them", type(e).__name__)
+            return []
+        recent = [p for p in found if isinstance(p["at"], datetime) and now - p["at"] <= timedelta(days=14)]
+        return [(f"(for {p['date']}) " if p["date"] else "") + p["text"] for p in recent[:3]]
 
     return gather
 
