@@ -1495,6 +1495,12 @@ def ask(
     """
     if not text or not text.strip():
         raise ValueError("ask() requires non-empty text")
+    # 11/25 (Chris): speech recognition writes her name as "Eris"; on a spoken turn (voice or the lens) it's read
+    # as Aerys before anything else sees the words. Typed text stays exactly as written.
+    if is_voice_turn(identity or {}, thread_id) or is_lens_surface(identity or {}):
+        from aerys_v2.spoken_names import fix_spoken_names
+
+        text = fix_spoken_names(text)
 
     # The sentinel's heartbeat is a probe, not someone talking to her: it must not
     # move her desk face (2026-10-26: its 01:02 and 07:08 turns settled her on the
