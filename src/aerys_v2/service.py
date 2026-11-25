@@ -2604,12 +2604,9 @@ def _one_loop_call_kinds(name: str, args: dict) -> frozenset:
 def _one_loop_outcome(content: str, status: object = None) -> str:
     """The execution-outcome contract (Codex re-check #2): completed, refused, pending or failed. Only a
     completed call backs a claim. classify_tool_result measures infrastructure failure and counts a policy
-    refusal as success, so the refusals and waits are read here first, from the answer's first line (a
-    reader's own first line, inside its outside-text wrapper)."""
-    from aerys_v2.outside_guard import unwrap_outside
+    refusal as success, so the refusals and waits are read here first, from the answer's first line."""
     from aerys_v2.turns import classify_tool_result
 
-    content = unwrap_outside(content)
     first = next((line for line in str(content or "").splitlines() if line.strip()), "")
     if classify_tool_result(str(content or ""), status) is not None:
         return "failed"
@@ -2625,9 +2622,7 @@ def _one_loop_done_kinds(name: str, args: dict, content: str, status: object = N
     A read is completed when it answered (not failed, refused or waiting); an act only on its tool's words
     for success (_ONE_LOOP_DONE_WORDS); an unknown tool never. Recording and delivery are separate kinds, so
     a ticket kept but not yet delivered backs "noted", not "sent"."""
-    from aerys_v2.outside_guard import unwrap_outside
-
-    text = str(unwrap_outside(content) or "")
+    text = str(content or "")
     if name == "no_action" or _one_loop_outcome(text, status) != "completed":
         return frozenset()       # no_action answers in words only: it never backs a look or an act
     kinds = _one_loop_call_kinds(name, args)
