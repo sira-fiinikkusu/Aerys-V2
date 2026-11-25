@@ -583,11 +583,13 @@ def test_armed_on_the_household_graph_only_and_named_only_when_armed():
     assert "search_history" in action_overlay_for(only_turns)
 
 
-def test_a_wake_up_never_carries_them_and_history_counts_as_outside_text():
+def test_a_wake_up_never_carries_them_and_her_own_past_chats_need_no_tap():
+    """D98 (Chris 11/25 11:30): searching her own past chats never holds her next action for a tap."""
     from aerys_v2 import service
     from aerys_v2.outside_guard import READERS
     from aerys_v2.wakeups import WAKE_DROPPED
 
     assert {"search_memory", "search_history"} <= WAKE_DROPPED
-    assert "search_history" in READERS
+    assert "search_history" not in READERS and "search_memory" not in READERS
+    assert "read_web_page" in READERS   # the web still counts as outside text
     assert {"search_memory", "search_history"} <= service.ONE_LOOP_READ_ONLY

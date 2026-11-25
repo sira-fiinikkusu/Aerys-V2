@@ -15,9 +15,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 READERS = frozenset({'search_web', 'read_web_page', 'analyze_image', 'read_document',
                      'youtube_summary', 'search_email', 'read_email', 'search_his_email', 'read_his_email',
-                     'check_async_task', 'list_async_tasks',
-                     # D95-A: past conversations verbatim, other people's words in a room included.
-                     'search_history'})
+                     'check_async_task', 'list_async_tasks'})
+# search_history is deliberately absent (D98, Chris 11/25 11:30: "i dont need her asking for permission
+# for this at all"): her own past conversations never hold her next action for a tap.
 # draft_in_his_gmail is deliberately absent: a draft reaches no one; the owner
 # reviews and sends it himself. It is also absent from action_executor's allowed set.
 # my_pending_requests stays outside REACH_OUT: withdrawing only narrows permission.
