@@ -976,16 +976,22 @@ STATED_MODEL = "jev-1.14.0"
 
 
 def _stated_question(fact: str) -> dict:
+    # Criteria re-worded 11/25 after his real 30-day replay showed a stated plan ("I'm heading to the
+    # market tomorrow, will it rain?") read as not-stated; checked on 9 held-out cases (all clean) with
+    # generic examples, never his own messages.
     return {"type": "noul",
             "instructions": f"Does the speaker of `message` state, as true, that: {fact}? A date in the "
                             "fact may be worked out from `said_on` and the message's own time words "
                             "(\"just\", \"yesterday\", \"next week\").",
             "criteria": {
-                "true": "He asserts it as something that is so about himself or his life, even inside a "
-                        "question (\"I just bought a Ram, what oil should I use?\" states he bought a Ram).",
-                "false": "He only asks about it, wonders, supposes, plans, or reports what someone else said; "
-                         "or the message doesn't contain it (\"is my dad visiting?\", \"what if I bought a "
-                         "Ram?\", \"should I get a Ram?\")."}}
+                "true": "He asserts it as so about himself or his life, even inside a question: something he "
+                        "did, has, is, prefers, or intends (\"I just bought a Ram, what oil should I use?\" "
+                        "states he bought a Ram; \"I'm driving to Tampa tomorrow, will there be traffic?\" "
+                        "states his plan).",
+                "false": "He only asks about it, wonders, supposes, or weighs it as an option, or reports what "
+                         "someone else said; or the message doesn't contain it (\"is my dad visiting?\", "
+                         "\"what if I bought a Ram?\", \"should I get a Ram?\", \"would it be crazy if I "
+                         "quit?\")."}}
 
 
 def jev_stated_check(api_key: str, *, model: str = STATED_MODEL, timeout_s: float = 2.0, client=None) -> StatedCheck:
