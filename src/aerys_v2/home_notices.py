@@ -76,6 +76,9 @@ HOME_JOB_PROMPT = (
     "what you were asked not to do, and don't add that you changed nothing, unless something was changed, "
     "went wrong, or needs him. Leave out how you did it (which tools, which steps) unless he'd need "
     "that. Use only what's below; never add anything. "
+    "He saw nothing of the job while it ran: this message is the first he hears of it. If your report "
+    "corrects a slip made during the job, give only the right result now; never 'correct what I said' "
+    "or mention what you told yourself along the way. "
     "The full report goes to him as text, so don't recite it. No lists, no markdown, no emoji. "
     "Reply with ONLY the message."
 )

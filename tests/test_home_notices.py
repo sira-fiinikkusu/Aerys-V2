@@ -443,6 +443,14 @@ def test_the_spoken_line_stops_at_the_answer():
     assert "unless something was changed" in HOME_JOB_PROMPT
 
 
+def test_a_slip_inside_the_job_is_never_corrected_to_him():
+    """Chris, 11/25 14:01: 'she never told me ANYTHING while she was playing so i saw nothing about her claiming
+    she won in 4'. The job's report fixed a slip made during the run; his message must give only the result."""
+    from aerys_v2.home_notices import HOME_JOB_PROMPT
+    assert "He saw nothing of the job while it ran" in HOME_JOB_PROMPT
+    assert "never 'correct what I said'" in HOME_JOB_PROMPT
+
+
 def test_her_plan_bookkeeping_stays_out_of_his_copy():
     """Kael's call, 11/09 (Chris: "i will let you decide"): the text copy is her full report, the
     record, but her plan bookkeeping ("the one plan item is closed") is hers. A line about what she
