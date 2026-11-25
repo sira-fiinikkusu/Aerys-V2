@@ -796,10 +796,12 @@ class HandsWatcher:
             if row.id in self._unrecorded:
                 status, outcome = self._unrecorded[row.id]
                 try:
-                    if g.store.finish(row.id, status, outcome, now):
-                        del self._unrecorded[row.id]
+                    recorded = g.store.finish(row.id, status, outcome, now)
                 except Exception:
                     log.warning("hands watcher: action %s's outcome still can't be recorded", row.id)
+                    continue
+                del self._unrecorded[row.id]
+                self._settled(row, status, outcome, recorded)
                 continue
             first = self._running_since.setdefault(row.id, now)
             if now - first < STUCK_AFTER:
@@ -825,6 +827,18 @@ class HandsWatcher:
             self._tell(row, _note_for(row, "failed", INTERRUPTED))
             self._tell_owner(row, INTERRUPTED)
         return failed
+
+    def _settled(self, row: GatedAction, status: str, outcome: str, recorded: bool) -> None:
+        """Tell what happened, once it's on record. Codex round 1 (G1): when the record lost its compare-and-
+        set (another watcher swept the row as interrupted while this run was still going), the stored state
+        is what was told; a second, conflicting outcome is never published (the real one is logged)."""
+        if not recorded:
+            log.warning("hands watcher: action %s finished %s after it was marked interrupted; the stored "
+                        "outcome stands, nothing more is told", row.id, status)
+            return
+        self._tell(row, _note_for(row, status, outcome))
+        if status == "failed":
+            self._tell_owner(row, outcome)
 
     def tick(self) -> dict:
         g, out = self.gate, {"done": 0, "failed": 0, "dropped": 0}
@@ -854,17 +868,17 @@ class HandsWatcher:
                     outcome, status = f"{type(e).__name__}", "failed"
                 if status == "failed":
                     log.warning("hands watcher: action %s (%s) didn't go through", row.id, row.action)
+                out[status] += 1
                 try:
-                    g.store.finish(row.id, status, outcome, now)
+                    recorded = g.store.finish(row.id, status, outcome, now)
                 except Exception:
-                    # G1: still 'running' in the table; recorded on a later pass (_sweep_running).
+                    # G1: still 'running' in the table; recorded, and only then told, on a later pass
+                    # (_sweep_running).
                     self._unrecorded[row.id] = (status, outcome)
                     log.warning("hands watcher: action %s %s, but recording it failed (never redone; "
                                 "retried next pass)", row.id, status)
-                out[status] += 1
-                self._tell(row, _note_for(row, status, outcome))
-                if status == "failed":
-                    self._tell_owner(row, outcome)
+                    continue
+                self._settled(row, status, outcome, recorded)
             elif state in ("declined", "expired", "withdrawn"):
                 if g.store.drop(row.id, state, now):
                     out["dropped"] += 1

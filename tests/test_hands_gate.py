@@ -1181,9 +1181,10 @@ def test_an_outcome_that_couldnt_be_recorded_is_recorded_on_a_later_pass_not_cal
     b.store.finish = flaky
     assert b.watcher.tick()["done"] == 1 and len(b.done) == 1
     (row,) = b.store.rows.values()
-    assert row.status == "running"
+    assert row.status == "running" and not b.notes          # told only once its outcome is on record
     b.watcher.tick()
     assert row.status == "done" and "t-1" in row.outcome and not told
+    assert len(b.notes) == 1 and "has started" in b.notes[0][1]
     b.clock["now"] = NOW + hands_gate.STUCK_AFTER * 3
     b.watcher.tick()
     assert row.status == "done" and len(b.done) == 1 and not told
@@ -1232,3 +1233,65 @@ def test_a_message_that_goes_says_which_branch_let_it():
     b.watcher.tick()
     later = b.gate.message(OWNER_THREAD, "discord", "sam_42", "later", TEXT)
     assert later.go and later.basis == "confirmed_contact"
+
+
+
+def _sweeping_watcher(b, told):
+    return HandsWatcher(b.gate, note=lambda thread, text: b.notes.append((thread, text)),
+                        owner_notice=lambda key, text: told.append(key))
+
+
+def test_a_late_result_after_another_watcher_swept_it_never_publishes_a_second_outcome():
+    """Codex round 1 (G1): a run that outlived the threshold was swept by another watcher, then finished;
+    its compare-and-set lost, and it still announced "has started" beside "interrupted". The stored
+    state wins: one outcome is told."""
+    told = []
+    b = Box()
+    other = _sweeping_watcher(b, told)
+
+    def slow(row):
+        b.clock["now"] = NOW + timedelta(minutes=1)
+        other.tick()                                                   # the other watcher sees it running
+        b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+        other.tick()                                                   # ... and sweeps it
+        return True, "task_id: t-1"
+
+    b.gate.executors[HOME_JOB] = slow
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    b.watcher.tick()
+    (row,) = b.store.rows.values()
+    assert row.status == "failed" and row.outcome == hands_gate.INTERRUPTED
+    assert [text for _, text in b.notes if "has started" in text] == []
+    assert len([text for _, text in b.notes if "may have run" in text]) == 1
+    assert set(told) == {f"approved-failed:{row.id}"}
+
+
+def test_an_unrecorded_result_that_was_swept_meanwhile_is_never_announced():
+    told = []
+    b = Box()
+    other = _sweeping_watcher(b, told)
+    b.gate.home_job(STRONG, OWNER_THREAD, "start_async_task", START_WRITE)
+    b.tap()
+    real_finish, down = b.store.finish, {"on": True}
+
+    def flaky(*args, **kwargs):
+        if down["on"]:
+            raise ConnectionError("nas")
+        return real_finish(*args, **kwargs)
+
+    b.store.finish = flaky
+    b.watcher.tick()                                                   # ran it; can't record it; told nobody
+    (row,) = b.store.rows.values()
+    assert row.status == "running" and not b.notes
+    b.clock["now"] = NOW + timedelta(minutes=1)
+    other.tick()
+    b.clock["now"] = NOW + hands_gate.STUCK_AFTER + timedelta(minutes=2)
+    stale = list(b.store.running())                                    # this watcher's read, just before...
+    other.tick()                                                       # ... the other watcher sweeps it
+    down["on"] = False
+    b.store.running = lambda: stale
+    b.watcher.tick()                                                   # the retry loses its compare-and-set
+    assert row.status == "failed" and row.outcome == hands_gate.INTERRUPTED
+    assert [text for _, text in b.notes if "has started" in text] == []
+    assert len([text for _, text in b.notes if "may have run" in text]) == 1
