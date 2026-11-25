@@ -118,18 +118,11 @@ def test_birthday_tool_then_two_extractor_aliases_leave_one_database_row():
 
 
 @pytest.mark.parametrize('source', [QUESTION, '[Portable observation time: 2026-09-06] ' + QUESTION])
-@pytest.mark.parametrize('answer', [
-    [], [dict(key_label='interest.beverage', value_text=QUESTION, source_text=QUESTION)],
-    [dict(key_label='interest.beverage', value_text=BEVERAGE, source_text=QUESTION)]])
-def test_source_question_never_becomes_a_fact(source, answer):
-    """Was test_source_question_skipped_before_llm (the question never reached the
-    model). Since 2026-11-24 it does, so a fact said inside a question can be kept;
-    what must still hold is the outcome: whatever the model makes of a pure
-    question, the question, or an answer inferred from it, is never a fact."""
-    llm = Mock(return_value=ex.LlmReply(json.dumps(answer), False))
+def test_source_question_skipped_before_llm(source):
+    llm = Mock()
     observations, reply = ex._extract_group(llm, {'messages': [{'content': source}]}, {})
     assert observations == [] and not reply.truncated
-    llm.assert_called_once()
+    llm.assert_not_called()
 
 
 @pytest.mark.parametrize('value', ['Has two dogs', 'Was born on April 12, 1990', 'Likes iced tea'])

@@ -221,15 +221,15 @@ _reject_streak = 0
 
 def _rejection_counts(summary: dict) -> tuple[int, int, dict]:
     """(proposed, lost, by_source): what the model proposed, and how much of it was
-    refused for a reason that can hide a real fact — a question-shaped value, context or
-    quote, a quote not in his messages, or a quote from inside his question. Location,
-    secret and test refusals are intended and are not counted as lost."""
+    refused for a reason that can hide a real fact: a question-shaped value, context or
+    quote, or a quote not found in his messages. Location, secret and test refusals are
+    intended and are not counted as lost."""
     proposed = lost = 0
     by_source = {}
     for name, s in (summary.get("sources") or {}).items():
         s = s or {}
         refused = s.get("rejected") or {}
-        source_lost = refused.get("question", 0) + s.get("unquoted", 0) + s.get("quote_in_question", 0)
+        source_lost = refused.get("question", 0) + s.get("unquoted", 0)
         source_proposed = s.get("observations", 0) + sum(refused.values())
         proposed, lost = proposed + source_proposed, lost + source_lost
         by_source[name] = {"proposed": source_proposed, "lost": source_lost}

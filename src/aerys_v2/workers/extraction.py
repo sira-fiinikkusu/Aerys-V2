@@ -164,12 +164,8 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Session-specific decisions: "parking this bug", "let's do X next"
 - Meta-commentary about the system: "the bot is broken", "that workflow failed"
 - Timestamps without facts: "it's late", "been a long day"
-- The question itself, and anything only a question suggests: a question never confirms a fact, so never infer its answer ("is my birthday in April?" says nothing about their birthday)
+- Questions, requests for information, and observations derived only from questions (never infer an answer)
 - Greetings and smalltalk: "hey", "what's up", "how are you"
-
-## Facts inside questions and requests:
-- A request or question often reveals a fact worth keeping. "I just bought a new truck, what oil should I use?" asks about oil, and also states that they just bought a new truck: extract the truck.
-- Keep only what the speaker STATES. The asking part is never a fact, and never infer an answer from it.
 
 ## Current location privacy (overrides all other extraction rules):
 - Never save Chris's current location, whereabouts, address or coordinates, whether from the presence block, the nearby tool, or anything he says about where he is right now.
@@ -195,9 +191,8 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Examples: basic.location, user.vehicle, interest.game, event.trip, preference.communication
 
 ## source_text rules:
-- Include source_text: the speaker's own words supporting each fact, copied exactly from one message. Never use a question as evidence.
-- Quote only the words that state the fact, stopping before any question: for "I just bought a new truck, what oil should I use?" the source_text is "I just bought a new truck".
-- Copy the words exactly; never paraphrase, shorten or join two messages. A fact you cannot quote this way is not kept, so leave it out.
+- Include source_text: the exact declarative source sentence supporting each fact. Never use a question as evidence.
+- Copy the words exactly from one message; never paraphrase, shorten or join two messages. A fact you cannot quote this way is not kept, so leave it out.
 
 ## value_text rules:
 - Write naturally, as a human would remember it -- NOT as a database entry
@@ -210,7 +205,6 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - 1 sentence max, captures the conversational moment
 - Include for interests, events, preferences. Skip for basic identity facts.
 - BAD: "mentioned in conversation"  GOOD: "came up while joking about RAM prices"
-- Write it as a statement, never a question. BAD: "which oil should he use"  GOOD: "came up while asking which oil to use"
 - If the conversation is mundane, context is null
 
 ## privacy_level rules:
@@ -475,8 +469,7 @@ def values_similar(a: str, b: str, *, threshold: float = VALUE_SIMILARITY_THRESH
 
 
 # Keep this gate independent of the extraction model's phrasing. Log only the
-# verdict, never the testimony. Source questions DO reach the model (2026-11-24: a fact
-# said inside a question is still a fact); this gate is what keeps the question out.
+# verdict, never the testimony. Source questions are filtered before LLM calls too.
 # A yes/no question opens with the auxiliary itself — "do you know my birthday",
 # "is the pool guy coming". No declarative sentence does that, so the opening word
 # alone is enough here.
@@ -1090,22 +1083,20 @@ def _extract_group(llm: Llm, group: dict, stats: dict) -> tuple[list[dict] | Non
     """
     messages = model_messages(group)
     if len(messages) != len(group['messages']):
-        log.warning("memory skipped: test-shaped source message")
+        log.warning("memory skipped: question-shaped or test-shaped source message")
     if not messages:
         return [], LlmReply("[]", False)
     return _extract_messages(llm, messages, stats)
 
 
 def model_messages(group: dict) -> list[dict]:
-    """The group's messages the extraction model is shown: all but probes of her memory.
-
-    2026-11-24: question-shaped messages reach the model now. Dropping them here
-    threw away the facts said inside a question ("I just bought a new truck, what
-    oil should I use?" lost the truck). A question still never becomes a fact: the
-    prompt says so, and parse_observations / triage_memory refuse any extracted
-    value, context or quote that is itself a question.
-    """
-    return [m for m in group['messages'] if not test_shaped(m['content'])]
+    """The group's messages the extraction model is shown: never a question, never a
+    probe of her memory. The quote gate (quoted_observations) matches against exactly
+    these. (A fact said inside a question, "I just bought a truck, what oil should I
+    use?", is lost here by design for now; 2026-11-25 it was scoped out of this batch,
+    to come back as a model judgment of whether his message states it as true.)"""
+    return [m for m in group['messages']
+            if not question_shaped(m['content']) and not test_shaped(m['content'])]
 
 
 #: Curly quotes and primes fold to straight ones: copying a quote changes them freely.
@@ -1113,166 +1104,62 @@ _QUOTE_FOLD = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201
                              "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"', "\u2033": '"'})
 #: The transcript's own "[Speaker]: " line prefix (build_transcript) is ours, not his words.
 _SPEAKER_PREFIX = re.compile(r"^\[[^\]\n]{1,80}\]:\s*")
-#: The door's observation-time stamp on a portable turn (V2_TURNS_SQL), folded to lower case.
-_PORTABLE_PREFIX = re.compile(r"^\[portable observation time: [^\]\n]*\]")
-_WORD = re.compile(r"[\w']+")
+_PUNCTUATION = re.compile(r"[^\w\s]")
 #: A key label as it may appear in a log line; anything else is logged as a placeholder.
 _LOGGABLE_KEY = re.compile(r"[a-z][a-z0-9_]{0,30}(?:\.[a-z0-9_]{1,40}){1,3}")
 
-# --- is the quoted span asserted, or asked or supposed? (Codex review round 1) ---------
-# A quote can be his words and still not his claim: "Could my birthday be April 12?"
-# contains "my birthday be April 12". So the matched span is judged by the clause around
-# it, in his own punctuation. A clause is a piece of a sentence between commas, colons or
-# spaced dashes; a sentence ends at . ! ? ; or a line break.
-_SENTENCE_END = re.compile(r"[!?;\n]+|\.(?!\d)")          # "2.5 liters" is one sentence
-_CLAUSE_BREAK = re.compile(r"[,:]|\s[-\u2013\u2014]+\s|[\u2013\u2014]")
-_LEAD_IN = re.compile(r"^(?:(?:and|but|so|also|oh|well|hey|ok|okay|um|uh)\b[\s,]*)+")
-#: A clause that opens as a question: yes/no ("could my birthday be..."), or a wh-word
-#: that asks ("what's", "when is"). A wh-word alone is not enough: "when I moved here,
-#: I got a dog" tells. "may" is not here: "May 3 is the appointment" tells too.
-_ASKS = re.compile(
-    r"^(?:do|does|did|is|are|am|can|could|would|will|should|shall|might)\b"
-    r"|^(?:what|which|who|where|when|why|how)(?:'s|'re|'ll|'d|'ve)(?!\w)"
-    r"|^(?:whats|whos|wheres|hows|whens|whys)\b"
-    r"|^(?:what|which|who|whom|whose|where|when|why|how)\s+"
-    r"(?:is|are|was|were|do|does|did|can|could|would|will|should|has|have|had|am)\b"
-    r"|^how\s+(?:many|much|long|often|old|far|come)\b")
-#: A supposition: it and the rest of its sentence are imagined ("if I get the job, I'll move").
-_SUPPOSES = re.compile(r"^(?:what\s+if|if|suppose|supposing|assuming|imagine|unless)\b")
-#: Doubt anywhere in a clause leaves it asserting only a possibility. "would" alone is not
-#: doubt: "I'd like you to call me Captain" is a preference he states.
-_HEDGE = re.compile(r"\b(?:could|might|may|would)\s+(?:be|have)\b|\bmaybe\b|\bperhaps\b"
-                    r"|\bpossibly\b|\bnot\s+sure\b|\bwonder(?:ing)?\b")
-#: Puts what FOLLOWS it in its clause in doubt: "tell me if the package came". What
-#: precedes it stays his: "I only eat eggs if they're scrambled" is a stated preference.
-_SCOPE = re.compile(r"\b(?:if|whether)\b")
-#: A tag question makes its whole sentence a question: "my birthday is April 12, right?"
-_TAG = re.compile(r"^(?:right|correct|true|yes|yeah|yep|no|ok|okay|eh|huh|am i right|or not"
-                  r"|is it|isn'?t it|aren'?t i|don'?t i|didn'?t i|wasn'?t it|won'?t it)$")
-#: Where a question starts inside an asking clause typed without a comma: "I just bought a
-#: new truck what oil should I use?" The cut goes at the last such start.
-_INNER_ASK = re.compile(r"\s(?=(?:what|which|who|where|when|why|how)\b"
-                        r"|(?:can|could|would|will|should|do|does|did|is|are)\s+(?:you|i|we|it|there|they)\b"
-                        r"|any\s+(?:tips|ideas|advice|thoughts|suggestions|recommendations)\b)")
 
-
-def _fold_for_quote(text: str | None, *, lines: bool = False) -> str:
+def _fold_for_quote(text: str | None) -> str:
     """Case, width, invisible characters, curly quotes and runs of whitespace: the
-    differences copying makes. Words and their order are untouched. With LINES, line
-    breaks survive: a line break ends a sentence."""
+    differences copying makes. Words and their order are untouched."""
     text = unicodedata.normalize("NFKC", text if isinstance(text, str) else "")
-    text = "".join(c for c in text if unicodedata.category(c) != "Cf").translate(_QUOTE_FOLD).casefold()
-    if lines:
-        return "\n".join(" ".join(line.split()) for line in text.splitlines())
-    return " ".join(text.split())
+    text = "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return " ".join(text.translate(_QUOTE_FOLD).casefold().split())
 
 
-def _words(folded: str) -> list[tuple[str, int, int]]:
-    """Each word of FOLDED and where it sits. Apostrophes are dropped ("don't" is
-    "dont", as he often types it); every other punctuation mark only separates words."""
-    words = []
-    for m in _WORD.finditer(folded):
-        word = m.group(0).replace("'", "")
-        if word:
-            words.append((word, m.start(), m.end()))
-    return words
-
-
-def _clauses(folded: str) -> list[tuple[int, int, bool, list[int]]]:
-    """(start, end, asserted, scope) for each clause of FOLDED. asserted is False for a
-    clause that asks, supposes, doubts, or ends an asking sentence; scope lists where an
-    if/whether puts the rest of its clause in doubt."""
-    out, pos = [], 0
-    for end in [*_SENTENCE_END.finditer(folded), None]:
-        start, stop = pos, (end.start() if end else len(folded))
-        asks = bool(end) and "?" in end.group(0)
-        pos = end.end() if end else len(folded)
-        spans, prev = [], start
-        for brk in _CLAUSE_BREAK.finditer(folded, start, stop):
-            spans.append((prev, brk.start()))
-            prev = brk.end()
-        spans.append((prev, stop))
-        if asks:
-            a, b = spans[-1]
-            cuts = [m.start() for m in _INNER_ASK.finditer(folded, a, b) if re.search(r"\w", folded[a:m.start()])]
-            if cuts:
-                spans[-1:] = [(a, cuts[-1]), (cuts[-1], b)]
-        texts = [_LEAD_IN.sub("", folded[a:b].strip(" \"'()[]")) for a, b in spans]
-        tagged = asks and bool(_TAG.match(texts[-1]))
-        supposed = False
-        for i, ((a, b), text) in enumerate(zip(spans, texts)):
-            supposed = supposed or bool(_SUPPOSES.match(text))
-            asserted = not (tagged or supposed or _ASKS.match(text) or _HEDGE.search(text)
-                            or (asks and i == len(spans) - 1))
-            out.append((a, b, asserted, [m.start() for m in _SCOPE.finditer(folded, a, b)]))
-    return out
-
-
-def source_quote_status(quote: str | None, messages: Sequence[dict]) -> str:
-    """'found' when QUOTE is the speaker's own words, found whole in ONE of MESSAGES,
-    in a clause he asserts; 'asked' when its words are there but only inside a question
-    or a supposition ("Could my birthday be April 12?"); else 'missing'.
-
-    Matched on words: forgiven are case, whitespace, curly quotes, punctuation (an
-    added or dropped apostrophe or comma, a wrapping quote mark, a trailing full stop)
-    and the transcript's "[Speaker]: " prefix. Not forgiven: a changed, dropped or added
-    word, or a quote stitched across two messages. Whole words only ("my truck" is not
-    in "my trucks"). A missing quote, or one that is only punctuation, is never found:
-    the empty string is in every message. Words said twice count if either is asserted.
-    """
-    needle = [w for w, _, _ in _words(_SPEAKER_PREFIX.sub("", _fold_for_quote(quote)))]
-    if not needle:
-        return "missing"
-    status, n = "missing", len(needle)
-    for message in messages:
-        folded = _fold_for_quote(message.get("content"), lines=True)
-        stamp = _PORTABLE_PREFIX.match(folded)
-        if stamp:   # blanked, not cut, so every position still lines up
-            folded = " " * stamp.end() + folded[stamp.end():]
-        words, clauses = _words(folded), None
-        for i in range(len(words) - n + 1):
-            if [w for w, _, _ in words[i:i + n]] != needle:
-                continue
-            clauses = clauses if clauses is not None else _clauses(folded)
-            start, end = words[i][1], words[i + n - 1][2]
-            if all(asserted and not any(p < start for p in scope)
-                   for a, b, asserted, scope in clauses if a < end and b > start):
-                return "found"
-            status = "asked"
-    return status
+def _quote_words(folded: str) -> str:
+    """The words alone, in order: apostrophes dropped ("don't" is "dont", as he often
+    types it), every other punctuation mark a space."""
+    return " ".join(_PUNCTUATION.sub(" ", folded.replace("'", "")).split())
 
 
 def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
-    """Is QUOTE the speaker's own words, stated (not asked) in one of MESSAGES?"""
-    return source_quote_status(quote, messages) == "found"
+    """Is QUOTE the speaker's own words, found whole in ONE of MESSAGES?
+
+    Compared on words: forgiven are case, whitespace, curly quotes, punctuation
+    (an added or dropped apostrophe or comma, a wrapping quote mark, a trailing full
+    stop) and the transcript's "[Speaker]: " prefix. Not forgiven: a changed,
+    dropped or added word, or a quote stitched across two messages. Whole words
+    only ("my truck" is not in "my trucks"). A missing quote, or one that is only
+    punctuation, is never found: the empty string is in every message.
+    """
+    needle = _quote_words(_SPEAKER_PREFIX.sub("", _fold_for_quote(quote)))
+    if not needle:
+        return False
+    pattern = re.compile(r"(?<!\w)" + re.escape(needle) + r"(?!\w)")
+    return any(pattern.search(_quote_words(_fold_for_quote(m.get("content")))) for m in messages)
 
 
 def quoted_observations(observations: list[dict], group: dict, stats: dict) -> list[dict]:
     """No quote, no memory (2026-11-24). Keep only the observations whose source_text
-    is found, asserted, in a message the model was shown (source_quote_status).
+    is found in a message the model was shown (source_quote_found).
 
     The model is asked for that quote; before, a quote that was not there became
     None and the fact was written anyway, so a fact the model made up landed with
-    nothing he said behind it, and a thin memory is worse than none. A quote lifted
-    from inside his question or supposition is a guessed answer, not his fact (Codex
-    review round 1). Each skip is counted (stats["unquoted"] / stats["quote_in_question"])
-    and logged by its key only, never the fact. Runs in both loops and before the
-    portable review inbox, which is a writer too. The explicit remember tool never
-    passes through here: his words are the source.
+    nothing he said behind it, and a thin memory is worse than none. Each skip is
+    counted (stats["unquoted"]) and logged by its key only, never the fact. Runs in
+    both loops and before the portable review inbox, which is a writer too. The
+    explicit remember tool never passes through here: his words are the source.
     """
     sent = model_messages(group)
     kept = []
     for obs in observations:
-        status = source_quote_status(obs.get("source_text"), sent)
-        if status == "found":
+        if source_quote_found(obs.get("source_text"), sent):
             kept.append(obs)
             continue
-        reason = "unquoted" if status == "missing" else "quote_in_question"
-        stats[reason] = stats.get(reason, 0) + 1
+        stats["unquoted"] = stats.get("unquoted", 0) + 1
         key = obs.get("key_label")
-        log.warning("memory skipped: %s (key %s)",
-                    "source quote not found in the speaker's messages" if status == "missing"
-                    else "source quote is asked or supposed, not stated",
+        log.warning("memory skipped: source quote not found in the speaker's messages (key %s)",
                     key if isinstance(key, str) and _LOGGABLE_KEY.fullmatch(key) else "(unrecognized key)")
     return kept
 
@@ -1387,11 +1274,10 @@ def run_extraction(
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
             "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0, "splits": 0,
-            # unquoted: observations whose source quote was not in his messages;
-            # quote_in_question: whose quote was only inside his question or
-            # supposition (quoted_observations); rejected: the parser's refusals by
-            # reason. Never staged; the watermark still moves.
-            "unquoted": 0, "quote_in_question": 0, "rejected": {},
+            # unquoted: observations whose source quote was not in his messages
+            # (quoted_observations) — never staged. rejected: the parser's refusals
+            # by reason. The watermark still moves.
+            "unquoted": 0, "rejected": {},
         }
         summary["sources"][name] = stats
         if not rows:
@@ -1557,11 +1443,10 @@ def run_live_extraction(
             # twice and were taken at their word as "nothing here" (the watermark
             # moves). parse_failures now means TRUNCATION — the watermark is stuck.
             "format_retries": 0, "format_empty": 0, "schema_fallbacks": 0, "splits": 0,
-            # unquoted: observations whose source quote was not in his messages;
-            # quote_in_question: whose quote was only inside his question or
-            # supposition (quoted_observations). Both also counted in skipped.
-            # rejected: the parser's refusals by reason. The watermark moves.
-            "unquoted": 0, "quote_in_question": 0, "rejected": {},
+            # unquoted: observations whose source quote was not in his messages
+            # (quoted_observations). Also counted in skipped. rejected: the parser's
+            # refusals by reason. The watermark moves.
+            "unquoted": 0, "rejected": {},
         }
         summary["sources"][name] = stats
         if not rows:

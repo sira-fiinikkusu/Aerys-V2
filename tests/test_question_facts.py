@@ -1,23 +1,18 @@
-"""A fact said inside a question is still a fact; the question never is.
+"""A question never becomes a fact, and for now neither does a fact said inside one.
 
-Found comparing our extractor with another open-source agent's (2026-11-24): every
-owner message shaped like a question was dropped BEFORE the extraction model saw it,
-and the prompt rejected "requests for information" outright. So "I just bought a new
-truck, what oil should I use?" lost the truck: the one thing in that message worth
-keeping went out with the question around it.
+Status quo, on purpose (2026-11-25). Earlier in this batch question-shaped owner
+messages were let through to the extraction model, so that "I just bought a new truck,
+what oil should I use?" could keep the truck. Two review rounds showed that judging
+"is this clause stated, or asked?" with punctuation and word lists keeps chasing cases
+both ways: it stored "Maybe, my birthday is April 12" and refused "I bought a truck and
+maybe you can help with the oil". So that change was taken out. Question-shaped
+messages are dropped before the model again, and the truck is lost. It comes back
+later as a model judgment ("does his message state this as true?") with the decision
+in code; when it does, the first test here flips on purpose.
 
-The line now sits on what is EXTRACTED, not on what is said. Question-shaped turns
-reach the model; the prompt tells it a request often reveals a fact while a question
-alone never confirms one; and the existing checks on the extracted values
-(parse_observations, triage_memory) still refuse any value, context or quote that is
-itself a question. Probe-shaped turns ("do you remember my birthday") are still
-dropped before the model, exactly as before.
-
-Codex review round 1 found the hole in that: a quote can be his words without being
-his claim. "Could my birthday be April 12?" contains "my birthday be April 12", which
-is not itself question-shaped. So the quote's span is judged by the clause around it,
-in his punctuation (extraction.source_quote_status): a clause that asks, supposes or
-doubts is not asserted, while a clause stated beside a question still is.
+What stays from that work: when the model's own output is question-shaped, the refusal
+is counted (stats["rejected"]["question"]) instead of vanishing, and a run of passes
+that loses most of what the model proposed reaches the desk (see test_source_quote.py).
 
 All fixtures are synthetic.
 """
@@ -30,8 +25,8 @@ from test_extraction import FakeConn, FakeLlm, fake_embedder, lease_conn, row
 from test_memory_hygiene import PERSON
 
 TRUCK_MESSAGE = "I just bought a new truck, what oil should I use?"
+TRUCK_STATEMENT = "I just bought a new truck."
 TRUCK_QUOTE = "I just bought a new truck"
-WEATHER = "what's the weather tomorrow?"
 
 
 def obs(value, source, *, key="user.vehicle", context=""):
@@ -50,114 +45,26 @@ def live(message, reply):
     return summary, inserts, llm
 
 
-def test_a_question_bearing_message_reaches_the_model():
-    seen = []
-
-    def model(system, user):
-        seen.append(user)
-        return ex.LlmReply("[]", False)
-
-    observations, reply = ex._extract_group(model, {"messages": [{"content": TRUCK_MESSAGE}]}, {})
-    assert observations == [] and not reply.truncated
-    assert len(seen) == 1 and TRUCK_MESSAGE in seen[0]
-
-
-def test_the_truck_inside_the_question_becomes_a_memory():
+def test_a_fact_inside_a_question_is_lost_for_now():
+    """The accepted status quo: the message never reaches the model."""
     summary, inserts, llm = live(TRUCK_MESSAGE, [obs("Just bought a new truck", TRUCK_QUOTE)])
-    assert TRUCK_MESSAGE in llm.calls[0][1]
-    assert summary["inserted_total"] == 1
-    assert inserts[0]["content"].startswith("user.vehicle: Just bought a new truck")
+    assert llm.calls == [] and inserts == []
+    assert summary["sources"]["prod_chat"]["rows"] == 1      # read, and the line still moves
 
 
-def test_quoting_the_whole_question_still_loses_the_fact_and_says_so():
-    """Why the prompt asks for only the stating words: the check on the extracted
-    quote is unchanged, and a quote that carries the question mark is a question.
-    Codex review round 1: that loss was invisible (observations, skipped and
-    unquoted all 0). The parser's refusal is counted now, by reason."""
-    summary, inserts, _ = live(TRUCK_MESSAGE, [obs("Just bought a new truck", TRUCK_MESSAGE)])
-    assert summary["inserted_total"] == 0 and inserts == []
-    assert summary["sources"]["prod_chat"]["rejected"] == {"question": 1}
+def test_the_same_fact_stated_on_its_own_is_kept():
+    summary, inserts, llm = live(TRUCK_STATEMENT, [obs("Just bought a new truck", TRUCK_QUOTE)])
+    assert len(llm.calls) == 1 and len(inserts) == 1
 
 
-def test_a_paraphrased_quote_is_counted_not_silent():
-    summary, inserts, _ = live(TRUCK_MESSAGE, [obs("Just bought a new truck", "I just purchased a new truck")])
-    assert inserts == [] and summary["sources"]["prod_chat"]["unquoted"] == 1
-
-
-# A guessed answer is not a fact (Codex review round 1, the blocker): the quote's words
-# are in the message, but inside a question or a supposition. Message, quote, value, key.
-NOT_ASSERTED = [
-    ("Could my birthday be April 12?", "my birthday be April 12", "Birthday is April 12", "basic.birth_date"),
-    ("Is my birthday April 12?", "my birthday April 12", "Birthday is April 12", "basic.birth_date"),
-    ("My birthday might be April 12", "My birthday might be April 12", "Birthday is April 12",
-     "basic.birth_date"),
-    ("Maybe my birthday is April 12", "my birthday is April 12", "Birthday is April 12", "basic.birth_date"),
-    ("I wonder if my birthday is April 12", "my birthday is April 12", "Birthday is April 12",
-     "basic.birth_date"),
-    ("My birthday is April 12, right?", "My birthday is April 12", "Birthday is April 12", "basic.birth_date"),
-    ("If I get the job, I'll move to Exampleville", "I'll move to Exampleville", "Moving to Exampleville",
-     "event.move"),
-    ("Tell me if the package came", "the package came", "The package arrived", "event.package"),
-    (WEATHER, "the weather tomorrow", "Wants to know the weather tomorrow", "interest.weather"),
-]
-
-
-@pytest.mark.parametrize("message,quote,value,key", NOT_ASSERTED)
-def test_a_quote_from_inside_a_question_or_supposition_never_becomes_a_memory(message, quote, value, key):
-    summary, inserts, _ = live(message, [obs(value, quote, key=key)])
-    stats = summary["sources"]["prod_chat"]
-    assert inserts == [] and summary["inserted_total"] == 0
-    assert stats["quote_in_question"] == 1 and stats["skipped"] == 1 and stats["unquoted"] == 0
-
-
-# What a request reveals, or what is said beside a question, is still asserted.
-ASSERTED = [
-    (TRUCK_MESSAGE, TRUCK_QUOTE),
-    ("I just bought a new truck, any tips?", TRUCK_QUOTE),
-    ("I just bought a new truck\nthoughts on synthetic oil?", TRUCK_QUOTE),     # a line break ends it
-    ("I just bought a new truck what oil should I use?", TRUCK_QUOTE),          # no comma at all
-    ("Is the oil change due? I just bought a new truck", TRUCK_QUOTE),
-    ("[Portable observation time: 2026-11-20T10:00:00Z] I just bought a new truck, any tips?", TRUCK_QUOTE),
-    ("Can you remind me Thursday, my blood test is Friday", "my blood test is Friday"),
-    ("I would like you to call me Captain from now on", "I would like you to call me Captain"),
-    ("May 3 is the appointment with the vet", "May 3 is the appointment with the vet"),
-    ("When I moved to Exampleville I got a dog", "I got a dog"),
-    ("I only eat eggs if they're scrambled", "I only eat eggs if they're scrambled"),
-    ("Is it true my truck is red? My truck is red, I checked.", "my truck is red"),   # asked, then said
-]
-
-
-@pytest.mark.parametrize("message,quote", ASSERTED)
-def test_an_asserted_clause_is_kept_even_beside_a_question(message, quote):
-    summary, inserts, _ = live(message, [obs("A fact he stated", quote, key="user.note")])
-    assert len(inserts) == 1, summary["sources"]["prod_chat"]
-
-
-@pytest.mark.parametrize("reply", [
-    [],                                                                  # the model follows the prompt
-    [obs(WEATHER, WEATHER, key="interest.weather")],                     # the question stored as a value
-    [obs("Tomorrow will be sunny", WEATHER, key="event.weather")],       # an answer inferred from it
-    [obs("Interested in the weather", "the weather tomorrow", key="interest.weather",
-         context="what is the weather tomorrow")],                       # a question as the context
+@pytest.mark.parametrize("observation", [
+    obs("What oil should he use?", TRUCK_QUOTE),                                   # a question as the value
+    obs("Just bought a new truck", TRUCK_QUOTE, context="which oil should he use"),  # as the context
+    obs("Just bought a new truck", TRUCK_QUOTE + ", what oil should I use?"),      # as the quote
 ])
-def test_a_pure_question_yields_nothing(reply):
-    summary, inserts, llm = live(WEATHER, reply)
-    assert len(llm.calls) == 1                     # it is asked now, not dropped unseen
-    assert summary["inserted_total"] == 0 and inserts == []
-
-
-def test_a_memory_probe_is_still_dropped_before_the_model():
-    llm = FakeLlm([])
-    observations, _ = ex._extract_group(
-        llm, {"messages": [{"content": "do you remember what my favorite drink is?"}]}, {})
-    assert observations == [] and llm.calls == []
-
-
-def test_the_prompt_keeps_facts_a_request_reveals_and_never_answers_a_question():
-    prompt = ex.EXTRACTION_SYSTEM_PROMPT
-    assert "requests for information" not in prompt          # the blanket rejection is gone
-    assert TRUCK_MESSAGE in prompt and TRUCK_QUOTE in prompt  # the worked example
-    assert "a question never confirms a fact" in prompt.lower()
-    assert "never infer" in prompt.lower()
-    # the quote must stop before the question, or the unchanged quote check drops it
-    assert "only the words that state the fact" in prompt
+def test_a_question_shaped_observation_is_refused_and_counted(observation):
+    """Codex review round 1: this refusal used to leave observations, skipped and
+    unquoted all at 0, invisible to anyone reading the pass summary."""
+    summary, inserts, _ = live(TRUCK_STATEMENT, [observation])
+    assert inserts == []
+    assert summary["sources"]["prod_chat"]["rejected"] == {"question": 1}
