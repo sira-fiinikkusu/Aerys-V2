@@ -14,8 +14,11 @@ returns an honest string, never raises.
 D101 (Chris 11/25 12:54, "A"; a side agent caught that she could close any promise unchecked):
   - kept: hers to mark; the next morning's brief names what she closed (brief.closed_promises_line);
   - dropped: only with the person's own words calling it off, quoted in `their_words` and found word for
-    word in what they said on this thread (D97's quote gate, extraction.source_quote_found). Without
-    that she closes nothing and asks them first.
+    word in what they said this turn (D97's quote gate, extraction.source_quote_found). "What they said"
+    is the reviewed trust window the remember and contact tools use (remember.CURRENT_TURN_TEXT): this
+    turn plus their previous turn on a private surface, this turn alone in a shared room, and nothing on
+    her own turns (brief, wakeups set it empty), so her prompts, Kael's notes and bounce nudges never count.
+    Without that she closes nothing and asks them first.
 """
 from __future__ import annotations
 
@@ -56,11 +59,6 @@ WHERE id = %(id)s::uuid AND person_id = %(person_id)s::uuid AND deleted_at IS NU
 RETURNING id
 """
 
-#: How many of the person's latest messages a "dropped" quote may come from: on their own thread (a DM, voice,
-#: the lens: 'person:<id>') the last few; in a shared room only the turn being answered (anyone else's words
-#: are there too).
-OWN_THREAD_MESSAGES = 6
-
 NOT_LINKED = "Not available: I can only look at promises made to someone I know; I don't know who this is."
 NEEDS_THEIR_WORDS = ("Not dropped: \"dropped\" needs their own words calling it off, quoted exactly in their_words "
                      "from what they said here. If they haven't said it's off, ask them first; if you did it, "
@@ -74,30 +72,19 @@ def _value(content: str) -> str:
     return text[m.end():] if m else text
 
 
-def their_messages(runtime, thread_id: str) -> list[dict]:
-    """The person's latest messages on this thread, from the graph state the tool runs in. Their own thread:
-    the last OWN_THREAD_MESSAGES; a shared room: only the turn being answered."""
-    state = getattr(runtime, "state", None)
-    messages = (state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)) or []
-    human = [m for m in messages if getattr(m, "type", "") == "human"]
-    keep = OWN_THREAD_MESSAGES if str(thread_id or "").startswith("person:") else 1
-    out = []
-    for m in human[-keep:]:
-        content = getattr(m, "content", "")
-        if isinstance(content, list):
-            content = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
-        out.append({"content": str(content or "")})
-    return out
-
-
 def open_promises(conn, person_id: str, *, limit: int = OPEN_LIMIT) -> list[dict]:
     rows = conn.execute(OPEN_SQL, {"person_id": person_id, "limit": limit}).fetchall()
     return [{"id": r[0], "text": _value(r[1]), "date": r[2] or "", "at": r[3]} for r in rows]
 
 
-def build_promises_tool(memories_db: ConnFactory):
+def build_promises_tool(memories_db: ConnFactory, *, turn_text: Callable[[], str] | None = None):
     """memories_db: a zero-argument callable giving a context-managed READ-WRITE connection to the
-    memories database (factory builds it; each call commits on clean exit)."""
+    memories database (factory builds it; each call commits on clean exit). turn_text() is the seam for the
+    person's own words this turn (defaults to remember's CURRENT_TURN_TEXT, D101)."""
+    if turn_text is None:
+        from aerys_v2.tools.remember import CURRENT_TURN_TEXT
+
+        turn_text = CURRENT_TURN_TEXT.get
 
     @tool
     def promises(runtime: ToolRuntime, action: str = "list", which: str = "", their_words: str = "") -> str:
@@ -112,7 +99,7 @@ def build_promises_tool(memories_db: ConnFactory):
         Never close one to tidy up. CALL "list" when he asks what you promised, or before saying you'll
         do something you may already have promised.
         """
-        identity, thread = runtime_identity(runtime)
+        identity, _thread = runtime_identity(runtime)
         person = str((identity or {}).get("user_id") or "").strip()
         try:
             uuid.UUID(person)
@@ -142,7 +129,8 @@ def build_promises_tool(memories_db: ConnFactory):
                     from aerys_v2.workers.extraction import source_quote_found
 
                     words = " ".join(str(their_words or "").split())
-                    if len(words.split()) < 2 or not source_quote_found(words, their_messages(runtime, thread)):
+                    said = str(turn_text() or "")
+                    if len(words.split()) < 2 or not source_quote_found(words, [{"content": said}]):
                         return NEEDS_THEIR_WORDS
                 closed = conn.execute(CLOSE_SQL, {"id": matches[0]["id"], "person_id": person,
                                                   "tag": f"promise:{act}"}).fetchone()
@@ -156,20 +144,39 @@ def build_promises_tool(memories_db: ConnFactory):
     return promises
 
 
+#: D101: how long an untold close waits to be named before it is let go (the dashboard keeps it either way).
+CLOSED_TELL_DAYS = 14
+
 CLOSED_SQL = """\
-SELECT content, category, deleted_at FROM memories
-WHERE person_id = %(person_id)s::uuid AND key_label LIKE 'aerys.promised.%%' AND deleted_at > %(since)s
+SELECT id::text, content, category, deleted_at FROM memories
+WHERE person_id = %(person_id)s::uuid AND key_label LIKE 'aerys.promised.%%'
+  AND deleted_at IS NOT NULL AND deleted_at > now() - make_interval(days => %(days)s)
   AND COALESCE(category, ARRAY[]::text[]) && ARRAY['promise:kept', 'promise:dropped']::text[]
+  AND NOT ('promise:told' = ANY(COALESCE(category, ARRAY[]::text[])))
 ORDER BY deleted_at
 LIMIT %(limit)s
 """
 
+#: Marks closes as told once the brief has handed their line to the desk (owed text: durable once queued).
+TOLD_SQL = """\
+UPDATE memories SET category = COALESCE(category, ARRAY[]::text[]) || ARRAY['promise:told']::text[]
+WHERE id = ANY(%(ids)s::uuid[]) AND person_id = %(person_id)s::uuid AND deleted_at IS NOT NULL
+  AND key_label LIKE 'aerys.promised.%%'
+  AND NOT ('promise:told' = ANY(COALESCE(category, ARRAY[]::text[])))
+"""
 
-def closed_promises(conn, person_id: str, since: datetime, *, limit: int = 10) -> list[dict]:
-    """D101: the promises the tool closed since `since` (other retirements, untagged, are not hers to report)."""
-    rows = conn.execute(CLOSED_SQL, {"person_id": person_id, "since": since, "limit": limit}).fetchall()
+
+def closed_promises(conn, person_id: str, *, days: int = CLOSED_TELL_DAYS, limit: int = 10) -> list[dict]:
+    """D101: the promises the tool closed that he hasn't been told about yet (untagged retirements are not
+    hers to report). Untold, not "the last 24 hours": a morning with no brief never loses one."""
+    rows = conn.execute(CLOSED_SQL, {"person_id": person_id, "days": days, "limit": limit}).fetchall()
     out = []
-    for content, category, at in rows:
+    for row_id, content, category, at in rows:
         how = "kept" if "promise:kept" in (category or []) else "dropped"
-        out.append({"text": _value(content), "how": how, "at": at})
+        out.append({"id": row_id, "text": _value(content), "how": how, "at": at})
     return out
+
+
+def mark_told(conn, person_id: str, ids: list[str]) -> None:
+    if ids:
+        conn.execute(TOLD_SQL, {"ids": list(ids), "person_id": person_id})

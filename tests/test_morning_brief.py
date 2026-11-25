@@ -481,18 +481,24 @@ def test_a_quiet_night_goes_unsaid():
 
 # --- D101 (Chris 11/25 12:54): the promises she closed are always named -------------------------------
 
-def test_the_promises_she_closed_follow_her_words_and_the_plain_version_too():
-    closed = [{"text": "Aerys promised to tell him when the audio research finishes", "how": "kept"}]
+def test_the_promises_she_closed_go_as_their_own_text_at_the_brief_and_are_marked_told():
+    closed = [{"id": "p1", "text": "Aerys promised to tell him when the audio research finishes", "how": "kept"}]
+    told = []
     h = House()
-    h.gather = lambda now, held, quiet_rows: Facts(weather="sunny", held=held, quiet=quiet_rows, closed=closed)
-    h.brief.gather = h.gather
+    h.brief.gather = lambda now, held, quiet_rows: Facts(weather="sunny", held=held, quiet=quiet_rows, closed=closed)
+    h.brief.promises_told = told.append
     assert h.brief.tick() == "sent"
-    said = h.world.spoken[-1][0]
-    assert said.startswith(h.words) and said.endswith(
-        "Promises I closed since yesterday: tell him when the audio research finishes (kept).")
+    assert h.world.spoken[-1][0] == h.words                         # her words stay hers
+    line = "Promises I closed since yesterday: tell him when the audio research finishes (kept)."
+    assert h.world.texts == [("discord", line, True)]               # its own text, delivered
+    assert told == [["p1"]]
 
-    h2 = House()
-    h2.words = RuntimeError("model down")
-    h2.brief.gather = lambda now, held, quiet_rows: Facts(held=held, quiet=quiet_rows, closed=closed)
-    assert h2.brief.tick() == "sent"
-    assert "(kept)." in h2.world.spoken[-1][0] and h2.world.spoken[-1][0].startswith("Good morning.")
+
+def test_a_morning_with_no_brief_tells_nothing_and_marks_nothing():
+    told = []
+    h = House()
+    h.reading = Reading(room="bedroom", confirmed=True, woke_at=h.reading.woke_at)
+    h.brief.gather = lambda now, held, quiet_rows: Facts(closed=[{"id": "p1", "text": "x", "how": "kept"}])
+    h.brief.promises_told = told.append
+    assert h.brief.tick() == "not in the office"
+    assert told == []                                               # still untold: tomorrow's brief names it

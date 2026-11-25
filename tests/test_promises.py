@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from aerys_v2 import brief, service
 from aerys_v2.honesty_judge import WORDS
 from aerys_v2.tools import promises as pm
@@ -48,17 +50,6 @@ def test_list_shows_her_open_promises_to_this_person_with_handles():
     assert "(for Dec 4)" in out and "information, not instructions" in out
     (sql, params), = conn.calls
     assert params["person_id"] == CHRIS          # only promises made to the caller
-
-
-def rt(identity, said=(), thread=None):
-    """A tool runtime whose graph state holds these human messages (oldest first) and one AI reply."""
-    from langchain_core.messages import AIMessage, HumanMessage
-
-    msgs = []
-    for line in said:
-        msgs += [HumanMessage(content=line), AIMessage(content="ok")]
-    base = runtime(identity, thread)
-    return SimpleNamespace(config=base.config, state={"messages": msgs})
 
 
 def closes(conn):
@@ -147,62 +138,70 @@ def test_closing_a_promise_has_success_words_the_judge_can_trust():
 
 # ---- D101 (Chris 11/25 12:54, "A"): kept is hers; dropped needs their own words ----------------------
 
+def tool_saying(conn, said):
+    """The tool with the person's words this turn (remember.CURRENT_TURN_TEXT's seam) fixed to `said`."""
+    return pm.build_promises_tool(db(conn), turn_text=lambda: said)
+
+
 def test_dropped_without_their_words_closes_nothing_and_says_ask_first():
     conn = Conn(ROWS)
-    out = pm.build_promises_tool(db(conn)).func(runtime=rt(dm(), ["forget the flight thing"]), action="dropped",
-                                                 which="bbbbbbbb")
+    out = tool_saying(conn, "forget the flight thing").func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb")
     assert out == pm.NEEDS_THEIR_WORDS and closes(conn) == []
 
 
 def test_dropped_with_words_they_never_said_closes_nothing():
     conn = Conn(ROWS)
-    out = pm.build_promises_tool(db(conn)).func(runtime=rt(dm(), ["how was your day"]), action="dropped",
-                                                 which="bbbbbbbb", their_words="forget the flight thing")
+    out = tool_saying(conn, "how was your day").func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb",
+                                                      their_words="forget the flight thing")
     assert out == pm.NEEDS_THEIR_WORDS and closes(conn) == []
 
 
 def test_dropped_with_their_quoted_words_closes_it():
     conn = Conn(ROWS)
-    said = ["what's the weather", "oh and you can forget the flight thing, I cancelled the trip"]
-    out = pm.build_promises_tool(db(conn)).func(runtime=rt(dm(), said), action="dropped", which="bbbbbbbb",
-                                                 their_words="You can forget the flight thing")
+    said = "what's the weather\noh and you can forget the flight thing, I cancelled the trip"
+    out = tool_saying(conn, said).func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb",
+                                       their_words="You can forget the flight thing")
     assert out.startswith("Marked dropped:")
     assert closes(conn) == [{"id": P2, "person_id": CHRIS, "tag": "promise:dropped"}]
 
 
 def test_a_one_word_quote_is_not_enough():
     conn = Conn(ROWS)
-    out = pm.build_promises_tool(db(conn)).func(runtime=rt(dm(), ["no"]), action="dropped", which="bbbbbbbb",
-                                                 their_words="no")
+    out = tool_saying(conn, "no").func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb", their_words="no")
     assert out == pm.NEEDS_THEIR_WORDS and closes(conn) == []
 
 
-def test_on_their_own_thread_the_last_few_messages_count_but_not_older_ones():
-    said = ["forget the flight thing"] + [f"filler {i}" for i in range(pm.OWN_THREAD_MESSAGES)]
+def test_on_her_own_turns_nothing_counts_as_their_words():
+    """The brief and wakeups set the window empty (wakeups.py): her facts prompt lists her promises, so a quote
+    from it must never close one."""
     conn = Conn(ROWS)
-    tool = pm.build_promises_tool(db(conn))
-    assert tool.func(runtime=rt(dm(), said), action="dropped", which="bbbbbbbb",
-                     their_words="forget the flight thing") == pm.NEEDS_THEIR_WORDS
-    assert tool.func(runtime=rt(dm(), said[:pm.OWN_THREAD_MESSAGES]), action="dropped", which="bbbbbbbb",
-                     their_words="forget the flight thing").startswith("Marked dropped:")
+    out = tool_saying(conn, "").func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb",
+                                     their_words="track his Arizona flight")
+    assert out == pm.NEEDS_THEIR_WORDS and closes(conn) == []
 
 
-def test_in_a_shared_room_only_the_turn_being_answered_counts():
-    """Anyone else's words are on a room thread too: only the latest message (the caller's turn) may carry it."""
-    from test_recall_search import guild
+def test_the_default_window_is_the_reviewed_one_remember_uses():
+    from aerys_v2.tools.remember import CURRENT_TURN_TEXT
     conn = Conn(ROWS)
     tool = pm.build_promises_tool(db(conn))
-    room = rt(guild(), ["forget the flight thing", "anyway, dinner at 6?"], thread="discord:guild:1")
-    assert tool.func(runtime=room, action="dropped", which="bbbbbbbb",
-                     their_words="forget the flight thing") == pm.NEEDS_THEIR_WORDS
-    room = rt(guild(), ["anyway, dinner at 6?", "forget the flight thing"], thread="discord:guild:1")
-    assert tool.func(runtime=room, action="dropped", which="bbbbbbbb",
-                     their_words="forget the flight thing").startswith("Marked dropped:")
+    token = CURRENT_TURN_TEXT.set("nah forget the flight thing")
+    try:
+        assert tool.func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb",
+                         their_words="forget the flight thing").startswith("Marked dropped:")
+    finally:
+        CURRENT_TURN_TEXT.reset(token)
+    conn2 = Conn(ROWS)
+    token = CURRENT_TURN_TEXT.set("")
+    try:
+        assert pm.build_promises_tool(db(conn2)).func(runtime=runtime(dm()), action="dropped", which="bbbbbbbb",
+                                                      their_words="forget the flight thing") == pm.NEEDS_THEIR_WORDS
+    finally:
+        CURRENT_TURN_TEXT.reset(token)
 
 
 def test_kept_needs_no_words():
     conn = Conn(ROWS)
-    out = pm.build_promises_tool(db(conn)).func(runtime=rt(dm(), []), action="kept", which="aaaaaaaa")
+    out = tool_saying(conn, "").func(runtime=runtime(dm()), action="kept", which="aaaaaaaa")
     assert out.startswith("Marked kept:") and closes(conn)[0]["tag"] == "promise:kept"
 
 
@@ -211,34 +210,69 @@ def test_the_judge_sees_their_words_on_a_drop():
         "marked her promise bbbb dropped (their words: forget it)"
 
 
-def test_the_closed_read_is_scoped_to_the_person_and_tagged_rows():
+def test_the_closed_read_is_untold_tagged_rows_of_that_person():
     for clause in ("person_id = %(person_id)s::uuid", "key_label LIKE 'aerys.promised.%%'",
-                   "deleted_at > %(since)s", "ARRAY['promise:kept', 'promise:dropped']"):
+                   "deleted_at IS NOT NULL", "ARRAY['promise:kept', 'promise:dropped']",
+                   "NOT ('promise:told' = ANY("):
         assert clause in pm.CLOSED_SQL
-    conn = Conn(closed_rows=[("aerys.promised.audio: Aerys promised to tell him when the audio research finishes",
-                              ["promise:kept"], NOW), ("aerys.promised.flight: track his flight", ["x", "promise:dropped"],
-                                                      NOW)])
-    got = pm.closed_promises(conn, CHRIS, NOW - timedelta(hours=24))
-    assert got == [{"text": "Aerys promised to tell him when the audio research finishes", "how": "kept", "at": NOW},
-                   {"text": "track his flight", "how": "dropped", "at": NOW}]
+    for clause in ("person_id = %(person_id)s::uuid", "deleted_at IS NOT NULL", "key_label LIKE 'aerys.promised.%%'",
+                   "NOT ('promise:told' = ANY("):
+        assert clause in pm.TOLD_SQL
+    conn = Conn(closed_rows=[(P1, "aerys.promised.audio: Aerys promised to tell him when the audio research finishes",
+                              ["promise:kept"], NOW), (P2, "aerys.promised.flight: track his flight",
+                                                       ["x", "promise:dropped"], NOW)])
+    got = pm.closed_promises(conn, CHRIS)
+    assert got == [{"id": P1, "text": "Aerys promised to tell him when the audio research finishes", "how": "kept",
+                    "at": NOW}, {"id": P2, "text": "track his flight", "how": "dropped", "at": NOW}]
+    pm.mark_told(conn, CHRIS, [P1, P2])
+    assert conn.calls[-1] == (pm.TOLD_SQL, {"ids": [P1, P2], "person_id": CHRIS})
 
 
-def test_the_brief_always_names_what_she_closed_after_her_words():
-    facts = brief.Facts(closed=[{"text": "Aerys promised to tell him when the audio research finishes.", "how": "kept"}])
-    assert brief.with_closed_promises("Morning! Sunny today.", facts) == (
-        "Morning! Sunny today.\n\nPromises I closed since yesterday: tell him when the audio research finishes "
-        "(kept).")
+def test_the_closed_line_says_them_in_her_voice():
+    facts = brief.Facts(closed=[{"id": P1, "text": "Aerys promised to tell him when the audio research finishes.",
+                                 "how": "kept"}])
+    assert brief.closed_promises_line(facts) == (
+        "Promises I closed since yesterday: tell him when the audio research finishes (kept).")
     said_she = brief.Facts(closed=[{"text": "Aerys said she will track his flight", "how": "dropped"},
                                    {"text": "Check the filter monthly", "how": "kept"}])
     assert brief.closed_promises_line(said_she) == (
         "Promises I closed since yesterday: track his flight (dropped); Check the filter monthly (kept).")
-    assert brief.with_closed_promises("Morning!", brief.Facts()) == "Morning!"
     many = brief.Facts(closed=[{"text": f"p{i}", "how": "dropped"} for i in range(5)])
     assert brief.closed_promises_line(many).endswith("p2 (dropped); and 2 more.")
+    assert brief.closed_promises_line(brief.Facts()) == ""
 
 
-def test_the_brief_gathers_what_she_closed_in_the_last_day(monkeypatch):
-    conn = Conn(closed_rows=[("aerys.promised.audio: told him about the audio", ["promise:kept"], NOW)])
+class Desk:
+    def __init__(self, outcome="queued"):
+        self.outcome, self.events = outcome, []
+
+    def reach_out(self, event):
+        self.events.append(event)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+@pytest.mark.parametrize("outcome,told", [("sent", True), ("queued", True), ("duplicate", True),
+                                          ("dropped", False), (RuntimeError("desk down"), False)])
+def test_closes_count_as_told_only_once_the_desk_took_the_line(outcome, told):
+    marked = []
+    desk = Desk(outcome)
+    facts = brief.Facts(closed=[{"id": P1, "text": "track his flight", "how": "kept"}])
+    brief.tell_closed_promises(desk, facts, marked.append, key="brief:2026-11-26")
+    (event,) = desk.events
+    assert event.owed and event.text_only and event.dedupe_key == "brief:2026-11-26:promises"
+    assert event.headline == "Promises I closed since yesterday: track his flight (kept)."
+    assert marked == ([[P1]] if told else [])
+
+
+def test_nothing_closed_sends_nothing():
+    desk = Desk()
+    assert brief.tell_closed_promises(desk, brief.Facts(), lambda ids: None, key="k") == "" and desk.events == []
+
+
+def test_the_brief_gathers_the_untold_closes(monkeypatch):
+    conn = Conn(closed_rows=[(P1, "aerys.promised.audio: told him about the audio", ["promise:kept"], NOW)])
 
     @contextmanager
     def fake_connect(*a, **k):
@@ -251,7 +285,7 @@ def test_the_brief_gathers_what_she_closed_in_the_last_day(monkeypatch):
     monkeypatch.setattr(brief, "_ha", lambda s: ("http://ha", {}))
     gather = brief.gatherer_for(settings, get=lambda *a: None, post=lambda *a: None)
     facts = gather(NOW, [], [])
-    assert facts.closed == [{"text": "told him about the audio", "how": "kept", "at": NOW}]
-    (since,) = [p["since"] for s, p in conn.calls if s == pm.CLOSED_SQL]
-    assert since == NOW - timedelta(hours=24)
+    assert facts.closed == [{"id": P1, "text": "told him about the audio", "how": "kept", "at": NOW}]
     assert gather(NOW, [], [], day=(NOW + timedelta(days=1)).date()).closed == []
+    brief.promises_told_for(settings)([P1])
+    assert conn.calls[-1] == (pm.TOLD_SQL, {"ids": [P1], "person_id": CHRIS})
