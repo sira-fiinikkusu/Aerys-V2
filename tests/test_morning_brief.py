@@ -502,3 +502,19 @@ def test_a_morning_with_no_brief_tells_nothing_and_marks_nothing():
     h.brief.promises_told = told.append
     assert h.brief.tick() == "not in the office"
     assert told == []                                               # still untold: tomorrow's brief names it
+
+
+def test_two_batches_the_same_morning_both_reach_him_on_the_real_desk():
+    """Codex 11/25 r2 (reproduced on the real ReachDesk): batch A handed over by the brief, batch B by the hello
+    that took it over. Both are delivered; neither is dropped as the other's duplicate; each is marked told."""
+    from aerys_v2.brief import tell_closed_promises
+    h = House()
+    told = []
+    a = Facts(closed=[{"id": "p1", "text": "track his flight", "how": "kept"}])
+    b = Facts(closed=[{"id": "p2", "text": "tell him about the audio", "how": "dropped"}])
+    out_a = tell_closed_promises(h.desk, a, told.append, key="brief:2026-11-10")
+    out_b = tell_closed_promises(h.desk, b, told.append, key="brief:2026-11-10")
+    rows = [r for r in h.desk.store.rows.values() if (r.dedupe_key or "").startswith("brief:2026-11-10:promises:")]
+    assert out_a != "dropped" and out_b != "dropped" and len(rows) == 2
+    assert all(r.status != "dropped" for r in rows) and told == [["p1"], ["p2"]]
+    assert tell_closed_promises(h.desk, a, told.append, key="brief:2026-11-10") == "duplicate"   # A again: same one

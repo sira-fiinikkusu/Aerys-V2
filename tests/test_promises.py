@@ -261,7 +261,7 @@ def test_closes_count_as_told_only_once_the_desk_took_the_line(outcome, told):
     facts = brief.Facts(closed=[{"id": P1, "text": "track his flight", "how": "kept"}])
     brief.tell_closed_promises(desk, facts, marked.append, key="brief:2026-11-26")
     (event,) = desk.events
-    assert event.owed and event.text_only and event.dedupe_key == "brief:2026-11-26:promises"
+    assert event.owed and event.text_only and event.dedupe_key.startswith("brief:2026-11-26:promises:")
     assert event.headline == "Promises I closed since yesterday: track his flight (kept)."
     assert marked == ([[P1]] if told else [])
 
@@ -289,3 +289,18 @@ def test_the_brief_gathers_the_untold_closes(monkeypatch):
     assert gather(NOW, [], [], day=(NOW + timedelta(days=1)).date()).closed == []
     brief.promises_told_for(settings)([P1])
     assert conn.calls[-1] == (pm.TOLD_SQL, {"ids": [P1], "person_id": CHRIS})
+
+
+
+def test_another_batch_the_same_morning_is_its_own_delivery():
+    """Codex 11/25 r2: the brief handed over batch A, then the hello took over and gathered batch B; under one key
+    the desk dropped B as a duplicate and B was marked told. The key is the batch now."""
+    from aerys_v2.reach import MemoryReachStore, ReachDesk
+    a = brief.Facts(closed=[{"id": P1, "text": "track his flight", "how": "kept"}])
+    b = brief.Facts(closed=[{"id": P2, "text": "tell him about the audio", "how": "kept"}])
+    desk = Desk("queued")
+    brief.tell_closed_promises(desk, a, lambda ids: None, key="brief:2026-11-26")
+    brief.tell_closed_promises(desk, b, lambda ids: None, key="brief:2026-11-26")
+    brief.tell_closed_promises(desk, a, lambda ids: None, key="brief:2026-11-26")
+    keys = [e.dedupe_key for e in desk.events]
+    assert keys[0] != keys[1] and keys[0] == keys[2]          # B is its own; A again is the same delivery

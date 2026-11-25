@@ -29,6 +29,7 @@ What she says is the private part: never logged.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import threading
@@ -158,9 +159,13 @@ def tell_closed_promises(desk, facts: Facts, told: Callable[[list], None] | None
     line = closed_promises_line(facts)
     if not line:
         return ""
+    ids = sorted(str(c["id"]) for c in facts.closed if isinstance(c, dict) and c.get("id"))
+    # Codex 11/25 r2: the delivery is THIS batch (a hash of its ids), so "duplicate" can only mean these same
+    # closes were already handed over; another batch the same morning (the hello taking over) goes on its own.
+    batch = hashlib.sha1(",".join(ids).encode("utf-8")).hexdigest()[:10]
     try:
         outcome = desk.reach_out(ReachEvent(source=SOURCE, topic=TOPIC, owed=True, text_only=True,
-                                            headline=line, dedupe_key=f"{key}:promises"))
+                                            headline=line, dedupe_key=f"{key}:promises:{batch}"))
     except Exception:
         log.warning("brief: telling him her closed promises failed; they stay untold", exc_info=True)
         return "failed"
