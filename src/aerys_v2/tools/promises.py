@@ -10,6 +10,12 @@ Who is asking comes from the per-call identity; she can only see and close the p
 that person. Closing retires the memory row (soft delete) with a `promise:kept` or `promise:dropped`
 tag, so the dashboard's "retired this week" shows what happened. ToolNode contract: every path
 returns an honest string, never raises.
+
+D101 (Chris 11/25 12:54, "A"; a side agent caught that she could close any promise unchecked):
+  - kept: hers to mark; the next morning's brief names what she closed (brief.closed_promises_line);
+  - dropped: only with the person's own words calling it off, quoted in `their_words` and found word for
+    word in what they said on this thread (D97's quote gate, extraction.source_quote_found). Without
+    that she closes nothing and asks them first.
 """
 from __future__ import annotations
 
@@ -50,7 +56,15 @@ WHERE id = %(id)s::uuid AND person_id = %(person_id)s::uuid AND deleted_at IS NU
 RETURNING id
 """
 
+#: How many of the person's latest messages a "dropped" quote may come from: on their own thread (a DM, voice,
+#: the lens: 'person:<id>') the last few; in a shared room only the turn being answered (anyone else's words
+#: are there too).
+OWN_THREAD_MESSAGES = 6
+
 NOT_LINKED = "Not available: I can only look at promises made to someone I know; I don't know who this is."
+NEEDS_THEIR_WORDS = ("Not dropped: \"dropped\" needs their own words calling it off, quoted exactly in their_words "
+                     "from what they said here. If they haven't said it's off, ask them first; if you did it, "
+                     "use \"kept\".")
 FAILED = "Couldn't read your promises just now; say so rather than guessing."
 
 
@@ -58,6 +72,22 @@ def _value(content: str) -> str:
     text = " ".join(str(content or "").split())
     m = re.match(r"aerys\.promised\.[a-z0-9_.]+:\s*", text)
     return text[m.end():] if m else text
+
+
+def their_messages(runtime, thread_id: str) -> list[dict]:
+    """The person's latest messages on this thread, from the graph state the tool runs in. Their own thread:
+    the last OWN_THREAD_MESSAGES; a shared room: only the turn being answered."""
+    state = getattr(runtime, "state", None)
+    messages = (state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)) or []
+    human = [m for m in messages if getattr(m, "type", "") == "human"]
+    keep = OWN_THREAD_MESSAGES if str(thread_id or "").startswith("person:") else 1
+    out = []
+    for m in human[-keep:]:
+        content = getattr(m, "content", "")
+        if isinstance(content, list):
+            content = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content)
+        out.append({"content": str(content or "")})
+    return out
 
 
 def open_promises(conn, person_id: str, *, limit: int = OPEN_LIMIT) -> list[dict]:
@@ -70,16 +100,19 @@ def build_promises_tool(memories_db: ConnFactory):
     memories database (factory builds it; each call commits on clean exit)."""
 
     @tool
-    def promises(runtime: ToolRuntime, action: str = "list", which: str = "") -> str:
+    def promises(runtime: ToolRuntime, action: str = "list", which: str = "", their_words: str = "") -> str:
         """Your open promises: things you said you would do for the person you're talking with.
 
         action "list" shows them, each with a short handle and the day you said it.
-        action "kept" or "dropped" closes one, by its handle in `which`: "kept" when you did it,
-        "dropped" when it no longer applies or he called it off. Only close one you really did or
-        that's really off; never to tidy up. CALL "list" when he asks what you promised, or before
-        saying you'll do something you may already have promised.
+        action "kept" closes one you did, by its handle in `which`; he hears about it in the next
+        morning's brief.
+        action "dropped" closes one that's off, and ONLY when the person said so: put their exact words
+        calling it off in `their_words` (copied from their message, word for word). Without their words
+        nothing is dropped: ask them whether it's still on.
+        Never close one to tidy up. CALL "list" when he asks what you promised, or before saying you'll
+        do something you may already have promised.
         """
-        identity, _thread = runtime_identity(runtime)
+        identity, thread = runtime_identity(runtime)
         person = str((identity or {}).get("user_id") or "").strip()
         try:
             uuid.UUID(person)
@@ -105,6 +138,12 @@ def build_promises_tool(memories_db: ConnFactory):
                 if len(matches) != 1:
                     return ("No single open promise has that handle; call promises with action \"list\" "
                             "and use one of the handles it shows.")
+                if act == "dropped":
+                    from aerys_v2.workers.extraction import source_quote_found
+
+                    words = " ".join(str(their_words or "").split())
+                    if len(words.split()) < 2 or not source_quote_found(words, their_messages(runtime, thread)):
+                        return NEEDS_THEIR_WORDS
                 closed = conn.execute(CLOSE_SQL, {"id": matches[0]["id"], "person_id": person,
                                                   "tag": f"promise:{act}"}).fetchone()
         except Exception:
@@ -115,3 +154,22 @@ def build_promises_tool(memories_db: ConnFactory):
         return f"Marked {act}: {matches[0]['text']}"
 
     return promises
+
+
+CLOSED_SQL = """\
+SELECT content, category, deleted_at FROM memories
+WHERE person_id = %(person_id)s::uuid AND key_label LIKE 'aerys.promised.%%' AND deleted_at > %(since)s
+  AND COALESCE(category, ARRAY[]::text[]) && ARRAY['promise:kept', 'promise:dropped']::text[]
+ORDER BY deleted_at
+LIMIT %(limit)s
+"""
+
+
+def closed_promises(conn, person_id: str, since: datetime, *, limit: int = 10) -> list[dict]:
+    """D101: the promises the tool closed since `since` (other retirements, untagged, are not hers to report)."""
+    rows = conn.execute(CLOSED_SQL, {"person_id": person_id, "since": since, "limit": limit}).fetchall()
+    out = []
+    for content, category, at in rows:
+        how = "kept" if "promise:kept" in (category or []) else "dropped"
+        out.append({"text": _value(content), "how": how, "at": at})
+    return out

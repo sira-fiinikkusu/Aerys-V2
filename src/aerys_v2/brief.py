@@ -30,6 +30,7 @@ What she says is the private part: never logged.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -93,6 +94,7 @@ class Facts:
     wet: bool = False                             # rain (or worse) in the forecast
     complete: bool = True                         # every source answered (else "quiet" may be a gap)
     promises: list = field(default_factory=list)  # #259: her open promises to him, newest first (<= 3)
+    closed: list = field(default_factory=list)    # D101: promises she closed in the last day: {"text", "how"}
 
 
 def _at(day: date, hour: int) -> datetime:
@@ -119,6 +121,35 @@ def plain_brief(facts: Facts) -> str:
     elif overnight:
         parts.append(f"{overnight} things came in overnight; they're in your messages.")
     return " ".join(parts)
+
+
+#: D101: how many closed promises the brief names before it counts the rest.
+CLOSED_SHOWN = 3
+
+
+def closed_promises_line(facts: Facts) -> str:
+    """D101 (Chris 11/25 12:54): what she closed since yesterday's brief, said by code after her words so it is
+    never left out. Empty when she closed nothing."""
+    closed = [c for c in (facts.closed or []) if isinstance(c, dict) and c.get("text")]
+    if not closed:
+        return ""
+    shown = "; ".join(f"{_in_her_voice(c['text'])} ({c.get('how') or 'closed'})" for c in closed[:CLOSED_SHOWN])
+    more = len(closed) - CLOSED_SHOWN
+    return f"Promises I closed since yesterday: {shown}" + (f"; and {more} more." if more > 0 else ".")
+
+
+#: The extractor writes her promises about her ("Aerys promised to tell him…"); the brief says them as hers.
+_ABOUT_HER = re.compile(r"^aerys (?:promised|said (?:she(?:'d| would| will)|she'll))\s+(?:to\s+)?", re.I)
+
+
+def _in_her_voice(text: str) -> str:
+    text = " ".join(str(text or "").split()).rstrip(".")
+    return _ABOUT_HER.sub("", text, count=1) or text
+
+
+def with_closed_promises(text: str, facts: Facts) -> str:
+    line = closed_promises_line(facts)
+    return f"{text}\n\n{line}" if line and text else (line or text)
 
 
 def stamped(row) -> str:
@@ -270,6 +301,7 @@ class MorningBrief:
             log.warning("brief: her words failed; the plain version goes", exc_info=True)
         if not text:
             text = plain_brief(facts)
+        text = with_closed_promises(text, facts)       # D101: never left to her words
         report_house(self.desk, getattr(self.compose, "house", None), source=SOURCE, topic=TOPIC, key=key)
         outcome = self.desk.reach_out(ReachEvent(
             source=SOURCE, topic=TOPIC, headline=text, detail=held_detail(held), room=self.room,
@@ -591,10 +623,11 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
             failed.append(weather_entity)
         found = events(start_at, target, failed)
         promised = open_promises_for_brief(now) if day is None else []
+        closed = closed_promises_for_brief(now) if day is None else []
         timed = [t for t, line, _ in found if not line.startswith("all day")]
         return Facts(weather=weather, events=[line for _, line, _ in found], held=held, quiet=quiet,
                      first_at=min(timed) if timed else None, personal=sum(1 for *_, mine in found if mine),
-                     wet=wet, complete=not failed, promises=promised)
+                     wet=wet, complete=not failed, promises=promised, closed=closed)
 
     def open_promises_for_brief(now: datetime) -> list[str]:
         """#259 step 4: up to 3 of her open promises to the owner from the last 14 days. Fails open."""
@@ -614,6 +647,24 @@ def gatherer_for(settings, *, get=None, post=None) -> Callable[[datetime, list, 
             return []
         recent = [p for p in found if isinstance(p["at"], datetime) and now - p["at"] <= timedelta(days=14)]
         return [(f"(for {p['date']}) " if p["date"] else "") + p["text"] for p in recent[:3]]
+
+    def closed_promises_for_brief(now: datetime) -> list[dict]:
+        """D101: the promises she closed (kept or dropped) in the 24 hours before this brief. Fails open: the
+        dashboard's "retired this week" still has them."""
+        url, owner = getattr(settings, "memories_database_url", None), getattr(settings, "owner_person_id", None)
+        if not url or owner is None:
+            return []
+        try:
+            import psycopg
+
+            from aerys_v2.tools.promises import closed_promises
+
+            with psycopg.connect(url, connect_timeout=5, options="-c statement_timeout=5000") as conn:
+                conn.read_only = True
+                return closed_promises(conn, str(owner), now - timedelta(hours=24))
+        except Exception as e:
+            log.warning("brief: reading her closed promises failed (%s); going without them", type(e).__name__)
+            return []
 
     return gather
 

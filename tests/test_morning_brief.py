@@ -477,3 +477,22 @@ def test_a_quiet_night_goes_unsaid():
     assert "- Came in overnight, each with the time it happened: nothing (say nothing about it)" in quiet
     busy = welcome_facts_text(WelcomeFacts(away=timedelta(hours=2), brief=Facts(weather="sun", quiet=[note])))
     assert "- Came in overnight, each with the time it happened: Your package came." in busy
+
+
+# --- D101 (Chris 11/25 12:54): the promises she closed are always named -------------------------------
+
+def test_the_promises_she_closed_follow_her_words_and_the_plain_version_too():
+    closed = [{"text": "Aerys promised to tell him when the audio research finishes", "how": "kept"}]
+    h = House()
+    h.gather = lambda now, held, quiet_rows: Facts(weather="sunny", held=held, quiet=quiet_rows, closed=closed)
+    h.brief.gather = h.gather
+    assert h.brief.tick() == "sent"
+    said = h.world.spoken[-1][0]
+    assert said.startswith(h.words) and said.endswith(
+        "Promises I closed since yesterday: tell him when the audio research finishes (kept).")
+
+    h2 = House()
+    h2.words = RuntimeError("model down")
+    h2.brief.gather = lambda now, held, quiet_rows: Facts(held=held, quiet=quiet_rows, closed=closed)
+    assert h2.brief.tick() == "sent"
+    assert "(kept)." in h2.world.spoken[-1][0] and h2.world.spoken[-1][0].startswith("Good morning.")
