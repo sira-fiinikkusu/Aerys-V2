@@ -220,9 +220,15 @@ def _item_line(item: dict) -> tuple[str, str]:
     return name, str(item.get("uri") or "")
 
 
+_PHONE_NAMES = {"phone", "cellphone", "cell phone", "smartphone", "smart phone", "mobile", "mobile phone", "cell"}
+_PHONE_FILLER = {"on", "to", "my", "his", "the", "your", "their", "own"}
+
+
 def is_phone_target(target: str) -> bool:
-    """He named his phone as the place ("my phone", "on the phone"), not a room."""
-    return "phone" in re.findall(r"[a-z]+", target.lower())
+    """He named his phone as the place ("my phone", "on the phone"). Exactly that: a room that merely
+    has "phone" in its name ("phone booth") is still a room."""
+    words = [w for w in re.findall(r"[a-z]+", target.lower()) if w not in _PHONE_FILLER]
+    return " ".join(words) in _PHONE_NAMES
 
 
 def phone_session(attributes: dict, op: str) -> tuple[str, str] | str:
@@ -231,7 +237,9 @@ def phone_session(attributes: dict, op: str) -> tuple[str, str] | str:
     The phone's sensor carries one `playback_state_<package>` per app with a session. Pause, stop and
     skips act on the app that is playing; resume on the one that is paused. More than one candidate is
     asked about, never guessed."""
-    states = {k[len(_PHONE_STATE_KEY):]: str(v) for k, v in (attributes or {}).items()
+    if not isinstance(attributes, dict):
+        return "The phone's media reading wasn't in a shape I know, so nothing was sent."
+    states = {k[len(_PHONE_STATE_KEY):]: str(v) for k, v in attributes.items()
               if isinstance(k, str) and k.startswith(_PHONE_STATE_KEY) and _PACKAGE.fullmatch(k[len(_PHONE_STATE_KEY):])}
     playing = sorted(p for p, s in states.items() if s in ("Playing", "Buffering"))
     paused = sorted(p for p, s in states.items() if s == "Paused")
@@ -515,6 +523,10 @@ def build_music_tool(
             f"is configured — name one of: {options}."
         )
 
+    def _names_a_speaker(target: str) -> bool:
+        words = [w for w in target.strip().lower().replace(".", " ").split() if w]
+        return bool(words) and any(all(w in e.lower().replace("_", " ") for w in words) for e in allowed)
+
     def _phone(op: str, config: RunnableConfig) -> str:
         """Pause/resume/stop/skip on his phone, whatever app is playing. His alone; never a guess."""
         if not (phone_notify and phone_media_sensor):
@@ -522,7 +534,8 @@ def build_music_tool(
         if op not in _PHONE_OPS:
             return ("On the phone I can pause, resume, stop and skip what's already playing. "
                     "I can't start a song or change its volume there.")
-        if identity_from_config(config).get("unattended"):
+        ident = identity_from_config(config)
+        if ident.get("unattended") or str(ident.get("platform") or "").strip().lower() == "wake":
             return "Not done: controlling his phone needs him asking."     # never on her own wake-up
         verdict = _his_alone(config)
         if verdict == "not_him":
@@ -537,7 +550,7 @@ def build_music_tool(
             return f"I couldn't read the phone's media ({e}), so nothing was sent."
         if not isinstance(state, dict) or state.get("state") in (None, "unavailable", "unknown"):
             return "I can't see anything playing on the phone right now, so nothing was sent."
-        found = phone_session(state.get("attributes") or {}, op)
+        found = phone_session(state.get("attributes"), op)
         if isinstance(found, str):
             return found
         package, title = found
@@ -616,6 +629,11 @@ def build_music_tool(
         """
         op = operation.strip().lower().replace(" ", "_")
 
+        # His phone is decided first, before any other handler can read or change anything. A
+        # configured speaker with that name stays a speaker.
+        if is_phone_target(target) and not _names_a_speaker(target):
+            return _phone(op, config)
+
         if op == "dj":
             refusal = _library_read_refusal(config)
             if refusal:
@@ -690,9 +708,6 @@ def build_music_tool(
                     "Most-saved artists: " + (", ".join(f"{n} ({c})" for n, c in top) or "none") + ".\n"
                     "Playlists: " + (", ".join(str(p.get("name")) for p in playlists[:_TASTE_PLAYLISTS]) or "none")
                     + (" …" if len(playlists) > _TASTE_PLAYLISTS else "") + ".")
-
-        if is_phone_target(target):
-            return _phone(op, config)
 
         player = _resolve_target(target, config, quieting=op in ("pause", "stop"))
         if not player.startswith("media_player."):

@@ -38,6 +38,8 @@ class HA:
             return httpx.Response(self.sensor_status, json={"state": self.state, "attributes": self.attributes or {}})
         if path == f"/api/services/notify/{NOTIFY}":
             return httpx.Response(self.notify_status, json=[])
+        if path.startswith("/api/services/media_player/") or path.startswith("/api/states/media_player."):
+            return httpx.Response(200, json=[] if "services" in path else {"state": "playing", "attributes": {}})
         return httpx.Response(404, json={})
 
     @property
@@ -45,10 +47,11 @@ class HA:
         return [b for p, b in self.calls if p.startswith("/api/services/")]
 
 
-def tool(ha, notify=NOTIFY, sensor=SENSOR):
+def tool(ha, notify=NOTIFY, sensor=SENSOR, players=None, **more):
     return build_music_tool(
         base_url="http://ha.test", token="t", config_entry_id="entry-1",
-        players={"dev-office": "media_player.office_satellite"}, default_player="media_player.office_satellite",
+        players=players or {"dev-office": "media_player.office_satellite"}, default_player="media_player.office_satellite",
+        **more,
         client=httpx.Client(transport=httpx.MockTransport(ha)), owner_person_id=OWNER,
         phone_notify=notify, phone_media_sensor=sensor,
     )
@@ -123,19 +126,48 @@ def test_only_he_can_control_his_phone():
     unsure_voice = {"configurable": {"identity": {"user_id": OWNER, "platform": "voice", "device_id": "dev-office",
                                                   "speaker": {"id": "unknown"}}, "thread_id": "voice:dev-office"}}
     wake = him(platform="wake", unattended=True)
-    for config in (someone, kael, unsure_voice, wake):
+    wake_unmarked = him(platform="wake")                      # a wake-up without the flag is still not him asking
+    unattended = him(unattended=True)
+    for config in (someone, kael, unsure_voice, wake, wake_unmarked, unattended):
         ha = HA(attributes=SPOTIFY)
         out = call(ha, "pause", config=config)
         assert not out.startswith(WRITE_OK_PREFIX), out
         assert ha.calls == [], "not even a read of his phone for someone else"
 
 
-def test_she_cannot_start_a_song_or_set_volume_on_the_phone():
-    for op in ("play", "volume", "play_next", "shuffle"):
-        ha = HA(attributes=SPOTIFY)
-        out = tool(ha).invoke({"operation": op, "target": "phone", "query": "something"}, config=him())
-        assert not out.startswith(WRITE_OK_PREFIX) and "can't start a song" in out
-        assert ha.calls == []
+class Recorder:
+    """Stands in for Music Assistant and the DJ store: any use at all is recorded."""
+
+    def __init__(self):
+        self.used = []
+
+    def call(self, *a, **k):
+        self.used.append(("call", a, k))
+        return "[]"
+
+    def put(self, *a, **k):
+        self.used.append(("put", a, k))
+
+    def get(self, *a, **k):
+        self.used.append(("get", a, k))
+
+
+def test_every_other_operation_on_the_phone_is_refused_before_anything_happens():
+    for op in ("play", "volume", "play_next", "add_to_queue", "shuffle", "repeat", "now_playing", "up_next",
+               "more_like_this", "dj", "like", "add_to_library", "new_playlist", "add_to_playlist",
+               "my_playlists", "my_taste", "recently_played", "queue", "nonsense"):
+        ha, ma, dj = HA(attributes=SPOTIFY), Recorder(), Recorder()
+        out = tool(ha, ma=ma, dj_store=dj).invoke(
+            {"operation": op, "target": "phone", "query": "on", "playlist": "Focus"}, config=him())
+        assert not out.startswith(WRITE_OK_PREFIX) and "can't start a song" in out, (op, out)
+        assert ha.calls == [] and ma.used == [] and dj.used == [], op
+
+
+def test_a_malformed_reading_is_a_plain_refusal():
+    for attributes in (["unexpected"], "text", 7):
+        ha = HA(attributes=attributes)
+        out = call(ha, "pause")
+        assert "nothing was sent" in out and ha.sent == []
 
 
 def test_without_the_phone_configured_it_is_out_of_reach():
@@ -154,8 +186,10 @@ def test_failures_are_said_plainly():
 
 
 def test_a_room_name_is_not_the_phone_and_a_strange_key_is_not_an_app():
-    assert is_phone_target("phone") and is_phone_target("my phone") and is_phone_target("on his Phone")
-    assert not is_phone_target("") and not is_phone_target("office") and not is_phone_target("headphones")
+    for yes in ("phone", "my phone", "on his Phone", "my cellphone", "the smartphone", "my cell phone", "mobile"):
+        assert is_phone_target(yes), yes
+    for no in ("", "office", "headphones", "phone booth", "phone room", "the office phone speaker"):
+        assert not is_phone_target(no), no
     odd = {"playback_state_": "Playing", "playback_state_not a package": "Playing", "playback_state_x": "Playing"}
     assert phone_session(odd, "pause") == "Nothing is playing on the phone right now."
 
@@ -163,8 +197,17 @@ def test_a_room_name_is_not_the_phone_and_a_strange_key_is_not_an_app():
 def test_the_office_speaker_still_pauses_as_before():
     ha = HA(attributes=SPOTIFY)
     out = tool(ha).invoke({"operation": "pause", "target": "office"}, config=him())
-    assert [p for p, _ in ha.calls if "notify" in p] == []
-    assert "office" in out
+    assert out == f"{WRITE_OK_PREFIX} pause sent to office satellite."
+    assert ha.sent == [{"entity_id": "media_player.office_satellite"}]
+    assert [p for p, _ in ha.calls if p.startswith("/api/services/")] == ["/api/services/media_player/media_pause"]
+
+
+def test_a_speaker_that_is_called_phone_stays_a_speaker():
+    ha = HA(attributes=SPOTIFY)
+    players = {"dev-office": "media_player.office_satellite", "dev-hall": "media_player.phone"}
+    out = tool(ha, players=players).invoke({"operation": "pause", "target": "phone"}, config=him())
+    assert out == f"{WRITE_OK_PREFIX} pause sent to phone."
+    assert ha.sent == [{"entity_id": "media_player.phone"}]
 
 
 def test_her_instructions_name_the_phone():
