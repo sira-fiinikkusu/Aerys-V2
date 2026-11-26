@@ -149,7 +149,7 @@ def test_the_upgrade_needs_every_character_ascii_or_typed_by_them():
     # what they typed is fine, accents and all; so is their own name
     assert not _foreign_characters("Sam loves caf\u00e9 au lait", "I love caf\u00e9 au lait", "Sam")
     assert _judged("assistant", yes, "Sam loves caf\u00e9 au lait", "I love caf\u00e9 au lait", "Sam") == "owner"
-    assert _judged("assistant", yes, "Jos\u00e9 gets up at 6", "I'm up at 6", "Jos\u00e9") == "owner"
+    assert _judged("assistant", yes, "Jos\u00e9 gets up at 6", "I'm up at 6", "Jos\u00e9") == "assistant"   # r6: no name exemption
     assert _judged("assistant", yes, "Sam gets up at 6", "I'm up at 6", "Sam") == "owner"
     # the allowlist only gates the upgrade: a veto and the word check's own verdict are untouched
     assert _judged("owner", lambda *a: tw.Judgement(0.1, 0.9, 0.9), "Bob trusts Alice", "remember Bob trusts Alice",
@@ -163,7 +163,7 @@ def test_the_name_exempts_only_itself_and_equivalent_spellings_pass():
     yes = lambda *a: tw.Judgement(0.99, 0.01, 0.01)
     name = "\u0421\u0442\u0435\u043f\u0430\u043d \u041f\u043e\u043f\u043e\u0432"
     assert _judged("assistant", yes, name + " does \u043f\u043e\u0442 like coffee", "I like coffee", name) == "assistant"
-    assert _judged("assistant", yes, name + " likes coffee", "I like coffee", name) == "owner"   # the name itself is fine
+    assert _judged("assistant", yes, name + " likes coffee", "I like coffee", name) == "assistant"   # r6: no name exemption; a non-ASCII name must be in their message
     assert _judged("assistant", yes, "\u041f\u043e\u043f\u043e\u0432 likes coffee", "I like coffee", name) == "assistant"   # Codex r5: only the full name, as the leading words, is exempt
     for fact, said in (("Sam loves caf\u00e9", "I love cafe\u0301"), ("Sam loves cafe\u0301", "I love caf\u00e9"),
                        ("Sam gets\r\nup at 6", "I'm up at 6"), ("Sam doesn\u2019t like coffee", "I don't like coffee"),
@@ -172,19 +172,32 @@ def test_the_name_exempts_only_itself_and_equivalent_spellings_pass():
         assert _judged("assistant", yes, fact, said, "Sam") == "owner", (fact, said)
 
 
-def test_the_name_is_exempt_once_as_the_subject_and_no_letterlike_sign_folds_in():
-    """Codex r5: a one-letter Cyrillic name made 'n-\u041e-t' pass (hyphens made it a whole word); a common-word name
-    was exempt everywhere; NFC turned the Kelvin sign into an ASCII K."""
+def test_no_name_exemption_and_no_letterlike_sign_folds_in():
+    """Codex r5/r6: a name's letters spelled disguised words ('\u041e does n-\u041e-t', 'N-ever' with a Greek Nu as the
+    name); NFC turned the Kelvin sign into K. Now no name exemption at all: a non-ASCII name must be in their message."""
     from aerys_v2.tools.remember import _judged
     yes = lambda *a: tw.Judgement(0.99, 0.01, 0.01)
-    o = "\u041e"
+    o, nu, net = "\u041e", "\u039d", "\u041d\u0435\u0442"
     assert _judged("assistant", yes, o + " does n-" + o + "-t like coffee", "I like coffee", o) == "assistant"
-    net = "\u041d\u0435\u0442"
+    assert _judged("assistant", yes, nu + "-ever drinks coffee", "I drink coffee", nu) == "assistant"
+    assert _judged("assistant", yes, o + "-nly drinks coffee", "I drink coffee", o) == "assistant"
     assert _judged("assistant", yes, net + " likes coffee. " + net + " coffee after noon.", "I like coffee", net) == "assistant"
-    assert _judged("assistant", yes, net + " likes coffee", "I like coffee", net) == "owner"     # the subject is fine
+    assert _judged("assistant", yes, net + " likes coffee", "I like coffee", net) == "assistant"   # not in their message
+    assert _judged("assistant", yes, net + " likes coffee", net + " here, I like coffee", net) == "owner"
     assert _judged("assistant", yes, "Sam takes vitamin \u212a", "I take vitamin D", "Sam") == "assistant"   # Kelvin sign
+    assert _judged("assistant", yes, "Sam takes vitamin \u212a", "I take vitamin K", "Sam") == "assistant"
     assert _judged("assistant", yes, "Sam takes vitamin K", "I take vitamin K", "Sam") == "owner"
-    assert _judged("assistant", yes, "Jos\u00e9's alarm is at 6", "my alarm is at 6", "Jos\u00e9") == "owner"
+
+
+def test_the_same_letter_written_another_way_still_counts():
+    """Codex r6: canonical spellings of what they typed (composed, decomposed, partly decomposed) are theirs."""
+    from aerys_v2.tools.remember import _foreign_characters
+    for fact, said in (("Jose\u0301 gets up at 6", "Jos\u00e9 here, I'm up at 6"),
+                       ("Jos\u00e9 gets up at 6", "Jose\u0301 here, I'm up at 6"),
+                       ("Sam enjoys ph\u01a1\u0309", "I like ph\u1edf"), ("Sam enjoys pho\u031b\u0309", "I like ph\u1edf"),
+                       ("Sam enjoys ph\u1edf", "I like pho\u031b\u0309"), ("Jos\u00e9's alarm is at 6", "Jos\u00e9: my alarm is at 6")):
+        assert not _foreign_characters(fact, said, "Sam"), (fact, said)
+    assert _foreign_characters("Jos\u00e9's alarm is at 6", "my alarm is at 6", "Jos\u00e9")   # name not in the message
 
 
 def test_a_malformed_judgement_never_blocks_the_write():

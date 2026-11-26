@@ -323,17 +323,25 @@ def _foreign_characters(fact: str, turn_text: str, speaker="") -> bool:
     their own message. A look-alike letter from another alphabet, a mathematical, circled or letterlike sign, a
     combining letter or an odd separator that they never typed can't reach an upgrade, in any arrangement (the
     denylist guards below stay as a second layer). A fact that fails stays in her words.
-    Codex r4/r5: the fact is read as written (only punctuation folded: no Unicode normalization, which turns the
-    Kelvin sign into K); their message counts in its written, composed and decomposed forms, so an accented letter
-    typed either way matches. Their name is exempt once, only as the fact's leading words (the subject, "Sam gets
-    up at 6"): anywhere else its letters could spell a disguised word."""
+    Codex r4-r6: the fact is read as written (only punctuation folded; Unicode normalization turns the Kelvin sign
+    into K). A non-ASCII character they didn't type verbatim still counts when it is the same letter written
+    another way: it decomposes into two or more parts, every one of which is in their message's decomposed form
+    (caf\u00e9 vs cafe + accent, a partly decomposed Vietnamese vowel). A one-part decomposition (Kelvin -> K,
+    Ohm -> Omega) never counts. No name exemption: a name's letters could spell a disguised word, so a non-ASCII
+    name has to be in their own message too. `speaker` is accepted for the caller's shape and not used."""
     import unicodedata
     fact, said = _typography(fact), _typography(turn_text)
-    name = _typography(str(speaker or "")).strip()
-    if name and fact.startswith(name) and not fact[len(name):len(name) + 1].isalnum():
-        fact = fact[len(name):]
-    allowed = set(said) | set(unicodedata.normalize("NFC", said)) | set(unicodedata.normalize("NFD", said))
-    return any(not (c.isascii() and (c.isprintable() or c in "\n\t")) and c not in allowed for c in fact)
+    verbatim = set(said) | set(unicodedata.normalize("NFC", said))
+    parts = set(said) | set(unicodedata.normalize("NFD", said))
+
+    def typed(c: str) -> bool:
+        if c.isascii():
+            return c.isprintable() or c in "\n\t"
+        if c in verbatim or c in parts:          # typed, or a part of something typed (a decomposed accent)
+            return True
+        d = unicodedata.normalize("NFD", c)
+        return len(d) > 1 and all(x in parts for x in d)
+    return not all(typed(c) for c in fact)
 
 
 _TYPOGRAPHY = str.maketrans({"\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
