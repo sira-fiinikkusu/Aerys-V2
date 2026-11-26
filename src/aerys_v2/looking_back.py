@@ -13,6 +13,7 @@ Judgements from Jev, the decision in code (the TypeSafe rule). The state is the 
 """
 from __future__ import annotations
 
+import contextvars
 import math
 import threading
 import time
@@ -84,7 +85,7 @@ class LookingBackCheck:
         if not self._inflight.acquire(blocking=False):
             return None
         try:
-            threading.Thread(target=run, daemon=True).start()
+            threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
         except Exception:  # noqa: BLE001
             self._inflight.release()
             return None

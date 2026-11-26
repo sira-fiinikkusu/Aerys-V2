@@ -79,6 +79,7 @@ Adversarial-review fixes (2026-07-04), all in this file unless noted:
 """
 
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -967,6 +968,23 @@ def is_state_key(key) -> bool:
     return isinstance(key, str) and key.startswith(STATE_PREFIXES)
 
 
+def is_taste_key(key) -> bool:
+    """preference.<subject>.<thing>: one taste per fact (D107). A favorite (preference.x) is not one."""
+    return isinstance(key, str) and key.startswith("preference.") and key.count(".") >= 2
+
+
+def replace_allowed(new_key, old_key) -> bool:
+    """May a model-chosen `replaces` retire old_key's row for new_key? Only between state keys, and a taste
+    only for the very same taste (the prompt: 'two tastes never share a key and one never replaces another').
+    #262 (Gemini review 11/25): with ~4x more tastes kept, a mistaken replace could retire an unrelated one.
+    A refused replace keeps both rows, the behaviour before D95-B; nothing is lost."""
+    if not (is_state_key(new_key) and is_state_key(old_key)):
+        return False
+    if is_taste_key(new_key) or is_taste_key(old_key):
+        return new_key == old_key
+    return True
+
+
 def clip_reply(text: str | None) -> str:
     """Her reply as the extractor sees it: whole when short, head and tail when long."""
     text = (text or "").strip()
@@ -1454,6 +1472,14 @@ def source_quote_found(quote: str | None, messages: Sequence[dict]) -> bool:
     return any(pattern.search(_quote_words(_fold_for_quote(m.get("content")))) for m in messages)
 
 
+def _takes_said_on(fn) -> bool:
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return "said_on" in params or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
 def quoted_observations(observations: list[dict], group: dict, stats: dict,
                         stated: StatedCheck | None = None) -> list[dict]:
     """No quote, no memory (2026-11-24). Keep only the observations whose source_text
@@ -1505,10 +1531,17 @@ def quoted_observations(observations: list[dict], group: dict, stats: dict,
         if isinstance(at, datetime):
             local = at.astimezone(USER_TZ)
             said_on = f"{local.strftime('%A')}, {local.strftime('%b')} {local.day}, {local.year}"
+        facts = [c.get("value_text") or "" for c in cands]
         try:
-            scores = stated(asking[where]["content"], [c.get("value_text") or "" for c in cands], said_on=said_on) or []
-        except TypeError:   # a seam without said_on (tests): same call, no date
-            scores = stated(asking[where]["content"], [c.get("value_text") or "" for c in cands]) or []
+            # #262: a seam without said_on (tests) is detected, not caught, so a real TypeError inside the check
+            # is never retried; any failure is 'unavailable' for every fact (the caller then keeps nothing).
+            if _takes_said_on(stated):
+                scores = stated(asking[where]["content"], facts, said_on=said_on) or []
+            else:
+                scores = stated(asking[where]["content"], facts) or []
+        except Exception:  # noqa: BLE001
+            log.warning("stated-as-true check failed; facts in this message are unavailable", exc_info=True)
+            scores = []
         for obs, p in zip(cands, list(scores) + [None] * (len(cands) - len(scores))):
             if p is None:
                 stats["stated_unavailable"] = stats.get("stated_unavailable", 0) + 1
@@ -1857,11 +1890,12 @@ def run_live_extraction(
                 key = obs.get("key_label")
                 # D95-B: a replace is honoured only for a row the extractor was SHOWN, and only
                 # between state keys (an event, an interest or her own words is never deleted
-                # by the model; Gemini review 11/25). Anything else is ignored and counted.
+                # by the model; Gemini review 11/25), and a taste only for the same taste (#262).
+                # Anything else is ignored and counted.
                 replace_id = (obs.get("replaces") or "").strip() or None
                 outcome: dict = {}
-                if replace_id and not (replace_id in known_keys and is_state_key(key)
-                                       and is_state_key(known_keys[replace_id])):
+                if replace_id and not (replace_id in known_keys
+                                       and replace_allowed(key, known_keys[replace_id])):
                     stats["replaces_ignored"] = stats.get("replaces_ignored", 0) + 1
                     replace_id = None
                 action = triage_memory(

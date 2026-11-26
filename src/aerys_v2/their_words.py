@@ -13,6 +13,7 @@ Any failure (timeout, error, no key, a bad score, no SDK) is None: the word chec
 """
 from __future__ import annotations
 
+import contextvars
 import math
 import threading
 import time
@@ -123,7 +124,7 @@ class TheirWordsCheck:
         if not self._inflight.acquire(blocking=False):
             return None
         try:
-            threading.Thread(target=run, daemon=True).start()
+            threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
         except Exception:  # noqa: BLE001
             self._inflight.release()
             return None
