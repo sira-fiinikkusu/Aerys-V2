@@ -214,3 +214,15 @@ def test_her_instructions_name_the_phone():
     from aerys_v2.factory import MUSIC_OVERLAY
 
     assert "target='phone'" in MUSIC_OVERLAY and "can't start a song on the phone" in MUSIC_OVERLAY
+
+
+def test_a_speaker_with_phone_inside_its_name_does_not_take_his_phone():
+    for entity in ("media_player.headphones", "media_player.phone_booth", "media_player.office_phone_speaker"):
+        ha, ma = HA(attributes=SPOTIFY), Recorder()
+        players = {"dev-office": "media_player.office_satellite", "dev-x": entity}
+        out = tool(ha, players=players).invoke({"operation": "pause", "target": "my phone"}, config=him())
+        assert "sent to his phone" in out, (entity, out)
+        assert ha.sent == [{"message": "command_media",
+                            "data": {"media_command": "pause", "media_package_name": "com.spotify.music"}}]
+        out = tool(ha, players=players, ma=ma).invoke({"operation": "new_playlist", "target": "phone", "query": "X"}, config=him())
+        assert "can't start a song" in out and ma.used == []

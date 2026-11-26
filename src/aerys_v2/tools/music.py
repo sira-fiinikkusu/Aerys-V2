@@ -524,8 +524,10 @@ def build_music_tool(
         )
 
     def _names_a_speaker(target: str) -> bool:
-        words = [w for w in target.strip().lower().replace(".", " ").split() if w]
-        return bool(words) and any(all(w in e.lower().replace("_", " ") for w in words) for e in allowed)
+        """Only a speaker whose whole name IS what he said (or its entity id): 'headphones' or
+        'phone booth' never takes a plain 'phone'."""
+        said = " ".join(re.findall(r"[a-z0-9]+", target.lower().replace("media_player.", " ")))
+        return bool(said) and any(_friendly(e).lower() == said for e in allowed)
 
     def _phone(op: str, config: RunnableConfig) -> str:
         """Pause/resume/stop/skip on his phone, whatever app is playing. His alone; never a guess."""
