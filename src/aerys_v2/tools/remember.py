@@ -304,14 +304,25 @@ QUESTION_REFUSAL = "Nothing was kept: questions are not facts. State the fact to
 def _mixed_script(text: str) -> bool:
     """A word mixing alphabets (Latin "n" + Cyrillic "\u043e" in "n\u043et"): the homoglyph trick. Never upgraded.
     Codex 11/26: also read with invisible format characters and combining marks removed, so a zero-width space or
-    an accent between the letters can't split the word into single-alphabet pieces."""
+    an accent between the letters can't split the word into single-alphabet pieces; and after NFKC, so circled or
+    full-width letters fold to the letters they stand for ("\u24dd\u043e\u24e3" is Latin n, Cyrillic o, Latin t)."""
     import unicodedata
     text = text or ""
-    joined = "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Mn", "Mc", "Me"))
-    for tok in _TOKEN_RE.findall(text) + _TOKEN_RE.findall(joined):
+
+    def joined(t: str) -> str:
+        return "".join(c for c in t if unicodedata.category(c) not in ("Cf", "Mn", "Mc", "Me"))
+    views = (text, joined(text), joined(unicodedata.normalize("NFKC", text)))
+    for tok in (t for view in views for t in _TOKEN_RE.findall(view)):
         if len({unicodedata.name(c, "?").split()[0] for c in tok if c.isalpha()}) > 1:
             return True
     return False
+
+
+def _symbol_letters(text: str) -> bool:
+    """Codex 11/26: symbol-class characters BEFORE normalization (circled \u24dd folds to n under NFKC, so
+    _odd_characters, which reads the folded text, can't see it). A fact holding one is never upgraded."""
+    import unicodedata
+    return any(unicodedata.category(c) in ("So", "Sk", "Co", "Cn", "Cs") for c in text or "")
 
 
 def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
@@ -323,7 +334,7 @@ def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
         return trust
     try:
         # Gemini review: the guards sit inside the try too, so nothing here can ever block the write.
-        if trust != "owner" and (_odd_characters(fact) or _mixed_script(fact)):
+        if trust != "owner" and (_odd_characters(fact) or _symbol_letters(fact) or _mixed_script(fact)):
             return trust
         judged = their_words(fact, turn_text, str(speaker or ""))
         if judged is None:

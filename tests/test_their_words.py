@@ -122,6 +122,14 @@ def test_hidden_characters_cant_split_a_mixed_alphabet_word():
         assert _mixed_script(fact)
         assert _judged("assistant", lambda *a: tw.Judgement(0.99, 0.01, 0.01), fact, "I like coffee", "Sam") == "assistant"
     assert not _mixed_script("Sam does not like caf\u00e9 au lait")
+    # Codex r2: circled and full-width letters fold to Latin under NFKC around a Cyrillic o; a squared letter has no
+    # fold at all and is caught as a symbol.
+    for fact in ("Sam does \u24dd\u043e\u24e3 like coffee", "Sam does \uff4e\u043e\uff54 like coffee",
+                 "Sam does \U0001f15d\u043e\U0001f163 like coffee"):
+        assert _judged("assistant", lambda *a: tw.Judgement(0.99, 0.01, 0.01), fact, "I like coffee", "Sam") == "assistant"
+    assert _mixed_script("Sam does \u24dd\u043e\u24e3 like coffee")
+    assert _judged("assistant", lambda *a: tw.Judgement(0.99, 0.01, 0.01), "Sam likes coffee", "I like coffee",
+                   "Sam") == "owner"                                       # a plain paraphrase still upgrades
     assert not _mixed_script("Сэм любит кофе")                                 # one alphabet per word is fine
 
 
