@@ -301,7 +301,25 @@ def refusal_for(text: str) -> str | None:
 QUESTION_REFUSAL = "Nothing was kept: questions are not facts. State the fact to remember."
 
 
-def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | None = None):
+def _vetoed(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
+    """#261 veto: only an "owner" verdict is ever re-checked, and only a clear veto changes it. Any failure keeps it."""
+    if trust != "owner" or their_words is None:
+        return trust
+    try:
+        judged = their_words(fact, turn_text or "", str(speaker or ""))
+    except Exception:  # noqa: BLE001 -- the check never blocks a write
+        log.warning("remember: their-words check failed; word check stands", exc_info=True)
+        return trust
+    if judged is not None and judged.veto:
+        log.info("remember: their-words check vetoed owner trust (meaning changed with the same words)")
+        return "assistant"
+    return trust
+
+
+def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | None = None, their_words=None):
+    """their_words (#261, optional): the Jev-judged check. VETO ONLY: it can turn the word check's "their words"
+    back into hers when the same words changed meaning (roles swapped, a maybe made certain); it never makes
+    anything theirs, so D105's guarantee (never "their words" where the pre-D105 rule wouldn't) still holds."""
     @tool
     def remember(fact: str, config: RunnableConfig = None) -> str:
         """KEEP a fact for the future, on purpose, in your long-term memory.
@@ -361,7 +379,8 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
             "fact": text,
             "key_label": label,
             "privacy_level": "private" if identity.get("privacy_context") == "private" else "public",
-            "trust": trust_for(text, CURRENT_TURN_TEXT.get(), names=(identity.get("display_name"),)),
+            "trust": _vetoed(trust_for(text, CURRENT_TURN_TEXT.get(), names=(identity.get("display_name"),)),
+                             their_words, text, CURRENT_TURN_TEXT.get(), identity.get("display_name")),
             "read": sorted({str(n) for n in (((config or {}).get("configurable") or {}).get(KEPT_AFTER_READING)
                                             or ()) if _SOURCE_NAME.fullmatch(str(n))}),
             "source_platform": str(identity.get("platform") or "unknown"),

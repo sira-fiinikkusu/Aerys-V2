@@ -2680,7 +2680,9 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         if remember_writer is not None:
             from aerys_v2.tools.remember import build_remember_tool
 
-            tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings)))
+            from aerys_v2.their_words import their_words_for
+            tools.append(build_remember_tool(remember_writer, key_labeler=memory_key_labeler_for(settings),
+                                             their_words=their_words_for(settings)))
         # SEARCH (D95-A, Chris 11/24): she looks past the recalled handful, at her long-term facts
         # and her past conversations, scoped by the caller's identity and room
         # (services/recall_search.py). Household graph only for now; read-only connections.
