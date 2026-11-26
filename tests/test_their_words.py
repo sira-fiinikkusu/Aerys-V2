@@ -133,6 +133,29 @@ def test_hidden_characters_cant_split_a_mixed_alphabet_word():
     assert not _mixed_script("Сэм любит кофе")                                 # one alphabet per word is fine
 
 
+def test_the_upgrade_needs_every_character_ascii_or_typed_by_them():
+    """Codex r3: whole-word homoglyphs, separators and combining letters passed the denylist guards. The allowlist:
+    each character of the fact is printable ASCII or appears in their own message or name."""
+    from aerys_v2.tools.remember import _foreign_characters, _judged
+    yes = lambda *a: tw.Judgement(0.99, 0.01, 0.01)
+    for fact in ("Sam does \u043f\u043e\u0442 like coffee",               # whole word, Cyrillic
+                 "Sam does \u03bd\u03bf\u03c4 like coffee",               # whole word, Greek
+                 "Sam does \U0001d6ce\U0001d6d0\U0001d6d5 like coffee",   # mathematical letters
+                 "Sam does n\u00b7\u043e\u00b7t like coffee", "Sam does n-\u043e-t like coffee",
+                 "Sam does n \u043e t like coffee",                           # separators around a Cyrillic o
+                 "Sam does n\u2deat like coffee", "Sam does n\u0345t like coffee"):  # combining letters
+        assert _foreign_characters(fact, "I like coffee", "Sam")
+        assert _judged("assistant", yes, fact, "I like coffee", "Sam") == "assistant", fact
+    # what they typed is fine, accents and all; so is their own name
+    assert not _foreign_characters("Sam loves caf\u00e9 au lait", "I love caf\u00e9 au lait", "Sam")
+    assert _judged("assistant", yes, "Sam loves caf\u00e9 au lait", "I love caf\u00e9 au lait", "Sam") == "owner"
+    assert _judged("assistant", yes, "Jos\u00e9 gets up at 6", "I'm up at 6", "Jos\u00e9") == "owner"
+    assert _judged("assistant", yes, "Sam gets up at 6", "I'm up at 6", "Sam") == "owner"
+    # the allowlist only gates the upgrade: a veto and the word check's own verdict are untouched
+    assert _judged("owner", lambda *a: tw.Judgement(0.1, 0.9, 0.9), "Bob trusts Alice", "remember Bob trusts Alice",
+                   "Sam") == "assistant"
+
+
 def test_a_malformed_judgement_never_blocks_the_write():
     """Codex 11/26 MINOR: reading .veto / .theirs on a bad result raised outside the try."""
     from aerys_v2.tools.remember import _judged

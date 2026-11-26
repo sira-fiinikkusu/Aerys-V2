@@ -318,6 +318,15 @@ def _mixed_script(text: str) -> bool:
     return False
 
 
+def _foreign_characters(fact: str, turn_text: str, speaker="") -> bool:
+    """Codex r3 (11/26): the upgrade's allowlist. Every character of the fact must be printable ASCII or appear,
+    exactly, in their own message or their name. A look-alike letter from another alphabet, a mathematical or
+    circled letter, a combining letter or an odd separator that they never typed can't reach an upgrade, in any
+    arrangement (the denylist guards below stay as a second layer). A fact that fails stays in her words."""
+    allowed = set(turn_text or "") | set(str(speaker or ""))
+    return any(not (c.isascii() and (c.isprintable() or c in "\n\t")) and c not in allowed for c in fact or "")
+
+
 def _symbol_letters(text: str) -> bool:
     """Codex 11/26: symbol-class characters BEFORE normalization (circled \u24dd folds to n under NFKC, so
     _odd_characters, which reads the folded text, can't see it). A fact holding one is never upgraded."""
@@ -334,7 +343,8 @@ def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
         return trust
     try:
         # Gemini review: the guards sit inside the try too, so nothing here can ever block the write.
-        if trust != "owner" and (_odd_characters(fact) or _symbol_letters(fact) or _mixed_script(fact)):
+        if trust != "owner" and (_foreign_characters(fact, turn_text, speaker) or _odd_characters(fact)
+                                  or _symbol_letters(fact) or _mixed_script(fact)):
             return trust
         judged = their_words(fact, turn_text, str(speaker or ""))
         if judged is None:
