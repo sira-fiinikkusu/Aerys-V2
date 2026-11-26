@@ -69,14 +69,27 @@ class Judgement:
     restates: float
     adds: float
     changes: float
+    # Codex 11/26: False when the message or fact was clipped for Jev. A cut-off tail may retract what the head
+    # says ("I like coffee ... Correction: I do not"), so a clipped judgement never upgrades; a veto still counts.
+    complete: bool = True
 
     @property
     def theirs(self) -> bool:
-        return self.restates >= YES_AT and self.adds <= NO_AT and self.changes <= NO_AT
+        return (self.complete and self.restates >= YES_AT and self.adds <= NO_AT
+                and self.changes <= NO_AT)
 
     @property
     def veto(self) -> bool:
         return self.adds >= VETO_AT or self.changes >= VETO_AT
+
+
+def _flat(text) -> str:
+    return " ".join(str(text or "").split())
+
+
+def fits(fact: str, their_message: str) -> bool:
+    """Both texts reach Jev whole (nothing clipped)."""
+    return len(_flat(their_message)) <= MESSAGE_MAX and len(_flat(fact)) <= FACT_MAX
 
 
 def build_state(fact: str, their_message: str, speaker: str = "") -> dict:
@@ -113,7 +126,7 @@ class TheirWordsCheck:
                 response = self.client.system_one(state=state, questions=QUESTIONS, model=self.model)
                 scores = [_score(response.answers[q].noul) for q in ("restates", "adds", "changes")]
                 if all(s is not None for s in scores):
-                    box["j"] = Judgement(*scores)
+                    box["j"] = Judgement(*scores, complete=fits(fact, their_message))
             except Exception:  # noqa: BLE001 -- the check never blocks a write
                 pass
             finally:

@@ -97,6 +97,50 @@ def test_the_remember_tool_vetoes_a_changed_meaning_and_upgrades_a_clear_paraphr
     assert trust == "assistant" and calls == []
 
 
+def test_a_clipped_message_never_upgrades_a_trailing_correction_can_not_be_lost():
+    """Codex 11/26 MAJOR: "I like coffee ... (past the clip) Correction: I do not like coffee" -> Jev sees only the
+    head. A judgement on clipped text may veto but never makes a fact theirs."""
+    head = "I like coffee. " + "We talked about the weekend and the weather for a long while. " * 25
+    said = head + "Correction: I do not like coffee."
+    assert len(said) > tw.MESSAGE_MAX and not tw.fits("Sam likes coffee", said)
+    check = tw.TheirWordsCheck(Client({"restates": 0.99, "adds": 0.01, "changes": 0.01}), timeout_s=2.0)
+    j = check("Sam likes coffee", said, "Sam")
+    assert j is not None and j.complete is False and j.theirs is False
+    from aerys_v2.tools.remember import _judged
+    assert _judged("assistant", check, "Sam likes coffee", said, "Sam") == "assistant"
+    short = check("Sam likes coffee", "I like coffee", "Sam")
+    assert short.complete and short.theirs                                   # whole text: unchanged
+    vetoing = tw.TheirWordsCheck(Client({"restates": 0.1, "adds": 0.9, "changes": 0.9}), timeout_s=2.0)
+    assert _judged("owner", vetoing, "Sam likes coffee", said, "Sam") == "assistant"   # a veto still counts
+
+
+def test_hidden_characters_cant_split_a_mixed_alphabet_word():
+    """Codex 11/26 MAJOR: a zero-width space or a combining mark between the letters hid Cyrillic \u043e."""
+    from aerys_v2.tools.remember import _judged, _mixed_script
+    for fact in ("Sam does n\u200b\u043e\u200bt like coffee", "Sam does n\u0301\u043et like coffee",
+                 "Sam does n\u043et like coffee"):
+        assert _mixed_script(fact)
+        assert _judged("assistant", lambda *a: tw.Judgement(0.99, 0.01, 0.01), fact, "I like coffee", "Sam") == "assistant"
+    assert not _mixed_script("Sam does not like caf\u00e9 au lait")
+    assert not _mixed_script("Сэм любит кофе")                                 # one alphabet per word is fine
+
+
+def test_a_malformed_judgement_never_blocks_the_write():
+    """Codex 11/26 MINOR: reading .veto / .theirs on a bad result raised outside the try."""
+    from aerys_v2.tools.remember import _judged
+
+    class Raises:
+        @property
+        def veto(self):
+            raise ValueError("bad")
+
+        theirs = veto
+
+    for bad in (object(), Raises(), SimpleNamespace(veto="yes", theirs="yes")):
+        assert _judged("owner", lambda *a, b=bad: b, "Bob trusts Alice", "remember Bob trusts Alice", "Sam") == "owner"
+        assert _judged("assistant", lambda *a, b=bad: b, "Sam gets up at 6", "I'm up at 6", "Sam") == "assistant"
+
+
 def test_a_failing_check_or_an_empty_turn_never_blocks_the_write_and_never_changes_trust():
     """Gemini review: a check that raises keeps the word check; an empty turn never asks Jev."""
     from aerys_v2.tools.remember import _judged

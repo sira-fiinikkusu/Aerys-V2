@@ -302,9 +302,13 @@ QUESTION_REFUSAL = "Nothing was kept: questions are not facts. State the fact to
 
 
 def _mixed_script(text: str) -> bool:
-    """A word mixing alphabets (Latin "n" + Cyrillic "\u043e" in "n\u043et"): the homoglyph trick. Never upgraded."""
+    """A word mixing alphabets (Latin "n" + Cyrillic "\u043e" in "n\u043et"): the homoglyph trick. Never upgraded.
+    Codex 11/26: also read with invisible format characters and combining marks removed, so a zero-width space or
+    an accent between the letters can't split the word into single-alphabet pieces."""
     import unicodedata
-    for tok in _TOKEN_RE.findall(text or ""):
+    text = text or ""
+    joined = "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Mn", "Mc", "Me"))
+    for tok in _TOKEN_RE.findall(text) + _TOKEN_RE.findall(joined):
         if len({unicodedata.name(c, "?").split()[0] for c in tok if c.isalpha()}) > 1:
             return True
     return False
@@ -322,15 +326,17 @@ def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
         if trust != "owner" and (_odd_characters(fact) or _mixed_script(fact)):
             return trust
         judged = their_words(fact, turn_text, str(speaker or ""))
+        if judged is None:
+            return trust
+        # Codex 11/26: read the verdict inside the boundary too (a malformed result never blocks the write).
+        veto, theirs = judged.veto is True, judged.theirs is True
     except Exception:  # noqa: BLE001 -- the check never blocks a write
         log.warning("remember: their-words check failed; word check stands", exc_info=True)
         return trust
-    if judged is None:
-        return trust
-    if trust == "owner" and judged.veto:
+    if trust == "owner" and veto:
         log.info("remember: their-words check vetoed owner trust (meaning changed with the same words)")
         return "assistant"
-    if trust != "owner" and judged.theirs:
+    if trust != "owner" and theirs:
         log.info("remember: their-words check confirmed a paraphrase as their words")
         return "owner"
     return trust
