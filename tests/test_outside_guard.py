@@ -272,8 +272,11 @@ def test_live_room_provenance_uses_ids_not_labels():
         assert done.value.value.outside is expected
 
 
-def test_real_remember_executor_preserves_assistant_trust_after_tap():
-    from aerys_v2.tools.remember import build_remember_tool, CURRENT_TURN_TEXT
+def test_his_tap_on_a_remember_card_confirms_exactly_those_words():
+    """D104 (Chris 11/25 19:58: "yes it should and i hate the idea of having to type to her to confirm it"): after
+    outside text her remember waits for his tap on a card that shows the exact fact; his Approve keeps it as HIS
+    words (owner trust). Before D104 the tap kept it as her inference."""
+    from aerys_v2.tools.remember import build_remember_tool
     records = []
     memory = build_remember_tool(lambda record: records.append(record) or 'insert')
     b = Box(executors={OUTSIDE_ACTION: action_executor([memory])})
@@ -284,12 +287,40 @@ def test_real_remember_executor_preserves_assistant_trust_after_tap():
     outside_guard(req, lambda r: pytest.fail('direct'), gate=b.gate)
     assert not records
     b.tap()
-    token = CURRENT_TURN_TEXT.set(fact)
-    try:
-        assert b.watcher.tick()['done'] == 1
-    finally:
-        CURRENT_TURN_TEXT.reset(token)
-    assert records[0]['trust'] == 'assistant' and records[0]['fact'] == fact
+    assert b.watcher.tick()['done'] == 1
+    assert records[0]['trust'] == 'owner' and records[0]['fact'] == fact
+
+
+def test_a_voice_not_sure_it_was_him_asks_for_his_tap_and_the_tap_keeps_it():
+    """D104 / T-30: a remember from a speaker that wasn't sure it was Chris used to fail even after his tap (the
+    D43 rule). Now it waits for his tap with no outside text at all, and his tap keeps it as his."""
+    from aerys_v2.tools.remember import build_remember_tool
+    from test_hands_gate import UNTAGGED
+    records = []
+    memory = build_remember_tool(lambda record: records.append(record) or 'insert')
+    b = Box(executors={OUTSIDE_ACTION: action_executor([memory])})
+    fact = 'The Aerys satellite is the speaker in his bedroom.'
+    req = request([], name='remember', args={'fact': fact})
+    req.runtime.config['configurable'].update(identity=UNTAGGED, thread_id=OWNER_THREAD)
+    out = outside_guard(req, lambda r: pytest.fail('direct: an unsure voice must not write his memory untapped'),
+                        gate=b.gate)
+    assert not records and 'Waiting' in str(getattr(out, 'content', out))
+    b.tap()
+    assert b.watcher.tick()['done'] == 1
+    assert records[0]['trust'] == 'owner' and records[0]['fact'] == fact
+
+
+def test_a_household_members_remember_is_not_confirmed_by_his_tap():
+    """His tap vouches for his own memory only: a card for someone else's memory keeps the old rule."""
+    from aerys_v2.outside_guard import action_executor as ae
+    from aerys_v2.tools.remember import build_remember_tool
+    from test_hands_gate import SAM
+    records = []
+    run = ae([build_remember_tool(lambda record: records.append(record) or 'insert')])
+    row = SimpleNamespace(thread_id=f'person:{SAM}', args={'tool': 'remember', 'tool_args': {'fact': 'Sam likes tea.'},
+                          'identity': {'user_id': SAM, 'platform': 'discord'}, '_tap_confirms': False})
+    ok, said = run(row)
+    assert ok and records[0]['trust'] == 'assistant'
 
 
 def test_guard_failure_inside_actual_engine_is_a_receipt(monkeypatch):

@@ -123,6 +123,37 @@ def _owner_typed_on_discord(conf, gate):
             and asker(identity, conf.get('thread_id', ''), gate.owner, gate.members) == OWNER_TEXT)
 
 
+#: D104 (Chris 11/25 19:58: "yes it should and i hate the idea of having to type to her to confirm it"): his tap on
+#: a remember card is his confirmation of exactly the words it shows.
+REMEMBER_UNSURE_VOICE = "Said over a speaker that wasn't sure it was your voice."
+
+
+def _remember_card(request, gate, conf, sources, args):
+    """D104: a remember after outside text, or from a voice that wasn't sure it was him, waits for his tap on a card
+    showing the exact fact; his Approve confirms exactly those words (action_executor keeps them as his)."""
+    from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+    if gate is None:
+        return _refusal(request, 'Not done: this needs the owner’s Approve button, which is unavailable. '
+                        'Nothing was kept.'), None
+    tool_args = dict(args)                    # exactly what she asked to keep; the card shows the fact
+    fact = ' '.join(str(tool_args.get('fact') or '').split())
+    shown = fact or json.dumps(tool_args, ensure_ascii=False)
+    identity, thread = conf.get('identity') or {}, conf.get('thread_id', '')
+    why = [notice(sources)] if sources else []
+    if identity.get(VOICE_OWNER_ASSUMED_KEY):
+        why.append(REMEMBER_UNSURE_VOICE)
+    from aerys_v2.hands_gate import _key
+    payload = {'tool': 'remember', 'tool_args': tool_args, 'identity': identity,
+               # Code-written, never hers: only a remember for the owner's own memory is confirmed by his tap.
+               '_tap_confirms': bool(getattr(gate, 'owner', None)) and str(identity.get('user_id') or '') == str(gate.owner),
+               'what': 'keeping this in your memory'}
+    verdict = gate._ask(OUTSIDE_ACTION, 'outside:' + _key(thread, payload), thread, payload,
+                        kind='memory', summary='Keep this in your memory?',
+                        detail='\n'.join(why) + f'\n\n“{shown}”\n\nApprove = you confirm exactly these words.',
+                        what=payload['what'])
+    return _answer(request, verdict, conf)
+
+
 def _decide(request, gate):
     """(refusal, basis): a ToolMessage when the call is refused or waits; else None and, for a reach-out,
     the G5 basis code naming the branch that let it go (None for anything that isn't a reach-out)."""
@@ -148,6 +179,10 @@ def _decide(request, gate):
         return None, None
     if not reaches:
         return None, None
+    from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+    if name == 'remember' and (conf.get('identity') or {}).get(VOICE_OWNER_ASSUMED_KEY):
+        # D104: a voice that wasn't sure it was him asks for his tap instead of telling him to type it.
+        return _remember_card(request, gate, conf, sources, args)
     if not sources:
         return None, CLEAN_TURN
     if name in ('write_file', 'edit_file'):
@@ -162,6 +197,8 @@ def _decide(request, gate):
                             'Not saved: I can only write my own skills, under /skills/<name>/. Nothing changed.'), None
     if name in TRUSTED_AFTER_HOME_JOBS and set(sources) <= HOME_JOB_READERS:
         return None, D29_OWN_JOB_RESULTS
+    if name == 'remember':
+        return _remember_card(request, gate, conf, sources, args)
     # D62 (Chris 11/18 10:20: "she shouldnt be hitting privacy gates when i message her on discord"):
     # after reading outside text, her note to Kael goes straight when HE asked in his own typed words
     # on Discord, as D58 lets her Discord message to him go. Kael reads her notes as observations,
@@ -311,14 +348,20 @@ def action_executor(tools, *, skill_middleware=None):
         tool = allowed.get(row.args.get('tool'))
         if tool is None:
             return False, 'Not done: the approved tool is unavailable.'
-        config = {'configurable': {'thread_id': row.thread_id,
-                                   'identity': row.args.get('identity') or {}}}
-        # Approval authorizes the write; it does not promote outside words to owner facts.
+        identity = dict(row.args.get('identity') or {})
         from aerys_v2.tools.remember import CURRENT_TURN_TEXT
-        # His tap on the button that showed this exact address is his word for it (contacts); for
-        # everything else the approved write carries no owner words (remember stays her own inference).
-        approved_words = (str(row.args['tool_args'].get('email') or '')
-                          if tool.name == 'save_contact_email' else '')
+        # His tap on the button that showed this exact address is his word for it (contacts). D104 (Chris 11/25
+        # 19:58): his tap on a remember card that showed the exact fact is his word for those words too, for his
+        # own memory (_tap_confirms, code-written at the card), even when the voice wasn't sure it was him. Any other
+        # approved write carries no owner words.
+        approved_words = ''
+        if tool.name == 'save_contact_email':
+            approved_words = str(row.args['tool_args'].get('email') or '')
+        elif tool.name == 'remember' and row.args.get('_tap_confirms') is True:
+            from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+            identity.pop(VOICE_OWNER_ASSUMED_KEY, None)
+            approved_words = str(row.args['tool_args'].get('fact') or '')
+        config = {'configurable': {'thread_id': row.thread_id, 'identity': identity}}
         token = CURRENT_TURN_TEXT.set(approved_words)
         tool_args = dict(row.args['tool_args'])
         if tool.name == 'send_email':
