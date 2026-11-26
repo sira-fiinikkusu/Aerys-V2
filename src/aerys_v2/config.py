@@ -443,6 +443,11 @@ class Settings(BaseSettings):
     # Where music goes for turns with no originating device (text/DM/CLI).
     # None = those callers are asked to name a speaker instead of guessing.
     ha_music_default_player: str | None = None
+    # His phone's media (board #264): the Home Assistant notify service name (no "notify." prefix)
+    # and the phone app's media-session sensor entity. Both set = she can pause/resume/stop/skip what
+    # is playing on his phone when he asks. Empty (the default) = no reach to the phone.
+    ha_phone_notify: str = ""
+    ha_phone_media_sensor: str = ""
 
     # The house's weather entity — get_weather reads current conditions and
     # forecasts from it (weather.get_forecasts). Local weather must come from

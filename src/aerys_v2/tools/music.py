@@ -66,6 +66,12 @@ _TRANSPORT_OPS = {
     "previous": "media_previous_track",
 }
 
+# What his phone's media session accepts (the Home Assistant phone app's media command). It
+# controls whatever app is already playing there; it cannot start a chosen song.
+_PHONE_OPS = {"pause": "pause", "resume": "play", "stop": "stop", "next": "next", "previous": "previous"}
+_PHONE_STATE_KEY = "playback_state_"
+_PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+")
+
 _SEARCH_LIMIT = 5
 _LIBRARY_TTL = 300
 _LIBRARY_PAGE_SIZE = 100
@@ -214,6 +220,45 @@ def _item_line(item: dict) -> tuple[str, str]:
     return name, str(item.get("uri") or "")
 
 
+def is_phone_target(target: str) -> bool:
+    """He named his phone as the place ("my phone", "on the phone"), not a room."""
+    return "phone" in re.findall(r"[a-z]+", target.lower())
+
+
+def phone_session(attributes: dict, op: str) -> tuple[str, str] | str:
+    """(app package, its title) for the one media session [op] should act on, else a plain refusal.
+
+    The phone's sensor carries one `playback_state_<package>` per app with a session. Pause, stop and
+    skips act on the app that is playing; resume on the one that is paused. More than one candidate is
+    asked about, never guessed."""
+    states = {k[len(_PHONE_STATE_KEY):]: str(v) for k, v in (attributes or {}).items()
+              if isinstance(k, str) and k.startswith(_PHONE_STATE_KEY) and _PACKAGE.fullmatch(k[len(_PHONE_STATE_KEY):])}
+    playing = sorted(p for p, s in states.items() if s in ("Playing", "Buffering"))
+    paused = sorted(p for p, s in states.items() if s == "Paused")
+    if op == "resume":
+        pick = paused if paused else []
+        if not pick:
+            return ("It's already playing on the phone." if playing
+                    else "Nothing is paused on the phone that I can resume.")
+    elif op in ("next", "previous"):
+        pick = playing or paused
+        if not pick:
+            return "Nothing is playing on the phone right now."
+    else:
+        pick = playing
+        if not pick:
+            return "Nothing is playing on the phone right now."
+    if len(pick) > 1:
+        return f"More than one app has media on the phone ({', '.join(_app_name(p) for p in pick)}); which one?"
+    return pick[0], str(attributes.get(f"title_{pick[0]}") or "")
+
+
+def _app_name(package: str) -> str:
+    """'com.spotify.music' -> 'spotify': enough to say which app, without a lookup table."""
+    parts = [p for p in package.split(".") if p not in ("com", "org", "net", "android", "app", "apps", "music", "google")]
+    return (parts[0] if parts else package).replace("_", " ")
+
+
 def build_music_tool(
     *,
     base_url: str,
@@ -225,6 +270,8 @@ def build_music_tool(
     owner_person_id: str | None = None,
     dj_store=None,
     ma=None,
+    phone_notify: str = "",
+    phone_media_sensor: str = "",
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -233,6 +280,9 @@ def build_music_tool(
     complete set of speakers this tool may ever drive. default_player catches
     callers with no device_id (text/DM/CLI) — None means those turns get an
     honest "name a speaker" instead of a guess.
+    phone_notify / phone_media_sensor: the Home Assistant notify service and media-session sensor
+    of his phone. Both set = she may pause, resume, stop and skip what is playing there (target
+    "phone"), for him only. Either empty = the phone is not a place she can reach.
     owner_person_id: whose library this is. Reading it back (my_playlists, my_taste) follows D47's
     rule for his own things: him, in a room only he reads. Playing music needs no such check.
     """
@@ -305,10 +355,10 @@ def build_music_tool(
             return "His library is his: only he can ask me what's in it."
         return "I'm not sure it's him asking, so his library stays private. Ask again, or in a DM."
 
-    def _his_write_refusal(config: RunnableConfig) -> str | None:
-        """D53 writes (likes, library, playlists, shuffle) are his alone. WHO asks is checked first and
-        on its own; a shared room is fine for a write (a like reveals nothing). Codex 11/15: checking the
-        room first let his id with an unknown voice through wherever the room wasn't private."""
+    def _his_alone(config: RunnableConfig) -> str | None:
+        """None when it is him asking; else "not_him" or "unsure". WHO asks is checked first and on its
+        own; a shared room is fine for a write (a like reveals nothing). Codex 11/15: checking the room
+        first let his id with an unknown voice through wherever the room wasn't private."""
         from aerys_v2.hands_gate import OWNER_ASK, OWNER_TEXT, OWNER_VOICE, asker
         from aerys_v2.rooms import on_his_face
 
@@ -317,11 +367,20 @@ def build_music_tool(
         thread = str(conf.get("thread_id") or "")
         if (not owner_person_id or str(ident.get("user_id") or "") != str(owner_person_id)
                 or thread.startswith("kael:")):
-            return "Only he can change his music library."
+            return "not_him"
         who = asker(ident, thread, owner_person_id)
         if who in (OWNER_TEXT, OWNER_VOICE) or (who == OWNER_ASK and (
                 on_his_face(ident) or str(ident.get("platform") or "") == "wake")):
             return None
+        return "unsure"
+
+    def _his_write_refusal(config: RunnableConfig) -> str | None:
+        """D53 writes (likes, library, playlists, shuffle) are his alone."""
+        verdict = _his_alone(config)
+        if verdict is None:
+            return None
+        if verdict == "not_him":
+            return "Only he can change his music library."
         return "I'm not sure it's him asking, so I didn't change his library. Ask again."
 
     ma_players: dict[str, str] = {}
@@ -456,6 +515,46 @@ def build_music_tool(
             f"is configured — name one of: {options}."
         )
 
+    def _phone(op: str, config: RunnableConfig) -> str:
+        """Pause/resume/stop/skip on his phone, whatever app is playing. His alone; never a guess."""
+        if not (phone_notify and phone_media_sensor):
+            return "I can't reach his phone's media from here."
+        if op not in _PHONE_OPS:
+            return ("On the phone I can pause, resume, stop and skip what's already playing. "
+                    "I can't start a song or change its volume there.")
+        if identity_from_config(config).get("unattended"):
+            return "Not done: controlling his phone needs him asking."     # never on her own wake-up
+        verdict = _his_alone(config)
+        if verdict == "not_him":
+            return "Only he can control his phone."
+        if verdict is not None:
+            return "I'm not sure it's him asking, so I left his phone alone. Ask again."
+        try:
+            r = http.get(f"{base}/api/states/{phone_media_sensor}", headers=headers)
+            r.raise_for_status()
+            state = r.json()
+        except (httpx.HTTPError, ValueError) as e:
+            return f"I couldn't read the phone's media ({e}), so nothing was sent."
+        if not isinstance(state, dict) or state.get("state") in (None, "unavailable", "unknown"):
+            return "I can't see anything playing on the phone right now, so nothing was sent."
+        found = phone_session(state.get("attributes") or {}, op)
+        if isinstance(found, str):
+            return found
+        package, title = found
+        try:
+            r = http.post(
+                f"{base}/api/services/notify/{phone_notify}",
+                headers=headers,
+                json={"message": "command_media",
+                      "data": {"media_command": _PHONE_OPS[op], "media_package_name": package}},
+            )
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            return f"The {op} on the phone FAILED — Home Assistant said: {e}."
+        about = f" ({_app_name(package)}" + (f": {title}" if title and op in ("pause", "resume", "stop") else "") + ")"
+        # A push to the phone: Home Assistant accepted it, the phone hasn't confirmed anything.
+        return f"{WRITE_OK_PREFIX} {op} sent to his phone{about}. It usually lands in a second or two."
+
     @tool
     def music(
         operation: str,
@@ -497,6 +596,8 @@ def build_music_tool(
         previous: return to the previous track.
         volume: query is a level from 0 to 100.
         now_playing: read the current track and volume.
+        His phone: target="phone" with pause, resume, stop, next or previous controls
+            whatever app is playing there (owner only). Nothing else works on the phone.
 
         Call for music requests. query is the user's name/artist/song/playlist.
         media_type optionally specifies track, artist, album, playlist, radio,
@@ -589,6 +690,9 @@ def build_music_tool(
                     "Most-saved artists: " + (", ".join(f"{n} ({c})" for n, c in top) or "none") + ".\n"
                     "Playlists: " + (", ".join(str(p.get("name")) for p in playlists[:_TASTE_PLAYLISTS]) or "none")
                     + (" …" if len(playlists) > _TASTE_PLAYLISTS else "") + ".")
+
+        if is_phone_target(target):
+            return _phone(op, config)
 
         player = _resolve_target(target, config, quieting=op in ("pause", "stop"))
         if not player.startswith("media_player."):

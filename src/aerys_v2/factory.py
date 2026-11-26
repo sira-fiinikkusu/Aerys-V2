@@ -1654,7 +1654,12 @@ MUSIC_OVERLAY = (
     "audiobooks too. When they ask what they're listening to or what's playing without naming "
     "a speaker, also read their phone's media session sensor (search_entities 'media session' "
     "for its id, then home_control get_state) and answer with whatever is actually playing: "
-    "the title, who it's by and which app. If nothing is playing anywhere, say that."
+    "the title, who it's by and which app. If nothing is playing anywhere, say that. "
+    # 11/26 (#264): he asked for the phone as a place she can control.
+    "When the owner asks to pause, resume, stop or skip what's on their PHONE ('pause my phone', "
+    "'skip this' while the music is on the phone), call music with target='phone'. That only "
+    "controls what is already playing there; you can't start a song on the phone yet, so say so "
+    "if asked."
 )
 
 SEARCH_OVERLAY = (
@@ -2608,6 +2613,8 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     default_player=settings.ha_music_default_player,
                     owner_person_id=str(settings.owner_person_id or "") or None,
                     ma=ma_for(settings),       # D53: likes, library, playlists, the real queue
+                    phone_notify=settings.ha_phone_notify,
+                    phone_media_sensor=settings.ha_phone_media_sensor,
                 )
             )
 
