@@ -523,11 +523,12 @@ def build_music_tool(
             f"is configured — name one of: {options}."
         )
 
-    def _names_a_speaker(target: str) -> bool:
-        """Only a speaker whose whole name IS what he said (or its entity id): 'headphones' or
+    def _speaker_named(target: str) -> str | None:
+        """The speaker whose whole name IS what he said (or its entity id), else None: 'headphones' or
         'phone booth' never takes a plain 'phone'."""
         said = " ".join(re.findall(r"[a-z0-9]+", target.lower().replace("media_player.", " ")))
-        return bool(said) and any(_friendly(e).lower() == said for e in allowed)
+        found = [e for e in allowed if said and _friendly(e).lower() == said]
+        return found[0] if len(found) == 1 else None
 
     def _phone(op: str, config: RunnableConfig) -> str:
         """Pause/resume/stop/skip on his phone, whatever app is playing. His alone; never a guess."""
@@ -633,8 +634,11 @@ def build_music_tool(
 
         # His phone is decided first, before any other handler can read or change anything. A
         # configured speaker with that name stays a speaker.
-        if is_phone_target(target) and not _names_a_speaker(target):
-            return _phone(op, config)
+        if is_phone_target(target):
+            speaker = _speaker_named(target)
+            if speaker is None:
+                return _phone(op, config)
+            target = _friendly(speaker)        # the same spelling the speaker lookup below matches
 
         if op == "dj":
             refusal = _library_read_refusal(config)

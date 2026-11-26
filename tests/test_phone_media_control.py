@@ -205,9 +205,11 @@ def test_the_office_speaker_still_pauses_as_before():
 def test_a_speaker_that_is_called_phone_stays_a_speaker():
     ha = HA(attributes=SPOTIFY)
     players = {"dev-office": "media_player.office_satellite", "dev-hall": "media_player.phone"}
-    out = tool(ha, players=players).invoke({"operation": "pause", "target": "phone"}, config=him())
-    assert out == f"{WRITE_OK_PREFIX} pause sent to phone."
-    assert ha.sent == [{"entity_id": "media_player.phone"}]
+    for said in ("phone", "Phone!", "PHONE"):
+        ha = HA(attributes=SPOTIFY)
+        out = tool(ha, players=players).invoke({"operation": "pause", "target": said}, config=him())
+        assert out == f"{WRITE_OK_PREFIX} pause sent to phone.", (said, out)
+        assert ha.sent == [{"entity_id": "media_player.phone"}]
 
 
 def test_her_instructions_name_the_phone():
