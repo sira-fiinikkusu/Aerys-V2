@@ -204,7 +204,8 @@ def test_the_office_speaker_still_pauses_as_before():
 
 def test_a_speaker_that_is_called_phone_stays_a_speaker():
     ha = HA(attributes=SPOTIFY)
-    players = {"dev-office": "media_player.office_satellite", "dev-hall": "media_player.phone"}
+    players = {"dev-office": "media_player.office_satellite", "dev-hall": "media_player.phone",
+               "dev-desk": "media_player.headphones"}          # a second name with "phone" inside it
     for said in ("phone", "Phone!", "PHONE"):
         ha = HA(attributes=SPOTIFY)
         out = tool(ha, players=players).invoke({"operation": "pause", "target": said}, config=him())

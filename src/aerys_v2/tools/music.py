@@ -634,11 +634,12 @@ def build_music_tool(
 
         # His phone is decided first, before any other handler can read or change anything. A
         # configured speaker with that name stays a speaker.
+        exact_speaker = None
         if is_phone_target(target):
             speaker = _speaker_named(target)
             if speaker is None:
                 return _phone(op, config)
-            target = _friendly(speaker)        # the same spelling the speaker lookup below matches
+            exact_speaker = speaker            # already resolved: never looked up by name again
 
         if op == "dj":
             refusal = _library_read_refusal(config)
@@ -715,7 +716,7 @@ def build_music_tool(
                     "Playlists: " + (", ".join(str(p.get("name")) for p in playlists[:_TASTE_PLAYLISTS]) or "none")
                     + (" …" if len(playlists) > _TASTE_PLAYLISTS else "") + ".")
 
-        player = _resolve_target(target, config, quieting=op in ("pause", "stop"))
+        player = exact_speaker or _resolve_target(target, config, quieting=op in ("pause", "stop"))
         if not player.startswith("media_player."):
             return player  # honest resolution error, relayed as-is
         # D54 (Codex 11/15): a run he isn't in never changes a speaker on his autonomy blocklist, checked on
