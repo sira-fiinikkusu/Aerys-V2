@@ -6,9 +6,9 @@ lexical: every content word of the fact must be in what they said. It can't see 
 Alice" -> "Alice trusts Bob", "I might like coffee" -> "I like coffee" pass it). Jev answers three judgements about
 the fact and their message; code decides (the TypeSafe rule: judgements from Jev, decisions in code).
 
-WIRED AS A VETO ONLY (remember._vetoed): a clear veto (it adds or changes something) turns the word check's "their
-words" back into hers; nothing else changes anything. Judgement.theirs (a clear restatement) is measured but NOT used:
-making a paraphrase "their words" loosens trust beyond the pre-D105 rule, and that is the owner's call.
+Wired in remember._judged: a clear veto (it adds or changes something) turns the word check's "their words" back
+into hers; and (D107, the owner 11/25 22:21: "we can give Jev a lot of agency here") a clear "theirs" (a restatement
+that adds and changes nothing) makes a paraphrase their words, past the strict word check.
 Any failure (timeout, error, no key, a bad score, no SDK) is None: the word check stands alone, exactly as before.
 """
 from __future__ import annotations

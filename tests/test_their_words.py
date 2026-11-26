@@ -60,20 +60,20 @@ def test_a_missing_sdk_means_no_veto_never_a_failed_build(monkeypatch):
     assert tw.their_words_for(SimpleNamespace(typesafe_api_key=key)) is None
 
 
-def test_the_module_has_no_upgrade_path():
-    """Gemini review: only the veto is wired; a paraphrase upgrade (making something theirs) is the owner's call."""
+def test_the_decision_lives_in_one_place():
+    """The veto/upgrade decision is remember._judged; the module only measures (no second decision path)."""
     assert not hasattr(tw, "combine")
 
 
-def test_the_remember_tool_uses_it_as_a_veto_only():
-    """#261 wired VETO ONLY: same words with a changed meaning go back to hers; nothing is ever made theirs."""
+def test_the_remember_tool_vetoes_a_changed_meaning_and_upgrades_a_clear_paraphrase():
+    """#261 + D107: same words with a changed meaning go back to hers; a clear restatement becomes theirs; unsure,
+    unavailable and odd characters leave the word check alone."""
     from aerys_v2.tools.remember import CURRENT_TURN_TEXT, build_remember_tool
     owner = "6e6bcbed-03ef-4d17-95d2-89c467414335"
     config = {"configurable": {"identity": {"user_id": owner, "platform": "discord", "display_name": "Sam"}}}
 
     def kept(fact, said, judged):
-        records = []
-        calls = []
+        records, calls = [], []
         def check(f, s, speaker):
             calls.append((f, s, speaker))
             return judged
@@ -85,10 +85,13 @@ def test_the_remember_tool_uses_it_as_a_veto_only():
             CURRENT_TURN_TEXT.reset(token)
         return records[0]["trust"], calls
 
-    veto, theirs = tw.Judgement(0.1, 0.9, 0.9), tw.Judgement(0.99, 0.05, 0.05)
+    veto, theirs, unsure = tw.Judgement(0.1, 0.9, 0.9), tw.Judgement(0.99, 0.05, 0.05), tw.Judgement(0.9, 0.1, 0.3)
     trust, calls = kept("Alice trusts Bob", "remember Bob trusts Alice", veto)
     assert trust == "assistant" and calls == [("Alice trusts Bob", "remember Bob trusts Alice", "Sam")]
     assert kept("Bob trusts Alice", "remember Bob trusts Alice", theirs)[0] == "owner"
     assert kept("Bob trusts Alice", "remember Bob trusts Alice", None)[0] == "owner"        # Jev unavailable
-    trust, calls = kept("Sam gets up at 6", "I'm up at 6", theirs)                          # never an upgrade
+    assert kept("Sam gets up at 6", "I'm up at 6", theirs)[0] == "owner"                    # D107: a paraphrase
+    assert kept("Sam gets up at 6", "I'm up at 6", unsure)[0] == "assistant"
+    assert kept("Sam gets up at 6", "I'm up at 6", None)[0] == "assistant"
+    trust, calls = kept("Sam does n\u043et like coffee", "I like coffee", theirs)              # odd characters: never
     assert trust == "assistant" and calls == []

@@ -301,25 +301,43 @@ def refusal_for(text: str) -> str | None:
 QUESTION_REFUSAL = "Nothing was kept: questions are not facts. State the fact to remember."
 
 
-def _vetoed(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
-    """#261 veto: only an "owner" verdict is ever re-checked, and only a clear veto changes it. Any failure keeps it."""
-    if trust != "owner" or their_words is None:
+def _mixed_script(text: str) -> bool:
+    """A word mixing alphabets (Latin "n" + Cyrillic "\u043e" in "n\u043et"): the homoglyph trick. Never upgraded."""
+    import unicodedata
+    for tok in _TOKEN_RE.findall(text or ""):
+        if len({unicodedata.name(c, "?").split()[0] for c in tok if c.isalpha()}) > 1:
+            return True
+    return False
+
+
+def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
+    """#261 / D107 (the owner, 11/25 22:21: "Let's turn that on too, we can give Jev a lot of agency here"): Jev's
+    judgement on top of the word check. A clear veto turns "their words" back into hers; a clear "theirs" (a
+    restatement that adds and changes nothing) makes a paraphrase their words. Unsure, unavailable or failed: the word
+    check stands. A fact holding odd characters is never upgraded (the homoglyph guard stays in front of Jev)."""
+    if their_words is None or not (turn_text or "").strip():
+        return trust
+    if trust != "owner" and (_odd_characters(fact) or _mixed_script(fact)):
         return trust
     try:
-        judged = their_words(fact, turn_text or "", str(speaker or ""))
+        judged = their_words(fact, turn_text, str(speaker or ""))
     except Exception:  # noqa: BLE001 -- the check never blocks a write
         log.warning("remember: their-words check failed; word check stands", exc_info=True)
         return trust
-    if judged is not None and judged.veto:
+    if judged is None:
+        return trust
+    if trust == "owner" and judged.veto:
         log.info("remember: their-words check vetoed owner trust (meaning changed with the same words)")
         return "assistant"
+    if trust != "owner" and judged.theirs:
+        log.info("remember: their-words check confirmed a paraphrase as their words")
+        return "owner"
     return trust
 
 
 def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | None = None, their_words=None):
-    """their_words (#261, optional): the Jev-judged check. VETO ONLY: it can turn the word check's "their words"
-    back into hers when the same words changed meaning (roles swapped, a maybe made certain); it never makes
-    anything theirs, so D105's guarantee (never "their words" where the pre-D105 rule wouldn't) still holds."""
+    """their_words (#261, optional): the Jev-judged check on top of the word check (_judged): a veto when the same
+    words changed meaning, and (D107) an upgrade when a paraphrase clearly restates what they said."""
     @tool
     def remember(fact: str, config: RunnableConfig = None) -> str:
         """KEEP a fact for the future, on purpose, in your long-term memory.
@@ -379,7 +397,7 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
             "fact": text,
             "key_label": label,
             "privacy_level": "private" if identity.get("privacy_context") == "private" else "public",
-            "trust": _vetoed(trust_for(text, CURRENT_TURN_TEXT.get(), names=(identity.get("display_name"),)),
+            "trust": _judged(trust_for(text, CURRENT_TURN_TEXT.get(), names=(identity.get("display_name"),)),
                              their_words, text, CURRENT_TURN_TEXT.get(), identity.get("display_name")),
             "read": sorted({str(n) for n in (((config or {}).get("configurable") or {}).get(KEPT_AFTER_READING)
                                             or ()) if _SOURCE_NAME.fullmatch(str(n))}),
