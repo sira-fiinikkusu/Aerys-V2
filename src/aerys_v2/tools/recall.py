@@ -50,7 +50,7 @@ def build_search_memory_tool(memories_db: ConnFactory, *, turns_db: ConnFactory 
 
         CALL THIS when the facts in front of you don't cover what they ask: "what do you know about
         my…", "did I ever tell you…", "what's the name of…", a person, place, plan, date or
-        preference you can't see here. Returns up to 12 dated facts. In a shared room it also covers
+        preference you can't see here. Returns up to 25 dated facts. In a shared room it also covers
         the public facts of the people who have been talking in this room.
 
         query: the words, name or topic to look for.

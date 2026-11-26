@@ -19,7 +19,7 @@ Scoring (in SQL, reference implementation in `combined_score()` below):
   score = cosine_similarity * (0.7 + 0.3 * recency)      -- recency is a BOOST, not a term
   cosine_similarity = 1 - (embedding <=> query_vec)      -- pgvector cosine distance
   recency = clamp(1 - age_seconds / 30 days, 0, 1)       -- linear decay to 0 at 30d
-No similarity threshold: ALL of a person's live memories are scored, top 20 kept.
+No similarity threshold: ALL of a person's live memories are scored, top RETRIEVE_LIMIT (30) kept.
 
 V1 scoring bug FIXED in the port (observed live 2026-07-03): the additive form
 `sim*0.7 + recency*0.3` let ANY fresh memory (+0.3) outrank every memory older
@@ -44,7 +44,7 @@ from typing import Any, Callable, Sequence
 SIM_WEIGHT = 0.7
 RECENCY_WEIGHT = 0.3
 RECENCY_WINDOW_S = 2_592_000  # 30 days — recency decays linearly to 0 over this
-RETRIEVE_LIMIT = 20  # rows scored & returned by SQL
+RETRIEVE_LIMIT = 30  # rows scored & returned by SQL (2x CONTEXT_CAP: room for the dedup to drop rows)
 # Chris 11/25 23:23: "im good with her saving more often, though it would reinforce the need to do 15 lines instead
 # of 5" (D107 keeps ~4x more tastes; on the s100 memory test 15 lines scored the same as 5: 42 vs 40 recall-only,
 # 81 vs 82 with search). 5 dated from the small-context days.
@@ -222,7 +222,7 @@ def retrieve_memories(
 # still found), returning more rows. WHO and WHICH LEVELS are decided by the caller's scope
 # (services/recall_search.py) and passed in; nothing here widens on its own. Never her
 # Kael-line logs (a2a_*, as in the people block) or her skills (as on the stick).
-SEARCH_LIMIT = 12
+SEARCH_LIMIT = 25  # more than CONTEXT_CAP, so a search reaches past the lines already recalled
 SEARCH_POOL = 30  # rows each half fetches before the merge
 
 _SEARCH_FROM = """\

@@ -269,7 +269,7 @@ def test_retrieve_param_shape_public():
     }
     assert "UNION" not in sql  # zero-row sentinel killed
     assert "m.embedding IS NOT NULL" in sql  # NULLS-FIRST latent bug fixed
-    assert "LIMIT 20" in sql
+    assert "LIMIT 30" in sql
 
 
 def test_retrieve_private_context_sees_both_levels():
@@ -382,6 +382,16 @@ def test_format_dedup_by_key_prefix_first_wins():
     ]
     out = format_memory_context(rows, now=NOW)
     assert out == "* espresso (2026-07-02, 0d ago)\n* no colon here (2026-07-02, 0d ago)"
+
+
+def test_recall_and_search_limits_leave_room_past_the_recalled_lines():
+    # Gemini full-repo review of bf4fe68 (11/25): at 15 recalled lines, a 12-row search returned fewer facts than
+    # she already sees, and 20 SQL rows left little room for the key dedup.
+    from aerys_v2.services.memory import RETRIEVE_LIMIT, SEARCH_LIMIT, SEARCH_POOL
+
+    assert SEARCH_LIMIT > CONTEXT_CAP
+    assert SEARCH_POOL >= SEARCH_LIMIT
+    assert RETRIEVE_LIMIT >= 2 * CONTEXT_CAP
 
 
 def test_format_caps_after_dedup():
