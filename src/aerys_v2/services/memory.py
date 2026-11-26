@@ -45,7 +45,10 @@ SIM_WEIGHT = 0.7
 RECENCY_WEIGHT = 0.3
 RECENCY_WINDOW_S = 2_592_000  # 30 days — recency decays linearly to 0 over this
 RETRIEVE_LIMIT = 20  # rows scored & returned by SQL
-CONTEXT_CAP = 5  # lines that survive dedup into the prompt block
+# Chris 11/25 23:23: "im good with her saving more often, though it would reinforce the need to do 15 lines instead
+# of 5" (D107 keeps ~4x more tastes; on the s100 memory test 15 lines scored the same as 5: 42 vs 40 recall-only,
+# 81 vs 82 with search). 5 dated from the small-context days.
+CONTEXT_CAP = 15  # lines that survive dedup into the prompt block
 #: How recall marks a line of HER own words (D97): what she said then, never a checked fact and
 #: never something he said. services/context.py adds the matching note to the block header.
 HER_WORDS_LABEL = "(her own words, not a checked fact)"
@@ -361,7 +364,7 @@ def format_memory_context_marked(rows: list[dict], *, now: datetime | None = Non
       2. dedup by key: text before the first ':' (stripped, lowered) when a colon
          exists, else the whole content — first occurrence wins, and rows arrive
          score-sorted DESC so the winner is the best-scored duplicate
-      3. cap at CONTEXT_CAP (5) lines
+      3. cap at CONTEXT_CAP (15) lines
       4. per line: display = text after the FIRST ':' (rest rejoined, so values
          containing colons — URLs, timestamps — survive), else full content;
          then '[source_platform]' if present, then '(YYYY-MM-DD, Nd ago)'

@@ -2,7 +2,7 @@
 
 Chris, 11/24: "A. Yes but also consider public rooms, if she needs to recall in guild chat or
 something where there are multiple entities then we would need to widen it in that space in
-particular." Each turn hands her five memory lines (memory.CONTEXT_CAP) and a recent window;
+particular." Each turn hands her fifteen memory lines (memory.CONTEXT_CAP) and a recent window;
 a LongMemEval pilot the same day showed she could not reach anything outside them.
 
 Two reads, one SCOPE. The scope is decided here, from the per-call identity only (never from

@@ -384,10 +384,12 @@ def test_format_dedup_by_key_prefix_first_wins():
     assert out == "* espresso (2026-07-02, 0d ago)\n* no colon here (2026-07-02, 0d ago)"
 
 
-def test_format_caps_at_five_after_dedup():
+def test_format_caps_after_dedup():
+    # Chris 11/25 23:23: 15 lines, not 5.
+    assert CONTEXT_CAP == 15
     rows = [
         {"content": f"key{i}: value {i}", "source_platform": None, "created_at": NOW}
-        for i in range(10)
+        for i in range(20)
     ]
     assert len(format_memory_context(rows, now=NOW).splitlines()) == CONTEXT_CAP
 
