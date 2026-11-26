@@ -319,17 +319,20 @@ def _mixed_script(text: str) -> bool:
 
 
 def _foreign_characters(fact: str, turn_text: str, speaker="") -> bool:
-    """Codex r3 (11/26): the upgrade's allowlist. Every character of the fact must be printable ASCII or appear,
-    exactly, in their own message or their name. A look-alike letter from another alphabet, a mathematical or
-    circled letter, a combining letter or an odd separator that they never typed can't reach an upgrade, in any
-    arrangement (the denylist guards below stay as a second layer). A fact that fails stays in her words.
-    Codex r4: the name is exempt only where it appears as the name (its letters can't spell another word), and
-    both sides are compared in one canonical form (NFC, ordinary typography folded), so cafe+accent == caf\u00e9,
-    CRLF == LF and a curly apostrophe == a straight one."""
-    fact, said, name = _typography(fact), _typography(turn_text), _typography(str(speaker or "")).strip()
-    for part in sorted({name, *name.split()} - {""}, key=len, reverse=True):
-        fact = re.sub(r"(?<!\w)" + re.escape(part) + r"(?!\w)", " ", fact)
-    allowed = set(said)
+    """Codex r3 (11/26): the upgrade's allowlist. Every character of the fact must be printable ASCII or appear in
+    their own message. A look-alike letter from another alphabet, a mathematical, circled or letterlike sign, a
+    combining letter or an odd separator that they never typed can't reach an upgrade, in any arrangement (the
+    denylist guards below stay as a second layer). A fact that fails stays in her words.
+    Codex r4/r5: the fact is read as written (only punctuation folded: no Unicode normalization, which turns the
+    Kelvin sign into K); their message counts in its written, composed and decomposed forms, so an accented letter
+    typed either way matches. Their name is exempt once, only as the fact's leading words (the subject, "Sam gets
+    up at 6"): anywhere else its letters could spell a disguised word."""
+    import unicodedata
+    fact, said = _typography(fact), _typography(turn_text)
+    name = _typography(str(speaker or "")).strip()
+    if name and fact.startswith(name) and not fact[len(name):len(name) + 1].isalnum():
+        fact = fact[len(name):]
+    allowed = set(said) | set(unicodedata.normalize("NFC", said)) | set(unicodedata.normalize("NFD", said))
     return any(not (c.isascii() and (c.isprintable() or c in "\n\t")) and c not in allowed for c in fact)
 
 
@@ -339,10 +342,9 @@ _TYPOGRAPHY = str.maketrans({"\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201
 
 
 def _typography(text: str) -> str:
-    """One canonical spelling for the allowlist: NFC, apostrophe-likes as ', curly quotes as \", dashes as -,
-    the ellipsis as ..., non-breaking spaces as spaces, no carriage returns. Punctuation only: no letter changes."""
-    import unicodedata
-    return unicodedata.normalize("NFC", _APOSTROPHES_RE.sub("'", text or "")).translate(_TYPOGRAPHY)
+    """Ordinary typography folded for the allowlist: apostrophe-likes as ', curly quotes as \", dashes as -, the
+    ellipsis as ..., non-breaking spaces as spaces, no carriage returns. Punctuation only: never a letter."""
+    return _APOSTROPHES_RE.sub("'", text or "").translate(_TYPOGRAPHY)
 
 
 def _symbol_letters(text: str) -> bool:

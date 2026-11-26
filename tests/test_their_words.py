@@ -164,12 +164,27 @@ def test_the_name_exempts_only_itself_and_equivalent_spellings_pass():
     name = "\u0421\u0442\u0435\u043f\u0430\u043d \u041f\u043e\u043f\u043e\u0432"
     assert _judged("assistant", yes, name + " does \u043f\u043e\u0442 like coffee", "I like coffee", name) == "assistant"
     assert _judged("assistant", yes, name + " likes coffee", "I like coffee", name) == "owner"   # the name itself is fine
-    assert _judged("assistant", yes, "\u041f\u043e\u043f\u043e\u0432 likes coffee", "I like coffee", name) == "owner"
+    assert _judged("assistant", yes, "\u041f\u043e\u043f\u043e\u0432 likes coffee", "I like coffee", name) == "assistant"   # Codex r5: only the full name, as the leading words, is exempt
     for fact, said in (("Sam loves caf\u00e9", "I love cafe\u0301"), ("Sam loves cafe\u0301", "I love caf\u00e9"),
                        ("Sam gets\r\nup at 6", "I'm up at 6"), ("Sam doesn\u2019t like coffee", "I don't like coffee"),
                        ("Sam doesn't like coffee", "I don\u2019t like coffee"), ("Sam said \u201cnever again\u201d", 'I said "never again"')):
         assert not _foreign_characters(fact, said, "Sam"), (fact, said)
         assert _judged("assistant", yes, fact, said, "Sam") == "owner", (fact, said)
+
+
+def test_the_name_is_exempt_once_as_the_subject_and_no_letterlike_sign_folds_in():
+    """Codex r5: a one-letter Cyrillic name made 'n-\u041e-t' pass (hyphens made it a whole word); a common-word name
+    was exempt everywhere; NFC turned the Kelvin sign into an ASCII K."""
+    from aerys_v2.tools.remember import _judged
+    yes = lambda *a: tw.Judgement(0.99, 0.01, 0.01)
+    o = "\u041e"
+    assert _judged("assistant", yes, o + " does n-" + o + "-t like coffee", "I like coffee", o) == "assistant"
+    net = "\u041d\u0435\u0442"
+    assert _judged("assistant", yes, net + " likes coffee. " + net + " coffee after noon.", "I like coffee", net) == "assistant"
+    assert _judged("assistant", yes, net + " likes coffee", "I like coffee", net) == "owner"     # the subject is fine
+    assert _judged("assistant", yes, "Sam takes vitamin \u212a", "I take vitamin D", "Sam") == "assistant"   # Kelvin sign
+    assert _judged("assistant", yes, "Sam takes vitamin K", "I take vitamin K", "Sam") == "owner"
+    assert _judged("assistant", yes, "Jos\u00e9's alarm is at 6", "my alarm is at 6", "Jos\u00e9") == "owner"
 
 
 def test_a_malformed_judgement_never_blocks_the_write():
