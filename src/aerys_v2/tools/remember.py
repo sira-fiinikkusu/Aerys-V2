@@ -317,9 +317,10 @@ def _judged(trust: str, their_words, fact: str, turn_text: str, speaker) -> str:
     check stands. A fact holding odd characters is never upgraded (the homoglyph guard stays in front of Jev)."""
     if their_words is None or not (turn_text or "").strip():
         return trust
-    if trust != "owner" and (_odd_characters(fact) or _mixed_script(fact)):
-        return trust
     try:
+        # Gemini review: the guards sit inside the try too, so nothing here can ever block the write.
+        if trust != "owner" and (_odd_characters(fact) or _mixed_script(fact)):
+            return trust
         judged = their_words(fact, turn_text, str(speaker or ""))
     except Exception:  # noqa: BLE001 -- the check never blocks a write
         log.warning("remember: their-words check failed; word check stands", exc_info=True)

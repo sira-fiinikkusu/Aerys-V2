@@ -95,3 +95,18 @@ def test_the_remember_tool_vetoes_a_changed_meaning_and_upgrades_a_clear_paraphr
     assert kept("Sam gets up at 6", "I'm up at 6", None)[0] == "assistant"
     trust, calls = kept("Sam does n\u043et like coffee", "I like coffee", theirs)              # odd characters: never
     assert trust == "assistant" and calls == []
+
+
+def test_a_failing_check_or_an_empty_turn_never_blocks_the_write_and_never_changes_trust():
+    """Gemini review: a check that raises keeps the word check; an empty turn never asks Jev."""
+    from aerys_v2.tools.remember import _judged
+    def boom(*a):
+        raise RuntimeError("down")
+    called = []
+    def spy(*a):
+        called.append(a)
+        return tw.Judgement(0.99, 0.05, 0.05)
+    assert _judged("owner", boom, "Bob trusts Alice", "remember Bob trusts Alice", "Sam") == "owner"
+    assert _judged("assistant", boom, "Sam gets up at 6", "I'm up at 6", "Sam") == "assistant"
+    assert _judged("assistant", spy, "Sam gets up at 6", "   ", "Sam") == "assistant" and called == []
+    assert _judged("assistant", None, "Sam gets up at 6", "I'm up at 6", "Sam") == "assistant"
