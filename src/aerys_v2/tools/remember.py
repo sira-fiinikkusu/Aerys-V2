@@ -322,9 +322,27 @@ def _foreign_characters(fact: str, turn_text: str, speaker="") -> bool:
     """Codex r3 (11/26): the upgrade's allowlist. Every character of the fact must be printable ASCII or appear,
     exactly, in their own message or their name. A look-alike letter from another alphabet, a mathematical or
     circled letter, a combining letter or an odd separator that they never typed can't reach an upgrade, in any
-    arrangement (the denylist guards below stay as a second layer). A fact that fails stays in her words."""
-    allowed = set(turn_text or "") | set(str(speaker or ""))
-    return any(not (c.isascii() and (c.isprintable() or c in "\n\t")) and c not in allowed for c in fact or "")
+    arrangement (the denylist guards below stay as a second layer). A fact that fails stays in her words.
+    Codex r4: the name is exempt only where it appears as the name (its letters can't spell another word), and
+    both sides are compared in one canonical form (NFC, ordinary typography folded), so cafe+accent == caf\u00e9,
+    CRLF == LF and a curly apostrophe == a straight one."""
+    fact, said, name = _typography(fact), _typography(turn_text), _typography(str(speaker or "")).strip()
+    for part in sorted({name, *name.split()} - {""}, key=len, reverse=True):
+        fact = re.sub(r"(?<!\w)" + re.escape(part) + r"(?!\w)", " ", fact)
+    allowed = set(said)
+    return any(not (c.isascii() and (c.isprintable() or c in "\n\t")) and c not in allowed for c in fact)
+
+
+_TYPOGRAPHY = str.maketrans({"\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+                             "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+                             "\u2015": "-", "\u2026": "...", "\u00a0": " ", "\u202f": " ", "\r": ""})
+
+
+def _typography(text: str) -> str:
+    """One canonical spelling for the allowlist: NFC, apostrophe-likes as ', curly quotes as \", dashes as -,
+    the ellipsis as ..., non-breaking spaces as spaces, no carriage returns. Punctuation only: no letter changes."""
+    import unicodedata
+    return unicodedata.normalize("NFC", _APOSTROPHES_RE.sub("'", text or "")).translate(_TYPOGRAPHY)
 
 
 def _symbol_letters(text: str) -> bool:

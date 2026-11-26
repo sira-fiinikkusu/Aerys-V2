@@ -156,6 +156,22 @@ def test_the_upgrade_needs_every_character_ascii_or_typed_by_them():
                    "Sam") == "assistant"
 
 
+def test_the_name_exempts_only_itself_and_equivalent_spellings_pass():
+    """Codex r4: a Cyrillic name supplied every letter of a look-alike word; and equivalent spellings (cafe + accent vs
+    caf\u00e9, CRLF, a curly apostrophe) blocked real paraphrases."""
+    from aerys_v2.tools.remember import _foreign_characters, _judged
+    yes = lambda *a: tw.Judgement(0.99, 0.01, 0.01)
+    name = "\u0421\u0442\u0435\u043f\u0430\u043d \u041f\u043e\u043f\u043e\u0432"
+    assert _judged("assistant", yes, name + " does \u043f\u043e\u0442 like coffee", "I like coffee", name) == "assistant"
+    assert _judged("assistant", yes, name + " likes coffee", "I like coffee", name) == "owner"   # the name itself is fine
+    assert _judged("assistant", yes, "\u041f\u043e\u043f\u043e\u0432 likes coffee", "I like coffee", name) == "owner"
+    for fact, said in (("Sam loves caf\u00e9", "I love cafe\u0301"), ("Sam loves cafe\u0301", "I love caf\u00e9"),
+                       ("Sam gets\r\nup at 6", "I'm up at 6"), ("Sam doesn\u2019t like coffee", "I don't like coffee"),
+                       ("Sam doesn't like coffee", "I don\u2019t like coffee"), ("Sam said \u201cnever again\u201d", 'I said "never again"')):
+        assert not _foreign_characters(fact, said, "Sam"), (fact, said)
+        assert _judged("assistant", yes, fact, said, "Sam") == "owner", (fact, said)
+
+
 def test_a_malformed_judgement_never_blocks_the_write():
     """Codex 11/26 MINOR: reading .veto / .theirs on a bad result raised outside the try."""
     from aerys_v2.tools.remember import _judged
