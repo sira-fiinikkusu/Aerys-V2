@@ -1313,7 +1313,9 @@ def remember_writer_for(settings: Settings):
                 privacy_level=record["privacy_level"],
                 created_at=datetime.now(timezone.utc).isoformat(),
                 channel=record.get("channel"),
-                category=[f"trust:{record['trust']}", "remember"],
+                # D105: what she read before keeping it travels with the fact (recall marks it).
+                category=[f"trust:{record['trust']}", "remember"]
+                + [f"from:{name}" for name in record.get("read") or ()],
             )
             conn.commit()
         return action

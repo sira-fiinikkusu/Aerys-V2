@@ -49,6 +49,69 @@ CONTEXT_CAP = 5  # lines that survive dedup into the prompt block
 #: How recall marks a line of HER own words (D97): what she said then, never a checked fact and
 #: never something he said. services/context.py adds the matching note to the block header.
 HER_WORDS_LABEL = "(her own words, not a checked fact)"
+#: D105 (Chris 11/25 20:27, after "that isnt how anyone remembers anything" and "im not sure how we got on the
+#: whole path that her memories of everything is funneled as spoken by me"): every recalled line says where it
+#: came from. Unmarked = drawn from what the person said (extracted from their own messages, or kept by the
+#: remember tool as a quote of their words). Each mark is set from what the row already carries, never guessed.
+OWN_NOTE_LABEL = "(her own note)"
+KAEL_NOTES_LABEL = "(from Kael's notes, approved by them)"
+KAEL_TALK_LABEL = "(her talk with Kael)"
+HER_PHRASING_LABEL = "(saved in her words)"
+#: Codex D105 r1: reading something before saving a fact isn't proof the fact came from it.
+READ_LABEL = "(saved after she read: {what})"
+#: The contexts her own writers stamp (the home body's gap reports, run notes and skill reviews).
+_OWN_NOTE_CONTEXTS = ("portable gap report", "note to self from unattended run", "skill review mark", "skill:")
+#: Code-owned outside-source names (outside_guard) in plain words.
+_READ_WHAT = {"read_web_page": "a web page", "web_search": "a web search", "read_email": "an email",
+              "search_email": "an email", "room": "a group chat", "relay": "a relayed message",
+              "read_file": "a file", "browse": "a web page"}
+#: What each mark means, said once under the lines (only for the marks shown).
+SOURCE_NOTES = {
+    "hers": (f"Lines marked {HER_WORDS_LABEL} are what you (Aerys) said at the time, not verified facts and not "
+             "things he said: if one matters, check it before repeating it as settled."),
+    "own_note": (f"Lines marked {OWN_NOTE_LABEL} are notes you (Aerys) wrote for yourself (gap reports, run "
+                 "notes, skill reviews, session summaries): yours, not things anyone told you."),
+    "kael_talk": (f"Lines marked {KAEL_TALK_LABEL} are from your (Aerys) conversations with Kael, not things "
+                  "they said."),
+    "kael": (f"Lines marked {KAEL_NOTES_LABEL} came from Kael's notes on their records, which they approved, "
+             "not from your conversations with them."),
+    "her_phrasing": (f"Lines marked {HER_PHRASING_LABEL} are facts you saved in your own wording: many restate "
+                     "what they told you, some are what you worked out. Say \"I have a note that...\", never quote "
+                     "one as their exact words."),
+    "read": ("Lines marked (saved after she read: ...) were saved right after you read that: the fact may come "
+             "from it or from them. Don't present one as their words, and don't deny they said it either; if it "
+             "matters, say where you think it came from."),
+}
+
+
+def source_mark(row: dict, key: str = "") -> tuple[str, str]:
+    """(kind, label) for where a memory came from, from what the row carries; ("", "") = their words."""
+    key = str(row.get("key_label") or key or "").strip().lower()
+    if key.startswith("aerys."):
+        return "hers", HER_WORDS_LABEL
+    context = str(row.get("context") or "").strip().lower()
+    # Replay 11/25: per-message recall (unlike search) can bring back a talk with Kael (a2a memory).
+    if str(row.get("source_platform") or "") == "kael_line" or context.startswith("a2a exchange"):
+        return "kael_talk", KAEL_TALK_LABEL
+    category = [str(t) for t in (row.get("category") or ())]
+    if "trust:owner" in category:
+        return "", ""
+    read = [t[5:] for t in category if t.startswith("from:")]
+    if read:
+        what = ", ".join(dict.fromkeys(_READ_WHAT.get(r, "an outside source") for r in read))
+        return "read", READ_LABEL.format(what=what)
+    if context.startswith(_OWN_NOTE_CONTEXTS) or key.startswith("session."):
+        return "own_note", OWN_NOTE_LABEL
+    if context.startswith("from kael's"):
+        return "kael", KAEL_NOTES_LABEL
+    if "trust:assistant" in category:
+        return "her_phrasing", HER_PHRASING_LABEL
+    return "", ""
+
+
+def source_notes(marks) -> str:
+    """The explanation lines for the marks shown, in a fixed order."""
+    return "\n".join(SOURCE_NOTES[k] for k in SOURCE_NOTES if k in marks)
 #: Keys whose rows add up instead of replacing (workers/extraction.APPEND_PREFIXES; a test keeps them equal).
 _APPEND_PREFIXES = ("event.", "aerys.")
 EMBED_MODEL = "openai/text-embedding-3-small"  # via OpenRouter, 1536-dim
@@ -63,7 +126,8 @@ SELECT
   (1 - (m.embedding <=> %(embedding)s::vector))
   * ({SIM_WEIGHT} + {RECENCY_WEIGHT} * LEAST(1.0, GREATEST(0.0,
       1 - EXTRACT(EPOCH FROM (NOW() - m.created_at)) / {RECENCY_WINDOW_S}.0
-    ))) AS combined_score
+    ))) AS combined_score,
+  m.key_label, m.context, m.category
 FROM memories m
 WHERE m.person_id = %(person_id)s::uuid
   AND m.deleted_at IS NULL
@@ -81,6 +145,9 @@ _COLUMNS = (
     "privacy_level",
     "created_at",
     "combined_score",
+    "key_label",
+    "context",
+    "category",
 )
 
 
@@ -168,7 +235,7 @@ WHERE m.person_id = ANY(%(person_ids)s::uuid[])
 
 _SEARCH_COLUMNS = (
     "id", "person_id", "content", "key_label", "source_platform", "privacy_level",
-    "created_at", "score", "display_name",
+    "created_at", "score", "display_name", "context", "category",
 )
 
 SEARCH_SEMANTIC_SQL = f"""\
@@ -179,7 +246,7 @@ SELECT
   * ({SIM_WEIGHT} + {RECENCY_WEIGHT} * LEAST(1.0, GREATEST(0.0,
       1 - EXTRACT(EPOCH FROM (NOW() - m.created_at)) / {RECENCY_WINDOW_S}.0
     ))) AS score,
-  p.display_name
+  p.display_name, m.context, m.category
 {_SEARCH_FROM}
 {_SEARCH_WHERE}
   AND m.embedding IS NOT NULL
@@ -192,7 +259,7 @@ LIMIT %(limit)s
 SEARCH_KEYWORD_SQL = f"""\
 SELECT
   m.id::text, m.person_id::text, m.content, m.key_label, m.source_platform, m.privacy_level,
-  m.created_at, h.held AS score, p.display_name
+  m.created_at, h.held AS score, p.display_name, m.context, m.category
 {_SEARCH_FROM}
 CROSS JOIN LATERAL (
   SELECT count(*) AS held FROM unnest(%(patterns)s::text[]) AS w(pat)
@@ -281,6 +348,12 @@ def format_memory_context(rows: list[dict], *, now: datetime | None = None) -> s
 
 
 def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = None) -> tuple[str, bool]:
+    """(block, her_shown): format_memory_context_marked's block and whether her own words (D97) are in it."""
+    block, marks = format_memory_context_marked(rows, now=now)
+    return block, "hers" in marks
+
+
+def format_memory_context_marked(rows: list[dict], *, now: datetime | None = None) -> tuple[str, frozenset]:
     """Build the prompt-ready memory block — the "Format Memory Context" Code node.
 
     Pipeline preserved exactly:
@@ -305,7 +378,7 @@ def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = No
     now = now or datetime.now(timezone.utc)
     seen: set[str] = set()
     lines: list[str] = []
-    her_shown = False   # D97: an aerys.* row made it into the block (by its key, never by its text)
+    marks: set[str] = set()   # D97/D105: where the shown lines came from (by key and stored tags, never by text)
     for row in rows:
         content = row.get("content")
         if content is None:
@@ -326,10 +399,11 @@ def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = No
             display = ":".join(content.split(":")[1:]).strip()
         else:
             display = content
-        if key.startswith("aerys."):
-            # D97 (2026-11-25): her own words, never to be read as a fact about him.
-            display = f"{HER_WORDS_LABEL} {display}"
-            her_shown = True
+        # D97: her own words, never to be read as a fact about him. D105: every other source says itself too.
+        kind, label = source_mark(row, key)
+        if kind:
+            display = f"{label} {display}"
+            marks.add(kind)
 
         parts = [f"* {display}"]
         if row.get("source_platform"):
@@ -340,7 +414,7 @@ def format_memory_context_flagged(rows: list[dict], *, now: datetime | None = No
 
         if len(lines) >= CONTEXT_CAP:
             break
-    return "\n".join(lines), her_shown
+    return "\n".join(lines), frozenset(marks)
 
 
 def _age_days(created_at: datetime, now: datetime) -> int:

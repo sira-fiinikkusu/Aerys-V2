@@ -433,7 +433,12 @@ UPDATE memories
 SET content = %(content)s, context = %(context)s, event_date = %(event_date)s,
     embedding = %(embedding)s::vector, updated_at = now(),
     privacy_level = CASE WHEN %(privacy_level)s = 'private' THEN 'private'
-                         ELSE privacy_level END
+                         ELSE privacy_level END,
+    -- D105 (Codex r1): the trust:/from: tags described the OLD text; a writer with provenance (remember)
+    -- re-adds its own in the same transaction (finish below).
+    category = CASE WHEN category IS NULL THEN NULL
+                    ELSE ARRAY(SELECT tag FROM unnest(category) tag
+                               WHERE tag NOT LIKE 'trust:%%' AND tag NOT LIKE 'from:%%') END
 WHERE id = %(id)s
 """
 
@@ -761,7 +766,7 @@ def triage_memory(
         "created_at": created_at,
     }
 
-    def finish(action, row_id=None):
+    def finish(action, row_id=None, kept_text=False):
         # Optional portable provenance is committed in the SAME transaction as
         # insert/update/replace. Existing callers retain their exact behavior.
         # An append key's write names its own row: its siblings are other memories.
@@ -770,11 +775,18 @@ def triage_memory(
                 UPDATE memories SET source_platform = %(source_platform)s,
                     channel = COALESCE(%(channel)s, channel),
                     source_message_id = COALESCE(%(source_message_id)s, source_message_id),
-                    category = CASE WHEN %(category)s::text[] IS NULL THEN category ELSE ARRAY(SELECT tag FROM unnest(COALESCE(category, ARRAY[]::text[])) tag
-                                     WHERE tag NOT LIKE 'trust:%%') || %(category)s::text[] END
+                    category = CASE WHEN %(category)s::text[] IS NULL THEN category
+                        -- D105 (Codex r2): the text was only refreshed, not rewritten: its own trust:/from: tags still
+                        -- describe it; only the writer's other tags are added.
+                        WHEN %(kept_text)s THEN COALESCE(category, ARRAY[]::text[]) || ARRAY(
+                            SELECT t FROM unnest(%(category)s::text[]) t
+                            WHERE t NOT LIKE 'trust:%%' AND t NOT LIKE 'from:%%'
+                              AND NOT (t = ANY(COALESCE(category, ARRAY[]::text[]))))
+                        ELSE ARRAY(SELECT tag FROM unnest(COALESCE(category, ARRAY[]::text[])) tag
+                                   WHERE tag NOT LIKE 'trust:%%' AND tag NOT LIKE 'from:%%') || %(category)s::text[] END
                 WHERE id = %(id)s
             """, {"source_platform": source_platform, "channel": channel, "category": category,
-                  "source_message_id": source_message_id, "id": row_id})
+                  "source_message_id": source_message_id, "id": row_id, "kept_text": bool(kept_text)})
             return action
         if row_id is not None:
             return action
@@ -785,7 +797,7 @@ def triage_memory(
                     channel = COALESCE(%(channel)s, channel),
                     source_message_id = COALESCE(%(source_message_id)s, source_message_id),
                     category = CASE WHEN %(category)s::text[] IS NULL THEN category ELSE ARRAY(SELECT tag FROM unnest(COALESCE(category, ARRAY[]::text[])) tag
-                                     WHERE tag NOT LIKE 'trust:%%') || %(category)s::text[] END
+                                     WHERE tag NOT LIKE 'trust:%%' AND tag NOT LIKE 'from:%%') || %(category)s::text[] END
                 WHERE person_id = %(person_id)s::uuid AND key_label = %(key_label)s
                     AND deleted_at IS NULL
             """, {"source_platform": source_platform, "channel": channel,
@@ -824,7 +836,7 @@ def triage_memory(
                     return "skipped"
                 if row_date and not event_date:
                     conn.execute(TRIAGE_APPEND_REFRESH_SQL, {"id": row_id, "privacy_level": privacy_level})
-                    return finish("update", row_id)
+                    return finish("update", row_id, kept_text=True)
                 conn.execute(TRIAGE_UPDATE_SQL, {"id": row_id, "content": content, "context": context,
                                                  "event_date": event_date, "embedding": embedding,
                                                  "privacy_level": privacy_level})

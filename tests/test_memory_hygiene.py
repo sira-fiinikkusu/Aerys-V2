@@ -95,6 +95,10 @@ def test_birthday_tool_then_two_extractor_aliases_leave_one_database_row():
     class Connection:
         def execute(self, sql, params):
             sql = re.sub(r'::(?:uuid|vector|timestamptz)', '', sql)
+            # D105: the rewrite also clears trust:/from: tags with Postgres array syntax; this SQLite stand-in has no
+            # category column, so the clause is dropped here (the real statement was probed on Postgres 16).
+            sql = re.sub(r',\s*(?:--[^\n]*\n\s*)*category = CASE WHEN category IS NULL THEN NULL.*?END', '', sql,
+                         flags=re.S)
             sql = re.sub(r'%\((\w+)\)s', r':\1', sql).replace('now()', 'CURRENT_TIMESTAMP')
             return database.execute(sql, params)
     def write(record):

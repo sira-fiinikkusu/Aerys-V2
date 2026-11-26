@@ -123,33 +123,78 @@ def _owner_typed_on_discord(conf, gate):
             and asker(identity, conf.get('thread_id', ''), gate.owner, gate.members) == OWNER_TEXT)
 
 
-#: D104 (Chris 11/25 19:58: "yes it should and i hate the idea of having to type to her to confirm it"): his tap on
-#: a remember card is his confirmation of exactly the words it shows.
-REMEMBER_UNSURE_VOICE = "Said over a speaker that wasn't sure it was your voice."
+#: D104 (Chris 11/25 19:58: "i hate the idea of having to type to her to confirm it"), redone under D105 (20:22:
+#: "that isnt how anyone remembers anything... why is it me approving her to hold onto something becomes something
+#: i explicitly said?"): a tap on a remember card means "keep it", never "I said it". Whose words a fact is stays
+#: decided by what the person actually said this turn (the remember tool's quote check), and what she read is
+#: recorded on the fact. When the speaker wasn't sure it was him, the card asks "was this you?": his tap settles
+#: who was talking, nothing more.
+REMEMBER_UNSURE_VOICE = "The speaker wasn't sure it was your voice."
+REMEMBER_APPROVE_MEANS = ("Approve = OK to keep it. It stays marked by where it came from: a tap never turns it "
+                          "into anyone's own words.")
+REMEMBER_WAS_IT_YOU_MEANS = ("Approve = yes, that was me, and keep it. Only words you actually said count as yours; "
+                             "anything she added stays marked as hers.")
+HEARD_SHOWN = 300                         # how much of what the speaker heard the card shows
+REMEMBER_FENCE_REFUSAL = ('Not kept: a fact holding ' + '```' + " can't be shown exactly on his card. "
+                          'Say it without the triple backticks.')
+
+
+def canonical_fact(value) -> str:
+    """Codex D104: ONE text for the card, the stored args and the write. Invisible format and control characters
+    out (newlines and tabs kept), ends trimmed as remember trims them."""
+    import unicodedata
+    text = str(value or '')
+    return ''.join(c for c in text if c in '\n\t' or unicodedata.category(c) not in ('Cf', 'Cc')).strip()
+
+
+def _literal(text: str) -> str:
+    """Shown in a code block, so no markup (a spoiler, a link, bold) can hide or dress up a word he confirms."""
+    return '```\n' + text + '\n```'          # the card refuses a fact holding a fence first
 
 
 def _remember_card(request, gate, conf, sources, args):
-    """D104: a remember after outside text, or from a voice that wasn't sure it was him, waits for his tap on a card
-    showing the exact fact; his Approve confirms exactly those words (action_executor keeps them as his)."""
+    """D104/D105: a remember after outside text, or from a voice that wasn't sure it was him, waits for a tap on a card
+    showing the exact fact. The tap means "keep it": whose words it is stays decided by what was actually said this
+    turn, and what she read is recorded on the fact. For an unsure voice the card asks "was this you?" and shows what
+    the speaker heard; his tap settles who was talking, nothing more."""
     from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+    from aerys_v2.tools.remember import CURRENT_TURN_TEXT, refusal_for
     if gate is None:
         return _refusal(request, 'Not done: this needs the owner’s Approve button, which is unavailable. '
                         'Nothing was kept.'), None
     tool_args = dict(args)                    # exactly what she asked to keep; the card shows the fact
-    fact = ' '.join(str(tool_args.get('fact') or '').split())
-    shown = fact or json.dumps(tool_args, ensure_ascii=False)
+    if 'fact' in tool_args:
+        tool_args['fact'] = canonical_fact(tool_args.get('fact'))
+        refused = refusal_for(tool_args['fact'])
+        if refused:
+            # The tool would refuse it after his tap anyway; a secret-shaped fact must never be put on a card.
+            return _refusal(request, refused), None
+        if '```' in tool_args['fact']:
+            # Codex D104 r2: the card must show exactly what is kept, and a fence can't be shown inside one.
+            return _refusal(request, REMEMBER_FENCE_REFUSAL), None
+    shown = tool_args.get('fact') or json.dumps(tool_args, ensure_ascii=False)
     identity, thread = conf.get('identity') or {}, conf.get('thread_id', '')
+    owner = str(getattr(gate, 'owner', None) or '')
+    was_it_you = bool(identity.get(VOICE_OWNER_ASSUMED_KEY)) and bool(owner) and str(identity.get('user_id') or '') == owner
+    # Code-captured, never hers: what the person actually said this turn (the quote check runs against it after the
+    # tap) and the code-owned names of what she read.
+    turn_words = str(CURRENT_TURN_TEXT.get() or '')
+    read_first = sorted(str(n) for n in sources) if isinstance(sources, (set, list, tuple)) else []
     why = [notice(sources)] if sources else []
-    if identity.get(VOICE_OWNER_ASSUMED_KEY):
-        why.append(REMEMBER_UNSURE_VOICE)
+    if was_it_you:
+        heard = ' '.join(canonical_fact(turn_words).replace('```', "'''").split())
+        heard = heard if len(heard) <= HEARD_SHOWN else heard[:HEARD_SHOWN - 1].rstrip() + '…'
+        why.append(REMEMBER_UNSURE_VOICE + (' It heard:\n' + _literal(heard) if heard else ''))
+        summary, means = 'Was this you? Keep this in your memory?', REMEMBER_WAS_IT_YOU_MEANS
+    else:
+        summary, means = 'Keep this in your memory?', REMEMBER_APPROVE_MEANS
     from aerys_v2.hands_gate import _key
     payload = {'tool': 'remember', 'tool_args': tool_args, 'identity': identity,
-               # Code-written, never hers: only a remember for the owner's own memory is confirmed by his tap.
-               '_tap_confirms': bool(getattr(gate, 'owner', None)) and str(identity.get('user_id') or '') == str(gate.owner),
+               '_turn_words': turn_words, '_was_it_you': was_it_you, '_read_first': read_first,
                'what': 'keeping this in your memory'}
     verdict = gate._ask(OUTSIDE_ACTION, 'outside:' + _key(thread, payload), thread, payload,
-                        kind='memory', summary='Keep this in your memory?',
-                        detail='\n'.join(why) + f'\n\n“{shown}”\n\nApprove = you confirm exactly these words.',
+                        kind='memory', summary=summary,
+                        detail='\n'.join(why) + '\n\nShe\'d keep:\n' + _literal(shown) + '\n' + means,
                         what=payload['what'])
     return _answer(request, verdict, conf)
 
@@ -349,19 +394,24 @@ def action_executor(tools, *, skill_middleware=None):
         if tool is None:
             return False, 'Not done: the approved tool is unavailable.'
         identity = dict(row.args.get('identity') or {})
-        from aerys_v2.tools.remember import CURRENT_TURN_TEXT
-        # His tap on the button that showed this exact address is his word for it (contacts). D104 (Chris 11/25
-        # 19:58): his tap on a remember card that showed the exact fact is his word for those words too, for his
-        # own memory (_tap_confirms, code-written at the card), even when the voice wasn't sure it was him. Any other
-        # approved write carries no owner words.
+        from aerys_v2.tools.remember import CURRENT_TURN_TEXT, KEPT_AFTER_READING
+        # His tap on the button that showed this exact address is his word for it (contacts). A remember card is
+        # different (D105): his tap means "keep it", never "I said it". The fact's words are checked against what
+        # was actually said in that turn (_turn_words, code-captured at the card); "was this you?" (an unsure
+        # voice) only settles who was talking. Any other approved write carries no owner words.
         approved_words = ''
         if tool.name == 'save_contact_email':
             approved_words = str(row.args['tool_args'].get('email') or '')
-        elif tool.name == 'remember' and row.args.get('_tap_confirms') is True:
-            from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
-            identity.pop(VOICE_OWNER_ASSUMED_KEY, None)
-            approved_words = str(row.args['tool_args'].get('fact') or '')
+        read_first = []
+        if tool.name == 'remember':
+            if row.args.get('_was_it_you') is True:
+                from aerys_v2.state import VOICE_OWNER_ASSUMED_KEY
+                identity.pop(VOICE_OWNER_ASSUMED_KEY, None)
+            approved_words = str(row.args.get('_turn_words') or '')
+            read_first = [str(n) for n in (row.args.get('_read_first') or ())]
         config = {'configurable': {'thread_id': row.thread_id, 'identity': identity}}
+        if read_first:
+            config['configurable'][KEPT_AFTER_READING] = read_first
         token = CURRENT_TURN_TEXT.set(approved_words)
         tool_args = dict(row.args['tool_args'])
         if tool.name == 'send_email':

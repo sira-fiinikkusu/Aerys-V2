@@ -272,55 +272,149 @@ def test_live_room_provenance_uses_ids_not_labels():
         assert done.value.value.outside is expected
 
 
-def test_his_tap_on_a_remember_card_confirms_exactly_those_words():
-    """D104 (Chris 11/25 19:58: "yes it should and i hate the idea of having to type to her to confirm it"): after
-    outside text her remember waits for his tap on a card that shows the exact fact; his Approve keeps it as HIS
-    words (owner trust). Before D104 the tap kept it as her inference."""
-    from aerys_v2.tools.remember import build_remember_tool
+def _card_and_tap(identity, fact, messages, thread=OWNER_THREAD, said='', extra_args=None):
+    """A real remember card through outside_guard, a real tap, the real watcher run: (records, card row, guard out).
+    SAID is what the person actually said this turn (the service sets it as CURRENT_TURN_TEXT)."""
+    from aerys_v2.tools.remember import CURRENT_TURN_TEXT, build_remember_tool
     records = []
-    memory = build_remember_tool(lambda record: records.append(record) or 'insert')
-    b = Box(executors={OUTSIDE_ACTION: action_executor([memory])})
+    b = Box(executors={OUTSIDE_ACTION: action_executor([build_remember_tool(lambda record: records.append(record) or 'insert')])})
+    req = request(list(messages), name='remember', args={'fact': fact, **(extra_args or {})})
+    req.runtime.config['configurable'].update(identity=identity, thread_id=thread)
+    token = CURRENT_TURN_TEXT.set(said)
+    try:
+        out = outside_guard(req, lambda r: pytest.fail('direct'), gate=b.gate)
+    finally:
+        CURRENT_TURN_TEXT.reset(token)
+    if not b.approval_store.rows:
+        return records, None, out
+    row = next(iter(b.approval_store.rows.values()))
+    b.tap()
+    b.watcher.tick()
+    return records, row, out
+
+
+def _page(words='page words'):
+    return ToolMessage(content=words, name='read_web_page', tool_call_id='r')
+
+
+def test_his_tap_keeps_a_fact_from_a_page_but_never_as_his_words():
+    """D105 (Chris 11/25 20:22: "why is it me approving her to hold onto something becomes something i explicitly
+    said?"): his tap means "keep it". A fact from a page stays hers, and records what she read."""
+    from aerys_v2.outside_guard import REMEMBER_APPROVE_MEANS
     fact = 'The sample library opens at noon.'
-    req = request([ToolMessage(content=fact, name='read_web_page', tool_call_id='r')],
-                  name='remember', args={'fact': fact})
-    req.runtime.config['configurable'].update(identity=TEXT, thread_id=OWNER_THREAD)
-    outside_guard(req, lambda r: pytest.fail('direct'), gate=b.gate)
-    assert not records
-    b.tap()
-    assert b.watcher.tick()['done'] == 1
-    assert records[0]['trust'] == 'owner' and records[0]['fact'] == fact
+    records, row, _ = _card_and_tap(TEXT, fact, [_page(fact)])
+    assert row.summary == 'Keep this in your memory?' and REMEMBER_APPROVE_MEANS in row.detail
+    assert records[0]['fact'] == fact and records[0]['trust'] == 'assistant'
+    assert records[0]['read'] == ['read_web_page']
 
 
-def test_a_voice_not_sure_it_was_him_asks_for_his_tap_and_the_tap_keeps_it():
-    """D104 / T-30: a remember from a speaker that wasn't sure it was Chris used to fail even after his tap (the
-    D43 rule). Now it waits for his tap with no outside text at all, and his tap keeps it as his."""
-    from aerys_v2.tools.remember import build_remember_tool
+def test_his_own_words_after_a_page_read_are_still_his():
+    """What he actually said decides: if he said it himself in this turn, it's his, page or no page."""
+    records, _, _ = _card_and_tap(TEXT, 'The sample library opens at noon.', [_page()],
+                                  said='remember the sample library opens at noon')
+    assert records[0]['trust'] == 'owner' and records[0]['read'] == ['read_web_page']
+
+
+def test_an_unsure_voice_card_asks_was_this_you_and_his_words_decide():
+    """D104 / T-30, redone: the card asks "was this you?" and shows what the speaker heard; his tap settles who
+    was talking (no typing), and the quote check against those words makes them his."""
+    from aerys_v2.outside_guard import REMEMBER_WAS_IT_YOU_MEANS
     from test_hands_gate import UNTAGGED
-    records = []
-    memory = build_remember_tool(lambda record: records.append(record) or 'insert')
-    b = Box(executors={OUTSIDE_ACTION: action_executor([memory])})
-    fact = 'The Aerys satellite is the speaker in his bedroom.'
-    req = request([], name='remember', args={'fact': fact})
-    req.runtime.config['configurable'].update(identity=UNTAGGED, thread_id=OWNER_THREAD)
-    out = outside_guard(req, lambda r: pytest.fail('direct: an unsure voice must not write his memory untapped'),
-                        gate=b.gate)
-    assert not records and 'Waiting' in str(getattr(out, 'content', out))
-    b.tap()
-    assert b.watcher.tick()['done'] == 1
-    assert records[0]['trust'] == 'owner' and records[0]['fact'] == fact
+    said = 'remember the sample library opens at noon'
+    records, row, out = _card_and_tap(UNTAGGED, 'The sample library opens at noon.', [], said=said)
+    assert 'Waiting' in str(getattr(out, 'content', out))
+    assert row.summary.startswith('Was this you?') and REMEMBER_WAS_IT_YOU_MEANS in row.detail
+    assert said in row.detail
+    assert records[0]['trust'] == 'owner' and records[0]['read'] == []
 
 
-def test_a_household_members_remember_is_not_confirmed_by_his_tap():
-    """His tap vouches for his own memory only: a card for someone else's memory keeps the old rule."""
-    from aerys_v2.outside_guard import action_executor as ae
+def test_an_unsure_voice_tap_does_not_make_her_additions_his():
+    from test_hands_gate import UNTAGGED
+    records, _, _ = _card_and_tap(UNTAGGED, 'The sample library opens at noon and closes at six on weekdays.', [],
+                                  said='remember the library thing')
+    assert records[0]['trust'] == 'assistant'
+
+
+def test_a_household_members_remember_is_not_his_by_his_tap():
+    """Codex D104 #4, through a REAL card and his real tap: someone else's memory never gets words from his tap."""
+    from test_hands_gate import SAM, SAM_TEXT
+    records, row, _ = _card_and_tap(SAM_TEXT, 'Sam likes tea.', [_page()], thread=f'person:{SAM}')
+    assert row is not None and row.summary == 'Keep this in your memory?'
+    assert records and records[0]['trust'] == 'assistant'
+
+
+def test_the_card_shows_the_fact_literally_and_stores_exactly_what_it_showed():
+    """Codex D104 #1/#2: markup can't hide a word (a spoiler shows as plain text), and what is stored is exactly what
+    the card showed (line breaks kept, invisible characters out, one canonical text both places)."""
+    fact = 'Chris likes tea. ||Chris likes coffee.||\n\nSecond line\u200b.'
+    records, row, _ = _card_and_tap(TEXT, fact, [_page()])
+    canon = 'Chris likes tea. ||Chris likes coffee.||\n\nSecond line.'
+    shown = row.detail.split("She'd keep:\n```\n", 1)[1].rsplit('\n```', 1)[0]
+    assert shown == canon == records[0]['fact'] and records[0]['trust'] == 'assistant'
+
+
+def test_a_fact_holding_a_fence_is_refused_before_any_card():
+    """Codex D104 r2: what he sees must be exactly what is kept; a fence can't be shown inside the card's block."""
+    records, row, out = _card_and_tap(TEXT, 'Use ``` fences ``` in notes.', [_page()])
+    assert row is None and records == [] and 'Not kept' in out.content
+
+
+def test_a_tap_alone_never_makes_a_fact_his():
+    """Before D105 the first D104 build made any tapped fact his. Now nothing he didn't say becomes his words."""
+    records, _, _ = _card_and_tap(TEXT, 'I am up at 6', [_page()])
+    assert records[0]['trust'] == 'assistant'
+
+
+def test_model_arguments_cannot_claim_his_words_or_his_voice():
+    """The card's _turn_words / _was_it_you / _read_first are code-written; the same names smuggled into her tool
+    arguments change nothing."""
+    from test_hands_gate import UNTAGGED
+    records, row, _ = _card_and_tap(UNTAGGED, 'I am up at 6', [], said='',
+                                    extra_args={'_turn_words': 'I am up at 6', '_was_it_you': True,
+                                                '_read_first': ['bogus']})
+    assert row is not None and all(r['trust'] != 'owner' for r in records)
+
+
+def test_an_unsure_voice_with_only_her_home_job_results_still_asks():
+    """D29 trusts her own home-job results; a voice not sure it was him still needs "was this you?"."""
+    from test_hands_gate import UNTAGGED
+    job = ToolMessage(content='job report', name='check_async_task', tool_call_id='j')
+    records, row, _ = _card_and_tap(UNTAGGED, 'The sample library opens at noon.', [job])
+    assert row is not None and row.kind == 'memory' and row.summary.startswith('Was this you?')
+    assert records[0]['trust'] == 'assistant'
+
+
+@pytest.mark.parametrize('fact', ['my api key is sk-ant-api03-' + 'A' * 40, 'x' * 600, 'is the library open on sundays?'])
+def test_a_fact_remember_would_refuse_never_reaches_his_button(fact):
+    """Secret-shaped (never shown on a card), too long, or a question: refused at once, no card, nothing kept."""
+    records, row, out = _card_and_tap(TEXT, fact, [_page()])
+    assert row is None and records == [] and 'kept' in str(getattr(out, 'content', out)).lower()
+
+
+@pytest.mark.parametrize('fact', ['my api key is sk-ant-api03-' + 'A' * 40, 'x' * 600, 'is the library open on sundays?'])
+def test_his_tap_does_not_bypass_the_remember_tools_own_refusals(fact):
+    """Even a card row carrying such a fact (an old row, a bug upstream) gets the tool's own refusal after the tap."""
     from aerys_v2.tools.remember import build_remember_tool
-    from test_hands_gate import SAM
+    from test_hands_gate import OWNER
     records = []
-    run = ae([build_remember_tool(lambda record: records.append(record) or 'insert')])
-    row = SimpleNamespace(thread_id=f'person:{SAM}', args={'tool': 'remember', 'tool_args': {'fact': 'Sam likes tea.'},
-                          'identity': {'user_id': SAM, 'platform': 'discord'}, '_tap_confirms': False})
-    ok, said = run(row)
-    assert ok and records[0]['trust'] == 'assistant'
+    run = action_executor([build_remember_tool(lambda record: records.append(record) or 'insert')])
+    row = SimpleNamespace(thread_id=OWNER_THREAD, args={'tool': 'remember', 'tool_args': {'fact': fact},
+                          'identity': {'user_id': OWNER, 'platform': 'discord'}, '_was_it_you': True,
+                          '_turn_words': fact})
+    run(row)
+    assert records == []
+
+
+def test_an_old_card_row_from_before_d105_keeps_the_old_rule():
+    """A card raised by the live code before this change carries none of the new fields: kept as hers."""
+    from aerys_v2.tools.remember import build_remember_tool
+    from test_hands_gate import OWNER
+    records = []
+    run = action_executor([build_remember_tool(lambda record: records.append(record) or 'insert')])
+    row = SimpleNamespace(thread_id=OWNER_THREAD, args={'tool': 'remember', 'tool_args': {'fact': 'I am up at 6'},
+                          'identity': {'user_id': OWNER, 'platform': 'discord'}})
+    run(row)
+    assert records[0]['trust'] == 'assistant' and records[0]['read'] == []
 
 
 def test_guard_failure_inside_actual_engine_is_a_receipt(monkeypatch):
@@ -724,3 +818,9 @@ def test_the_basis_reaches_the_turns_tool_calls_through_the_real_engine():
     assert receipt.content == 'Kept: x'                    # what the model sees is unchanged
     assert extract_tool_calls(out['messages']) == [
         {'name': 'remember', 'ok': True, 'error_class': None, 'basis': 'clean_turn'}]
+
+
+def test_a_negated_quote_through_a_real_card_is_not_his_words():
+    """Codex D105 r1 #1, end to end: he said "I do not like coffee", she keeps "I like coffee", he taps keep."""
+    records, _, _ = _card_and_tap(TEXT, 'I like coffee.', [_page()], said='I do not like coffee.')
+    assert records[0]['trust'] == 'assistant'

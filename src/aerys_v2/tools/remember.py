@@ -57,10 +57,46 @@ CURRENT_TURN_TEXT: contextvars.ContextVar[str] = contextvars.ContextVar("aerys_c
 #: If it ever needs to rise, raise the portable embedder first.
 FACT_LIMIT = 500
 KEY_LABEL_TIMEOUT_S = 2.0
-OWNER_QUOTE_RATIO = 0.8  # share of the fact's tokens that must appear in the turn text
+#: D105 r9 (Codex): there is no overlap ratio any more. A fact is his words only when EVERY content word in it is
+#: in what he said (filler, pronouns, contraction endings and his own name excepted): a 20% allowance was where a
+#: meaning-changing word (a homoglyph "n\u043et", "dont", "non-smoking", a split "n ot") could hide.
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _TOKEN_RE = re.compile(r"\w+")  # Unicode-aware: a Japanese or Arabic quote is still the owner's word
 _STOP = frozenset("the a an and or of to in on at for is are was were be that this it my his her their our".split())
+#: Codex D105 r1/r5: word overlap ignores "not" ("I do not like coffee" -> "I like coffee" read as his words).
+#: Until the judged check (#261), the negations (each with the word it negates) must match exactly.
+#: A side agent's catch (11/25): "Don't forget my appointment is Dec 19" or "No, remember that I..." ask her to keep
+#: something; that negation is the request, not the fact. Codex D105 r3: only a REQUEST at the start of a sentence
+#: of HIS turn is removed ("I never forget birthdays" keeps its negation), never anything in the fact. Codex r4: a
+#: leading "No," is NOT removed ("I like coffee? No." is a correction); "No, remember that I..." stays hers.
+_REMEMBER_ASK_RE = re.compile(
+    r"(?:^|(?<=[.!?]))\s*(?:(?:hey|ok|okay)\s+aerys[,!]?\s*)?(?:(?:and|also|oh|please)[,]?\s+)*"
+    r"(?:(?:don['\u2019]?t|do\s+not|never)\s+(?:you\s+)?(?:ever\s+)?(?:let\s+(?:me|you|us)\s+)?forget\b[\s,.:;!\u2014\u2013-]*)",
+    re.I | re.M)
+
+
+_NEG_WORDS = frozenset("not no cannot never nothing none nobody nowhere neither nor without".split())
+_NEG_SAME = frozenset("not no cannot".split())       # don't / doesn't / do not / cannot / no ... all read as "not"
+#: Codex r6/r7: a word, plus an apostrophe only when it's a real contraction ending (don't, it's, we're), so quote
+#: marks split words instead of joining them ("not\u2018like\u2019" is "not", "like").
+_WORDS_RE = re.compile(r"\w+(?:'(?:t|s|re|ve|ll|d|m)\b)?")
+#: Codex r8: every apostrophe-like mark reads as one apostrophe first (don\u2018t, don\u2019t, don`t), then only a real
+#: contraction ending joins the word ("not\u2018like\u2019" still splits into "not", "like").
+_APOSTROPHES_RE = re.compile("[\u2018\u2019`\u00b4\u02bc\u2032]")
+
+
+def _negations(text: str) -> set[tuple[str, str]]:
+    """Codex D105 r5: each negation WITH the word it negates ("not like", "never forget"), so an unrelated "No," or
+    "I don't know" elsewhere can't vouch for a negation in the fact, and a negation in the fact needs the same one
+    in what he said."""
+    words = _WORDS_RE.findall(_plain(text))
+    out = set()
+    for i, w in enumerate(words):
+        if w in _NEG_WORDS or w.endswith("n't"):
+            head = "not" if (w in _NEG_SAME or w.endswith("n't")) else w
+            nxt = next((x for x in words[i + 1:] if x not in _STOP), "")
+            out.add((head, nxt))
+    return out
 
 KEPT_PREFIX = "Kept:"
 ALREADY_PREFIX = "Already kept:"
@@ -88,17 +124,133 @@ TOO_LONG = (
 Writer = Callable[[dict], str]
 
 
-def _tokens(text: str) -> set[str]:
-    return {t for t in _TOKEN_RE.findall(text.casefold()) if (len(t) >= 3 or not t.isascii()) and t not in _STOP}
+#: Contractions spelled out, with or without the apostrophe (Chris types "dont", "cant", "doesnt"), so
+#: "don't" / "dont" / "do not" all read the same in both texts.
+_CONTRACTIONS = [
+    (re.compile(r"(?i)\bcan'?t\b"), "can not"), (re.compile(r"(?i)\bwon'?t\b"), "will not"),
+    (re.compile(r"(?i)\bshan'?t\b"), "shall not"), (re.compile(r"(?i)\bain'?t\b"), "am not"),
+    (re.compile(r"(?i)\b(do|does|did|is|are|was|were|has|have|had|should|would|could|must|need|might)n'?t\b"), r"\1 not"),
+    (re.compile(r"(?i)n't\b"), " not"),
+    # Codex r10: the other contractions are spelled out too, so no leftover piece needs an exemption.
+    (re.compile(r"(?i)'s\b"), ""), (re.compile(r"(?i)'m\b"), " am"), (re.compile(r"(?i)'re\b"), " are"),
+    (re.compile(r"(?i)'ve\b"), " have"), (re.compile(r"(?i)'ll\b"), " will"), (re.compile(r"(?i)'d\b"), " would"),
+]
 
 
-def trust_for(fact: str, turn_text: str) -> str:
-    """owner when the fact is (near-)verbatim what the owner said this turn; else assistant."""
-    fact_tokens = _tokens(fact)
+def _plain(text: str) -> str:
+    """Codex r6-r9, the whole typography class at once: compatibility forms folded (full-width letters and
+    apostrophes), invisible format characters dropped, every apostrophe-like mark read as one apostrophe, and
+    contractions spelled out. Whatever still looks odd (a homoglyph, an accented letter, a split word) simply
+    doesn't match his words, and an unmatched word means the fact isn't his."""
+    return _spell(_normal(text).casefold())
+
+
+def _normal(text: str) -> str:
+    import unicodedata
+    text = _APOSTROPHES_RE.sub("'", text or "")      # before NFKC: it turns \u00b4 into a space + accent
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cf", "Mn"))
+    return _APOSTROPHES_RE.sub("'", text)
+
+
+def _spell(text: str) -> str:
+    """Contractions spelled out (case kept: "Don't" -> "Do not")."""
+    for pattern, spelled in _CONTRACTIONS:
+        text = pattern.sub(spelled, text)
+    return text
+
+
+#: Codex r10: the only words a fact may carry that he didn't say are his own name (passed in) and first-person
+#: pronouns (she keeps "Chris ..." for his "I ..."). Filler, letters and stopwords all count: "vitamin A" never
+#: vouches for "vitamin D", nor "I work" for "I work in IT".
+#: Codex r12: no pronoun is exempt ("The cabin is yours" must never vouch for "The cabin is mine").
+_LIVE_QUOTE_RATIO = 0.8   # the rule live until D105 (885e3e5), kept as a gate: see _live_rule
+#: Numbers whole, with their sign, decimal point, fraction or time ("-20", "1.5", "1/5", "8:30" all differ); then
+#: words; then any symbol that isn't ordinary sentence punctuation as a token of its own ("<", ">", "\u00ac", "$").
+_WORD_TOKEN_RE = re.compile(
+    r"[-\u2212+\u00b1]?(?:\d+(?:[.,/:]\d+)*|[.,]\d+)%?"          # numbers whole: -20, 1.5, 1/5, 8:30, .5
+    r"|\w+"
+    r"|[^\w\s.,!?;:'\"()\[\]{}\u2026\u2013\u2014*`]")            # any other mark is a token ("<", "\u00ac", "+", "-")
+_ACRONYM_RE = re.compile(r"[A-Z]{1,3}")
+#: Codex r11: "I" after these words is a Roman numeral ("type I", "stage I"), never the pronoun.
+_ROMAN_AFTER = frozenset("type stage phase grade class level part chapter war act volume vol tier step round "
+                         "schedule category".split())
+
+
+def _words(text: str) -> set[str]:
+    """Every token of the text: numbers whole, words casefolded except short all-caps acronyms (IT, A, D, TV),
+    meaningful symbols on their own."""
+    return set(_tokens_in_order(text))
+
+
+def _tokens_in_order(text: str) -> list[str]:
+    plain = _spell(_normal(text))
+    # Codex r11: a spaced minus stays on its number ("- 20" is "-20"); a hyphen inside a word just splits it
+    # ("non-smoking" -> "non", "smoking"); any other minus or plus is a token of its own ("O-", "O+").
+    plain = re.sub(r"(?<![\w.])([-\u2212])\s+(?=[.,]?\d)", r"\1", plain)
+    plain = re.sub(r"(?<=\w)[-\u2010](?=\w)", " ", plain)
+    out: list[str] = []
+    prev = ""
+    for m in _WORD_TOKEN_RE.finditer(plain):
+        tok = m.group()
+        # A capital "A" that starts a sentence is the article, not an acronym ("A friend of mine...").
+        sentence_start = not plain[:m.start()].strip() or plain[:m.start()].rstrip()[-1:] in ".!?"
+        if tok == "I" and prev in _ROMAN_AFTER:
+            out.append("^I")
+        elif tok != "I" and _ACRONYM_RE.fullmatch(tok) and not (len(tok) == 1 and sentence_start):
+            out.append("^" + tok)
+        else:
+            out.append(tok.casefold())
+        prev = tok.casefold()
+    return out
+
+
+def _marks(text: str) -> set[str]:
+    """Codex r11: the meaning-bearing marks (comparison, polarity, sign, currency...) — like negations, they must
+    be the same on both sides: a fact may not add one, and may not drop one ("\u00aclike" -> "like", ">5" -> "5")."""
+    import unicodedata
+    return {t for t in _words(text) if len(t) == 1 and not t.isalnum()
+            and (unicodedata.category(t)[0] == "S" or t in "+-\u2212\u00b1<>=~^|&%#@/\\")}
+
+
+def _odd_characters(text: str) -> bool:
+    """Codex r9: characters the word check can't see (enclosed letters like \U0001F15D, emoji, private-use,
+    unassigned, control) could carry a word; a fact holding one is never counted as his words."""
+    import unicodedata
+    return any(unicodedata.category(c) in ("So", "Sk", "Co", "Cn", "Cs") or
+               (unicodedata.category(c) == "Cc" and c not in "\n\t\r") for c in _plain(text))
+
+
+def _live_rule(fact: str, turn_text: str) -> str:
+    """The quote check exactly as it was live before D105 (885e3e5): 80% of the fact's longer words in the turn.
+    Codex r12: kept as a GATE, so the new rules can only ever say "their words" where the old one already did —
+    never a new false attribution, by construction. Whatever slips past both is a gap live already had (#261)."""
+    def toks(text: str) -> set[str]:
+        return {w for w in _TOKEN_RE.findall((text or "").casefold()) if (len(w) >= 3 or not w.isascii()) and w not in _STOP}
+    fact_tokens = toks(fact)
     if not fact_tokens or not turn_text:
         return "assistant"
-    overlap = len(fact_tokens & _tokens(turn_text)) / len(fact_tokens)
-    return "owner" if overlap >= OWNER_QUOTE_RATIO else "assistant"
+    return "owner" if len(fact_tokens & toks(turn_text)) / len(fact_tokens) >= _LIVE_QUOTE_RATIO else "assistant"
+
+
+def trust_for(fact: str, turn_text: str, names=()) -> str:
+    """owner only when the fact says what he said this turn: the same negations (each with the word it negates)
+    and every content word of the fact found in his words (his name and pronouns excepted); else assistant. His
+    sentence-leading "Don't forget ..." request is not part of what he stated. Ambiguity is always assistant."""
+    if not (fact or "").strip() or not (turn_text or "").strip():
+        return "assistant"
+    if _odd_characters(fact):
+        return "assistant"
+    stated = _REMEMBER_ASK_RE.sub(" ", _spell(_normal(turn_text)))
+    if _negations(fact) != _negations(stated) or _marks(fact) != _marks(stated):
+        return "assistant"
+    content = _words(fact)
+    if not content:
+        return "assistant"
+    own_names = {w.casefold() for n in names or () for w in _TOKEN_RE.findall(_normal(str(n or "")))}
+    if content - _words(stated) - own_names:
+        return "assistant"
+    return _live_rule(fact, turn_text)
 
 
 def key_label_for(fact: str) -> str:
@@ -121,6 +273,32 @@ def _bounded_label(labeler, fact):
     if not isinstance(label, str) or not re.fullmatch(KEY_LABEL_PATTERN, label):
         raise ValueError("invalid memory key label")
     return label
+
+
+#: D105: set ONLY by outside_guard.action_executor, from the card that was tapped (never by a turn): the
+#: code-owned names of what she read before asking to keep this (a web page, an email...). Recorded on the fact
+#: so recall can say where it came from; it never changes whose words it is.
+KEPT_AFTER_READING = "kept_after_reading"
+_SOURCE_NAME = re.compile(r"[a-z_]{1,40}")
+
+
+def refusal_for(text: str) -> str | None:
+    """The refusals remember gives before it knows who is asking (the card checks these first, so a fact that
+    can't be kept never reaches his button, and a secret never reaches a card)."""
+    if location_memory_blocked(text):
+        return LOCATION_REFUSAL
+    if secret_kind(text):
+        return SECRET_REFUSAL
+    if not text:
+        return EMPTY
+    if len(text) > FACT_LIMIT:
+        return TOO_LONG
+    if question_shaped(text):
+        return QUESTION_REFUSAL
+    return None
+
+
+QUESTION_REFUSAL = "Nothing was kept: questions are not facts. State the fact to remember."
 
 
 def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | None = None):
@@ -170,7 +348,7 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
             return NOT_LINKED
         if question_shaped(text):
             log.warning("remember skipped: question-shaped observation")
-            return "Nothing was kept: questions are not facts. State the fact to remember."
+            return QUESTION_REFUSAL
         try:
             if key_labeler is None:
                 raise ValueError("memory key labeler is not configured")
@@ -183,7 +361,9 @@ def build_remember_tool(writer: Writer, *, key_labeler: Callable[[str], str] | N
             "fact": text,
             "key_label": label,
             "privacy_level": "private" if identity.get("privacy_context") == "private" else "public",
-            "trust": trust_for(text, CURRENT_TURN_TEXT.get()),
+            "trust": trust_for(text, CURRENT_TURN_TEXT.get(), names=(identity.get("display_name"),)),
+            "read": sorted({str(n) for n in (((config or {}).get("configurable") or {}).get(KEPT_AFTER_READING)
+                                            or ()) if _SOURCE_NAME.fullmatch(str(n))}),
             "source_platform": str(identity.get("platform") or "unknown"),
             "channel": identity.get("channel_id"),
         }
