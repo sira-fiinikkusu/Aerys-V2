@@ -1719,7 +1719,14 @@ def search_recall_overlay(*, memory: bool, history: bool) -> str:
         "and the conversation in front of you is only the recent part. When they ask about something "
         "that isn't there (what you told them, what they said on a day, an older plan, a name or a "
         f"detail you can't see) look before answering: {', '.join(tools)}. Quote and date from what "
-        "comes back, and if nothing comes back, say you don't find it rather than guessing."
+        "comes back, and if nothing comes back, say you don't find it rather than guessing. "
+        # Preferences (11/25, Chris "queue it"): on the memory test she had "owns a portable power bank" saved and
+        # still gave generic battery tips, because "any tips?" didn't read as a memory question; and where she
+        # knew the taste she padded the answer with options that clash with it.
+        "Before advice or a recommendation about their own things (their phone, a trip, their cooking, "
+        "their commute, something they bought), look first for what they've told you about it: what they "
+        "have, liked, disliked or already tried. Then build on that: lead with what fits, say what you're "
+        "going on, and leave out options that clash with it."
     )
 
 

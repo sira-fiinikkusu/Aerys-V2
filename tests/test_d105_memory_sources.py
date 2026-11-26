@@ -382,3 +382,13 @@ def test_never_their_words_where_the_live_rule_said_otherwise():
             owners += 1
             assert _live_rule(fact, said) == "owner", (fact, said)
     assert owners >= 5, "the table must hold positives too"
+
+
+def test_her_search_guidance_says_to_look_before_advice_about_their_things():
+    """Preferences (11/25): "any tips?" about his phone didn't read as a memory question, so she never looked up the
+    power bank she had saved; and where she knew a taste she padded with options that clash with it."""
+    from aerys_v2.factory import search_recall_overlay
+    text = search_recall_overlay(memory=True, history=True)
+    assert "Before advice or a recommendation about their own things" in text
+    assert "leave out options that clash with it" in text
+    assert search_recall_overlay(memory=False, history=False) == ""
