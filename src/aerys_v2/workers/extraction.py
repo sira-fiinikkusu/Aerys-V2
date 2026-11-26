@@ -157,7 +157,7 @@ EXTRACTION_SYSTEM_PROMPT = """You extract memories from conversation transcripts
 - Genuine interests with signal: hobbies, games, media, projects they care about
 - Meaningful life events with context: trips, purchases, celebrations, milestones
 - Stated preferences for Aerys: how they want to be addressed, communication style
-- Personal tastes, even in passing: what they like or dislike (places, hotels, food and drink, products and gear, media, styles), what they own or use, what they tried and how it went. Keep what they said, not a rule drawn from it: "loved the rooftop pool and the balcony view at our last hotel" -> preference.hotel.amenities "Loved the rooftop pool and the balcony view at their last hotel", never "Prefers hotels with rooftop pools". A taste of theirs is only one they state themselves: never inferred from a question alone or from what Aerys said. A taste said in the same message as a request is still a statement worth keeping (quote only the stated part).
+- Personal tastes, even in passing: what they like or dislike (places, hotels, food and drink, products and gear, media, styles), what they own or use, what they tried and how it went. Keep what they said, not a rule drawn from it, one taste per fact: "loved the rooftop pool and the balcony view at our last hotel" -> preference.hotel.rooftop_pool "Loved the rooftop pool at their last hotel" and preference.hotel.balcony_view "Loved the balcony view at their last hotel", never "Prefers hotels with rooftop pools". A taste of theirs is only one they state themselves: never inferred from a question alone or from what Aerys said. A taste said in the same message as a request is still a statement worth keeping (quote only the stated part).
 - Vehicle, home, pet details: specific and memorable
 
 ## What to REJECT (ephemeral noise -- do NOT extract):
@@ -204,7 +204,7 @@ The user message may list memories she already has, as `id · key · value`. The
 - Use one key per fact: basic.birth_date for a date of birth (including birthday); preference.favorite_color for favorite color; interest.beverage for a favorite drink. A birthday celebration is a separate event, not a second birth-date fact.
 - Keys describe the subject and attribute, NEVER the value: a correction must keep the same key.
 - A specific interest gets its own subject in the key, so two of them never share one: interest.band.electric_storm, interest.game.zoids, interest.show.severance. A single "favorite X" keeps one key (interest.beverage).
-- A taste is keyed by what it is about and which aspect, never by the value; a different aspect gets its own key: preference.hotel.amenities, preference.hotel.location, preference.food.spice. A favorite or an interest keeps the key the rules above give it.
+- A taste is keyed by its subject and the specific thing it is about, never by the value, so two tastes never share a key and one never replaces another: preference.hotel.rooftop_pool, preference.hotel.air_conditioning, preference.food.cilantro. The same thing again (a changed opinion of it) keeps its key. A favorite or an interest keeps the key the rules above give it.
 - Every distinct event is its own observation, even when it shares a key with an earlier one (two concerts are two event.concert items, each with its own date).
 - For a named subject other than the speaker, qualify the attribute with a stable lowercase subject identifier, e.g. preference.test_plant.light. Preserve an explicit valid category.subject.attribute label when supplied with the fact.
 - NEVER use a person's name as prefix

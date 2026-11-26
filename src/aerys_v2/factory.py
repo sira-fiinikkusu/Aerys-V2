@@ -1724,9 +1724,9 @@ def search_recall_overlay(*, memory: bool, history: bool) -> str:
         # still gave generic battery tips, because "any tips?" didn't read as a memory question; and where she
         # knew the taste she padded the answer with options that clash with it.
         "Before advice or a recommendation about their own things (their phone, a trip, their cooking, "
-        "their commute, something they bought), look first for what they've told you about it: what they "
-        "have, liked, disliked or already tried. Then build on that: lead with what fits, say what you're "
-        "going on, and leave out options that clash with it."
+        "their commute, something they bought), check what's in front of you for what they have, liked, "
+        "disliked or already tried; if it doesn't tell you, look it up. Then build on that: lead with what "
+        "fits, say what you're going on, and leave out options that clash with it."
     )
 
 

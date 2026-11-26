@@ -43,7 +43,7 @@ def test_a_taste_is_kept_in_his_words_never_as_a_rule_drawn_from_it():
     rule = next(l for l in extract_section().splitlines() if l.startswith("- Personal tastes"))
     assert "Keep what they said, not a rule drawn from it" in rule
     assert '"loved the rooftop pool and the balcony view at our last hotel"' in rule
-    assert '"Loved the rooftop pool and the balcony view at their last hotel"' in rule
+    assert '"Loved the rooftop pool at their last hotel"' in rule and '"Loved the balcony view at their last hotel"' in rule
     assert 'never "Prefers hotels with rooftop pools"' in rule
 
 
@@ -57,16 +57,43 @@ def test_a_taste_is_only_one_he_states_never_from_a_question_or_from_aerys():
     assert "observations derived only from questions (never infer an answer)" in PROMPT
 
 
-def test_a_taste_is_keyed_by_aspect_so_a_second_taste_does_not_replace_the_first():
-    # preference.* is a state key: a different value under the SAME key replaces the old row
-    # (triage_memory). A different aspect therefore needs its own key, and the key never names the value.
+def test_a_taste_is_keyed_by_the_thing_itself_so_a_second_taste_does_not_replace_the_first():
+    # preference.* is a state key: a different value under the SAME key replaces the old row (triage_memory).
+    # Codex prefs r1: "amenities" would have let "disliked the noisy AC" retire "loved the rooftop pool". Each
+    # taste gets its own key (the specific thing), and a compound statement is split, one taste per fact.
     rules = key_rules()
-    assert "A taste is keyed by what it is about and which aspect, never by the value" in rules
-    assert "a different aspect gets its own key" in rules
+    assert "keyed by its subject and the specific thing it is about, never by the value" in rules
+    assert "two tastes never share a key and one never replaces another" in rules
+    assert "The same thing again (a changed opinion of it) keeps its key." in rules
     assert "A favorite or an interest keeps the key the rules above give it." in rules
-    for key in ("preference.hotel.amenities", "preference.hotel.location", "preference.food.spice"):
+    assert "one taste per fact" in PROMPT and "amenities" not in PROMPT
+    for key in ("preference.hotel.rooftop_pool", "preference.hotel.balcony_view", "preference.hotel.air_conditioning",
+                "preference.food.cilantro"):
         assert key in PROMPT
         assert re.fullmatch(KEY_LABEL_PATTERN, key) and is_state_key(key)
+
+
+def test_two_tastes_about_one_hotel_both_survive_successive_writes():
+    """Codex prefs r1 regression: compatible tastes must not replace each other in triage."""
+    from aerys_v2.workers.extraction import triage_memory
+    rows = {}
+
+    class Conn:
+        def execute(self, sql, params=None):
+            head = sql.lstrip().upper()
+            found = [(i, c) for i, (k, c) in rows.items() if params and k == params.get("key_label")]
+            if head.startswith("INSERT"):
+                rows[f"r{len(rows) + 1}"] = (params["key_label"], params["content"])
+                return type("R", (), {"fetchone": lambda self: (f"r{len(rows)}",), "fetchall": lambda self: []})()
+            return type("R", (), {"fetchone": lambda self: found[0] if found else None,
+                                  "fetchall": lambda self: found})()
+    for key, value in [("preference.hotel.rooftop_pool", "Loved the rooftop pool at their last hotel"),
+                       ("preference.hotel.air_conditioning", "Disliked the noisy air conditioning at their last hotel")]:
+        action = triage_memory(Conn(), person_id="p", key_label=key, value_text=value, content=f"{key}: {value}",
+                               context=None, event_date=None, embedding="[0.1]", source_platform="discord",
+                               privacy_level="public", created_at="2026-11-25 12:00:00+00")
+        assert action == "insert", (key, action)
+    assert sorted(k for k, _ in rows.values()) == ["preference.hotel.air_conditioning", "preference.hotel.rooftop_pool"]
 
 
 # --- the taste-plus-request message through the existing gates ------------------------------------
@@ -77,7 +104,7 @@ def group(*texts, reply=None):
 
 
 def taste(quote=TASTE):
-    return {"key_label": "preference.hotel.amenities", "value_text": "Loved the rooftop pool at their last hotel",
+    return {"key_label": "preference.hotel.rooftop_pool", "value_text": "Loved the rooftop pool at their last hotel",
             "source_text": quote, "context": "", "event_date": "", "privacy_level": "private", "replaces": ""}
 
 
@@ -102,7 +129,7 @@ def test_with_the_check_armed_the_model_sees_it_marked_as_asking():
     llm = FakeLlm([json.dumps([taste()])])
     observations, _ = ex._extract_group(llm, group(ASKING), {}, asking_ok=True)
     assert len(llm.calls) == 1 and "(asking; a fact he states inside may be quoted" in llm.calls[0][1]
-    assert [o["key_label"] for o in observations] == ["preference.hotel.amenities"]
+    assert [o["key_label"] for o in observations] == ["preference.hotel.rooftop_pool"]
 
 
 def test_without_the_check_the_quote_gate_drops_it_as_before():
@@ -120,7 +147,7 @@ def test_with_the_check_it_is_kept_when_jev_says_he_states_it():
 
     stats = {}
     kept = quoted_observations([taste()], group(ASKING), stats, stated)
-    assert [o["key_label"] for o in kept] == ["preference.hotel.amenities"]
+    assert [o["key_label"] for o in kept] == ["preference.hotel.rooftop_pool"]
     assert calls == [(ASKING, ["Loved the rooftop pool at their last hotel"])] and stats["stated_kept"] == 1
 
 
