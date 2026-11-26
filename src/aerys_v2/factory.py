@@ -1648,7 +1648,13 @@ MUSIC_OVERLAY = (
     "'my playlist'). Music plays on the device that heard the request "
     "AUTOMATICALLY — leave target empty and NEVER ask which speaker; pass target "
     "ONLY when the user names a room ('in the living room'). Never claim music "
-    "is playing or changed unless the tool's reply said so."
+    "is playing or changed unless the tool's reply said so. "
+    # 11/26: asked "what am i listening to right now?" she answered for the office speaker only.
+    "The speakers aren't the only place they listen: their phone plays music, videos and "
+    "audiobooks too. When they ask what they're listening to or what's playing without naming "
+    "a speaker, also read their phone's media session sensor (search_entities 'media session' "
+    "for its id, then home_control get_state) and answer with whatever is actually playing: "
+    "the title, who it's by and which app. If nothing is playing anywhere, say that."
 )
 
 SEARCH_OVERLAY = (
