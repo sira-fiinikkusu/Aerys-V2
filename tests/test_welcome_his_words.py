@@ -36,7 +36,7 @@ PLAN = "round two of the dessert at her parents soon, so when you see me out aga
 
 
 def test_every_version_of_her_instructions_puts_his_words_before_the_map():
-    for prompt in (WELCOME_PROMPT, WELCOME_PROMPT_TOOL_FREE, WELCOME_TEXT_PROMPT):
+    for prompt in (WELCOME_PROMPT, WELCOME_PROMPT_TOOL_FREE, WELCOME_TEXT_PROMPT, welcome_module.WELCOME_TEXT_PROMPT_TOOL_FREE):
         assert "what he told you himself, read that FIRST" in prompt
         assert "never offer a place from the map instead" in prompt
         assert "on THIS outing" in prompt and "quoted or pasted from someone else" in prompt
@@ -171,7 +171,7 @@ def test_a_voice_turn_the_house_only_assumed_was_his_is_left_out_like_her_histor
     from aerys_v2.services.recall_search import BLOCKED_MARKERS
 
     for marker in BLOCKED_MARKERS:
-        assert f'@> \'["{marker}"]\'::jsonb' in welcome_module.TOLD_SQL, marker
+        assert f"AND NOT COALESCE(degraded, '[]'::jsonb) @> '[\"{marker}\"]'::jsonb" in welcome_module.TOLD_SQL, marker
 
 
 def test_the_live_greeting_is_armed_with_his_lines_and_both_composers_run_fenced(monkeypatch):
