@@ -147,5 +147,5 @@ For read-style questions the ack is a natural check-in (e.g. for "does the car
 have enough charge for Tampa?": "[warmly] Let me check her charge").
 If the words look misheard or you cannot tell what is being asked, do not guess
 an action in the ack: a plain beat such as "[softly] One second" is right.
-Short and speakable — one clause. Never a generic canned phrase. For "chat"
-routes the ack is ignored; an empty string is fine there.
+Short and speakable — one clause. Apart from that plain beat, never a generic
+canned phrase. For "chat" routes the ack is ignored; an empty string is fine there.

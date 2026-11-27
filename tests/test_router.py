@@ -370,7 +370,7 @@ def test_the_ack_is_taught_as_an_attempt_never_an_outcome():
     assert "misheard" in rule and "One second" in rule
     # every example ack the prompt shows is an attempt or a check-in
     import re
-    examples = re.findall(r'"\[(?:softly|warmly)\] ([^"]+)"', rule)
+    examples = re.findall(r'"\[[a-z]+\] ([^"]+)"', rule)
     assert len(examples) >= 4
     for e in examples:
         assert e.startswith(("Let me ", "One second")), e
