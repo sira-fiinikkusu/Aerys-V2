@@ -166,6 +166,44 @@ def test_vision_403_on_signed_url_explains_expired_signature():
     assert "expired" in out and "never strip the query string" in out
 
 
+def _fetch_failed(fetch_status: int, url: str) -> FakeOpenRouter:
+    """The provider's real answer when IT could not fetch the image (seen live 2026-11-27)."""
+    fake = FakeOpenRouter(status=400)
+    body = {"error": {"message": f"Received {fetch_status} status code when fetching image from URL: {url}",
+                      "code": 400, "metadata": {"provider_name": None}}}
+    fake.handler = lambda request: (fake.requests.append(request), httpx.Response(400, json=body))[1]
+    return fake
+
+
+def test_vision_says_why_when_the_image_itself_could_not_be_fetched():
+    """Her gap #195: the provider answers 400 and the real reason (the image's host said 404)
+    is inside the message. She used to hear only 'failed with HTTP 400'."""
+    web = "https://example.com/private/cat.png"
+    out = make_vision(_fetch_failed(404, web)).invoke({"url": web, "question": "?"})
+    assert "could not be fetched" in out and "HTTP 404" in out and "nothing was looked at" in out
+    assert "HTTP 400" not in out
+    out = make_vision(_fetch_failed(403, web)).invoke({"url": web, "question": "?"})
+    assert "HTTP 403" in out and "expired" in out and "Discord" not in out
+    # a signed Discord link whose fetch failed gets the expired-signature explanation
+    out = make_vision(_fetch_failed(404, SIGNED_IMAGE_URL)).invoke({"url": SIGNED_IMAGE_URL, "question": "?"})
+    assert "Discord CDN signature" in out and "never strip the query string" in out and "HTTP 404" in out
+
+
+def test_vision_other_400s_keep_the_plain_line():
+    """A 400 that is NOT a failed image fetch, or an unreadable body, is reported as before."""
+    out = make_vision(FakeOpenRouter(status=400)).invoke({"url": "https://example.com/a.png", "question": "?"})
+    assert out == "OpenRouter vision call failed with HTTP 400."
+    fake = FakeOpenRouter(status=400)
+    fake.handler = lambda request: httpx.Response(400, text="<html>bad gateway</html>")
+    out = make_vision(fake).invoke({"url": "https://example.com/a.png", "question": "?"})
+    assert out == "OpenRouter vision call failed with HTTP 400."
+    for odd in ({"error": "text"}, {"error": {"message": 7}}, [], {"error": {"message": "Received lots of status"}}):
+        fake = FakeOpenRouter(status=400)
+        fake.handler = lambda request, odd=odd: httpx.Response(400, json=odd)
+        out = make_vision(fake).invoke({"url": "https://example.com/a.png", "question": "?"})
+        assert out == "OpenRouter vision call failed with HTTP 400.", odd
+
+
 def test_vision_unreachable_and_malformed_are_honest_strings():
     def boom(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("no route")

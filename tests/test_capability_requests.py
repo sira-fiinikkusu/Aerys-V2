@@ -226,6 +226,15 @@ def test_receipts_of_the_guard_and_the_voice_carry_are_not_gaps():
     assert [s.fingerprint for s in sigs] == ["degraded::outside_guard_failed"]
 
 
+def test_a_spoken_one_sec_before_the_answer_is_not_a_gap():
+    """Board #214: a slow voice turn says a holding line and the answer follows. That is the
+    feature working; its first appearance was mined as 'degraded subsystem' gap #200."""
+    from aerys_v2.service import VOICE_HANDOFF_MARKER
+    assert classify_turn(turn(degraded=[VOICE_HANDOFF_MARKER])) == []
+    sigs = classify_turn(turn(degraded=[VOICE_HANDOFF_MARKER, "turn_failed"]))
+    assert [s.fingerprint for s in sigs] == ["degraded::turn_failed"]
+
+
 def test_by_design_marker_beside_a_real_one_only_drops_itself():
     sigs = classify_turn(turn(degraded=["escalated_from_chat", "turn_failed"]))
     assert [s.fingerprint for s in sigs] == ["degraded::turn_failed"]

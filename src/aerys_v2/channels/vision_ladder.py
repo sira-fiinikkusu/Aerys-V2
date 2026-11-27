@@ -21,6 +21,7 @@ the dict from `build_vision_request()`, performs the actual POST, and feeds the 
 JSON back through `extract_description()` / `explain_vision_http_error()`.
 """
 
+import re
 from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
@@ -252,3 +253,33 @@ def explain_vision_http_error(status: int, image_url: str) -> str:
             "never strip the query string."
         )
     return f"OpenRouter vision call failed with HTTP {status}."
+
+
+_IMAGE_FETCH_STATUS = re.compile(r"Received (\d{3}) status code when fetching image")
+
+
+def image_fetch_status(error_body: object) -> int | None:
+    """The status the IMAGE'S OWN HOST gave the vision provider, when that is why the call failed.
+
+    The provider fetches the image itself. When the fetch fails it answers 400 with
+    "Received 404 status code when fetching image from URL: ...", so the outer 400 says nothing
+    and the useful number is inside the message (seen live 2026-11-18, her gap #195).
+    Anything that is not that shape returns None.
+    """
+    try:
+        message = error_body["error"]["message"]  # type: ignore[index]
+    except (KeyError, TypeError, IndexError):
+        return None
+    found = _IMAGE_FETCH_STATUS.search(message) if isinstance(message, str) else None
+    return int(found.group(1)) if found else None
+
+
+def explain_image_fetch_failure(fetch_status: int, image_url: str) -> str:
+    """What to tell the agent when the image itself could not be fetched. Nothing was looked at."""
+    if fetch_status in (403, 404) and looks_like_signed_discord_url(image_url):
+        return explain_vision_http_error(fetch_status, image_url)
+    return (
+        f"The image could not be fetched: its host answered HTTP {fetch_status}, so nothing was "
+        "looked at. The link may have expired, be private, or refuse automated fetches. "
+        "Trying the same link again will fail the same way; a fresh link or the image itself is needed."
+    )

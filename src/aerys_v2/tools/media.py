@@ -37,7 +37,9 @@ from aerys_v2.channels.vision_ladder import (
     build_auth_headers,
     build_vision_body,
     detect_media_kind,
+    explain_image_fetch_failure,
     explain_vision_http_error,
+    image_fetch_status,
     extract_description,
     looks_like_signed_discord_url,
 )
@@ -137,6 +139,14 @@ def build_analyze_image_tool(
         if r.status_code >= 400:
             # 403/404 on a signed CDN URL gets the expired-signature explanation
             # instead of a bare status the model would just retry into.
+            # The provider fetches the image itself: when THAT fetch failed, its 400 hides the
+            # real reason inside the message. Say that reason (her gap #195).
+            try:
+                fetch_status = image_fetch_status(r.json())
+            except ValueError:
+                fetch_status = None
+            if fetch_status is not None:
+                return explain_image_fetch_failure(fetch_status, target)
             return explain_vision_http_error(r.status_code, target)
         try:
             return extract_description(r.json())
