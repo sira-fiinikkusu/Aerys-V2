@@ -27,6 +27,7 @@ successful turns are capped in service.py; reads and failures remain informative
 
 from difflib import SequenceMatcher
 import re
+import threading
 import time
 from threading import Lock
 import logging
@@ -643,6 +644,21 @@ def build_music_tool(
         state = r.json()
         return state if isinstance(state, dict) else None
 
+    def _within(fn, seconds: float):
+        """fn()'s result if it comes within `seconds`, else None (a late or failed answer is dropped)."""
+        box: dict = {}
+
+        def work():
+            try:
+                box["out"] = fn()
+            except Exception:
+                pass
+
+        worker = threading.Thread(target=work, daemon=True, name="phone-confirm")
+        worker.start()
+        worker.join(max(0.0, seconds))
+        return box.get("out")
+
     def _spotify_link(item: dict, kind: str) -> str:
         """spotify:<kind>:<id> for something search found. One of his library items carries no Spotify id
         here, so it is looked up by its exact name (and, for a song, its artist): never a near match."""
@@ -696,7 +712,10 @@ def build_music_tool(
             player = _spotify_player()
         except (httpx.HTTPError, ValueError) as e:
             return f"I couldn't reach Spotify's player ({e}), so nothing was sent."
-        sources = (player or {}).get("attributes", {}).get("source_list") if isinstance((player or {}).get("attributes"), dict) else None
+        before = (player or {}).get("attributes") if isinstance((player or {}).get("attributes"), dict) else {}
+        sources = before.get("source_list")
+        was = (str(before.get("media_content_id") or "") if (player or {}).get("state") == "playing"
+               and before.get("source") == phone_spotify_source else "")
         if not isinstance(sources, list) or phone_spotify_source not in sources:
             return ("His phone isn't reachable for Spotify right now (it drops off a while after Spotify was "
                     "last used there). Ask him to open Spotify on his phone, then ask again. Nothing was sent.")
@@ -730,8 +749,11 @@ def build_music_tool(
             except httpx.HTTPError as e:
                 # No answer at all: it may have gone through. Never a second song on top of a maybe.
                 return _UNSURE.format(name=name, why=type(e).__name__)
+            if r.status_code >= 500:
+                # A server error can come after Spotify already took it (a timeout upstream): a maybe.
+                return _UNSURE.format(name=name, why=f"HTTP {r.status_code}")
             if r.status_code >= 400:
-                last_error = f"HTTP {r.status_code}"           # a plain refusal: nothing started, try the next
+                last_error = f"HTTP {r.status_code}"           # refused before anything ran: try the next
                 tried.pop()
                 continue
             sent.append(name)
@@ -745,12 +767,14 @@ def build_music_tool(
                 left = give_up - time.monotonic()
                 if left <= 0.2:
                     break
-                try:
-                    now = _spotify_player(timeout=min(3.0, left)) or {}       # a stalled read can't outlast the budget
-                except (httpx.HTTPError, ValueError):
+                now = _within(lambda: _spotify_player(timeout=min(3.0, left)), left)   # never past the budget
+                if not isinstance(now, dict):
                     continue
                 attrs = now.get("attributes") if isinstance(now.get("attributes"), dict) else {}
-                if now.get("state") == "playing" and attrs.get("source") == phone_spotify_source:
+                on_now = str(attrs.get("media_content_id") or "")
+                # Playing on the phone is not enough: it has to be THIS, not the song that was already on.
+                this = on_now == link if kind == "track" else bool(on_now) and on_now != was
+                if now.get("state") == "playing" and attrs.get("source") == phone_spotify_source and this:
                     return (f"{WRITE_OK_PREFIX} playing {name} on his phone. "
                             "Keep the confirmation to a few words; no explanation, offers or questions.")
             return (f"{WRITE_OK_PREFIX} sent {name} to his phone, but Spotify hasn't said it started yet. "

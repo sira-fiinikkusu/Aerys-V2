@@ -32,6 +32,9 @@ class HA:
         self.selected = "Kitchen"                  # where Spotify would play until the phone is picked
         self.confirm_after = 0                     # how many reads after the play before it shows as playing
         self.reads_since_play = 0
+        self.old_id = self.old_source = None       # what was already playing before she was asked
+        self.now_id = None                         # what Spotify reports once the new play shows
+        self.reports = "sent"                      # "sent": the link she sent; or a fixed id (a track of an album)
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -41,8 +44,11 @@ class HA:
             shown = self.playing and self.reads_since_play >= self.confirm_after
             if self.playing:
                 self.reads_since_play += 1
-            attrs = {"source_list": self.sources, "source": self.selected if shown else None}
-            return httpx.Response(self.player_status, json={"state": "playing" if shown else "idle", "attributes": attrs})
+            if shown:
+                attrs = {"source_list": self.sources, "source": self.selected, "media_content_id": self.now_id}
+                return httpx.Response(self.player_status, json={"state": "playing", "attributes": attrs})
+            attrs = {"source_list": self.sources, "source": self.old_source, "media_content_id": self.old_id}
+            return httpx.Response(self.player_status, json={"state": "playing" if self.old_id else "idle", "attributes": attrs})
         if path.startswith("/api/services/music_assistant/play_media"):
             return httpx.Response(200, json=[])
         if path.startswith("/api/states/media_player."):
@@ -58,6 +64,7 @@ class HA:
         if path == "/api/services/media_player/play_media":
             if self.play_status == 200 and self.starts:
                 self.playing = True
+                self.now_id = body.get("media_content_id") if self.reports == "sent" else self.reports
             return httpx.Response(self.play_status, json=[])
         return httpx.Response(404, json={})
 
@@ -111,6 +118,7 @@ def test_an_artist_an_album_and_a_playlist_go_as_what_they_are():
     for kind, link in (("artist", "spotify:artist:4tZwfgrHOc3mvqYlEYSvVi"), ("album", "spotify:album:2noRn2Aes5aoNVsU6iWThc"),
                        ("playlist", "spotify:playlist:37i9dQZF1DWZeKCadgRdKQ")):
         ha = HA()
+        ha.reports = "spotify:track:7777777777777777777777"        # Spotify reports the track now on, not the album
         out = play(ha, query="anything", media_type=kind)
         assert out.startswith(f"{WRITE_OK_PREFIX} playing"), (kind, out)
         assert ha.posts("media_player/play_media") == [
@@ -133,7 +141,7 @@ def test_sent_but_not_started_is_never_called_playing():
 
 
 def test_a_refused_play_is_said_plainly():
-    out = play(HA(play_status=500))
+    out = play(HA(play_status=403))
     assert "FAILED" in out and not out.startswith(WRITE_OK_PREFIX)
     out = play(HA(player_status=500))
     assert "couldn't reach Spotify's player" in out and "nothing was sent" in out
@@ -285,6 +293,29 @@ def test_a_play_with_no_answer_is_said_as_unsure_and_no_second_song_is_sent():
 
 
 def test_a_plain_refusal_moves_on_to_the_next_and_claims_nothing():
-    ha = HA(play_status=500)
+    ha = HA(play_status=400)
     out = play(ha)
     assert "FAILED" in out and "couldn't tell" not in out
+
+
+def test_the_song_that_was_already_on_is_not_proof_the_new_one_started():
+    ha = HA(starts=False)                                         # the request is accepted, the old song keeps playing
+    ha.old_id, ha.old_source = "spotify:track:9999999999999999999999", PHONE
+    out = play(ha)
+    assert out.startswith(f"{WRITE_OK_PREFIX} sent One More Time") and "playing One More Time" not in out
+    # an album asked for while a song is on: the same old track still showing is not the album
+    ha = HA(starts=False)
+    ha.old_id, ha.old_source = "spotify:track:9999999999999999999999", PHONE
+    out = play(ha, query="anything", media_type="album")
+    assert out.startswith(f"{WRITE_OK_PREFIX} sent") and "hasn't said it started" in out
+
+
+def test_a_server_error_after_the_send_is_a_maybe_and_no_second_song_follows():
+    search = {"tracks": [{"name": "One More Time", "uri": "spotify--abc123://track/0DiWol3AO6WpXZgp0goxAV", "artists": [{"name": "Daft Punk"}]},
+                         {"name": "One More Time", "uri": "spotify--abc123://track/1111111111111111111111", "artists": [{"name": "Other"}]}]}
+    ha = HA(play_status=504, search=search)
+    out = play(ha)
+    assert "couldn't tell whether it went through" in out and len(ha.posts("media_player/play_media")) == 1
+    ha = HA(play_status=400, search=search)                       # refused outright: the next one may be tried
+    out = play(ha)
+    assert "FAILED" in out and len(ha.posts("media_player/play_media")) == 2
