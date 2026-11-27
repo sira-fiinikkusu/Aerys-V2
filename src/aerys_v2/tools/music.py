@@ -72,8 +72,9 @@ _PHONE_OPS = {"pause": "pause", "resume": "play", "stop": "stop", "next": "next"
 _PHONE_STATE_KEY = "playback_state_"
 # What Spotify can start on his phone, and the media type Home Assistant's Spotify player wants for it.
 _PHONE_PLAY_TYPES = {"track": "music", "artist": "artist", "album": "album", "playlist": "playlist"}
-_SPOTIFY_URI = re.compile(r"spotify[^:/]*://(track|artist|album|playlist)/([A-Za-z0-9]{8,64})")
+_SPOTIFY_URI = re.compile(r"spotify[^:/]*://(track|artist|album|playlist)/([A-Za-z0-9]{22})")   # a Spotify id: 22 base62
 _PHONE_CONFIRM_TRIES = 5
+_PHONE_CONFIRM_S = 10.0          # the whole wait for Spotify to say it started, slow reads included
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+")
 
 _SEARCH_LIMIT = 5
@@ -641,17 +642,20 @@ def build_music_tool(
             return ""
         name = str(item.get("name") or "").strip()
         mine = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in item.get("artists") or []}
-        if not name:
-            return ""
+        mine.discard("")
+        if not name or (kind != "artist" and not mine):
+            return ""                     # without an artist to match, a same-titled song could be anyone's
         r = http.post(f"{base}/api/services/music_assistant/search?return_response", headers=headers,
                       json={"config_entry_id": config_entry_id, "name": name, "media_type": kind, "limit": _SEARCH_LIMIT})
         r.raise_for_status()
-        hits = ((r.json() or {}).get("service_response") or {}).get(_TYPE_TO_CATEGORY[kind]) or []
-        for hit in hits:
+        data = r.json()
+        found = data.get("service_response") if isinstance(data, dict) else None
+        hits = found.get(_TYPE_TO_CATEGORY[kind]) if isinstance(found, dict) else None
+        for hit in hits if isinstance(hits, list) else []:
             if not isinstance(hit, dict) or _name_key(str(hit.get("name") or "")) != _name_key(name):
                 continue
             theirs = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in hit.get("artists") or []}
-            if kind != "artist" and mine and not (mine & theirs):
+            if kind != "artist" and not (mine & theirs):
                 continue
             m = _SPOTIFY_URI.fullmatch(str(hit.get("uri") or ""))
             if m and m.group(1) == kind:
@@ -660,7 +664,19 @@ def build_music_tool(
 
     def _phone_play(query: str, media_type: str, config: RunnableConfig) -> str:
         """Start what he asked for on his phone through Spotify. Only while Spotify lists the phone as a place
-        to play; otherwise she says so, and nothing is sent."""
+        to play; otherwise she says so, and nothing is sent. Whatever comes back in a shape nobody expected
+        ends as a plain sentence, never an exception (that would end her turn)."""
+        sent: list = []
+        try:
+            return _phone_play_inner(query, media_type, config, sent)
+        except Exception as e:
+            log.warning("music: starting on the phone failed (%s)", type(e).__name__)
+            if sent:
+                return (f"{WRITE_OK_PREFIX} sent {sent[-1]} to his phone, but I couldn't check that it started "
+                        f"({type(e).__name__}). Say it was sent, not that it's playing.")
+            return f"Starting music on his phone didn't work ({type(e).__name__}). Nothing was sent."
+
+    def _phone_play_inner(query: str, media_type: str, config: RunnableConfig, sent: list) -> str:
         try:
             player = _spotify_player()
         except (httpx.HTTPError, ValueError) as e:
@@ -675,9 +691,12 @@ def build_music_tool(
         what, candidates = found
         last_error = ""
         for item, kind in candidates[:4]:
-            if kind not in _PHONE_PLAY_TYPES:
+            if kind not in _PHONE_PLAY_TYPES or not isinstance(item, dict):
                 continue
-            name, _ = _item_line(item)
+            name = str(item.get("name") or "?")
+            artists = [str(a.get("name") if isinstance(a, dict) else a) for a in item.get("artists") or [] if a]
+            if artists:
+                name += " by " + ", ".join(artists)
             try:
                 link = _spotify_link(item, kind)
                 if not link:
@@ -692,8 +711,12 @@ def build_music_tool(
             except (httpx.HTTPError, ValueError) as e:
                 last_error = str(e)
                 continue
+            sent.append(name)
             # Sent is not playing: Spotify itself has to say it started on the phone.
+            give_up = time.monotonic() + _PHONE_CONFIRM_S
             for _ in range(_PHONE_CONFIRM_TRIES):
+                if time.monotonic() >= give_up:
+                    break
                 sleep(1.0)
                 try:
                     now = _spotify_player() or {}

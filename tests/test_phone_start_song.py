@@ -23,24 +23,37 @@ SEARCH = {
 
 class HA:
     def __init__(self, *, sources=(PHONE, "Kitchen"), starts=True, play_status=200, search=None, library=None,
-                 player_status=200):
+                 player_status=200, follow_source=True):
+        self.follow_source = follow_source
         self.sources, self.starts, self.play_status = list(sources), starts, play_status
         self.search, self.library, self.player_status = SEARCH if search is None else search, library or {}, player_status
         self.calls: list[tuple[str, dict]] = []
         self.playing = False
+        self.selected = "Kitchen"                  # where Spotify would play until the phone is picked
+        self.confirm_after = 0                     # how many reads after the play before it shows as playing
+        self.reads_since_play = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content) if request.content else {}
         self.calls.append((path, body))
         if path == f"/api/states/{PLAYER}":
-            attrs = {"source_list": self.sources, "source": PHONE if self.playing else None}
-            return httpx.Response(self.player_status, json={"state": "playing" if self.playing else "idle", "attributes": attrs})
+            shown = self.playing and self.reads_since_play >= self.confirm_after
+            if self.playing:
+                self.reads_since_play += 1
+            attrs = {"source_list": self.sources, "source": self.selected if shown else None}
+            return httpx.Response(self.player_status, json={"state": "playing" if shown else "idle", "attributes": attrs})
+        if path.startswith("/api/services/music_assistant/play_media"):
+            return httpx.Response(200, json=[])
+        if path.startswith("/api/states/media_player."):
+            return httpx.Response(200, json={"state": "idle", "attributes": {}})
         if path == "/api/services/music_assistant/search":
             return httpx.Response(200, json={"service_response": self.search})
         if path == "/api/services/music_assistant/get_library":
             return httpx.Response(200, json={"service_response": {"items": self.library.get(body.get("media_type"), [])}})
         if path == "/api/services/media_player/select_source":
+            if self.follow_source:
+                self.selected = body.get("source")
             return httpx.Response(200, json=[])
         if path == "/api/services/media_player/play_media":
             if self.play_status == 200 and self.starts:
@@ -78,6 +91,20 @@ def test_a_song_starts_on_his_phone_and_playing_is_said_once_spotify_says_so():
     assert ha.posts("media_player/play_media") == [
         {"entity_id": PLAYER, "media_content_id": "spotify:track:0DiWol3AO6WpXZgp0goxAV", "media_content_type": "music"}]
     assert ha.posts("music_assistant/play_media") == []          # never through a house speaker
+    order = [p.rsplit("/", 1)[-1] for p, _ in ha.calls if p.startswith("/api/services/media_player/")]
+    assert order == ["select_source", "play_media"]              # the phone is picked before anything plays
+
+
+def test_playing_somewhere_else_is_not_playing_on_his_phone():
+    ha = HA(follow_source=False)                                 # Spotify keeps playing in the kitchen
+    out = play(ha)
+    assert out.startswith(f"{WRITE_OK_PREFIX} sent") and "hasn't said it started" in out
+
+
+def test_a_slow_start_is_still_confirmed():
+    ha = HA()
+    ha.confirm_after = 3
+    assert play(ha).startswith(f"{WRITE_OK_PREFIX} playing One More Time by Daft Punk on his phone.")
 
 
 def test_an_artist_an_album_and_a_playlist_go_as_what_they_are():
@@ -137,7 +164,8 @@ def test_his_own_library_song_is_found_by_its_exact_name_and_artist_never_a_near
 
 def test_a_link_that_is_not_spotifys_is_never_sent():
     for uri in ("library://track/52", "spotify--abc123://track/../../x", "http://evil.test/track/0DiWol3AO6WpXZgp0goxAV",
-                "spotify--abc123://podcast/2O2tukhyPYiNFJH3WVLwwM", ""):
+                "spotify--abc123://podcast/2O2tukhyPYiNFJH3WVLwwM", "", "spotify--abc123://track/12345678",
+                "spotify--abc123://track/" + "a" * 23, "spotify--abc123://track/0DiWol3AO6WpXZgp0goxA!"):
         ha = HA(search={"tracks": [{"name": "one more time", "uri": uri, "artists": []}]})
         out = play(ha)
         assert ha.posts("media_player/play_media") == [], uri
@@ -161,5 +189,57 @@ def test_other_operations_on_the_phone_are_still_refused_before_anything_happens
 def test_playing_in_a_room_is_unchanged():
     ha = HA()
     out = tool(ha).invoke({"operation": "play", "target": "office", "query": "one more time"}, config=him())
-    assert "office" in out or "FAILED" in out
+    assert out.startswith(f"{WRITE_OK_PREFIX} playing One More Time by Daft Punk on office satellite."), out
+    sent = ha.posts("music_assistant/play_media")
+    assert sent[0] == {"entity_id": "media_player.office_satellite", "media_type": "track", "enqueue": "replace",
+                       "media_id": "spotify--abc123://track/0DiWol3AO6WpXZgp0goxAV"}
+    assert sent[1]["radio_mode"] is True and sent[1]["enqueue"] == "add"
     assert ha.posts("media_player/select_source") == []           # the phone path was not taken
+
+
+def test_a_response_in_a_shape_nobody_expected_ends_as_a_sentence():
+    for search in ({"tracks": [None]}, {"tracks": [{"name": "one more time", "uri": 7, "artists": ["Daft Punk"]}]},
+                   {"tracks": "nope"}, []):
+        ha = HA(search=search)
+        out = play(ha)
+        assert isinstance(out, str) and not out.startswith(WRITE_OK_PREFIX), (search, out)
+        assert ha.posts("media_player/play_media") == []
+    library = {"track": [{"name": "One More Time", "uri": "library://track/52", "artists": [{"name": "Daft Punk"}]}]}
+
+    class Odd(HA):
+        def __call__(self, request):
+            if request.url.path == "/api/services/music_assistant/search":
+                self.calls.append((request.url.path, {}))
+                return httpx.Response(200, json={"service_response": []})
+            return super().__call__(request)
+
+    out = play(Odd(library=library))
+    assert isinstance(out, str) and not out.startswith(WRITE_OK_PREFIX)
+
+
+class LookupOnly(HA):
+    """The open search finds nothing; only the by-name look-up of a library item (it names a media_type)
+    returns a same-titled song, so a play here can only have come from that look-up."""
+
+    def __call__(self, request):
+        if request.url.path == "/api/services/music_assistant/search":
+            body = json.loads(request.content)
+            self.calls.append((request.url.path, body))
+            hit = {"name": "One More Time", "uri": "spotify--abc123://track/1111111111111111111111",
+                   "artists": [{"name": "Somebody Else"}]}
+            return httpx.Response(200, json={"service_response": {"tracks": [hit] if body.get("media_type") else []}})
+        return super().__call__(request)
+
+
+def test_his_library_song_is_matched_by_title_and_artist_never_by_title_alone():
+    def library(artists):
+        return {"track": [{"name": "One More Time", "uri": "library://track/52", "artists": artists}]}
+
+    for artists in ([], [{"name": ""}], [{"name": "Daft Punk"}]):          # none, blank, or a different artist
+        ha = LookupOnly(library=library(artists))
+        out = play(ha)
+        assert ha.posts("media_player/play_media") == [], artists
+        assert "couldn't find" in out and "Nothing was sent" in out
+    ha = LookupOnly(library=library([{"name": "Somebody Else"}]))          # the same artist: that is his song
+    assert play(ha).startswith(f"{WRITE_OK_PREFIX} playing")
+    assert ha.posts("media_player/play_media")[0]["media_content_id"] == "spotify:track:1111111111111111111111"
