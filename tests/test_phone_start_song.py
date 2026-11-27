@@ -235,11 +235,56 @@ def test_his_library_song_is_matched_by_title_and_artist_never_by_title_alone():
     def library(artists):
         return {"track": [{"name": "One More Time", "uri": "library://track/52", "artists": artists}]}
 
-    for artists in ([], [{"name": ""}], [{"name": "Daft Punk"}]):          # none, blank, or a different artist
+    for artists in ([], [{"name": ""}], [{}], [{"name": None}], [None], [{"name": "Daft Punk"}]):   # none, blank, missing, or different
         ha = LookupOnly(library=library(artists))
         out = play(ha)
         assert ha.posts("media_player/play_media") == [], artists
-        assert "couldn't find" in out and "Nothing was sent" in out
+        assert "Nothing was sent" in out and not out.startswith(WRITE_OK_PREFIX), (artists, out)
     ha = LookupOnly(library=library([{"name": "Somebody Else"}]))          # the same artist: that is his song
     assert play(ha).startswith(f"{WRITE_OK_PREFIX} playing")
     assert ha.posts("media_player/play_media")[0]["media_content_id"] == "spotify:track:1111111111111111111111"
+
+
+class NamelessLookup(LookupOnly):
+    """The look-up's hit names no artist either: two blanks must not count as the same artist."""
+
+    def __call__(self, request):
+        if request.url.path == "/api/services/music_assistant/search":
+            body = json.loads(request.content)
+            self.calls.append((request.url.path, body))
+            hit = {"name": "One More Time", "uri": "spotify--abc123://track/1111111111111111111111", "artists": [{}]}
+            return httpx.Response(200, json={"service_response": {"tracks": [hit] if body.get("media_type") else []}})
+        return HA.__call__(self, request)
+
+
+def test_two_missing_artist_names_are_not_a_match():
+    for artists in ([{}], [{"name": None}]):
+        ha = NamelessLookup(library={"track": [{"name": "One More Time", "uri": "library://track/52", "artists": artists}]})
+        play(ha)
+        assert ha.posts("media_player/play_media") == [], artists
+
+
+class NoAnswer(HA):
+    """Home Assistant never answers the play request: it may have gone through."""
+
+    def __call__(self, request):
+        if request.url.path == "/api/services/media_player/play_media":
+            self.calls.append((request.url.path, json.loads(request.content)))
+            raise httpx.ReadTimeout("no answer", request=request)
+        return super().__call__(request)
+
+
+def test_a_play_with_no_answer_is_said_as_unsure_and_no_second_song_is_sent():
+    search = {"tracks": [{"name": "One More Time", "uri": "spotify--abc123://track/0DiWol3AO6WpXZgp0goxAV", "artists": [{"name": "Daft Punk"}]},
+                         {"name": "One More Time", "uri": "spotify--abc123://track/1111111111111111111111", "artists": [{"name": "Other"}]}]}
+    ha = NoAnswer(search=search)
+    out = play(ha)
+    assert "couldn't tell whether it went through" in out and "Nothing was sent" not in out
+    assert not out.startswith(WRITE_OK_PREFIX)
+    assert len(ha.posts("media_player/play_media")) == 1          # one attempt, never a second on top of a maybe
+
+
+def test_a_plain_refusal_moves_on_to_the_next_and_claims_nothing():
+    ha = HA(play_status=500)
+    out = play(ha)
+    assert "FAILED" in out and "couldn't tell" not in out

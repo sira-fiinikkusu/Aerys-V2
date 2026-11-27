@@ -626,8 +626,19 @@ def build_music_tool(
         found = [e for e in allowed if said and _friendly(e).lower() == said]
         return found[0] if len(found) == 1 else None
 
-    def _spotify_player() -> dict | None:
-        r = http.get(f"{base}/api/states/{phone_spotify_player}", headers=headers)
+    def _artist_keys(item: dict) -> set:
+        """The artists an item really names: non-empty strings only (a missing name matches nobody)."""
+        out = set()
+        for a in item.get("artists") or []:
+            n = a.get("name") if isinstance(a, dict) else a
+            if isinstance(n, str) and n.strip():
+                out.add(_name_key(n))
+        out.discard("")
+        return out
+
+    def _spotify_player(timeout: float | None = None) -> dict | None:
+        r = http.get(f"{base}/api/states/{phone_spotify_player}", headers=headers,
+                     **({"timeout": timeout} if timeout is not None else {}))
         r.raise_for_status()
         state = r.json()
         return state if isinstance(state, dict) else None
@@ -641,8 +652,7 @@ def build_music_tool(
         if not str(item.get("uri") or "").startswith("library://") or kind not in ("track", "artist", "album"):
             return ""
         name = str(item.get("name") or "").strip()
-        mine = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in item.get("artists") or []}
-        mine.discard("")
+        mine = _artist_keys(item)
         if not name or (kind != "artist" and not mine):
             return ""                     # without an artist to match, a same-titled song could be anyone's
         r = http.post(f"{base}/api/services/music_assistant/search?return_response", headers=headers,
@@ -654,8 +664,7 @@ def build_music_tool(
         for hit in hits if isinstance(hits, list) else []:
             if not isinstance(hit, dict) or _name_key(str(hit.get("name") or "")) != _name_key(name):
                 continue
-            theirs = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in hit.get("artists") or []}
-            if kind != "artist" and not (mine & theirs):
+            if kind != "artist" and not (mine & _artist_keys(hit)):
                 continue
             m = _SPOTIFY_URI.fullmatch(str(hit.get("uri") or ""))
             if m and m.group(1) == kind:
@@ -666,17 +675,23 @@ def build_music_tool(
         """Start what he asked for on his phone through Spotify. Only while Spotify lists the phone as a place
         to play; otherwise she says so, and nothing is sent. Whatever comes back in a shape nobody expected
         ends as a plain sentence, never an exception (that would end her turn)."""
-        sent: list = []
+        sent: list = []            # names Home Assistant accepted a play for
+        tried: list = []           # names a play was attempted for (accepted or not known)
         try:
-            return _phone_play_inner(query, media_type, config, sent)
+            return _phone_play_inner(query, media_type, config, sent, tried)
         except Exception as e:
             log.warning("music: starting on the phone failed (%s)", type(e).__name__)
             if sent:
                 return (f"{WRITE_OK_PREFIX} sent {sent[-1]} to his phone, but I couldn't check that it started "
                         f"({type(e).__name__}). Say it was sent, not that it's playing.")
+            if tried:
+                return _UNSURE.format(name=tried[-1], why=type(e).__name__)
             return f"Starting music on his phone didn't work ({type(e).__name__}). Nothing was sent."
 
-    def _phone_play_inner(query: str, media_type: str, config: RunnableConfig, sent: list) -> str:
+    _UNSURE = ("I tried to start {name} on his phone, but couldn't tell whether it went through ({why}). "
+               "Say that plainly; don't say it's playing, and don't say nothing happened.")
+
+    def _phone_play_inner(query: str, media_type: str, config: RunnableConfig, sent: list, tried: list) -> str:
         try:
             player = _spotify_player()
         except (httpx.HTTPError, ValueError) as e:
@@ -704,22 +719,34 @@ def build_music_tool(
                 r = http.post(f"{base}/api/services/media_player/select_source", headers=headers,
                               json={"entity_id": phone_spotify_player, "source": phone_spotify_source})
                 r.raise_for_status()
+            except (httpx.HTTPError, ValueError) as e:
+                last_error = str(e)
+                continue
+            tried.append(name)
+            try:
                 r = http.post(f"{base}/api/services/media_player/play_media", headers=headers,
                               json={"entity_id": phone_spotify_player, "media_content_id": link,
                                     "media_content_type": _PHONE_PLAY_TYPES[kind]})
-                r.raise_for_status()
-            except (httpx.HTTPError, ValueError) as e:
-                last_error = str(e)
+            except httpx.HTTPError as e:
+                # No answer at all: it may have gone through. Never a second song on top of a maybe.
+                return _UNSURE.format(name=name, why=type(e).__name__)
+            if r.status_code >= 400:
+                last_error = f"HTTP {r.status_code}"           # a plain refusal: nothing started, try the next
+                tried.pop()
                 continue
             sent.append(name)
             # Sent is not playing: Spotify itself has to say it started on the phone.
             give_up = time.monotonic() + _PHONE_CONFIRM_S
             for _ in range(_PHONE_CONFIRM_TRIES):
-                if time.monotonic() >= give_up:
+                left = give_up - time.monotonic()
+                if left <= 0.5:
                     break
-                sleep(1.0)
+                sleep(min(1.0, left))
+                left = give_up - time.monotonic()
+                if left <= 0.2:
+                    break
                 try:
-                    now = _spotify_player() or {}
+                    now = _spotify_player(timeout=min(3.0, left)) or {}       # a stalled read can't outlast the budget
                 except (httpx.HTTPError, ValueError):
                     continue
                 attrs = now.get("attributes") if isinstance(now.get("attributes"), dict) else {}
