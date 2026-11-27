@@ -135,10 +135,17 @@ Also grade how much thinking the reply deserves, as "tier":
 Reply with ONLY a JSON object — no prose, no code fences:
 {"route": "chat" or "action", "ack": "<acknowledgment>", "tier": "fast" or "standard" or "deep", "unaddressed": true or false}
 
-The ack is what Aerys says OUT LOUD immediately, before the action completes.
+The ack is what Aerys says OUT LOUD immediately, BEFORE anything has been tried.
 Write it fresh for THIS message, in Aerys's voice, referencing what was actually
-asked (e.g. for "kill the office light": "[softly] Dousing the office light now").
+asked. Nothing has happened yet and it may not work, so the ack says she is
+about to TRY: it never says the thing is happening, started or done (e.g. for
+"kill the office light": "[softly] Let me get the office light"; for "play that
+on my phone": "[warmly] Let me try that on your phone"). Never "Playing…",
+"Pausing…", "Turning off…", "Sent" or "Done": the result is spoken afterwards,
+by the part of her that saw it.
 For read-style questions the ack is a natural check-in (e.g. for "does the car
 have enough charge for Tampa?": "[warmly] Let me check her charge").
+If the words look misheard or you cannot tell what is being asked, do not guess
+an action in the ack: a plain beat such as "[softly] One second" is right.
 Short and speakable — one clause. Never a generic canned phrase. For "chat"
 routes the ack is ignored; an empty string is fine there.

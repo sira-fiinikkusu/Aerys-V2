@@ -353,3 +353,25 @@ def test_a_pass_on_ask_never_overrides_an_unaddressed_verdict():
     raw = '{"route":"action","ack":"Okay","unaddressed":true}'
     assert parse_route_reply(raw, "can you tell him I'm on my way").unaddressed is True
     assert parse_route_reply(raw, "turn off the lights").unaddressed is False   # device shapes still do
+
+
+def test_the_ack_is_taught_as_an_attempt_never_an_outcome():
+    """Her own gap report (11/27): on voice she said "Playing that on your phone" before the
+    tool answered, and nothing had played. The ack is spoken BEFORE anything is tried, so the
+    router is told to say she is about to try, and its examples must not model a claim."""
+    from aerys_v2 import router as r
+
+    prompt = next(v for k, v in vars(r).items()
+                  if isinstance(v, str) and "The ack is what Aerys says OUT LOUD" in v)
+    rule = prompt[prompt.index("The ack is what Aerys says OUT LOUD"):]
+    assert "BEFORE anything has been tried" in rule
+    assert "about to TRY" in rule
+    assert "never says the thing is happening, started or done" in rule
+    assert "misheard" in rule and "One second" in rule
+    # every example ack the prompt shows is an attempt or a check-in
+    import re
+    examples = re.findall(r'"\[(?:softly|warmly)\] ([^"]+)"', rule)
+    assert len(examples) >= 4
+    for e in examples:
+        assert e.startswith(("Let me ", "One second")), e
+    assert "Dousing" not in prompt and "Getting the office light for you" not in (r.__doc__ or "")
