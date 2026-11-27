@@ -108,11 +108,13 @@ WELCOME_PROMPT = (
     "long lunch at the noodle place, then the hardware store?\"). Never mention addresses, maps or how you know; since "
     "it's a guess, put it as a question, not a claim; an address alone may need a quick look-up before "
     "you name the place. "
-    "If the facts list what he told you himself, read that FIRST: when he said where he was going or what "
-    "he'd be doing, that is where he was. Greet him like you remembered it (\"how was round two at her "
+    "If the facts list what he told you himself, read that FIRST: when he told you, in his own voice, where "
+    "he was going or what he'd be doing on THIS outing (said the same day, before he left or while he was "
+    "out), that is where he was. Greet him like you remembered it (\"how was round two at her "
     "parents'?\") and never offer a place from the map instead; the map is only for when he told you "
-    "nothing about it. Use his words only to know where he was and what to ask; don't repeat the rest of "
-    "what he said. "
+    "nothing about this outing. A plan for another day, something he quoted or pasted from someone else, "
+    "or a maybe doesn't count: when it isn't clearly about this outing, leave it and greet him plainly. "
+    "Those lines are his private talk with you: say nothing from them aloud except the outing itself. "
     "Never guess: if it isn't clear, just ask. Never pry, and it's fine if he doesn't say. If things came in while he was out, say so in a few "
     "words; the details are in his messages. If his morning brief is included, give it after the "
     "hello in two to four more short sentences: the weather, what's left on today's calendar "
@@ -176,11 +178,18 @@ class WelcomeFacts:
     stops: list = field(default_factory=list)    # Stop: where his phone stayed a while (D85)
     brief: Facts | None = None                   # the morning brief's facts, when it comes along
     home_for: timedelta | None = None            # D91: set when it goes as a Discord message: how long he's been home
-    told: list = field(default_factory=list)     # (when, his words): what he told her himself that day (never logged)
+    told: list = field(default_factory=list)     # (when, his words): what he told her himself (kept out of the log)
 
 
 def _utc(dt: datetime) -> datetime:
     return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def unattended_text_in(facts) -> bool:
+    """Whether her turn must run fenced (no house writes): the facts carry a map's place names (D92), or
+    his own typed lines, which can hold text he pasted from anywhere. In a DM he is there to see what she
+    does with it; here nobody is watching, so it counts like any outside read."""
+    return names_in(facts) or bool(getattr(facts, "told", None))
 
 
 def names_in(facts) -> bool:
@@ -200,6 +209,11 @@ def _named(stop) -> str:
 def _clock(dt: datetime) -> str:
     """'1:30 PM', Eastern (the calendar tool's format, without importing the tools)."""
     return dt.astimezone(EASTERN).strftime("%I:%M %p").lstrip("0")
+
+
+def _day_clock(dt: datetime) -> str:
+    """'Thu 3:14 PM': his own lines can come from the day before, so each carries its day."""
+    return f"{_utc(dt).astimezone(EASTERN):%a} {_clock(dt)}"
 
 
 def how_long(away: timedelta) -> str:
@@ -320,9 +334,10 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
     else:
         lines.append("On his calendar while he was out: nothing")
     if facts.told:
-        lines.append("What he told you himself today, before and while he was out (his own words to you, "
-                     "oldest first; if he said where he was going, that is where he was):")
-        lines += [f"- {_clock(when)}: {words}" for when, words in facts.told]
+        lines.append("What he told you himself in the hours before he left and while he was out (his own "
+                     "words to you, oldest first, each with its day and time; text he pasted or quoted is "
+                     "not him telling you his plans):")
+        lines += [f"- {_day_clock(when)}: {words}" for when, words in facts.told]
     if facts.stops:
         lines.append("Where his phone stayed a while (addresses from his phone; an address isn't a place "
                      "name until it's looked up):")
@@ -654,11 +669,23 @@ class WelcomeHome:
         these lines; none of his words are logged (the error's type only)."""
         if self.told is None:
             return []
-        try:
-            return list(self.told(left, arrived) or [])
-        except Exception as e:
-            log.warning("welcome home: what he told her couldn't be read (%s); going without it", type(e).__name__)
-            return []
+        box: dict = {}
+
+        def work():
+            try:
+                box["rows"] = list(self.told(left, arrived) or [])
+            except Exception as e:
+                box["err"] = type(e).__name__
+
+        # He's standing in the room: a read that hangs never holds the hello (it goes without these lines).
+        worker = threading.Thread(target=work, daemon=True, name="welcome-told")
+        worker.start()
+        worker.join(TOLD_BUDGET_S)
+        if "rows" in box:
+            return box["rows"]
+        log.warning("welcome home: what he told her couldn't be read (%s); going without it",
+                    box.get("err") or "took too long")
+        return []
 
     def _visits(self, left: datetime, arrived: datetime, now: datetime, key: str) -> list:
         """His personal calendar while he was out. She may ask about ONE of them (the one that ended
@@ -962,6 +989,7 @@ def away_since_for(settings, *, get=None) -> Callable[[datetime], datetime | Non
 TOLD_WINDOW = timedelta(hours=10)
 TOLD_LINES = 30
 TOLD_CHARS = 240
+TOLD_BUDGET_S = 6.0
 #: Only where he talks to her alone: his own thread, by DM, by voice or the panel.
 TOLD_CHANNELS = ("discord_dm", "voice", "person", "telegram")
 
@@ -1160,9 +1188,9 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
         desk, read=home_reader_for(settings), away_since=away_since_for(settings),
         compose=composer_for(settings, prompt=WELCOME_PROMPT if turn else WELCOME_PROMPT_TOOL_FREE,
                              text_of=welcome_facts_text, turn=turn,
-                             kind="welcome", outside_of=names_in),
+                             kind="welcome", outside_of=unattended_text_in),
         compose_text=composer_for(settings, prompt=WELCOME_TEXT_PROMPT if turn else WELCOME_TEXT_PROMPT_TOOL_FREE,
-                                  text_of=welcome_facts_text, turn=turn, kind="welcome-text", outside_of=names_in),
+                                  text_of=welcome_facts_text, turn=turn, kind="welcome-text", outside_of=unattended_text_in),
         visits=visits_for(settings), stops=stops_for(settings), told=told_for(settings),
         rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
