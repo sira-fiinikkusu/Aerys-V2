@@ -84,7 +84,7 @@ def test_it_reads_only_his_own_private_thread_in_the_hours_around_the_trip():
     sql, p = conn.seen[0]
     assert p["owner"] == OWNER and p["thread"] == f"person:{OWNER}"
     # the private doors, spelled out here: a shared room's channel added to the constant fails this
-    assert sorted(p["channels"]) == ["discord_dm", "person", "telegram", "voice"] == sorted(TOLD_CHANNELS)
+    assert sorted(p["channels"]) == ["discord_dm", "person", "telegram", "telegram_dm", "voice"] == sorted(TOLD_CHANNELS)
     assert p["start"] == utc(LEFT) - TOLD_WINDOW and p["end"] == utc(HOME) and p["n"] == TOLD_LINES
     assert TOLD_WINDOW == timedelta(hours=10)
     # the whole statement, word for word: a loosened WHERE (an OR, a dropped line) fails this
@@ -92,6 +92,9 @@ def test_it_reads_only_his_own_private_thread_in_the_hours_around_the_trip():
         "SELECT created_at, input_text FROM v2_turns "
         "WHERE person_id = %(owner)s AND thread_id = %(thread)s AND channel = ANY(%(channels)s) "
         "AND sealed_room IS NULL AND created_at >= %(start)s AND created_at <= %(end)s "
+        "AND guard_verdict IS DISTINCT FROM 'portable_untrusted' "
+        "AND NOT COALESCE(degraded, '[]'::jsonb) @> '[\"voice_owner_assumed\"]'::jsonb "
+        "AND NOT COALESCE(degraded, '[]'::jsonb) @> '[\"dropped_unaddressed\"]'::jsonb "
         "AND input_text IS NOT NULL AND btrim(input_text) <> '' "
         "ORDER BY created_at DESC LIMIT %(n)s")
 
@@ -163,11 +166,47 @@ def test_a_turn_that_reads_his_typed_lines_runs_fenced_like_any_outside_read():
     assert seen == [True, False]
 
 
-def test_the_live_greeting_is_wired_to_that_fence():
-    import inspect
+def test_a_voice_turn_the_house_only_assumed_was_his_is_left_out_like_her_history_search_does():
+    """An unsure speaker (someone else in the room) lands in his thread marked voice_owner_assumed."""
+    from aerys_v2.services.recall_search import BLOCKED_MARKERS
 
-    src = inspect.getsource(welcome_module.welcome_home_for)
-    assert src.count("outside_of=unattended_text_in") == 2 and "outside_of=names_in" not in src
+    for marker in BLOCKED_MARKERS:
+        assert f'@> \'["{marker}"]\'::jsonb' in welcome_module.TOLD_SQL, marker
+
+
+def test_the_live_greeting_is_armed_with_his_lines_and_both_composers_run_fenced(monkeypatch):
+    import aerys_v2.brief as brief_module
+    from aerys_v2.reach import MemoryReachStore, ReachDesk
+
+    built = []
+
+    def fake_composer_for(settings, **kw):
+        built.append(kw)
+        return lambda facts: "hello"
+
+    monkeypatch.setattr(brief_module, "composer_for", fake_composer_for)
+    desk = ReachDesk(MemoryReachStore(), lambda *a, **k: None, budget_default=3)
+
+    def settings(**over):
+        base = dict(welcome_home=True, welcome_home_entity="binary_sensor.home", ha_token=SimpleNamespace(get_secret_value=lambda: "t"),
+                    ha_base_url="http://ha.test", reach_room_devices="office=dev-office", welcome_home_rooms="",
+                    database_url=None, owner_person_id=OWNER, presence_geocoded_entity="")
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    hello = welcome_module.welcome_home_for(settings(), desk)
+    assert hello is not None and hello.told is None                       # no database: not armed, still greets
+    assert [k["outside_of"] for k in built] == [unattended_text_in, unattended_text_in]
+    assert [k["kind"] for k in built] == ["welcome", "welcome-text"]
+    monkeypatch.setattr(welcome_module, "told_for", lambda s: (lambda left, arrived: [(T0, PLAN)]))
+    armed = welcome_module.welcome_home_for(settings(), desk)
+    assert armed.told(utc(LEFT), utc(HOME)) == [(T0, PLAN)]
+
+
+def test_a_naive_time_reads_the_same_day_and_clock():
+    from aerys_v2.welcome import _day_clock
+
+    assert _day_clock(datetime(2026, 11, 11, 3, 30)) == "Tue 10:30 PM"     # naive = UTC: one instant, not two
 
 
 def test_a_read_that_hangs_never_holds_the_hello_and_is_never_doubled(monkeypatch):

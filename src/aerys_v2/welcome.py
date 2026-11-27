@@ -213,7 +213,8 @@ def _clock(dt: datetime) -> str:
 
 def _day_clock(dt: datetime) -> str:
     """'Thu 3:14 PM': his own lines can come from the day before, so each carries its day."""
-    return f"{_utc(dt).astimezone(EASTERN):%a} {_clock(dt)}"
+    when = _utc(dt)
+    return f"{when.astimezone(EASTERN):%a} {_clock(when)}"
 
 
 def how_long(away: timedelta) -> str:
@@ -1001,12 +1002,15 @@ TOLD_LINES = 30
 TOLD_CHARS = 240
 TOLD_BUDGET_S = 6.0
 #: Only where he talks to her alone: his own thread, by DM, by voice or the panel.
-TOLD_CHANNELS = ("discord_dm", "voice", "person", "telegram")
+TOLD_CHANNELS = ("discord_dm", "voice", "person", "telegram_dm", "telegram")
 
 TOLD_SQL = """
 SELECT created_at, input_text FROM v2_turns
  WHERE person_id = %(owner)s AND thread_id = %(thread)s AND channel = ANY(%(channels)s)
    AND sealed_room IS NULL AND created_at >= %(start)s AND created_at <= %(end)s
+   AND guard_verdict IS DISTINCT FROM 'portable_untrusted'
+   AND NOT COALESCE(degraded, '[]'::jsonb) @> '["voice_owner_assumed"]'::jsonb
+   AND NOT COALESCE(degraded, '[]'::jsonb) @> '["dropped_unaddressed"]'::jsonb
    AND input_text IS NOT NULL AND btrim(input_text) <> ''
  ORDER BY created_at DESC LIMIT %(n)s
 """
@@ -1027,7 +1031,9 @@ def told_rows(rows, *, lines: int = TOLD_LINES, chars: int = TOLD_CHARS) -> list
 def told_for(settings, *, connect=None) -> Callable[[datetime, datetime], list] | None:
     """What he told her himself, from his own private thread (her own conversation with him: DMs, voice,
     the panel), from TOLD_WINDOW before he left to when he got home. None without a database or an
-    owner. Never another person's words, never a shared or sealed room. connect is the test seam."""
+    owner. Never another person's words, never a shared or sealed room, and never a voice turn the house
+    only ASSUMED was his (an unsure speaker, or talk in the room that wasn't to her): the same markers her
+    history search leaves out (recall_search.BLOCKED_MARKERS). connect is the test seam."""
     url = getattr(settings, "database_url", None)
     owner = str(getattr(settings, "owner_person_id", "") or "").strip()
     if not owner or (not url and connect is None):
