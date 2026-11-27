@@ -181,12 +181,31 @@ def test_vision_says_why_when_the_image_itself_could_not_be_fetched():
     web = "https://example.com/private/cat.png"
     out = make_vision(_fetch_failed(404, web)).invoke({"url": web, "question": "?"})
     assert "could not be fetched" in out and "HTTP 404" in out and "nothing was looked at" in out
-    assert "HTTP 400" not in out
+    assert "HTTP 400" not in out and out.startswith("Vision call failed with HTTP 404")
     out = make_vision(_fetch_failed(403, web)).invoke({"url": web, "question": "?"})
     assert "HTTP 403" in out and "expired" in out and "Discord" not in out
     # a signed Discord link whose fetch failed gets the expired-signature explanation
     out = make_vision(_fetch_failed(404, SIGNED_IMAGE_URL)).invoke({"url": SIGNED_IMAGE_URL, "question": "?"})
     assert "Discord CDN signature" in out and "never strip the query string" in out and "HTTP 404" in out
+
+
+def test_a_failed_image_fetch_is_recorded_as_a_failed_call():
+    """Review finding (11/27): the turn record and the honesty judge decide 'did she look at an
+    image' from the tool's own words. Every wording of a failed fetch must read as FAILED there,
+    or an unfetched image would count as looked at."""
+    from aerys_v2.turns import classify_tool_result
+
+    def recorded_as_failed(text: str) -> bool:
+        return classify_tool_result(text, "success") == "http_error"   # the real classifier
+
+    web = "https://example.com/private/cat.png"
+    for status, url in ((404, web), (403, web), (500, web), (429, web), (404, SIGNED_IMAGE_URL), (403, SIGNED_IMAGE_URL), (500, SIGNED_IMAGE_URL)):
+        out = make_vision(_fetch_failed(status, url)).invoke({"url": url, "question": "?"})
+        assert recorded_as_failed(out), (status, url, out)
+        assert "nothing was looked at" in out or "expired" in out
+    # and a successful look is not
+    ok = make_vision(FakeOpenRouter(reply="a cat on a sofa")).invoke({"url": web, "question": "?"})
+    assert classify_tool_result(ok, "success") is None
 
 
 def test_vision_other_400s_keep_the_plain_line():

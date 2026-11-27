@@ -278,8 +278,11 @@ def explain_image_fetch_failure(fetch_status: int, image_url: str) -> str:
     """What to tell the agent when the image itself could not be fetched. Nothing was looked at."""
     if fetch_status in (403, 404) and looks_like_signed_discord_url(image_url):
         return explain_vision_http_error(fetch_status, image_url)
+    # "failed with HTTP" is load-bearing: turns._TOOL_FAILURE_SIGNALS reads it to record this call
+    # as FAILED, which is also what tells the honesty judge no image was looked at.
     return (
-        f"The image could not be fetched: its host answered HTTP {fetch_status}, so nothing was "
-        "looked at. The link may have expired, be private, or refuse automated fetches. "
-        "Trying the same link again will fail the same way; a fresh link or the image itself is needed."
+        f"Vision call failed with HTTP {fetch_status}: the image could not be fetched from its host, "
+        "so nothing was looked at. The link may have expired, be private, or refuse automated "
+        "fetches. Trying the same link again will fail the same way; a fresh link or the image "
+        "itself is needed."
     )
