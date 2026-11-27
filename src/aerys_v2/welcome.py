@@ -108,6 +108,11 @@ WELCOME_PROMPT = (
     "long lunch at the noodle place, then the hardware store?\"). Never mention addresses, maps or how you know; since "
     "it's a guess, put it as a question, not a claim; an address alone may need a quick look-up before "
     "you name the place. "
+    "If the facts list what he told you himself, read that FIRST: when he said where he was going or what "
+    "he'd be doing, that is where he was. Greet him like you remembered it (\"how was round two at her "
+    "parents'?\") and never offer a place from the map instead; the map is only for when he told you "
+    "nothing about it. Use his words only to know where he was and what to ask; don't repeat the rest of "
+    "what he said. "
     "Never guess: if it isn't clear, just ask. Never pry, and it's fine if he doesn't say. If things came in while he was out, say so in a few "
     "words; the details are in his messages. If his morning brief is included, give it after the "
     "hello in two to four more short sentences: the weather, what's left on today's calendar "
@@ -171,6 +176,7 @@ class WelcomeFacts:
     stops: list = field(default_factory=list)    # Stop: where his phone stayed a while (D85)
     brief: Facts | None = None                   # the morning brief's facts, when it comes along
     home_for: timedelta | None = None            # D91: set when it goes as a Discord message: how long he's been home
+    told: list = field(default_factory=list)     # (when, his words): what he told her himself that day (never logged)
 
 
 def _utc(dt: datetime) -> datetime:
@@ -313,6 +319,10 @@ def welcome_facts_text(facts: WelcomeFacts) -> str:
         lines += [f"- [{ASK if v.ask else NO_ASK}] {v.when}: {v.title}" for v in facts.visits]
     else:
         lines.append("On his calendar while he was out: nothing")
+    if facts.told:
+        lines.append("What he told you himself today, before and while he was out (his own words to you, "
+                     "oldest first; if he said where he was going, that is where he was):")
+        lines += [f"- {_clock(when)}: {words}" for when, words in facts.told]
     if facts.stops:
         lines.append("Where his phone stayed a while (addresses from his phone; an address isn't a place "
                      "name until it's looked up):")
@@ -373,10 +383,12 @@ class WelcomeHome:
                  rooms: tuple = ("office", "kitchen"), brief=None, followups=None,
                  away_minutes: int = 30, settle_minutes: int = 20, quiet_start_hour: int = 21,
                  clock: Callable[[], datetime] | None = None,
-                 compose_text: Callable[[WelcomeFacts], str] | None = None):
+                 compose_text: Callable[[WelcomeFacts], str] | None = None,
+                 told: Callable[[datetime, datetime], list] | None = None):
         self.desk, self.read, self.away_since, self.compose, self.visits = desk, read, away_since, compose, visits
         self.compose_text = compose_text or compose     # D91: her words for the Discord hello
         self.stops = stops
+        self.told = told              # told(left, arrived) -> [(when, his words)], or None (not armed)
         self.rooms = tuple(r.strip().lower() for r in rooms if r.strip())
         self.brief, self.followups = brief, followups
         self.away_for = timedelta(minutes=away_minutes)
@@ -636,6 +648,18 @@ class WelcomeHome:
             log.warning("welcome home: his stops couldn't be read (%s); going without them", type(e).__name__)
             return []
 
+    def _told(self, left: datetime, arrived: datetime) -> list:
+        """What he told her himself that day (11/26: he'd said "when you see me out again its because i was
+        at her parents", and the hello asked about a place off the map). A read that fails costs only
+        these lines; none of his words are logged (the error's type only)."""
+        if self.told is None:
+            return []
+        try:
+            return list(self.told(left, arrived) or [])
+        except Exception as e:
+            log.warning("welcome home: what he told her couldn't be read (%s); going without it", type(e).__name__)
+            return []
+
     def _visits(self, left: datetime, arrived: datetime, now: datetime, key: str) -> list:
         """His personal calendar while he was out. She may ask about ONE of them (the one that ended
         last), if appointments aren't muted, his check-in dial has room today, and no check-in
@@ -825,7 +849,7 @@ class WelcomeHome:
         visits = self._visits(left, arrived, now, key)
         facts = WelcomeFacts(away=arrived - left, room=room, visits=visits, held=[] if marker else held,
                              stops=self._stops(left, arrived) if stops is None else stops, brief=brief_facts,
-                             home_for=(now - arrived) if by_text else None)
+                             home_for=(now - arrived) if by_text else None, told=self._told(left, arrived))
         compose = self.compose_text if by_text else self.compose
         text = ""
         try:
@@ -932,6 +956,57 @@ def away_since_for(settings, *, get=None) -> Callable[[datetime], datetime | Non
         return left_at(rows, arrived, start)
 
     return away_since
+
+
+#: How far before he left his own words are read, how many lines, and how long each may be.
+TOLD_WINDOW = timedelta(hours=10)
+TOLD_LINES = 30
+TOLD_CHARS = 240
+#: Only where he talks to her alone: his own thread, by DM, by voice or the panel.
+TOLD_CHANNELS = ("discord_dm", "voice", "person", "telegram")
+
+TOLD_SQL = """
+SELECT created_at, input_text FROM v2_turns
+ WHERE person_id = %(owner)s AND thread_id = %(thread)s AND channel = ANY(%(channels)s)
+   AND sealed_room IS NULL AND created_at >= %(start)s AND created_at <= %(end)s
+   AND input_text IS NOT NULL AND btrim(input_text) <> ''
+ ORDER BY created_at DESC LIMIT %(n)s
+"""
+
+
+def told_rows(rows, *, lines: int = TOLD_LINES, chars: int = TOLD_CHARS) -> list:
+    """(when, his words) oldest first, each on one line and clipped; the newest `lines` are kept."""
+    out = []
+    for when, text in rows or []:
+        words = " ".join(str(text or "").split())
+        if not words or not isinstance(when, datetime):
+            continue
+        out.append((when, words if len(words) <= chars else words[:chars - 1].rstrip() + "…"))
+    out.sort(key=lambda r: r[0])
+    return out[-lines:]
+
+
+def told_for(settings, *, connect=None) -> Callable[[datetime, datetime], list] | None:
+    """What he told her himself, from his own private thread (her own conversation with him: DMs, voice,
+    the panel), from TOLD_WINDOW before he left to when he got home. None without a database or an
+    owner. Never another person's words, never a shared or sealed room. connect is the test seam."""
+    url = getattr(settings, "database_url", None)
+    owner = str(getattr(settings, "owner_person_id", "") or "").strip()
+    if not owner or (not url and connect is None):
+        return None
+    if connect is None:
+        from aerys_v2.factory import read_only_db
+
+        connect = read_only_db(url)
+
+    def read(left: datetime, arrived: datetime) -> list:
+        with connect() as conn:
+            rows = conn.execute(TOLD_SQL, {"owner": owner, "thread": f"person:{owner}",
+                                           "channels": list(TOLD_CHANNELS), "start": left - TOLD_WINDOW,
+                                           "end": arrived, "n": TOLD_LINES}).fetchall()
+        return told_rows(rows)
+
+    return read
 
 
 def stops_for(settings, *, get=None, near=None) -> Callable[[datetime, datetime], list] | None:
@@ -1088,7 +1163,8 @@ def welcome_home_for(settings, desk, *, brief=None, action_graph=None) -> Welcom
                              kind="welcome", outside_of=names_in),
         compose_text=composer_for(settings, prompt=WELCOME_TEXT_PROMPT if turn else WELCOME_TEXT_PROMPT_TOOL_FREE,
                                   text_of=welcome_facts_text, turn=turn, kind="welcome-text", outside_of=names_in),
-        visits=visits_for(settings), stops=stops_for(settings), rooms=rooms, brief=brief, followups=followups,
+        visits=visits_for(settings), stops=stops_for(settings), told=told_for(settings),
+        rooms=rooms, brief=brief, followups=followups,
         away_minutes=int(getattr(settings, "welcome_home_away_minutes", 30)),
         settle_minutes=int(getattr(settings, "welcome_home_settle_minutes", 20)),
         quiet_start_hour=int(getattr(settings, "owner_quiet_start_hour", 21)))
