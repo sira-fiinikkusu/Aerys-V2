@@ -669,6 +669,11 @@ class WelcomeHome:
         these lines; none of his words are logged (the error's type only)."""
         if self.told is None:
             return []
+        last = getattr(self, "_told_reader", None)
+        if last is not None and last.is_alive():
+            # An earlier read is still stuck (a stalled connection): never a second one beside it.
+            log.warning("welcome home: an earlier read of what he told her is still hung; going without it")
+            return []
         box: dict = {}
 
         def work():
@@ -679,7 +684,12 @@ class WelcomeHome:
 
         # He's standing in the room: a read that hangs never holds the hello (it goes without these lines).
         worker = threading.Thread(target=work, daemon=True, name="welcome-told")
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            log.warning("welcome home: couldn't start the read of what he told her; going without it")
+            return []
+        self._told_reader = worker
         worker.join(TOLD_BUDGET_S)
         if "rows" in box:
             return box["rows"]
