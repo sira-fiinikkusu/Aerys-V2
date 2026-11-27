@@ -158,7 +158,7 @@ def _sound_key(value: object) -> str:
 def _saved_keys(item: dict) -> list[str]:
     """Names a saved track or artist answers to: its name, and name + artists."""
     name = str(item.get("name") or "")
-    artists = " ".join(str(a.get("name")) for a in item.get("artists") or [] if a.get("name"))
+    artists = " ".join(str(a.get("name")) for a in item.get("artists") or [] if isinstance(a, dict) and a.get("name"))
     return [_name_key(name)] + ([_name_key(f"{name} {artists}")] if artists else [])
 
 
@@ -714,8 +714,9 @@ def build_music_tool(
             return f"I couldn't reach Spotify's player ({e}), so nothing was sent."
         before = (player or {}).get("attributes") if isinstance((player or {}).get("attributes"), dict) else {}
         sources = before.get("source_list")
-        was = (str(before.get("media_content_id") or "") if (player or {}).get("state") == "playing"
-               and before.get("source") == phone_spotify_source else "")
+        # What Spotify had on before she asked, wherever it was and playing or not: picking the phone can
+        # carry that old song over, and it must never pass for the new one.
+        was = str(before.get("media_content_id") or "")
         if not isinstance(sources, list) or phone_spotify_source not in sources:
             return ("His phone isn't reachable for Spotify right now (it drops off a while after Spotify was "
                     "last used there). Ask him to open Spotify on his phone, then ask again. Nothing was sent.")
@@ -728,7 +729,8 @@ def build_music_tool(
             if kind not in _PHONE_PLAY_TYPES or not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "?")
-            artists = [str(a.get("name") if isinstance(a, dict) else a) for a in item.get("artists") or [] if a]
+            artists = [n.strip() for n in ((a.get("name") if isinstance(a, dict) else a) for a in item.get("artists") or [])
+                       if isinstance(n, str) and n.strip()]
             if artists:
                 name += " by " + ", ".join(artists)
             try:
@@ -749,8 +751,9 @@ def build_music_tool(
             except httpx.HTTPError as e:
                 # No answer at all: it may have gone through. Never a second song on top of a maybe.
                 return _UNSURE.format(name=name, why=type(e).__name__)
-            if r.status_code >= 500:
-                # A server error can come after Spotify already took it (a timeout upstream): a maybe.
+            if r.status_code >= 500 or r.status_code < 200 or 300 <= r.status_code < 400:
+                # A server error can come after Spotify already took it (a timeout upstream), and an answer
+                # that is neither yes nor a refusal (a redirect) settles nothing: a maybe.
                 return _UNSURE.format(name=name, why=f"HTTP {r.status_code}")
             if r.status_code >= 400:
                 last_error = f"HTTP {r.status_code}"           # refused before anything ran: try the next

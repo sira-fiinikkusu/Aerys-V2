@@ -247,7 +247,7 @@ def test_his_library_song_is_matched_by_title_and_artist_never_by_title_alone():
         ha = LookupOnly(library=library(artists))
         out = play(ha)
         assert ha.posts("media_player/play_media") == [], artists
-        assert "Nothing was sent" in out and not out.startswith(WRITE_OK_PREFIX), (artists, out)
+        assert "couldn't find" in out and "Nothing was sent" in out, (artists, out)      # a real answer, not a crash
     ha = LookupOnly(library=library([{"name": "Somebody Else"}]))          # the same artist: that is his song
     assert play(ha).startswith(f"{WRITE_OK_PREFIX} playing")
     assert ha.posts("media_player/play_media")[0]["media_content_id"] == "spotify:track:1111111111111111111111"
@@ -268,8 +268,9 @@ class NamelessLookup(LookupOnly):
 def test_two_missing_artist_names_are_not_a_match():
     for artists in ([{}], [{"name": None}]):
         ha = NamelessLookup(library={"track": [{"name": "One More Time", "uri": "library://track/52", "artists": artists}]})
-        play(ha)
+        out = play(ha)
         assert ha.posts("media_player/play_media") == [], artists
+        assert "couldn't find" in out, (artists, out)
 
 
 class NoAnswer(HA):
@@ -293,9 +294,53 @@ def test_a_play_with_no_answer_is_said_as_unsure_and_no_second_song_is_sent():
 
 
 def test_a_plain_refusal_moves_on_to_the_next_and_claims_nothing():
-    ha = HA(play_status=400)
+    two = {"tracks": [{"name": "One More Time", "uri": "spotify--abc123://track/0DiWol3AO6WpXZgp0goxAV", "artists": [{"name": "Daft Punk"}]},
+                      {"name": "One More Time", "uri": "spotify--abc123://track/1111111111111111111111", "artists": [{"name": "Other"}]}]}
+    ha = HA(play_status=400, search=two)
     out = play(ha)
     assert "FAILED" in out and "couldn't tell" not in out
+    assert [b["media_content_id"] for b in ha.posts("media_player/play_media")] == [
+        "spotify:track:0DiWol3AO6WpXZgp0goxAV", "spotify:track:1111111111111111111111"]
+
+
+def test_a_redirect_is_not_a_yes():
+    ha = HA(play_status=302)
+    out = play(ha)
+    assert "couldn't tell whether it went through" in out and not out.startswith(WRITE_OK_PREFIX)
+    assert len(ha.posts("media_player/play_media")) == 1
+
+
+def test_an_old_song_carried_over_to_the_phone_is_not_the_album_he_asked_for():
+    """It was playing in the kitchen (or paused on the phone); picking the phone moves that old song there."""
+    for old_source in ("Kitchen", PHONE):
+        ha = HA(starts=False)
+        ha.old_id, ha.old_source = "spotify:track:9999999999999999999999", old_source
+
+        class Carried(type(ha)):
+            pass
+
+        real = ha.__call__
+
+        def call(request, ha=ha, real=real):
+            if request.url.path == "/api/services/media_player/select_source":
+                ha.old_source = PHONE                       # the old song now plays on the phone
+            return real(request)
+
+        out = build_music_tool(
+            base_url="http://ha.test", token="t", config_entry_id="entry-1",
+            players={"dev-office": "media_player.office_satellite"}, default_player="media_player.office_satellite",
+            client=httpx.Client(transport=httpx.MockTransport(call)), owner_person_id=OWNER,
+            phone_notify="mobile_app_test", phone_media_sensor="sensor.test_media",
+            phone_spotify_player=PLAYER, phone_spotify_source=PHONE, sleep=lambda s: None,
+        ).invoke({"operation": "play", "target": "my phone", "query": "anything", "media_type": "album"}, config=him())
+        assert out.startswith(f"{WRITE_OK_PREFIX} sent") and "hasn't said it started" in out, (old_source, out)
+
+
+def test_a_missing_artist_name_is_never_spoken_as_none():
+    search = {"tracks": [{"name": "one more time", "uri": "spotify--abc123://track/0DiWol3AO6WpXZgp0goxAV",
+                          "artists": [{"name": None}, {"name": "  "}, {"name": "Daft Punk"}]}]}
+    out = play(HA(search=search))
+    assert "by Daft Punk on his phone" in out and "None" not in out
 
 
 def test_the_song_that_was_already_on_is_not_proof_the_new_one_started():
