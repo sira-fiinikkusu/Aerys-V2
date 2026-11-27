@@ -1657,9 +1657,10 @@ MUSIC_OVERLAY = (
     "the title, who it's by and which app. If nothing is playing anywhere, say that. "
     # 11/26 (#264): he asked for the phone as a place she can control.
     "When the owner asks to pause, resume, stop or skip what's on their PHONE ('pause my phone', "
-    "'skip this' while the music is on the phone), call music with target='phone'. That only "
-    "controls what is already playing there; you can't start a song on the phone yet, so say so "
-    "if asked."
+    "'skip this' while the music is on the phone), call music with target='phone'. To START music "
+    "on their phone ('play X on my phone'), call music operation=play with target='phone'; it only "
+    "works while Spotify on the phone is reachable, and the tool tells you when it isn't: pass that "
+    "on plainly (they need to open Spotify on the phone and ask again)."
 )
 
 SEARCH_OVERLAY = (
@@ -2615,6 +2616,8 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     ma=ma_for(settings),       # D53: likes, library, playlists, the real queue
                     phone_notify=settings.ha_phone_notify,
                     phone_media_sensor=settings.ha_phone_media_sensor,
+                    phone_spotify_player=settings.ha_phone_spotify_player,
+                    phone_spotify_source=settings.ha_phone_spotify_source,
                 )
             )
 

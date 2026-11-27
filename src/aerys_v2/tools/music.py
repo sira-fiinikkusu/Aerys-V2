@@ -70,6 +70,10 @@ _TRANSPORT_OPS = {
 # controls whatever app is already playing there; it cannot start a chosen song.
 _PHONE_OPS = {"pause": "pause", "resume": "play", "stop": "stop", "next": "next", "previous": "previous"}
 _PHONE_STATE_KEY = "playback_state_"
+# What Spotify can start on his phone, and the media type Home Assistant's Spotify player wants for it.
+_PHONE_PLAY_TYPES = {"track": "music", "artist": "artist", "album": "album", "playlist": "playlist"}
+_SPOTIFY_URI = re.compile(r"spotify[^:/]*://(track|artist|album|playlist)/([A-Za-z0-9]{8,64})")
+_PHONE_CONFIRM_TRIES = 5
 _PACKAGE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+")
 
 _SEARCH_LIMIT = 5
@@ -280,6 +284,9 @@ def build_music_tool(
     ma=None,
     phone_notify: str = "",
     phone_media_sensor: str = "",
+    phone_spotify_player: str = "",
+    phone_spotify_source: str = "",
+    sleep=time.sleep,
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -291,6 +298,9 @@ def build_music_tool(
     phone_notify / phone_media_sensor: the Home Assistant notify service and media-session sensor
     of his phone. Both set = she may pause, resume, stop and skip what is playing there (target
     "phone"), for him only. Either empty = the phone is not a place she can reach.
+    phone_spotify_player / phone_spotify_source: Home Assistant's Spotify player entity and the name his
+    phone has in its list of places to play. Both set = she may also START a song, artist, album or
+    playlist there, while Spotify on the phone is reachable (it drops off a while after its last use).
     owner_person_id: whose library this is. Reading it back (my_playlists, my_taste) follows D47's
     rule for his own things: him, in a room only he reads. Playing music needs no such check.
     """
@@ -523,6 +533,91 @@ def build_music_tool(
             f"is configured — name one of: {options}."
         )
 
+    def _what_to_play(query: str, media_type: str, config: RunnableConfig):
+        """(what he asked for, the candidates to try in order) for a play request: his own library first,
+        then search. A plain string when there is nothing to try (said to her as it is)."""
+        what = query.strip()
+        if not what:
+            return "Tell me what to play — an artist, song, album, or playlist name."
+        wanted = media_type.strip().lower()
+        results = saved = None
+        try:
+            # A library outage must not disable the existing global search.
+            if wanted in {"", "playlist"}:
+                hit = _library_match(what, _playlists())
+                if hit:
+                    results = {"playlists": [hit]}
+            if results is None and wanted in {"", "track", "artist"}:
+                tracks = _saved("track")
+                artists = _saved("artist") if wanted != "track" else []
+                if wanted != "track":                     # an artist he only has songs of counts too (T-21)
+                    artists = artists + _artists_of(tracks, artists)
+                saved = _saved_match(what, tracks if wanted != "artist" else [], artists)
+        except (httpx.HTTPError, ValueError):
+            results = saved = None
+        if saved:
+            # Exact spelling is his; "sounds the same" is his only when he SAID it (voice can't spell).
+            # A typed ask keeps its spelling: a near saved name still yields to an exact catalog one.
+            conf = (config or {}).get("configurable") or {}
+            voice = is_voice_turn(identity_from_config(config), conf.get("thread_id", ""))
+            trusted = saved[2] == "exact" or (saved[2] == "sounds" and voice)
+            saved = (saved[0], saved[1], trusted)
+        if results is None and saved and saved[2]:
+            results = {_TYPE_TO_CATEGORY[saved[1]]: [saved[0]]}
+        if results is None:
+            try:
+                r = http.post(
+                    f"{base}/api/services/music_assistant/search?return_response",
+                    headers=headers,
+                    json={
+                        "config_entry_id": config_entry_id,
+                        "name": what,
+                        "limit": _SEARCH_LIMIT,
+                    },
+                )
+                r.raise_for_status()
+                results = (r.json() or {}).get("service_response") or {}
+            except (httpx.HTTPError, ValueError) as e:
+                if not saved:
+                    return f"Music search is unreachable right now ({e})."
+                results = {}
+
+        if wanted and wanted in _TYPE_TO_CATEGORY:
+            order = ((_TYPE_TO_CATEGORY[wanted], wanted),)
+        else:
+            order = _CATEGORY_ORDER
+        spotify_exact: list[tuple[dict, str]] = []
+        if saved and not saved[2]:
+            # A near name of his ("Imagined") yields to the exact name he said, if search has one it can
+            # play ("Imagine": same categories, same name rule, any rank); otherwise his own saved song is
+            # the better reading of a misheard ask.
+            spotify_exact = [(hit, singular) for category, singular in order
+                             for hit in (results.get(category) or [])
+                             if isinstance(hit, dict) and _play_norm(hit.get("name")) == _play_norm(what)]
+            if not spotify_exact:
+                results = {_TYPE_TO_CATEGORY[saved[1]]: [saved[0]]}
+        # Candidates in preference order. 2026-09-19 (bedroom, "play music from
+        # Lilith Max"): the first TRACK hit won over the ARTIST the owner named,
+        # radio mode asked Music Assistant for an "Endless Mix" the Spotify
+        # provider could not fill, and the play failed with nothing to fall back
+        # to. Two fixes: a result whose NAME is what the user said is promoted to
+        # the front of the line whatever its category, and a failed play tries
+        # the same item without radio mode, then the next candidate, before
+        # giving up honestly.
+        candidates: list[tuple[dict, str]] = []
+        for category, singular in order:
+            for hit in (results.get(category) or [])[:3]:
+                candidates.append((hit, singular))
+        exact = [c for c in candidates if _play_norm(c[0].get("name")) == _play_norm(what)]
+        others = [c for c in candidates if c not in exact]
+        # A yield (D52) puts the exact names first, then his near saved song, then the usual line,
+        # so a failed exact play still falls through like any other ask.
+        first = spotify_exact + ([(saved[0], saved[1])] if spotify_exact and saved else [])
+        candidates = first + [c for c in exact + others if c not in first]
+        if not candidates:
+            return f"I couldn't find anything matching '{what}' on Spotify."
+        return what, candidates
+
     def _speaker_named(target: str) -> str | None:
         """The speaker whose whole name IS what he said (or its entity id), else None: 'headphones' or
         'phone booth' never takes a plain 'phone'."""
@@ -530,13 +625,100 @@ def build_music_tool(
         found = [e for e in allowed if said and _friendly(e).lower() == said]
         return found[0] if len(found) == 1 else None
 
-    def _phone(op: str, config: RunnableConfig) -> str:
+    def _spotify_player() -> dict | None:
+        r = http.get(f"{base}/api/states/{phone_spotify_player}", headers=headers)
+        r.raise_for_status()
+        state = r.json()
+        return state if isinstance(state, dict) else None
+
+    def _spotify_link(item: dict, kind: str) -> str:
+        """spotify:<kind>:<id> for something search found. One of his library items carries no Spotify id
+        here, so it is looked up by its exact name (and, for a song, its artist): never a near match."""
+        m = _SPOTIFY_URI.fullmatch(str(item.get("uri") or ""))
+        if m and m.group(1) == kind:
+            return f"spotify:{kind}:{m.group(2)}"
+        if not str(item.get("uri") or "").startswith("library://") or kind not in ("track", "artist", "album"):
+            return ""
+        name = str(item.get("name") or "").strip()
+        mine = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in item.get("artists") or []}
+        if not name:
+            return ""
+        r = http.post(f"{base}/api/services/music_assistant/search?return_response", headers=headers,
+                      json={"config_entry_id": config_entry_id, "name": name, "media_type": kind, "limit": _SEARCH_LIMIT})
+        r.raise_for_status()
+        hits = ((r.json() or {}).get("service_response") or {}).get(_TYPE_TO_CATEGORY[kind]) or []
+        for hit in hits:
+            if not isinstance(hit, dict) or _name_key(str(hit.get("name") or "")) != _name_key(name):
+                continue
+            theirs = {_name_key(str(a.get("name") if isinstance(a, dict) else a)) for a in hit.get("artists") or []}
+            if kind != "artist" and mine and not (mine & theirs):
+                continue
+            m = _SPOTIFY_URI.fullmatch(str(hit.get("uri") or ""))
+            if m and m.group(1) == kind:
+                return f"spotify:{kind}:{m.group(2)}"
+        return ""
+
+    def _phone_play(query: str, media_type: str, config: RunnableConfig) -> str:
+        """Start what he asked for on his phone through Spotify. Only while Spotify lists the phone as a place
+        to play; otherwise she says so, and nothing is sent."""
+        try:
+            player = _spotify_player()
+        except (httpx.HTTPError, ValueError) as e:
+            return f"I couldn't reach Spotify's player ({e}), so nothing was sent."
+        sources = (player or {}).get("attributes", {}).get("source_list") if isinstance((player or {}).get("attributes"), dict) else None
+        if not isinstance(sources, list) or phone_spotify_source not in sources:
+            return ("His phone isn't reachable for Spotify right now (it drops off a while after Spotify was "
+                    "last used there). Ask him to open Spotify on his phone, then ask again. Nothing was sent.")
+        found = _what_to_play(query, media_type, config)
+        if isinstance(found, str):
+            return found
+        what, candidates = found
+        last_error = ""
+        for item, kind in candidates[:4]:
+            if kind not in _PHONE_PLAY_TYPES:
+                continue
+            name, _ = _item_line(item)
+            try:
+                link = _spotify_link(item, kind)
+                if not link:
+                    continue
+                r = http.post(f"{base}/api/services/media_player/select_source", headers=headers,
+                              json={"entity_id": phone_spotify_player, "source": phone_spotify_source})
+                r.raise_for_status()
+                r = http.post(f"{base}/api/services/media_player/play_media", headers=headers,
+                              json={"entity_id": phone_spotify_player, "media_content_id": link,
+                                    "media_content_type": _PHONE_PLAY_TYPES[kind]})
+                r.raise_for_status()
+            except (httpx.HTTPError, ValueError) as e:
+                last_error = str(e)
+                continue
+            # Sent is not playing: Spotify itself has to say it started on the phone.
+            for _ in range(_PHONE_CONFIRM_TRIES):
+                sleep(1.0)
+                try:
+                    now = _spotify_player() or {}
+                except (httpx.HTTPError, ValueError):
+                    continue
+                attrs = now.get("attributes") if isinstance(now.get("attributes"), dict) else {}
+                if now.get("state") == "playing" and attrs.get("source") == phone_spotify_source:
+                    return (f"{WRITE_OK_PREFIX} playing {name} on his phone. "
+                            "Keep the confirmation to a few words; no explanation, offers or questions.")
+            return (f"{WRITE_OK_PREFIX} sent {name} to his phone, but Spotify hasn't said it started yet. "
+                    "Say it was sent, not that it's playing.")
+        if last_error:
+            return f"Starting music on his phone FAILED — Home Assistant said: {last_error}."
+        return (f"I couldn't find '{what}' as something Spotify can start on his phone (a song, artist, album "
+                "or a public playlist; his own playlists don't work there yet). Nothing was sent.")
+
+    def _phone(op: str, config: RunnableConfig, query: str = "", media_type: str = "") -> str:
         """Pause/resume/stop/skip on his phone, whatever app is playing. His alone; never a guess."""
         if not (phone_notify and phone_media_sensor):
             return "I can't reach his phone's media from here."
-        if op not in _PHONE_OPS:
-            return ("On the phone I can pause, resume, stop and skip what's already playing. "
-                    "I can't start a song or change its volume there.")
+        can_start = bool(phone_spotify_player and phone_spotify_source)
+        if op not in _PHONE_OPS and not (op == "play" and can_start):
+            return ("On the phone I can " + ("start music, and " if can_start else "") +
+                    "pause, resume, stop and skip what's playing. Nothing else works on the phone"
+                    + ("." if can_start else ", and I can't start a song there."))
         ident = identity_from_config(config)
         if ident.get("unattended") or str(ident.get("platform") or "").strip().lower() == "wake":
             return "Not done: controlling his phone needs him asking."     # never on her own wake-up
@@ -545,6 +727,8 @@ def build_music_tool(
             return "Only he can control his phone."
         if verdict is not None:
             return "I'm not sure it's him asking, so I left his phone alone. Ask again."
+        if op == "play":
+            return _phone_play(query, media_type, config)
         try:
             r = http.get(f"{base}/api/states/{phone_media_sensor}", headers=headers)
             r.raise_for_status()
@@ -613,7 +797,8 @@ def build_music_tool(
         volume: query is a level from 0 to 100.
         now_playing: read the current track and volume.
         His phone: target="phone" with pause, resume, stop, next or previous controls
-            whatever app is playing there (owner only). Nothing else works on the phone.
+            whatever app is playing there (owner only); play with target="phone" starts a song,
+            artist or album there through Spotify. Nothing else works on the phone.
 
         Call for music requests. query is the user's name/artist/song/playlist.
         media_type optionally specifies track, artist, album, playlist, radio,
@@ -638,7 +823,7 @@ def build_music_tool(
         if is_phone_target(target):
             speaker = _speaker_named(target)
             if speaker is None:
-                return _phone(op, config)
+                return _phone(op, config, query, media_type)
             exact_speaker = speaker            # already resolved: never looked up by name again
 
         if op == "dj":
@@ -891,86 +1076,10 @@ def build_music_tool(
             )
 
         # ---- play: search Music Assistant, then queue the top hit ------------
-        what = query.strip()
-        if not what:
-            return "Tell me what to play — an artist, song, album, or playlist name."
-        wanted = media_type.strip().lower()
-        results = saved = None
-        try:
-            # A library outage must not disable the existing global search.
-            if wanted in {"", "playlist"}:
-                hit = _library_match(what, _playlists())
-                if hit:
-                    results = {"playlists": [hit]}
-            if results is None and wanted in {"", "track", "artist"}:
-                tracks = _saved("track")
-                artists = _saved("artist") if wanted != "track" else []
-                if wanted != "track":                     # an artist he only has songs of counts too (T-21)
-                    artists = artists + _artists_of(tracks, artists)
-                saved = _saved_match(what, tracks if wanted != "artist" else [], artists)
-        except (httpx.HTTPError, ValueError):
-            results = saved = None
-        if saved:
-            # Exact spelling is his; "sounds the same" is his only when he SAID it (voice can't spell).
-            # A typed ask keeps its spelling: a near saved name still yields to an exact catalog one.
-            conf = (config or {}).get("configurable") or {}
-            voice = is_voice_turn(identity_from_config(config), conf.get("thread_id", ""))
-            trusted = saved[2] == "exact" or (saved[2] == "sounds" and voice)
-            saved = (saved[0], saved[1], trusted)
-        if results is None and saved and saved[2]:
-            results = {_TYPE_TO_CATEGORY[saved[1]]: [saved[0]]}
-        if results is None:
-            try:
-                r = http.post(
-                    f"{base}/api/services/music_assistant/search?return_response",
-                    headers=headers,
-                    json={
-                        "config_entry_id": config_entry_id,
-                        "name": what,
-                        "limit": _SEARCH_LIMIT,
-                    },
-                )
-                r.raise_for_status()
-                results = (r.json() or {}).get("service_response") or {}
-            except (httpx.HTTPError, ValueError) as e:
-                if not saved:
-                    return f"Music search is unreachable right now ({e})."
-                results = {}
-
-        if wanted and wanted in _TYPE_TO_CATEGORY:
-            order = ((_TYPE_TO_CATEGORY[wanted], wanted),)
-        else:
-            order = _CATEGORY_ORDER
-        spotify_exact: list[tuple[dict, str]] = []
-        if saved and not saved[2]:
-            # A near name of his ("Imagined") yields to the exact name he said, if search has one it can
-            # play ("Imagine": same categories, same name rule, any rank); otherwise his own saved song is
-            # the better reading of a misheard ask.
-            spotify_exact = [(hit, singular) for category, singular in order
-                             for hit in (results.get(category) or [])
-                             if isinstance(hit, dict) and _play_norm(hit.get("name")) == _play_norm(what)]
-            if not spotify_exact:
-                results = {_TYPE_TO_CATEGORY[saved[1]]: [saved[0]]}
-        # Candidates in preference order. 2026-09-19 (bedroom, "play music from
-        # Lilith Max"): the first TRACK hit won over the ARTIST the owner named,
-        # radio mode asked Music Assistant for an "Endless Mix" the Spotify
-        # provider could not fill, and the play failed with nothing to fall back
-        # to. Two fixes: a result whose NAME is what the user said is promoted to
-        # the front of the line whatever its category, and a failed play tries
-        # the same item without radio mode, then the next candidate, before
-        # giving up honestly.
-        candidates: list[tuple[dict, str]] = []
-        for category, singular in order:
-            for hit in (results.get(category) or [])[:3]:
-                candidates.append((hit, singular))
-        exact = [c for c in candidates if _play_norm(c[0].get("name")) == _play_norm(what)]
-        others = [c for c in candidates if c not in exact]
-        # A yield (D52) puts the exact names first, then his near saved song, then the usual line,
-        # so a failed exact play still falls through like any other ask.
-        first = spotify_exact + ([(saved[0], saved[1])] if spotify_exact and saved else [])
-        candidates = first + [c for c in exact + others if c not in first]
-        if not candidates:
-            return f"I couldn't find anything matching '{what}' on Spotify."
+        found = _what_to_play(query, media_type, config)
+        if isinstance(found, str):
+            return found
+        what, candidates = found
         tried: list[str] = []
         last_error = ""
         for item, chosen_type in candidates[:4]:

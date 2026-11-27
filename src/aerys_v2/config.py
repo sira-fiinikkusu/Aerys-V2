@@ -448,6 +448,11 @@ class Settings(BaseSettings):
     # is playing on his phone when he asks. Empty (the default) = no reach to the phone.
     ha_phone_notify: str = ""
     ha_phone_media_sensor: str = ""
+    # Starting music on his phone (#264): Home Assistant's Spotify player entity, and the name his phone
+    # has in that player's list of places to play. Both set = she may start a song there while Spotify
+    # on the phone is reachable. Empty (the default) = she can only control what is already playing.
+    ha_phone_spotify_player: str = ""
+    ha_phone_spotify_source: str = ""
 
     # The house's weather entity — get_weather reads current conditions and
     # forecasts from it (weather.get_forecasts). Local weather must come from

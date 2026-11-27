@@ -216,7 +216,7 @@ def test_a_speaker_that_is_called_phone_stays_a_speaker():
 def test_her_instructions_name_the_phone():
     from aerys_v2.factory import MUSIC_OVERLAY
 
-    assert "target='phone'" in MUSIC_OVERLAY and "can't start a song on the phone" in MUSIC_OVERLAY
+    assert "target='phone'" in MUSIC_OVERLAY and "operation=play with target='phone'" in MUSIC_OVERLAY
 
 
 def test_a_speaker_with_phone_inside_its_name_does_not_take_his_phone():
