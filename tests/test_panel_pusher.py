@@ -527,3 +527,85 @@ def test_factory_arms_the_mirror_from_settings(monkeypatch):
     assert factory.face_pusher_for(settings) is not None
     assert seen["url"] == PANEL and seen["kwargs"]["mirror_url"] == DESK
 
+
+def test_a_push_held_up_behind_a_slow_panel_never_overwrites_a_newer_one_on_the_mirror():
+    """The panel answers the first push late. By then a newer push has reached the mirror.
+    The late one must be dropped there, or the mirror ends on stale words."""
+    import threading
+
+    release, first_at_panel = threading.Event(), threading.Event()
+
+    class SlowFirstPanel:
+        def __init__(self):
+            self.mirror: list[dict] = []
+            self._panel_calls = 0
+
+        def post(self, url, json=None, **kwargs):
+            if url == PANEL:
+                self._panel_calls += 1
+                if self._panel_calls == 1:
+                    first_at_panel.set()
+                    release.wait(5)
+            else:
+                self.mirror.append(json)
+
+    client = SlowFirstPanel()
+    p = FacePusher(PANEL, client=client, async_send=True, mirror_url=DESK)
+    p._send("happy_speaking", "On it")          # stalls at the panel
+    assert first_at_panel.wait(5)
+    p._send("happy_idle", "")                   # newer; goes straight through
+    deadline = time.time() + 5
+    while not client.mirror and time.time() < deadline:
+        time.sleep(0.01)
+    assert client.mirror == [{"state": "happy_idle"}]
+    release.set()                               # the old one finally leaves the panel
+    time.sleep(0.3)
+    assert client.mirror == [{"state": "happy_idle"}]
+
+
+def test_mirror_posts_arrive_in_order_on_the_threaded_path():
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=True, mirror_url=DESK)
+    p("working")
+    deadline = time.time() + 5
+    while len(client.posts) < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert sorted(u for u, _ in client.posts) == sorted([PANEL, DESK])
+
+
+def test_an_empty_mirror_setting_means_no_mirror():
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url="")
+    p("working")
+    assert client.posts == [(PANEL, {"state": panel.WORKING_STATE})]
+
+
+def test_the_settle_flip_reaches_the_mirror_unrenamed(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.05)
+    monkeypatch.setattr(panel, "_minimum_hold_s", lambda _s: 0.0)
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK,
+                   face_map={"happy_speaking": "widetalk", "happy_idle": "wideidle"})
+    p("speaking", "[warmly] hello")
+    time.sleep(0.25)
+    assert client.posts[-2:] == [(PANEL, {"state": "wideidle"}), (DESK, {"state": "happy_idle"})]
+
+
+def test_a_mirror_without_a_panel_sends_nothing_and_says_so(caplog):
+    from types import SimpleNamespace
+
+    from aerys_v2 import factory
+
+    assert build_face_pusher(None, mirror_url=DESK) is None
+    settings = SimpleNamespace(panel_state_url=None, panel_face_map="", panel_mirror_url=DESK)
+    with caplog.at_level("WARNING"):
+        assert factory.face_pusher_for(settings) is None
+    assert "PANEL_MIRROR_URL" in caplog.text
+
+
+def test_the_setting_reads_from_the_environment(monkeypatch):
+    from aerys_v2.config import Settings
+
+    assert "panel_mirror_url" in Settings.model_fields
+    assert Settings.model_fields["panel_mirror_url"].default is None
+

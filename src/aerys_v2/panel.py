@@ -193,10 +193,17 @@ class FacePusher:
         self._url = url
         # A second listener for the same pushes (owner ask 2026-11-27: his desktop
         # reacts when he talks to her on the office satellite, and prints her words).
-        # It gets her OWN state names, not the panel's renamed clips, and the same
-        # caption. Sent after the panel's post on the same thread, with its own
+        # It gets the state name as it stands before the send-time face remap (so
+        # after the fallbacks above, which follow what the panel can show), and the
+        # same caption. Sent after the panel's post on the same thread, with its own
         # swallow: a dark desktop costs the panel nothing and the turn nothing.
         self._mirror_url = mirror_url or None
+        # Latest wins on the mirror. Each send takes a number in the order the pushes
+        # were decided; a send that was held up behind a slow panel and arrives after
+        # a newer one is dropped, so the mirror can never end on stale words.
+        self._mirror_lock = threading.Lock()
+        self._mirror_seq = 0
+        self._mirror_sent = 0
         # Renames applied at send time only, so moods, dedup and the settle flip all
         # keep reasoning in her state names (see Settings.panel_face_map).
         self._face_map = dict(face_map or {})
@@ -288,14 +295,17 @@ class FacePusher:
             log.debug("face deferred push failed (harmless)", exc_info=True)
 
     def _send(self, state: str, caption: str = "") -> None:
+        with self._mirror_lock:
+            self._mirror_seq += 1
+            seq = self._mirror_seq
         if self._async:
             threading.Thread(
-                target=self._post, args=(state, caption), daemon=True
+                target=self._post, args=(state, caption, seq), daemon=True
             ).start()
         else:
-            self._post(state, caption)
+            self._post(state, caption, seq)
 
-    def _post(self, state: str, caption: str = "") -> None:
+    def _post(self, state: str, caption: str = "", seq: int = 0) -> None:
         try:
             body: dict = {"state": self._face_map.get(state, state)}
             if caption:
@@ -308,7 +318,11 @@ class FacePusher:
                 mirrored: dict = {"state": state}
                 if caption:
                     mirrored["text"] = caption
-                self._client.post(self._mirror_url, json=mirrored)
+                with self._mirror_lock:
+                    if seq < self._mirror_sent:
+                        return  # a newer push already reached the mirror
+                    self._mirror_sent = seq
+                    self._client.post(self._mirror_url, json=mirrored)
             except Exception:
                 log.debug("panel mirror unreachable (harmless)", exc_info=True)
 

@@ -631,8 +631,8 @@ class Settings(BaseSettings):
     # "<world>__<file>" clip when one is installed. Empty = no remap.
     panel_face_map: str = ""
     # A second listener for the face pushes (owner ask 2026-11-27): the same state and
-    # caption the panel gets, posted to this URL too, with her own state names (no face
-    # remap). His desktop uses it to react when he talks to her on the office satellite and
+    # caption the panel gets, posted to this URL too, with the state name as it stands before the face
+    # remap. His desktop uses it to react when he talks to her on the office satellite and
     # to print her words. Needs panel_state_url; None = no mirror. A LAN address: env only.
     panel_mirror_url: str | None = None
     # Her circadian rhythm (owner ask 2026-07-19): the --serve container runs a

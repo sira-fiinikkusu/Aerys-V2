@@ -354,6 +354,9 @@ def face_pusher_for(settings: Settings) -> Callable[[str, str], None] | None:
     HOW (mood mapping, the speaking auto-flip, fire-and-forget delivery).
     """
     if not settings.panel_state_url:
+        if getattr(settings, "panel_mirror_url", None):
+            log.warning("PANEL_MIRROR_URL is set but PANEL_STATE_URL is not: the mirror rides the "
+                        "panel's pushes, so nothing will be sent to it")
         return None
     from .panel import build_face_pusher, parse_face_map
     from .panel_corner import CornerStatus, corner_base, set_activity_sink
