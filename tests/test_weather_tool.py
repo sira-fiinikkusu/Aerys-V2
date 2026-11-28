@@ -335,7 +335,7 @@ def _as(identity):
 
 
 def test_a_guest_speaking_in_the_house_gets_the_local_weather():
-    out = guest_tool().invoke({"span": "now"}, config=_as({"user_id": "voice-guest", "voice": True}))
+    out = guest_tool().invoke({"span": "now"}, config=_as({"user_id": "voice-guest", "voice": True, "device_id": "room-1"}))
     assert "88" in out and "only read out" not in out
 
 
@@ -353,11 +353,13 @@ def test_a_stranger_writing_in_from_outside_is_refused_and_the_house_is_never_as
     for identity in ({"user_id": "discord:123", "platform": "discord", "channel_kind": "guild"},
                      {"user_id": "telegram:9", "platform": "telegram", "channel_kind": "dm"},
                      {"user_id": "voice-guest"},            # says guest voice but the turn was not spoken
-                     {"voice": False}, {}):
+                     {"user_id": "voice-guest", "voice": True},                  # spoken, but from no room device
+                     {"user_id": "voice-guest", "voice": True, "device_id": " "},
+                     {"voice": False, "device_id": "room-1"}, {}):
         out = t.invoke({"span": "today"}, config=_as(identity))
         assert "only read out to someone speaking" in out
         assert "88" not in out
-    assert t.invoke({"span": "now"}) .startswith("The house's local weather is only read out")   # no identity at all
+    assert "only read out to someone speaking" in t.invoke({"span": "now"})   # no identity at all
     assert asked == []       # refused before any request: nothing about the house leaves
 
 
@@ -370,4 +372,34 @@ def test_the_guest_copy_keeps_the_same_name_and_arguments_as_the_owners():
     g, o = guest_tool(), tool()
     assert g.name == o.name == "get_weather"
     assert set(g.args) == set(o.args) == {"span"}       # the model is never shown a config argument
+
+
+def test_the_identity_reaches_the_tool_through_the_real_tool_node():
+    """The tests above hand the tool its config directly. This one goes through the same ToolNode the
+    action graph uses, so if a library change ever stopped passing the config along, the guest in the
+    house would be refused and this test would say so."""
+    from langchain_core.messages import AIMessage
+    from langgraph.prebuilt import ToolNode
+
+    from langgraph.graph import END, START, MessagesState, StateGraph
+
+    g = StateGraph(MessagesState)
+    g.add_node("tools", ToolNode([guest_tool()]))
+    g.add_edge(START, "tools")
+    g.add_edge("tools", END)
+    graph = g.compile()
+    call = AIMessage(content="", tool_calls=[{"name": "get_weather", "args": {"span": "now"}, "id": "c1", "type": "tool_call"}])
+
+    def run(identity):
+        out = graph.invoke({"messages": [call]}, config={"configurable": {"identity": identity, "thread_id": "t"}})
+        return out["messages"][-1].content
+
+    assert "88" in run({"user_id": "voice-guest", "voice": True, "device_id": "room-1"})
+    assert "only read out to someone speaking" in run({"user_id": "discord:123", "platform": "discord"})
+
+
+def test_the_refusal_reads_as_a_refusal_to_the_honesty_check():
+    from aerys_v2.service import _ONE_LOOP_READ_REFUSED
+
+    assert _ONE_LOOP_READ_REFUSED.search(guest_tool().invoke({"span": "now"}, config=_as({"platform": "discord"})))
 

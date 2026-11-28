@@ -2437,7 +2437,9 @@ def action_tools_for(settings: Settings, *, guest: bool = False, reach_desk=None
 
     guest=True drops ONLY the HOME half — the reduced set a non-allowlisted caller
     gets (see guest_action_graph_for): media + web search, but no house control,
-    presence, or timers. Reading media someone shares and searching the public web
+    presence, or timers. The one exception (owner decision 2026-11-28) is get_weather
+    in its house-voice-only form: it answers a turn spoken on a room satellite and
+    refuses everyone else. Reading media someone shares and searching the public web
     are not sensitive; actuating the house or disclosing presence is, so HOME is
     dropped structurally (the tool isn't in the list, so it can't be called).
 
@@ -3095,7 +3097,8 @@ def action_stack_for(settings: Settings, soul: str, room_context_fn: RoomContext
 def guest_action_graph_for(settings: Settings, soul: str, room_context_fn: RoomContextFn | None = None, *, reach_desk=None) -> object | None:
     """The REDUCED action graph handed to NON-allowlisted callers: media tools
     (analyze_image / read_document / youtube_summary) + web search — but no house
-    control, no presence reads, no timers. Anyone can share an image or ask her to
+    control, no presence reads, no timers. The local weather is there for a guest
+    speaking on a room satellite only (see action_tools_for). Anyone can share an image or ask her to
     look something up, while the owner-only house tools stay STRUCTURALLY out of
     reach (they aren't in this graph, so a confused model can't call them — defense
     in depth on top of the ask() allowlist gate). None when neither media nor search

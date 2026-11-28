@@ -250,9 +250,13 @@ def build_weather_tool(
         """
         if house_voice_only:
             identity = ((config or {}).get("configurable") or {}).get("identity") or {}
-            if not identity.get("voice"):
-                return ("The house's local weather is only read out to someone speaking on one of the "
-                        "house's own speakers. For the weather somewhere, search the web with the place name.")
+            # Spoken AND from a room device: the same two marks the alarm uses for "a voice in the
+            # house". A voice turn with no room device (a phone, a pair of glasses, some future
+            # remote client) is not someone standing in the house.
+            if not (identity.get("voice") and str(identity.get("device_id") or "").strip()):
+                return ("Not available: the house's local weather is only read out to someone speaking on "
+                        "one of the house's own speakers. For the weather somewhere, search the web with "
+                        "the place name.")
         want = (span or "now").strip().lower()
         # "week" is inside "weekend": ask the narrower question first (Chris, lesson 2).
         if "weekend" in want:
