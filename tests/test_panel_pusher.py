@@ -718,3 +718,17 @@ def test_working_waits_for_a_short_acknowledgement_but_not_for_a_long_reply_he_c
     p2("working")
     assert client2.states == ["neutral_speaking", panel.WORKING_STATE]
 
+
+def test_the_same_sound_is_never_handed_over_for_two_replies(monkeypatch):
+    """A quick follow-up after an acknowledgement finds the acknowledgement's sound again. It is not sent twice."""
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    links = iter(["http://ha/api/tts_proxy/ack.flac", "http://ha/api/tts_proxy/ack.flac", "http://ha/api/tts_proxy/next.flac"])
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK, voice_link=lambda: next(links))
+    p("speaking", "[warmly] On it")
+    p("speaking", "[warmly] Done, the lamp is off")
+    p("speaking", "[warmly] Anything else")
+    audio = [b["audio"] for u, b in client.posts if u == DESK and "audio" in b]
+    assert audio == ["http://ha/api/tts_proxy/ack.flac", "http://ha/api/tts_proxy/next.flac"]
+    assert [b["text"] for u, b in client.posts if u == DESK and "text" in b] == ["On it", "Done, the lamp is off", "Anything else"]
+

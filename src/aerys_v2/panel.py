@@ -217,6 +217,7 @@ class FacePusher:
         # Where her real voice is playing from, asked only for the mirror and only when
         # she is speaking (see tts_link). None = the mirror gets no audio address.
         self._voice_link = voice_link
+        self._last_voice_link: str | None = None
         self._mirror_seq = 0
         self._mirror_sent = 0
         # Renames applied at send time only, so moods, dedup and the settle flip all
@@ -354,7 +355,11 @@ class FacePusher:
                     link = self._voice_link()
                     if link:
                         with self._mirror_lock:
-                            if seq == self._mirror_sent:
+                            # One sound belongs to one reply. A follow-up spoken moments after an
+                            # acknowledgement has no sound of its own to find, and must not be given
+                            # the acknowledgement's a second time.
+                            if seq == self._mirror_sent and link != self._last_voice_link:
+                                self._last_voice_link = link
                                 self._client.post(self._mirror_url, json={"state": state, "audio": link})
                 except Exception:
                     log.debug("voice address not sent (harmless)", exc_info=True)
