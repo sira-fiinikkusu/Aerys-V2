@@ -629,9 +629,11 @@ def test_the_mirror_gets_the_voice_address_only_when_she_speaks_and_the_panel_ne
     p("working")
     assert asked == [] and client.posts[-1] == (DESK, {"state": panel.WORKING_STATE})
     p("speaking", "[warmly] hello")
-    assert client.posts[-2:] == [
+    # her words go first, exactly as before; the address follows as a message of its own
+    assert client.posts[-3:] == [
         (PANEL, {"state": "happy_speaking", "text": "hello"}),
-        (DESK, {"state": "happy_speaking", "text": "hello", "audio": "http://ha/api/tts_proxy/abc.flac"}),
+        (DESK, {"state": "happy_speaking", "text": "hello"}),
+        (DESK, {"state": "happy_speaking", "audio": "http://ha/api/tts_proxy/abc.flac"}),
     ]
     assert asked == [1]
 
@@ -678,4 +680,41 @@ def test_factory_arms_the_voice_address_only_when_asked_and_able(monkeypatch):
         seen.clear()
         factory.face_pusher_for(SimpleNamespace(**base, **kw))
         assert seen["voice_link"] is None
+
+
+def test_a_slow_house_never_costs_her_words_and_a_stale_address_is_not_sent(monkeypatch):
+    """The lookup answers late. By then she has settled. Her words were already delivered, and the
+    address for a reply that is over is dropped."""
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    client = SplitClient()
+    holder = {}
+
+    def slow_link():
+        # while the house is being asked, a newer push (the settle) reaches the mirror
+        holder["p"]._send("happy_idle", "")
+        return "http://ha/api/tts_proxy/abc.flac"
+
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK, voice_link=slow_link)
+    holder["p"] = p
+    p._send("happy_speaking", "hello")
+    desk = [b for u, b in client.posts if u == DESK]
+    assert desk == [{"state": "happy_speaking", "text": "hello"}, {"state": "happy_idle"}]
+
+
+def test_working_waits_for_a_short_acknowledgement_but_not_for_a_long_reply_he_cut_in_on(monkeypatch):
+    # a short line: the working face waits for it, as before
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.2)
+    monkeypatch.setattr(panel, "_minimum_hold_s", lambda _s: 0.0)
+    p, client = pusher()
+    p("speaking", "On it")
+    p("working")
+    assert client.states == ["neutral_speaking"]
+    time.sleep(0.4)
+    assert client.states == ["neutral_speaking", panel.WORKING_STATE]
+    # a long reply: he cuts in and new work starts, the working face goes up at once
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    p2, client2 = pusher()
+    p2("speaking", "a long answer " * 60)
+    p2("working")
+    assert client2.states == ["neutral_speaking", panel.WORKING_STATE]
 

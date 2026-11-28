@@ -138,6 +138,9 @@ def mood_of(text: str) -> str:
 # (it predicted 27.7 s); only the ceiling was wrong. 100 s covers the longest caption
 # (1600 characters). A newer push still cancels the hold at once.
 _SPEAKING_CAP_S = 100.0
+# The longest speaking hold that is still treated as an acknowledgement ("On it, one sec") that the
+# working face should wait for. Longer than this is a real reply.
+_ACK_HOLD_S = 8.0
 
 
 def speaking_estimate_s(text: str) -> float:
@@ -227,6 +230,7 @@ class FacePusher:
         self._gen = 0
         self._timer: threading.Timer | None = None
         self._timer_fires_at = 0.0
+        self._hold_is_ack = False
 
     def __call__(self, phase: str, text: str = "") -> None:
         try:
@@ -247,7 +251,7 @@ class FacePusher:
 
             now = time.monotonic()
             with self._lock:
-                if phase == "working" and self._timer_fires_at > now:
+                if phase == "working" and self._timer_fires_at > now and self._hold_is_ack:
                     # She's mid-ack ("On it — one sec"): let the speaking face
                     # finish its estimated run, THEN switch to the working face.
                     # The pending flip is re-aimed at working instead of idle.
@@ -263,6 +267,10 @@ class FacePusher:
                 if phase == "speaking":
                     # Settle back to this mood's idle face when the words run out.
                     delay = max(speaking_estimate_s(text), _minimum_hold_s(state))
+                    # Only a short line is an acknowledgement worth waiting out. A long reply still
+                    # holding the speaking face when new work starts means he cut in on her: the
+                    # working face goes up now, not after the old reply's estimate runs out.
+                    self._hold_is_ack = delay <= _ACK_HOLD_S
                     self._arm_timer(
                         delay, _IDLE.get(mood, "neutral_idle")
                     )
@@ -330,14 +338,6 @@ class FacePusher:
                 mirrored: dict = {"state": state}
                 if caption:
                     mirrored["text"] = caption
-                    if self._voice_link is not None:
-                        try:        # her words must reach the mirror even if the house can't be asked
-                            link = self._voice_link()
-                        except Exception:
-                            link = None
-                            log.debug("voice link lookup raised (harmless)", exc_info=True)
-                        if link:
-                            mirrored["audio"] = link
                 with self._mirror_lock:
                     if seq < self._mirror_sent:
                         return  # a newer push already reached the mirror
@@ -345,6 +345,19 @@ class FacePusher:
                     self._client.post(self._mirror_url, json=mirrored)
             except Exception:
                 log.debug("panel mirror unreachable (harmless)", exc_info=True)
+                return
+            # Her words are delivered. Only now ask the house where her voice is, and send that as a
+            # message of its own: a slow answer can delay nothing, and if anything newer has gone to the
+            # mirror meanwhile the address is simply not sent.
+            if caption and self._voice_link is not None:
+                try:
+                    link = self._voice_link()
+                    if link:
+                        with self._mirror_lock:
+                            if seq == self._mirror_sent:
+                                self._client.post(self._mirror_url, json={"state": state, "audio": link})
+                except Exception:
+                    log.debug("voice address not sent (harmless)", exc_info=True)
 
 
 def build_face_pusher(
