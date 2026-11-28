@@ -947,3 +947,24 @@ def test_lamp_switches_still_need_a_voice_in_the_house_and_still_cannot_be_read(
     assert tool.func(operation="get_state", entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
     assert ha.requests == []
 
+
+@pytest.mark.parametrize("target", [",", " , ", ""])
+def test_an_empty_target_is_never_everything(target):
+    ha, db = FakeHA(), FakeDB()
+    out = guest_with_lamps(ha, db).func(operation="turn_on", entity_id=target, runtime=as_(IN_THE_HOUSE))
+    assert not out.startswith(("Done", "OK", "Sent"))
+    assert not [r for r in ha.requests if r[0] == "POST"] and db.inserts() == []
+
+
+def test_a_lamp_on_a_plug_cannot_be_dimmed_or_coloured_and_other_switches_cannot_be_toggled():
+    ha, db = FakeHA(), FakeDB()
+    tool = guest_with_lamps(ha, db)
+    for kw in (dict(operation="set_brightness", brightness_pct=40), dict(operation="set_color", color="red")):
+        out = tool.func(entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE), **kw)
+        assert not out.startswith(("Done", "OK", "Sent"))
+    for op in ("toggle", "turn_off"):
+        out = tool.func(operation=op, entity_id="switch.office_fan", runtime=as_(IN_THE_HOUSE))
+        assert out == GUEST_LIGHTS_ONLY
+    assert tool.func(operation="history", entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
+    assert not [r for r in ha.requests if r[0] == "POST"] and db.inserts() == []
+
