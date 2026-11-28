@@ -1145,6 +1145,21 @@ def test_action_tools_guest_drops_only_the_house_half():
         {"span": "now"}, config={"configurable": {"identity": {"platform": "discord"}}})
     no_house = Settings(_env_file=None, anthropic_api_key="sk-test", tavily_api_key="tav-test")
     assert "get_weather" not in {t.name for t in action_tools_for(no_house, guest=True)}
+    # lights (owner decision 2026-11-28): with no lights on his list a guest gets no home_control at
+    # all; with some, the guest's copy is the lights-only one and holds his lights and nothing else
+    assert "home_control" not in guest
+    lit = Settings(
+        _env_file=None, anthropic_api_key="sk-test", ha_token="tok", ha_base_url="http://ha.test",
+        ha_canary_entities="light.desk,switch.desk_fan,light.kitchen",
+    )
+    gl = {t.name: t for t in action_tools_for(lit, guest=True)}
+    assert "home_control" in gl and "search_entities" not in gl and "timer" not in gl
+    from aerys_v2.tools.home_control import GUEST_LIGHTS_NOT_HERE
+    assert gl["home_control"].invoke({"operation": "turn_on", "entity_id": "light.desk"}) == GUEST_LIGHTS_NOT_HERE
+    from types import SimpleNamespace
+    here = SimpleNamespace(config={"configurable": {"identity": {"voice": True, "device_id": "room-1"}, "thread_id": "t"}})
+    refused = gl["home_control"].func(operation="turn_on", entity_id="switch.desk_fan", runtime=here)
+    assert refused.startswith("Not available:") or refused.startswith("Refused")
 
 
 def test_voice_action_that_comes_back_blank_speaks_her_line():

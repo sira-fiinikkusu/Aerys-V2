@@ -39,6 +39,13 @@ from langgraph.prebuilt import ToolRuntime
 log = logging.getLogger(__name__)
 
 WRITE_OPS = frozenset({"turn_on", "turn_off", "toggle", "set_brightness", "set_color"})
+#: What the guest's copy of this tool says to anyone who is not standing in the house (see
+#: build_home_control_tool's guest_lights_only). Starts the way a refused read does, so no check
+#: downstream can take it for something done.
+GUEST_LIGHTS_NOT_HERE = ("Not available: the house lights only answer someone speaking on one of the "
+                         "house's own speakers.")
+GUEST_LIGHTS_ONLY = ("Not available: a guest can turn lights on and off, dim them or change their colour, "
+                     "in any room. Nothing else in the house, and no readings.")
 # HA color modes that mean "this light can take a color" (color_temp alone cannot).
 COLOR_MODES = frozenset({"xy", "rgb", "hs", "rgbw", "rgbww"})
 _HEX_COLOR = re.compile(r"^#?([0-9a-fA-F]{6})$")
@@ -580,8 +587,17 @@ def build_home_control_tool(
     his_places: frozenset[str] = frozenset(),
     owner_person_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
+    guest_lights_only: bool = False,
 ):
     """Close over the config and return the LangChain tool object.
+
+    guest_lights_only (owner decision 2026-11-28: "Any room is fine for lights. Alexa doesnt block
+    them"): the copy handed to people who are not on his list. It keeps the tool's name, so every
+    fence written for home_control still covers it, and narrows it three ways. It answers only a
+    turn SPOKEN on a room satellite (the same two marks the alarm uses). It only WRITES: no
+    get_state, no history, so it can never be used to look at the house. And it only touches
+    lights: the caller passes a canary set that holds lights alone, and a non-light target is
+    refused here as well.
 
     Everything injectable, same seam philosophy as the checkpointer: tests pass
     an httpx.Client on a MockTransport and a fake conn_factory; --serve passes
@@ -945,6 +961,14 @@ def build_home_control_tool(
         in the requested state — say that plainly.
         """
         op = operation.strip().lower()
+        if guest_lights_only:
+            from aerys_v2.rooms import runtime_identity
+
+            who, _thread = runtime_identity(runtime)
+            if not (who.get("voice") and str(who.get("device_id") or "").strip()):
+                return GUEST_LIGHTS_NOT_HERE
+            if op not in WRITE_OPS:
+                return GUEST_LIGHTS_ONLY
         targets, problem = _resolve_targets(entity_id, "get_state" if op == "history" else op)
         if problem:
             return problem
@@ -979,6 +1003,8 @@ def build_home_control_tool(
 
         # ---- writes: domain gate, then canary gate — over EVERY target -------
         domains = {e.split(".", 1)[0] for e in targets}
+        if guest_lights_only and domains != {"light"}:
+            return GUEST_LIGHTS_ONLY
         bad = sorted(d for d in domains if d not in WRITABLE_DOMAINS)
         if bad:
             return (

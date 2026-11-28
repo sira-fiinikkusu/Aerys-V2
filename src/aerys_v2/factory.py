@@ -2437,9 +2437,9 @@ def action_tools_for(settings: Settings, *, guest: bool = False, reach_desk=None
 
     guest=True drops ONLY the HOME half — the reduced set a non-allowlisted caller
     gets (see guest_action_graph_for): media + web search, but no house control,
-    presence, or timers. The one exception (owner decision 2026-11-28) is get_weather
-    in its house-voice-only form: it answers a turn spoken on a room satellite and
-    refuses everyone else. Reading media someone shares and searching the public web
+    presence, or timers. The two exceptions (owner decisions 2026-11-28) are get_weather
+    and home_control in their house-voice-only forms: they answer a turn spoken on a
+    room satellite and refuse everyone else, and that home_control only switches lights. Reading media someone shares and searching the public web
     are not sensitive; actuating the house or disclosing presence is, so HOME is
     dropped structurally (the tool isn't in the list, so it can't be called).
 
@@ -2665,6 +2665,37 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                 house_voice_only=True,
             )
         )
+        # ...and may switch the lights, in any room (owner decision 2026-11-28: "Any room is fine
+        # for lights. Alexa doesnt block them"). The same tool name as his, so every fence written
+        # for home_control covers it, in a copy that only writes, only to lights, and only for a
+        # turn spoken on a room satellite. Its allowlist is the lights on his own allowlist and
+        # nothing else: no switches, and none of the reads. search_entities stays out of a guest's
+        # reach; a room or light name is resolved by the tool itself, against lights alone.
+        from aerys_v2.tools.home_control import (
+            build_home_control_tool as _guest_home_control,
+            canary_set as _guest_canary,
+            room_aliases as _guest_aliases,
+        )
+
+        guest_lights = frozenset(e for e in _guest_canary(settings.ha_canary_entities) if e.startswith("light."))
+        if guest_lights:
+            guest_conn = None
+            if settings.database_url is not None:
+                import psycopg
+
+                def guest_conn():
+                    return psycopg.connect(settings.database_url)
+
+            tools.append(
+                _guest_home_control(
+                    base_url=settings.ha_base_url,
+                    token=settings.ha_token.get_secret_value(),
+                    canary_entities=guest_lights,
+                    conn_factory=guest_conn,
+                    aliases=_guest_aliases(settings.ha_room_aliases),
+                    guest_lights_only=True,
+                )
+            )
 
     if settings.tavily_api_key is not None:
         # Web search is public info — available to everyone, guest included (owner

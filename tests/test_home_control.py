@@ -741,3 +741,120 @@ def test_a_button_on_an_opening_channel_never_answers_what_is_open():
     # but asked for BY NAME it is still findable — excluded from class matching, not hidden
     assert "binary_sensor.emotion_air_living_room_opening" in _entities(
         tool.invoke({"query": "emotion air living room"}))
+
+
+# ---- the guest's copy: lights, in any room, for a voice in the house (owner decision 2026-11-28) ----
+
+from types import SimpleNamespace  # noqa: E402
+
+from aerys_v2.tools.home_control import GUEST_LIGHTS_NOT_HERE, GUEST_LIGHTS_ONLY  # noqa: E402
+
+IN_THE_HOUSE = {"user_id": "voice-guest", "voice": True, "device_id": "room-1"}
+
+
+def guest_lights(ha: FakeHA, db: FakeDB | None = None, canary: str = "light.desk"):
+    return build_home_control_tool(
+        base_url="http://ha.test:8123", token="t0ken", canary_entities=canary_set(canary),
+        client=ha.client(), conn_factory=db.factory if db is not None else None, guest_lights_only=True,
+    )
+
+
+def as_(identity):
+    return SimpleNamespace(config={"configurable": {"identity": identity, "thread_id": "t"}})
+
+
+def test_a_guest_speaking_in_the_house_can_switch_a_light():
+    ha, db = FakeHA(), FakeDB()
+    out = guest_lights(ha, db).func(operation="turn_on", entity_id="light.desk", runtime=as_(IN_THE_HOUSE))
+    assert out.startswith("Done: turn_on sent to light.desk")
+    assert ("POST", "/api/services/light/turn_on") in ha.requests
+    assert len(db.inserts()) == 1            # a guest's switch is written down like anyone's
+
+
+@pytest.mark.parametrize("identity", [
+    {"user_id": "discord:123", "platform": "discord", "channel_kind": "guild"},
+    {"user_id": "telegram:9", "platform": "telegram", "channel_kind": "dm"},
+    {"user_id": "voice-guest"},                          # called a voice guest, but the turn was not spoken
+    {"user_id": "voice-guest", "voice": True},           # spoken, but from no room device
+    {"user_id": "voice-guest", "voice": True, "device_id": "  "},
+    {"voice": False, "device_id": "room-1"},
+    {},
+])
+def test_anyone_not_speaking_on_a_room_satellite_is_refused_and_the_house_is_never_asked(identity):
+    ha, db = FakeHA(), FakeDB()
+    tool = guest_lights(ha, db)
+    for op in ("turn_on", "turn_off", "toggle", "set_brightness", "set_color", "get_state", "history"):
+        assert tool.func(operation=op, entity_id="light.desk", runtime=as_(identity)) == GUEST_LIGHTS_NOT_HERE
+    assert tool.func(operation="turn_on", entity_id="light.desk", runtime=None) == GUEST_LIGHTS_NOT_HERE
+    assert tool.invoke({"operation": "turn_on", "entity_id": "light.desk"}) == GUEST_LIGHTS_NOT_HERE
+    assert ha.requests == [] and db.executed == []
+
+
+def test_a_guest_can_never_use_it_to_look_at_the_house():
+    ha = FakeHA()
+    tool = guest_lights(ha)
+    for op in ("get_state", "history", "GET_STATE", " History "):
+        for target in ("light.desk", "person.someone", "sensor.office_temperature", "device_tracker.phone"):
+            assert tool.func(operation=op, entity_id=target, runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
+    assert ha.requests == []
+
+
+def test_a_guest_can_switch_lights_and_nothing_else():
+    ha, db = FakeHA(), FakeDB()
+    # even if a switch somehow sat on the guest's list, the guest copy refuses anything that is not a light
+    tool = guest_lights(ha, db, canary="light.desk,switch.desk_fan")
+    assert tool.func(operation="turn_on", entity_id="switch.desk_fan", runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
+    assert tool.func(operation="turn_on", entity_id="light.desk,switch.desk_fan", runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
+    for target in ("lock.front_door", "cover.garage", "alarm_control_panel.panel", "climate.house", "media_player.tv"):
+        out = tool.func(operation="turn_on", entity_id=target, runtime=as_(IN_THE_HOUSE))
+        assert not out.startswith("Done") and not out.startswith("OK")
+    assert not [r for r in ha.requests if r[0] == "POST"] and db.inserts() == []
+
+
+def test_a_light_that_is_not_on_the_list_is_refused_and_the_refusal_names_only_lights():
+    ha = FakeHA()
+    out = guest_lights(ha, canary="light.desk").func(operation="turn_on", entity_id="light.attic", runtime=as_(IN_THE_HOUSE))
+    assert out.startswith("Refused") and "light.desk" in out
+    assert not [r for r in ha.requests if r[0] == "POST"]
+
+
+def test_the_owners_copy_is_unchanged():
+    ha = FakeHA()
+    tool = make_tool(ha)
+    assert tool.invoke({"operation": "turn_on", "entity_id": "light.desk"}).startswith("Done:")
+    assert "off" in tool.invoke({"operation": "get_state", "entity_id": "light.desk"})
+
+
+def test_the_guest_copy_has_the_same_name_and_arguments_as_the_owners():
+    g, o = guest_lights(FakeHA()), make_tool(FakeHA())
+    assert g.name == o.name == "home_control" and set(g.args) == set(o.args)
+
+
+def test_the_identity_reaches_the_guest_copy_through_the_real_tool_node():
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    ha = FakeHA()
+    g = StateGraph(MessagesState)
+    g.add_node("tools", ToolNode([guest_lights(ha)]))
+    g.add_edge(START, "tools")
+    g.add_edge("tools", END)
+    graph = g.compile()
+    call = AIMessage(content="", tool_calls=[{"name": "home_control", "id": "c1", "type": "tool_call",
+                                              "args": {"operation": "turn_on", "entity_id": "light.desk"}}])
+
+    def run(identity):
+        return graph.invoke({"messages": [call]}, config={"configurable": {"identity": identity, "thread_id": "t"}})["messages"][-1].content
+
+    assert run({"user_id": "discord:1", "platform": "discord"}) == GUEST_LIGHTS_NOT_HERE
+    assert ha.requests == []
+    assert run(IN_THE_HOUSE).startswith("Done: turn_on sent to light.desk")
+
+
+def test_the_guest_refusals_read_as_refusals_to_the_honesty_check():
+    from aerys_v2.service import _ONE_LOOP_READ_REFUSED
+
+    assert _ONE_LOOP_READ_REFUSED.search(GUEST_LIGHTS_NOT_HERE) and _ONE_LOOP_READ_REFUSED.search(GUEST_LIGHTS_ONLY)
+    assert not GUEST_LIGHTS_NOT_HERE.startswith("Done") and not GUEST_LIGHTS_ONLY.startswith("Done")
+
