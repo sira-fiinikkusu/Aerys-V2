@@ -27,6 +27,7 @@ from functools import lru_cache
 from typing import Callable
 
 import httpx
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 log = logging.getLogger(__name__)
@@ -124,9 +125,15 @@ def build_weather_tool(
     client: httpx.Client | None = None,
     nws_point: str | None = None,
     fetch_json: Callable[[str], dict] | None = None,
+    house_voice_only: bool = False,
 ):
     """The armed get_weather tool. entity_id is the house's weather entity
-    (settings.ha_weather_entity); client and the NWS JSON fetch are injectable for tests."""
+    (settings.ha_weather_entity); client and the NWS JSON fetch are injectable for tests.
+
+    house_voice_only (owner decision 2026-11-28): the copy of this tool handed to people who are
+    not on his list. It answers only a turn that was SPOKEN on one of the house's own satellites,
+    by someone standing in the house, who already knows where they are. A stranger writing in from
+    outside gets a plain refusal: the local forecast would tell them roughly where the house is."""
     http = client or httpx.Client(timeout=10.0)
     base = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}"}
@@ -224,7 +231,7 @@ def build_weather_tool(
             return f"Weather read failed: {e}"
 
     @tool
-    def get_weather(span: str = "now") -> str:
+    def get_weather(span: str = "now", config: RunnableConfig = None) -> str:
         """ALWAYS use this for ANY weather question about home or the local
         area — rain, forecast, temperature, wind, "should I bring a jacket".
         NEVER use search_web for local weather: web results resolve the town
@@ -241,6 +248,11 @@ def build_weather_tool(
         line; quote it as given. When it says not available or no figure, say
         there is no figure; never invent a percentage.
         """
+        if house_voice_only:
+            identity = ((config or {}).get("configurable") or {}).get("identity") or {}
+            if not identity.get("voice"):
+                return ("The house's local weather is only read out to someone speaking on one of the "
+                        "house's own speakers. For the weather somewhere, search the web with the place name.")
         want = (span or "now").strip().lower()
         # "week" is inside "weekend": ask the narrower question first (Chris, lesson 2).
         if "weekend" in want:

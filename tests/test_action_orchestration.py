@@ -1137,6 +1137,14 @@ def test_action_tools_guest_drops_only_the_house_half():
     assert {"analyze_image", "read_document", "youtube_summary", "search_web"} <= guest
     # ...but the HOME half (house control, presence reads, timers) is structurally gone
     assert not ({"home_control", "search_entities", "timer"} & guest)
+    # the one HOME tool a guest holds is the weather, in its voice-in-the-house-only form
+    # (owner decision 2026-11-28); without a house token it is not there at all
+    assert "get_weather" in guest
+    gw = next(t for t in action_tools_for(s, guest=True) if t.name == "get_weather")
+    assert "only read out to someone speaking" in gw.invoke(
+        {"span": "now"}, config={"configurable": {"identity": {"platform": "discord"}}})
+    no_house = Settings(_env_file=None, anthropic_api_key="sk-test", tavily_api_key="tav-test")
+    assert "get_weather" not in {t.name for t in action_tools_for(no_house, guest=True)}
 
 
 def test_voice_action_that_comes_back_blank_speaks_her_line():

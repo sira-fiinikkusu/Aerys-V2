@@ -318,3 +318,56 @@ def test_tomorrow_when_first_period_is_tonight(monkeypatch, nws):
 
     out = nws_tool(evening).invoke({"span": "tomorrow"})
     assert out.endswith("Saturday 20% (Cloudy); Saturday Night no figure (Cloudy)")
+
+
+# ── the guest's copy: only for a voice in the house (owner decision 2026-11-28) ──
+
+
+def guest_tool(**kwargs):
+    return build_weather_tool(
+        base_url="http://ha:8123", token="t", entity_id=ENTITY,
+        client=fake_ha(**kwargs), house_voice_only=True,
+    )
+
+
+def _as(identity):
+    return {"configurable": {"identity": identity}}
+
+
+def test_a_guest_speaking_in_the_house_gets_the_local_weather():
+    out = guest_tool().invoke({"span": "now"}, config=_as({"user_id": "voice-guest", "voice": True}))
+    assert "88" in out and "only read out" not in out
+
+
+def test_a_stranger_writing_in_from_outside_is_refused_and_the_house_is_never_asked():
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.path)
+        return httpx.Response(200, json=STATE)
+
+    t = build_weather_tool(base_url="http://ha:8123", token="t", entity_id=ENTITY,
+                           client=httpx.Client(transport=httpx.MockTransport(handler)),
+                           nws_point="1.0,2.0", fetch_json=lambda url: asked.append(url) or {},
+                           house_voice_only=True)
+    for identity in ({"user_id": "discord:123", "platform": "discord", "channel_kind": "guild"},
+                     {"user_id": "telegram:9", "platform": "telegram", "channel_kind": "dm"},
+                     {"user_id": "voice-guest"},            # says guest voice but the turn was not spoken
+                     {"voice": False}, {}):
+        out = t.invoke({"span": "today"}, config=_as(identity))
+        assert "only read out to someone speaking" in out
+        assert "88" not in out
+    assert t.invoke({"span": "now"}) .startswith("The house's local weather is only read out")   # no identity at all
+    assert asked == []       # refused before any request: nothing about the house leaves
+
+
+def test_the_owners_copy_is_unchanged_and_needs_no_identity():
+    assert "88" in tool().invoke({"span": "now"})
+    assert "88" in tool().invoke({"span": "now"}, config=_as({"platform": "discord"}))
+
+
+def test_the_guest_copy_keeps_the_same_name_and_arguments_as_the_owners():
+    g, o = guest_tool(), tool()
+    assert g.name == o.name == "get_weather"
+    assert set(g.args) == set(o.args) == {"span"}       # the model is never shown a config argument
+

@@ -2646,6 +2646,24 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             )
         )
 
+    if guest and settings.ha_token is not None:
+        # A guest's voice may ask for the house's local weather (owner decision 2026-11-28, after
+        # he was heard as a guest one groggy morning and was told about New York). This copy of
+        # the tool answers only a turn spoken on one of the house's own satellites; a stranger
+        # writing in from outside is refused, because the local forecast says where the house is.
+        # Read-only, and the only HOME tool a guest gets.
+        from aerys_v2.tools.weather import build_weather_tool
+
+        tools.append(
+            build_weather_tool(
+                base_url=settings.ha_base_url,
+                token=settings.ha_token.get_secret_value(),
+                entity_id=settings.ha_weather_entity,
+                nws_point=settings.storm_watch_latlon,
+                house_voice_only=True,
+            )
+        )
+
     if settings.tavily_api_key is not None:
         # Web search is public info — available to everyone, guest included (owner
         # decision 2026-07-05). Only the HOME half stays behind the allowlist.
