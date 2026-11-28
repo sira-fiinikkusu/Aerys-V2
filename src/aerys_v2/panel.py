@@ -186,10 +186,17 @@ class FacePusher:
     """
 
     def __init__(self, url: str, *, client=None, async_send: bool = True,
-                 face_map: dict[str, str] | None = None) -> None:
+                 face_map: dict[str, str] | None = None,
+                 mirror_url: str | None = None) -> None:
         import httpx
 
         self._url = url
+        # A second listener for the same pushes (owner ask 2026-11-27: his desktop
+        # reacts when he talks to her on the office satellite, and prints her words).
+        # It gets her OWN state names, not the panel's renamed clips, and the same
+        # caption. Sent after the panel's post on the same thread, with its own
+        # swallow: a dark desktop costs the panel nothing and the turn nothing.
+        self._mirror_url = mirror_url or None
         # Renames applied at send time only, so moods, dedup and the settle flip all
         # keep reasoning in her state names (see Settings.panel_face_map).
         self._face_map = dict(face_map or {})
@@ -296,18 +303,27 @@ class FacePusher:
             self._client.post(self._url, json=body)
         except Exception:
             log.debug("panel unreachable (harmless)", exc_info=True)
+        if self._mirror_url:
+            try:
+                mirrored: dict = {"state": state}
+                if caption:
+                    mirrored["text"] = caption
+                self._client.post(self._mirror_url, json=mirrored)
+            except Exception:
+                log.debug("panel mirror unreachable (harmless)", exc_info=True)
 
 
 def build_face_pusher(
     url: str | None, *, client=None, async_send: bool = True,
-    face_map: dict[str, str] | None = None,
+    face_map: dict[str, str] | None = None, mirror_url: str | None = None,
 ) -> Callable[[str, str], None] | None:
     """None unless a panel URL is configured — the standard optional-seam arming
     pattern. The URL lives in the environment (PANEL_STATE_URL), never in code:
     it's a LAN address and this repo is public."""
     if not url:
         return None
-    return FacePusher(url, client=client, async_send=async_send, face_map=face_map)
+    return FacePusher(url, client=client, async_send=async_send, face_map=face_map,
+                      mirror_url=mirror_url)
 
 
 class TimerStrip:

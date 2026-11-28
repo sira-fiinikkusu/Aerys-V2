@@ -436,3 +436,94 @@ def test_clap_falls_back_to_happy_talk_when_unmapped():
     p, client = mapped_pusher({"neutral_idle": "m_idle"})
     p("speaking", "[proudly] done!")
     assert client.states == ["happy_speaking"]
+
+
+# ── the desk mirror: a second listener for the same pushes ───────────────────
+
+
+class SplitClient:
+    """Records every post; raises for the URLs it is told are dark."""
+
+    def __init__(self, dark=()):
+        self.posts: list[tuple[str, dict]] = []
+        self._dark = set(dark)
+
+    def post(self, url, json=None, **kwargs):
+        if url in self._dark:
+            raise ConnectionError(f"{url} is dark")
+        self.posts.append((url, json))
+
+
+PANEL, DESK = "http://panel:8300/state", "http://desk:8377/state"
+
+
+def test_mirror_gets_her_own_state_names_and_the_same_words(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK,
+                   face_map={"happy_speaking": "widetalk"})
+    p("speaking", "[warmly] Forecast looks clear all day")
+    assert client.posts == [
+        (PANEL, {"state": "widetalk", "text": "Forecast looks clear all day"}),
+        (DESK, {"state": "happy_speaking", "text": "Forecast looks clear all day"}),
+    ]
+
+
+def test_mirror_hears_the_settle_flip_with_no_words(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 0.05)
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK)
+    p("speaking", "[warmly] hello")
+    time.sleep(0.2)
+    assert [(u, b) for u, b in client.posts if u == DESK] == [
+        (DESK, {"state": "happy_speaking", "text": "hello"}),
+        (DESK, {"state": "happy_idle"}),
+    ]
+
+
+def test_a_dark_mirror_costs_the_panel_nothing():
+    client = SplitClient(dark={DESK})
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK)
+    p("working")
+    assert client.posts == [(PANEL, {"state": panel.WORKING_STATE})]
+
+
+def test_a_dark_panel_still_reaches_the_mirror():
+    client = SplitClient(dark={PANEL})
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK)
+    p("working")
+    assert client.posts == [(DESK, {"state": panel.WORKING_STATE})]
+
+
+def test_no_mirror_means_exactly_one_post():
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False)
+    p("working")
+    assert client.posts == [(PANEL, {"state": panel.WORKING_STATE})]
+
+
+def test_build_face_pusher_carries_the_mirror():
+    client = SplitClient()
+    p = build_face_pusher(PANEL, client=client, async_send=False, mirror_url=DESK)
+    p("working")
+    assert [u for u, _ in client.posts] == [PANEL, DESK]
+
+
+def test_factory_arms_the_mirror_from_settings(monkeypatch):
+    from types import SimpleNamespace
+
+    from aerys_v2 import factory
+
+    seen = {}
+
+    def fake_build(url, **kwargs):
+        seen["url"], seen["kwargs"] = url, kwargs
+        return lambda *_a, **_k: None
+
+    monkeypatch.setattr(panel, "build_face_pusher", fake_build)
+    # the corner status rides the same arming; keep this test from installing a real sink
+    monkeypatch.setattr("aerys_v2.panel_corner.set_activity_sink", lambda _sink: None)
+    settings = SimpleNamespace(panel_state_url=PANEL, panel_face_map="", panel_mirror_url=DESK)
+    assert factory.face_pusher_for(settings) is not None
+    assert seen["url"] == PANEL and seen["kwargs"]["mirror_url"] == DESK
+

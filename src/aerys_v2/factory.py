@@ -361,7 +361,10 @@ def face_pusher_for(settings: Settings) -> Callable[[str, str], None] | None:
     # Her status line (owner ask 2026-09-26) rides the same arming: the action graph
     # reports the TOOLS she calls, the corner shows a phrase for them, then clears.
     set_activity_sink(CornerStatus(corner_base(settings.panel_state_url) + "/corner/status").report)
-    return build_face_pusher(settings.panel_state_url, face_map=parse_face_map(settings.panel_face_map))
+    return build_face_pusher(
+        settings.panel_state_url, face_map=parse_face_map(settings.panel_face_map),
+        mirror_url=getattr(settings, "panel_mirror_url", None),
+    )
 
 
 def speak_fn_for(settings: Settings) -> Callable[[str, str], None] | None:

@@ -630,6 +630,11 @@ class Settings(BaseSettings):
     # so a partial face set falls back to the sprites, and the panel still prefers a
     # "<world>__<file>" clip when one is installed. Empty = no remap.
     panel_face_map: str = ""
+    # A second listener for the face pushes (owner ask 2026-11-27): the same state and
+    # caption the panel gets, posted to this URL too, with her own state names (no face
+    # remap). His desktop uses it to react when he talks to her on the office satellite and
+    # to print her words. Needs panel_state_url; None = no mirror. A LAN address: env only.
+    panel_mirror_url: str | None = None
     # Her circadian rhythm (owner ask 2026-07-19): the --serve container runs a
     # presence watcher that darkens the panel when this occupancy entity goes
     # off AND the listed lights are out (the vacancy automation's fingerprint),
