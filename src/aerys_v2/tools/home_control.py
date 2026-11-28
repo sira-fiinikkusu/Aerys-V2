@@ -607,6 +607,13 @@ def build_home_control_tool(
     base = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     http = client or httpx.Client(timeout=10.0)
+    if guest_lights_only:
+        # A room name may stand for lights AND other things, or for a light that is not on the
+        # list. For a guest it stands only for the lights on the list: nothing else can be
+        # reached through a name, and no refusal can name anything else.
+        canary_entities = frozenset(e for e in canary_entities if e.startswith("light."))
+        aliases = {name: kept for name, ents in (aliases or {}).items()
+                   if (kept := tuple(e for e in ents if e in canary_entities))}
 
     def _his_location(entity: str) -> bool:
         return entity in his_places or (private_entity(entity, private_entities) and whereabouts(entity))
@@ -961,6 +968,7 @@ def build_home_control_tool(
         in the requested state — say that plainly.
         """
         op = operation.strip().lower()
+        who: dict = {}
         if guest_lights_only:
             from aerys_v2.rooms import runtime_identity
 
@@ -1118,6 +1126,11 @@ def build_home_control_tool(
                 body.update(color_body)
             # ---- the audited write: intent -> HA -> receipt ------------------
             payload = {"operation": op, "entity_id": entity_field, "domain": domain}
+            if guest_lights_only:
+                # The record says a guest did this and from which room device, so it can never
+                # be read as the owner's own switch.
+                payload["guest"] = True
+                payload["device_id"] = str(who.get("device_id") or "")[:128]
             if brightness_pct is not None:
                 payload["brightness_pct"] = brightness_pct
             if color_label is not None:

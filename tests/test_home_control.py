@@ -858,3 +858,30 @@ def test_the_guest_refusals_read_as_refusals_to_the_honesty_check():
     assert _ONE_LOOP_READ_REFUSED.search(GUEST_LIGHTS_NOT_HERE) and _ONE_LOOP_READ_REFUSED.search(GUEST_LIGHTS_ONLY)
     assert not GUEST_LIGHTS_NOT_HERE.startswith("Done") and not GUEST_LIGHTS_ONLY.startswith("Done")
 
+
+def test_a_room_name_means_only_the_guests_lights_and_a_refusal_names_nothing_else():
+    """A room alias may hold a switch, or a light that is not on the list. For a guest the room is its
+    listed lights; the rest is not switched, not refused by name, not mentioned."""
+    ha, db = FakeHA(), FakeDB()
+    tool = build_home_control_tool(
+        base_url="http://ha.test:8123", token="t0ken",
+        canary_entities=canary_set("light.desk,switch.desk_fan"),
+        aliases={"office": ("light.desk", "switch.desk_fan", "light.closet"), "closet": ("light.closet",)},
+        client=ha.client(), conn_factory=db.factory, guest_lights_only=True,
+    )
+    out = tool.func(operation="turn_on", entity_id="office", runtime=as_(IN_THE_HOUSE))
+    assert out.startswith("Done: turn_on sent to light.desk")
+    assert "closet" not in out and "desk_fan" not in out
+    hidden = tool.func(operation="turn_on", entity_id="closet", runtime=as_(IN_THE_HOUSE))
+    assert not hidden.startswith("Done") and "light.closet" not in hidden and "desk_fan" not in hidden
+
+
+def test_a_guests_switch_is_recorded_as_a_guests_from_that_room_device():
+    ha, db = FakeHA(), FakeDB()
+    guest_lights(ha, db).func(operation="turn_on", entity_id="light.desk", runtime=as_(IN_THE_HOUSE))
+    row = json.dumps([str(p) for _s, p in db.inserts()])
+    assert "guest" in row and "room-1" in row
+    mine = FakeDB()
+    make_tool(FakeHA(), mine).invoke({"operation": "turn_on", "entity_id": "light.desk"})
+    assert "guest" not in json.dumps([str(p) for _s, p in mine.inserts()])
+
