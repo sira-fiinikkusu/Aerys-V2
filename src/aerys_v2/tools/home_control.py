@@ -588,6 +588,7 @@ def build_home_control_tool(
     owner_person_id: str | None = None,
     clock: Callable[[], datetime] | None = None,
     guest_lights_only: bool = False,
+    guest_light_switches: frozenset[str] = frozenset(),
 ):
     """Close over the config and return the LangChain tool object.
 
@@ -596,8 +597,9 @@ def build_home_control_tool(
     fence written for home_control still covers it, and narrows it three ways. It answers only a
     turn SPOKEN on a room satellite (the same two marks the alarm uses). It only WRITES: no
     get_state, no history, so it can never be used to look at the house. And it only touches
-    lights: the caller passes a canary set that holds lights alone, and a non-light target is
-    refused here as well.
+    lights: the lights on the allowlist, plus the few switches the owner has named as being lamps
+    (guest_light_switches: a room lit through a smart plug is still a room's light). Every other
+    switch on his allowlist, a fan, a car, a charger, stays out of a guest's reach.
 
     Everything injectable, same seam philosophy as the checkpointer: tests pass
     an httpx.Client on a MockTransport and a fake conn_factory; --serve passes
@@ -611,7 +613,10 @@ def build_home_control_tool(
         # A room name may stand for lights AND other things, or for a light that is not on the
         # list. For a guest it stands only for the lights on the list: nothing else can be
         # reached through a name, and no refusal can name anything else.
-        canary_entities = frozenset(e for e in canary_entities if e.startswith("light."))
+        guest_light_switches = frozenset(e for e in guest_light_switches
+                                         if e.startswith("switch.") and e in canary_entities)
+        canary_entities = frozenset(e for e in canary_entities
+                                    if e.startswith("light.") or e in guest_light_switches)
         aliases = {name: kept for name, ents in (aliases or {}).items()
                    if (kept := tuple(e for e in ents if e in canary_entities))}
 
@@ -1011,7 +1016,8 @@ def build_home_control_tool(
 
         # ---- writes: domain gate, then canary gate — over EVERY target -------
         domains = {e.split(".", 1)[0] for e in targets}
-        if guest_lights_only and domains != {"light"}:
+        if guest_lights_only and not (targets and all(
+                e.startswith("light.") or e in guest_light_switches for e in targets)):
             return GUEST_LIGHTS_ONLY
         bad = sorted(d for d in domains if d not in WRITABLE_DOMAINS)
         if bad:

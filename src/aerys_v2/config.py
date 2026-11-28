@@ -734,6 +734,10 @@ class Settings(BaseSettings):
     # show them only to him in his own rooms (a DM, his voice, his glasses), never a room others read.
     # Kept in .env, never here (public repo). Empty = no reading is held back.
     ha_private_entities: str = ""
+    # Switches that are really lamps (owner decision 2026-11-28): a guest speaking in the house may
+    # switch the lights in any room, and some rooms are lit through smart plugs. csv of switch ids;
+    # only ones that are also on ha_canary_entities count. Every other switch stays his alone.
+    ha_guest_light_switches: str = ""
     # csv of "device_id=domain.service" pairs for SPEAKERLESS voice devices
     # (e-ink displays): a follow-up for a mapped device is WRITTEN to its
     # screen via that HA service (an ESPHome user action, e.g.

@@ -1160,6 +1160,16 @@ def test_action_tools_guest_drops_only_the_house_half():
     here = SimpleNamespace(config={"configurable": {"identity": {"voice": True, "device_id": "room-1"}, "thread_id": "t"}})
     refused = gl["home_control"].func(operation="turn_on", entity_id="switch.desk_fan", runtime=here)
     assert refused.startswith("Not available:") or refused.startswith("Refused")
+    # switches he has named as lamps join the guest's lights; one that is not on his own list does not
+    lamps = Settings(
+        _env_file=None, anthropic_api_key="sk-test", ha_token="tok", ha_base_url="http://ha.test",
+        ha_canary_entities="light.desk,switch.desk_fan,switch.office_light_1",
+        ha_guest_light_switches="switch.office_light_1,switch.not_on_his_list",
+    )
+    gl2 = {t.name: t for t in action_tools_for(lamps, guest=True)}["home_control"]
+    assert "only entities I may control are: light.desk, switch.office_light_1" in gl2.func(
+        operation="turn_on", entity_id="light.attic", runtime=here)
+    assert gl2.func(operation="turn_on", entity_id="switch.desk_fan", runtime=here).startswith("Not available:")
 
 
 def test_voice_action_that_comes_back_blank_speaks_her_line():

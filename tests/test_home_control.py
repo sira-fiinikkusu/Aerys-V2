@@ -885,3 +885,65 @@ def test_a_guests_switch_is_recorded_as_a_guests_from_that_room_device():
     make_tool(FakeHA(), mine).invoke({"operation": "turn_on", "entity_id": "light.desk"})
     assert "guest" not in json.dumps([str(p) for _s, p in mine.inserts()])
 
+
+# ---- rooms lit through smart plugs: the switches the owner named as lamps ----
+
+LAMPS = frozenset({"switch.office_light_1", "switch.office_light_2"})
+HIS_LIST = "light.desk,switch.office_light_1,switch.office_light_2,switch.car_climate,switch.office_fan,lock.car_door"
+
+
+def guest_with_lamps(ha: FakeHA, db: FakeDB | None = None, aliases=None, lamps=LAMPS):
+    return build_home_control_tool(
+        base_url="http://ha.test:8123", token="t0ken", canary_entities=canary_set(HIS_LIST),
+        aliases=aliases or {}, client=ha.client(), conn_factory=db.factory if db is not None else None,
+        guest_lights_only=True, guest_light_switches=lamps,
+    )
+
+
+def test_a_guest_can_switch_a_lamp_that_is_wired_as_a_switch():
+    ha, db = FakeHA(), FakeDB()
+    out = guest_with_lamps(ha, db).func(operation="turn_on", entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE))
+    # the stand-in house reports no change for this device, so the tool says "Sent ..." and not "Done": what
+    # matters here is that the switch was really asked, and written down
+    assert out.startswith("Sent turn_on to switch.office_light_1") or out.startswith("Done")
+    assert ("POST", "/api/services/switch/turn_on") in ha.requests and len(db.inserts()) == 1
+
+
+def test_a_room_name_reaches_its_lamp_switches_and_never_the_other_switches():
+    ha = FakeHA()
+    tool = guest_with_lamps(ha, aliases={
+        "office": ("switch.office_light_1", "switch.office_light_2", "switch.office_fan"),
+        "car": ("switch.car_climate", "lock.car_door"),
+    })
+    out = tool.func(operation="turn_on", entity_id="office", runtime=as_(IN_THE_HOUSE))
+    assert "office_light_1" in out and "office_light_2" in out and "office_fan" not in out
+    assert [r for r in ha.requests if r[0] == "POST"] == [("POST", "/api/services/switch/turn_on")]
+    car = tool.func(operation="turn_on", entity_id="car", runtime=as_(IN_THE_HOUSE))
+    assert not car.startswith("Done") and "car_climate" not in car and "car_door" not in car
+
+
+@pytest.mark.parametrize("target", ["switch.car_climate", "switch.office_fan", "lock.car_door",
+                                    "switch.office_light_1,switch.car_climate", "switch.not_on_any_list"])
+def test_every_other_switch_on_his_list_stays_his(target):
+    ha, db = FakeHA(), FakeDB()
+    out = guest_with_lamps(ha, db).func(operation="turn_on", entity_id=target, runtime=as_(IN_THE_HOUSE))
+    assert not out.startswith(("Done", "OK", "Sent"))
+    assert not [r for r in ha.requests if r[0] == "POST"] and db.inserts() == []
+
+
+def test_a_lamp_switch_must_also_be_on_his_own_list_and_be_a_switch():
+    ha = FakeHA()
+    tool = guest_with_lamps(ha, lamps=frozenset({"switch.not_on_his_list", "lock.car_door", "switch.office_light_1"}))
+    assert tool.func(operation="turn_on", entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE)).startswith(("Done", "Sent"))
+    for target in ("switch.not_on_his_list", "lock.car_door"):
+        assert not tool.func(operation="turn_on", entity_id=target, runtime=as_(IN_THE_HOUSE)).startswith(("Done", "Sent"))
+    assert [r for r in ha.requests if r[0] == "POST"] == [("POST", "/api/services/switch/turn_on")]
+
+
+def test_lamp_switches_still_need_a_voice_in_the_house_and_still_cannot_be_read():
+    ha = FakeHA()
+    tool = guest_with_lamps(ha)
+    assert tool.func(operation="turn_on", entity_id="switch.office_light_1", runtime=as_({"platform": "discord"})) == GUEST_LIGHTS_NOT_HERE
+    assert tool.func(operation="get_state", entity_id="switch.office_light_1", runtime=as_(IN_THE_HOUSE)) == GUEST_LIGHTS_ONLY
+    assert ha.requests == []
+

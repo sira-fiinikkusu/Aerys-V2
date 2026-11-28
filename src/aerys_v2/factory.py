@@ -2669,7 +2669,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
         # for lights. Alexa doesnt block them"). The same tool name as his, so every fence written
         # for home_control covers it, in a copy that only writes, only to lights, and only for a
         # turn spoken on a room satellite. Its allowlist is the lights on his own allowlist and
-        # nothing else: no switches, and none of the reads. search_entities stays out of a guest's
+        # nothing else, plus the few switches he has named as lamps: no other switch, and none of the reads. search_entities stays out of a guest's
         # reach; a room or light name is resolved by the tool itself, against lights alone.
         from aerys_v2.tools.home_control import (
             build_home_control_tool as _guest_home_control,
@@ -2677,7 +2677,12 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
             room_aliases as _guest_aliases,
         )
 
-        guest_lights = frozenset(e for e in _guest_canary(settings.ha_canary_entities) if e.startswith("light."))
+        his_list = _guest_canary(settings.ha_canary_entities)
+        lamp_switches = frozenset(
+            e for e in _guest_canary(getattr(settings, "ha_guest_light_switches", ""))
+            if e.startswith("switch.") and e in his_list
+        )
+        guest_lights = frozenset(e for e in his_list if e.startswith("light.")) | lamp_switches
         if guest_lights:
             guest_conn = None
             if settings.database_url is not None:
@@ -2694,6 +2699,7 @@ def _action_tools_armed(settings: Settings, *, guest: bool = False, reach_desk=N
                     conn_factory=guest_conn,
                     aliases=_guest_aliases(settings.ha_room_aliases),
                     guest_lights_only=True,
+                    guest_light_switches=lamp_switches,
                 )
             )
 
