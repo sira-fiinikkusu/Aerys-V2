@@ -72,7 +72,9 @@ def test_mood_of_defaults_neutral_and_hearts_read_affection():
 
 def test_speaking_estimate_bounds():
     assert speaking_estimate_s("hi") == 2.5  # floor: one-word acks hold a beat
-    assert speaking_estimate_s("x" * 10_000) == 20.0  # ceiling: rambles don't pin
+    assert speaking_estimate_s("x" * 10_000) == 100.0  # ceiling: the longest caption, no more
+    # the reply that showed the old 20 s ceiling was wrong: 437 characters played for 28 s
+    assert 27.0 < speaking_estimate_s("x" * 420) < 29.0
     # tags are spoken silently — they must not inflate the estimate
     assert speaking_estimate_s("[warmly] hi") == speaking_estimate_s("hi")
 
@@ -523,7 +525,8 @@ def test_factory_arms_the_mirror_from_settings(monkeypatch):
     monkeypatch.setattr(panel, "build_face_pusher", fake_build)
     # the corner status rides the same arming; keep this test from installing a real sink
     monkeypatch.setattr("aerys_v2.panel_corner.set_activity_sink", lambda _sink: None)
-    settings = SimpleNamespace(panel_state_url=PANEL, panel_face_map="", panel_mirror_url=DESK)
+    settings = SimpleNamespace(panel_state_url=PANEL, panel_face_map="", panel_mirror_url=DESK,
+                               panel_mirror_audio=False, ha_token=None, ha_base_url="http://ha")
     assert factory.face_pusher_for(settings) is not None
     assert seen["url"] == PANEL and seen["kwargs"]["mirror_url"] == DESK
 
@@ -608,4 +611,71 @@ def test_the_setting_reads_from_the_environment(monkeypatch):
 
     assert "panel_mirror_url" in Settings.model_fields
     assert Settings.model_fields["panel_mirror_url"].default is None
+
+
+# ── her real voice: the mirror is told where the sound is ────────────────────
+
+
+def test_the_mirror_gets_the_voice_address_only_when_she_speaks_and_the_panel_never_does(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    asked = []
+
+    def link():
+        asked.append(1)
+        return "http://ha/api/tts_proxy/abc.flac"
+
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK, voice_link=link)
+    p("working")
+    assert asked == [] and client.posts[-1] == (DESK, {"state": panel.WORKING_STATE})
+    p("speaking", "[warmly] hello")
+    assert client.posts[-2:] == [
+        (PANEL, {"state": "happy_speaking", "text": "hello"}),
+        (DESK, {"state": "happy_speaking", "text": "hello", "audio": "http://ha/api/tts_proxy/abc.flac"}),
+    ]
+    assert asked == [1]
+
+
+def test_no_voice_address_means_the_mirror_message_is_unchanged(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+    for link in (None, lambda: None, lambda: ""):
+        client = SplitClient()
+        p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK, voice_link=link)
+        p("speaking", "[warmly] hello")
+        assert client.posts[-1] == (DESK, {"state": "happy_speaking", "text": "hello"})
+
+
+def test_a_voice_lookup_that_blows_up_still_delivers_the_words(monkeypatch):
+    monkeypatch.setattr(panel, "speaking_estimate_s", lambda _t: 60.0)
+
+    def boom():
+        raise RuntimeError("house is not answering")
+
+    client = SplitClient()
+    p = FacePusher(PANEL, client=client, async_send=False, mirror_url=DESK, voice_link=boom)
+    p("speaking", "[warmly] hello")
+    # nothing raised, and her words still reach the mirror, just without an address
+    assert client.posts == [(PANEL, {"state": "happy_speaking", "text": "hello"}),
+                            (DESK, {"state": "happy_speaking", "text": "hello"})]
+
+
+def test_factory_arms_the_voice_address_only_when_asked_and_able(monkeypatch):
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from aerys_v2 import factory
+
+    seen = {}
+    monkeypatch.setattr(panel, "build_face_pusher", lambda url, **kw: seen.update(kw) or (lambda *_a, **_k: None))
+    monkeypatch.setattr("aerys_v2.panel_corner.set_activity_sink", lambda _sink: None)
+    base = dict(panel_state_url=PANEL, panel_face_map="", ha_base_url="http://ha")
+    factory.face_pusher_for(SimpleNamespace(**base, panel_mirror_url=DESK, panel_mirror_audio=True, ha_token=SecretStr("t")))
+    assert callable(seen["voice_link"])
+    for kw in (dict(panel_mirror_url=DESK, panel_mirror_audio=False, ha_token=SecretStr("t")),
+               dict(panel_mirror_url=DESK, panel_mirror_audio=True, ha_token=None),
+               dict(panel_mirror_url=None, panel_mirror_audio=True, ha_token=SecretStr("t"))):
+        seen.clear()
+        factory.face_pusher_for(SimpleNamespace(**base, **kw))
+        assert seen["voice_link"] is None
 

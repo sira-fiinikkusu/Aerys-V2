@@ -364,9 +364,18 @@ def face_pusher_for(settings: Settings) -> Callable[[str, str], None] | None:
     # Her status line (owner ask 2026-09-26) rides the same arming: the action graph
     # reports the TOOLS she calls, the corner shows a phrase for them, then clears.
     set_activity_sink(CornerStatus(corner_base(settings.panel_state_url) + "/corner/status").report)
+    mirror_url = getattr(settings, "panel_mirror_url", None)
+    voice_link = None
+    if mirror_url and getattr(settings, "panel_mirror_audio", False) and settings.ha_token is not None:
+        from functools import partial
+
+        from .tts_link import current_voice_link
+
+        voice_link = partial(current_voice_link, settings.ha_base_url,
+                             settings.ha_token.get_secret_value())
     return build_face_pusher(
         settings.panel_state_url, face_map=parse_face_map(settings.panel_face_map),
-        mirror_url=getattr(settings, "panel_mirror_url", None),
+        mirror_url=mirror_url, voice_link=voice_link,
     )
 
 

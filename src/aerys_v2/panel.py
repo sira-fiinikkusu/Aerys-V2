@@ -132,6 +132,14 @@ def mood_of(text: str) -> str:
     return "neutral"
 
 
+# The ceiling on the speaking estimate. It was 20 s until 2026-11-28: a 437-character
+# reply played for 28 s on the office satellite while the estimate stopped at 20, so her
+# face and the desk mirror went quiet 7 s before she did. The per-character rate was right
+# (it predicted 27.7 s); only the ceiling was wrong. 100 s covers the longest caption
+# (1600 characters). A newer push still cancels the hold at once.
+_SPEAKING_CAP_S = 100.0
+
+
 def speaking_estimate_s(text: str) -> float:
     """Rough TTS playback duration for the speaking->idle auto-flip.
 
@@ -140,7 +148,7 @@ def speaking_estimate_s(text: str) -> float:
     face a beat and rambles don't pin it for a minute.
     """
     visible = _TAG_RE.sub("", text or "")
-    return max(2.5, min(20.0, 1.5 + len(visible) / 16.0))
+    return max(2.5, min(_SPEAKING_CAP_S, 1.5 + len(visible) / 16.0))
 
 
 # The panel's LVGL Montserrat font covers printable ASCII — emojis and exotic
@@ -187,7 +195,8 @@ class FacePusher:
 
     def __init__(self, url: str, *, client=None, async_send: bool = True,
                  face_map: dict[str, str] | None = None,
-                 mirror_url: str | None = None) -> None:
+                 mirror_url: str | None = None,
+                 voice_link: Callable[[], str | None] | None = None) -> None:
         import httpx
 
         self._url = url
@@ -202,6 +211,9 @@ class FacePusher:
         # were decided; a send that was held up behind a slow panel and arrives after
         # a newer one is dropped, so the mirror can never end on stale words.
         self._mirror_lock = threading.Lock()
+        # Where her real voice is playing from, asked only for the mirror and only when
+        # she is speaking (see tts_link). None = the mirror gets no audio address.
+        self._voice_link = voice_link
         self._mirror_seq = 0
         self._mirror_sent = 0
         # Renames applied at send time only, so moods, dedup and the settle flip all
@@ -318,6 +330,14 @@ class FacePusher:
                 mirrored: dict = {"state": state}
                 if caption:
                     mirrored["text"] = caption
+                    if self._voice_link is not None:
+                        try:        # her words must reach the mirror even if the house can't be asked
+                            link = self._voice_link()
+                        except Exception:
+                            link = None
+                            log.debug("voice link lookup raised (harmless)", exc_info=True)
+                        if link:
+                            mirrored["audio"] = link
                 with self._mirror_lock:
                     if seq < self._mirror_sent:
                         return  # a newer push already reached the mirror
@@ -330,6 +350,7 @@ class FacePusher:
 def build_face_pusher(
     url: str | None, *, client=None, async_send: bool = True,
     face_map: dict[str, str] | None = None, mirror_url: str | None = None,
+    voice_link: Callable[[], str | None] | None = None,
 ) -> Callable[[str, str], None] | None:
     """None unless a panel URL is configured — the standard optional-seam arming
     pattern. The URL lives in the environment (PANEL_STATE_URL), never in code:
@@ -337,7 +358,7 @@ def build_face_pusher(
     if not url:
         return None
     return FacePusher(url, client=client, async_send=async_send, face_map=face_map,
-                      mirror_url=mirror_url)
+                      mirror_url=mirror_url, voice_link=voice_link)
 
 
 class TimerStrip:

@@ -635,6 +635,11 @@ class Settings(BaseSettings):
     # remap. His desktop uses it to react when he talks to her on the office satellite and
     # to print her words. Needs panel_state_url; None = no mirror. A LAN address: env only.
     panel_mirror_url: str | None = None
+    # With the mirror, also tell it where her real voice is playing from (the short-lived
+    # address Home Assistant hands the satellite), so the desktop can read her actual voice
+    # level. Asked of Home Assistant on the pusher's thread, only when she speaks; needs
+    # ha_token. False = the mirror gets state and words only.
+    panel_mirror_audio: bool = False
     # Her circadian rhythm (owner ask 2026-07-19): the --serve container runs a
     # presence watcher that darkens the panel when this occupancy entity goes
     # off AND the listed lights are out (the vacancy automation's fingerprint),
